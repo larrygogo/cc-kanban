@@ -211,11 +211,62 @@ function detectFramedNumberedMenu(
   };
 }
 
-function promptSnippet(visible: string, index: number, contextBefore = 1): string {
+/// 编号选项行（`> 1. Yes` / `❯ 2) No`）。取上下文的起点和裁掉选项区的终点必须用
+/// **同一条**规则——两边判定不一致，就会出现「起点跨过了一组选项、终点又锚在它上面」
+/// 的组合，把当前这一屏整个裁没。终点侧的耦合方式：下游只从 promptSnippet 返回的
+/// anchor（匹配行）**之后**找第一个编号行,起点侧被排除/保留的编号行都在 anchor 之前,
+/// 两边不可能锚到对方保留的行上。无 g 标志：带状态的正则不能这样复用。
+const NUMBERED_OPTION = /^\s*(?:[❯›>▶]\s*)?\d+[.)]\s+/;
+/// 带光标标记的编号行:残影选择器的判定特征。上一屏审批框的选项组必然有一行带焦点
+/// 光标(claude 用 `>`、kimi 用 `▶`),而命令正文里的编号列表(多行 commit message 的
+/// 「1. fix parser」、带编号的输出)不会有——仅凭「是编号行」就钳位,会把这类命令的
+/// 开头从审批卡上截掉,用户批准一条自己看不全的命令。
+const MARKED_NUMBERED_OPTION = /^\s*[❯›>▶]\s*\d+[.)]\s+/;
+
+/// 取正则的**最后一次**匹配。TUI 重绘不清屏,上一份面板留在缓冲上方:首个匹配会把
+/// 标题/命令锁在残影上,而按键打给的是屏幕最下方的活动面板。传入的正则必须带 g。
+function lastMatch(pattern: RegExp, text: string): (RegExpMatchArray & { index: number }) | null {
+  let last: (RegExpMatchArray & { index: number }) | null = null;
+  for (const match of text.matchAll(pattern)) {
+    // matchAll 的 index 类型上可缺席(实际总在);过滤掉让下游拿到确定的 number。
+    if (match.index !== undefined) last = match as RegExpMatchArray & { index: number };
+  }
+  return last;
+}
+
+function promptSnippet(
+  visible: string,
+  index: number,
+  contextBefore = 1,
+): { text: string; anchor: number } {
   const lines = visible.split("\n");
   const matchedLine = visible.slice(0, index).split("\n").length - 1;
   // 命令审批需要多保留几行，才能显示命令和用途；普通启动选择只留一行上下文。
-  return lines.slice(Math.max(0, matchedLine - contextBefore), matchedLine + 10).join("\n").trim();
+  let start = Math.max(0, matchedLine - contextBefore);
+  // 往前取上下文时不能跨过上一屏残留的**选择器**：跨过去了,残留选项会混进卡片正文。
+  // 判据是成组的:连续编号行构成一个 run,run 里含带光标标记的行才是残留选择器;
+  // 纯编号 run 是命令正文里的列表(commit message、编号输出),照常保留、继续向上。
+  for (let line = matchedLine - 1; line >= start; line -= 1) {
+    if (!NUMBERED_OPTION.test(lines[line])) continue;
+    let top = line;
+    while (top - 1 >= 0 && NUMBERED_OPTION.test(lines[top - 1])) top -= 1;
+    let bottom = line;
+    while (bottom + 1 < matchedLine && NUMBERED_OPTION.test(lines[bottom + 1])) bottom += 1;
+    if (lines.slice(top, bottom + 1).some((entry) => MARKED_NUMBERED_OPTION.test(entry))) {
+      start = bottom + 1;
+      break;
+    }
+    line = top; // 纯编号组整组跳过,继续向上取上下文(for 自减后落在组上方)。
+  }
+  // 掐头去尾的空行按行做(不能对拼好的串 .trim():行号一变,anchor 就对不上匹配行)。
+  let firstKept = start;
+  while (firstKept < matchedLine && !lines[firstKept].trim()) firstKept += 1;
+  let lastKept = Math.min(lines.length - 1, matchedLine + 9);
+  while (lastKept > matchedLine && !lines[lastKept].trim()) lastKept -= 1;
+  return {
+    text: lines.slice(firstKept, lastKept + 1).join("\n"),
+    anchor: matchedLine - firstKept,
+  };
 }
 
 /// 光标菜单选项块 → GUI 按钮。行首缩进只是菜单的对齐手段，不属于选项文字；
@@ -284,10 +335,31 @@ export function terminalAttention(
     const longSession = /this session is[^\n]{0,120}\bold and[^\n]{0,80}\btokens\b/i.exec(visible)
       ?? /resuming the full session will consume a substantial portion of your usage limits/i.exec(visible);
     if (longSession) best = { index: longSession.index, id: "claude:long-session-resume" };
-    const commandApproval = /this command requires approval/i.exec(visible)
-      ?? /do you want to proceed\?/i.exec(visible);
-    if (commandApproval && (!best || commandApproval.index > best.index)) {
-      best = { index: commandApproval.index, id: "claude:command-approval" };
+    // 取**最后一次**出现,不是第一次:TUI 重绘会把上一屏的审批框留在缓冲里,从第一处
+    // 起截窗口就会把两屏内容(以及夹在中间的工具输出)一起塞进卡片——真实现场见过同一
+    // 句「Do you want to proceed?」在卡上显示两遍,命令区里还混着上一轮的搜索结果。
+    // 审批框永远是屏幕最下面那个,最后一次匹配才是当前这一个。
+    const approvalIndex = Math.max(
+      lower.lastIndexOf("this command requires approval"),
+      lower.lastIndexOf("do you want to proceed?"),
+    );
+    if (approvalIndex >= 0 && (!best || approvalIndex > best.index)) {
+      best = { index: approvalIndex, id: "claude:command-approval" };
+    }
+  }
+  // kimi 审批面板(ApprovalPanel;面板形态与按键语义为官方源码取证,见
+  // apps/kimi-code/src/tui/components/dialogs/approval-panel.ts @ 0.29):
+  // kimi 的 PermissionRequest hook 是 observation-only(官方文档),broker 审批桥对它
+  // 关闭,屏幕识别是 GUI 给出可操作审批的唯一通道。按键提示行是面板的稳定签名;
+  // 提示行被裁掉时退回标题行(▶ Run this command? 等)。
+  if (grammar.provider === "kimi") {
+    // 与上面 claude 的 lastIndexOf 同理:kimi 重绘也不清屏,上一条命令的面板残留在缓冲
+    // 上方。首个匹配会把标题/命令锁在残影上,而数字键打给的是屏幕最下方的活动面板——
+    // 用户看着 A 批准了 B。恒取最后一次匹配。
+    const panelHint = lastMatch(/↑\/↓ select · [\d/]+ choose · ↵ confirm/gi, visible)
+      ?? lastMatch(/^\s*▶\s*(?:run this command|write this file|apply these edits|stop this task|ready to build with this plan|approve [^\n?]+)\?/gim, visible);
+    if (panelHint && (!best || panelHint.index > best.index)) {
+      best = { index: panelHint.index, id: "kimi:command-approval" };
     }
   }
   for (const marker of markers) {
@@ -338,18 +410,34 @@ export function terminalAttention(
     };
   }
   if (!best) return null;
-  const snippet = best.id === "interactive:numbered-selector"
-    ? visible
-    : promptSnippet(visible, best.index, best.id === "claude:command-approval" ? 12 : 1);
+  // kimi 审批面板的详情从标题行(▶ Run this command?)起取:best 可能命中面板底部的
+  // 按键提示行,从那里截会把命令正文裁掉。同样取最后一个标题——首个会落在重绘残影上。
+  const kimiHeader = best.id === "kimi:command-approval"
+    ? lastMatch(/^\s*▶\s*[^\n]+\?\s*$/gm, visible)
+    : null;
+  const snippetInfo = best.id === "interactive:numbered-selector"
+    ? { text: visible, anchor: 0 }
+    : kimiHeader
+      ? { text: visible.slice(kimiHeader.index), anchor: 0 }
+      : promptSnippet(visible, best.index, best.id === "claude:command-approval" || best.id === "kimi:command-approval" ? 12 : 1);
+  const snippet = snippetInfo.text;
   // 命令审批的选项已经转换成 GUI 按钮，详情区保留命令、用途和审批问题，只从第一个
-  // 编号选项起裁掉。这样不会重复 Yes/No，也不会带上键位说明或 TUI 重绘尾部噪声。
+  // 编号选项起裁掉。「第一个」从 anchor(匹配行)之后数——审批的问句永远在选项之前,
+  // anchor 之前的编号行是命令正文的一部分(见 NUMBERED_OPTION 的耦合注释),既不能当
+  // 截断锚点,也不能被解析成选项按钮。只对命令审批收紧:generic 提示的锚点可能是
+  // 选项**下方**的按键提示行(press enter/esc to …),对它们门控会把真选项排除掉。
+  const commandApproval = best.id === "claude:command-approval" || best.id === "kimi:command-approval";
+  const optionsFrom = commandApproval ? snippetInfo.anchor + 1 : 0;
   const snippetLines = snippet.split("\n");
-  const firstOptionLine = snippetLines.findIndex((line) => /^\s*(?:[❯›>]\s*)?\d+[.)]\s+/.test(line));
-  const displayText = best.id === "claude:command-approval" && firstOptionLine >= 0
+  const firstOptionLine = snippetLines.findIndex(
+    (line, index) => index >= optionsFrom && NUMBERED_OPTION.test(line),
+  );
+  const displayText = commandApproval && firstOptionLine >= 0
     ? snippetLines.slice(0, firstOptionLine).join("\n").trim()
     : snippet;
-  const labels = snippet.split("\n").flatMap((line) => {
-    const match = line.match(/^\s*([❯›>]?)\s*(\d+)[.)]\s*(.+?)\s*$/);
+  const labels = snippetLines.flatMap((line, index) => {
+    if (index < optionsFrom) return [];
+    const match = line.match(/^\s*([❯›>▶]?)\s*(\d+)[.)]\s*(.+?)\s*$/);
     return match ? [{ index: Number(match[2]) - 1, label: match[3], focused: Boolean(match[1]) }] : [];
   });
   if (best.id === "interactive:numbered-selector") {
@@ -472,6 +560,18 @@ export function terminalAttention(
       text: question,
       options: choices,
     };
+  }
+  // kimi 审批面板:数字键直接选中并提交(源码 selectAndSubmit),GUI 按钮只需打数字,
+  // 无需光标相对移动;需要现场输入反馈的选项(Reject with feedback / Revise)在卡片上
+  // 完成不了,不收成按钮——想写反馈仍可从终端处理。
+  if (best.id === "kimi:command-approval") {
+    const byIndex = new Map<number, (typeof labels)[number]>();
+    for (const entry of labels) byIndex.set(entry.index, entry);
+    const options = [...byIndex.values()]
+      .sort((a, b) => a.index - b.index)
+      .filter(({ label }) => !/reject with feedback|^revise$/i.test(label.trim()))
+      .map(({ index, label }) => ({ label, input: String(index + 1) }));
+    return { id: best.id, text: displayText, options: options.length >= 2 ? options : undefined };
   }
   // trust、长会话恢复以及其他编号选择器共用同一套结构化按钮，不再退化成上一项/下一项。
   if (labels.length >= 2) {

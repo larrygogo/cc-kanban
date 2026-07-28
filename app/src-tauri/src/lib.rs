@@ -1,6 +1,7 @@
 mod account;
 #[cfg(any(target_os = "macos", test))]
 mod app_bundle;
+mod bgpty;
 mod chat;
 mod confirm;
 #[cfg(target_os = "windows")]
@@ -25,7 +26,9 @@ mod wezterm;
 mod install;
 mod managed_terminal;
 mod proc;
-mod profile;
+// pub：集成测试 `tests/profile_merge.rs` 要在**独立进程**里跑端到端合并（它会设
+// CLAUDE_CONFIG_DIR / MEOWO_DB 这类进程级环境变量，与 lib 单测并行跑会互相串味）。
+pub mod profile;
 mod session_command;
 mod session_query;
 mod terminal;
@@ -43,7 +46,8 @@ use install::{
 };
 use managed_terminal::{
     get_pending_approval, managed_terminal_binding, managed_terminal_snapshot,
-    open_attached_terminal, register_approval_consumer, resize_managed_terminal,
+    attach_background_session, open_attached_terminal, register_approval_consumer,
+    resize_managed_terminal, send_background_prompt,
     resolve_pending_approval, start_managed_terminal, stop_managed_terminal,
     unregister_approval_consumer, write_managed_terminal,
 };
@@ -55,7 +59,8 @@ use session_query::{
 };
 #[cfg(test)]
 use session_query::{
-    live_sessions_blocking, session_connected, tab_class, PageReq, RESUME_GRACE_MS,
+    live_sessions_blocking, session_connected, tab_class, LiveContext, PageReq,
+    SessionRuntimeIndex, RESUME_GRACE_MS,
 };
 use terminal::{
     focus_session, new_session, open_project_dir, restart_session_supported, resume_session,
@@ -129,6 +134,8 @@ struct AppState {
     /// 会话列表和角标共享的短命进程表快照。
     // Arc:采样(冷路径 30-120ms)在各命令的 spawn_blocking 里做,缓存需跨闭包共享。
     process_snapshots: std::sync::Arc<session_query::ProcessSnapshotCache>,
+    /// agent 自建后台会话的索引快照(claude FleetView)。同样在 spawn_blocking 里采样。
+    session_runtimes: std::sync::Arc<session_query::SessionRuntimeCache>,
     // Arc:confirm_dialog 的窗口销毁回调要在 'static 闭包里访问待决表。
     confirms: std::sync::Arc<confirm::Confirms>,
     /// 最近一次检查得到的更新包；下载命令复用它，确保检查与下载使用同一份代理策略。
@@ -139,6 +146,9 @@ struct AppState {
     update_downloading: AtomicBool,
     /// 由 Meowo 持有的交互式 PTY。对话窗口与后续 attach 客户端共享同一 broker。
     ptys: pty::PtyBroker,
+    /// 搭在 agent 自己托管的后台会话上的旁路连接（claude FleetView）。与 ptys 平行:
+    /// 那边的进程是我们 spawn 的、生杀予夺;这边只是连上去看画面。
+    bg_ptys: bgpty::BgPtyRegistry,
 }
 
 struct DownloadedUpdate {
@@ -418,6 +428,10 @@ async fn get_accounts() -> Vec<account::ProviderAccountPayload> {
                 },
                 usage_supported: account::usage_supported(p.id()),
                 relay_enabled: settings::load_settings().relay.enabled(p.id()),
+                active_profile_name: profile::active_display_name_in(
+                    &settings::load_settings(),
+                    p.id().as_str(),
+                ),
             })
             .collect()
     })
@@ -867,6 +881,8 @@ pub fn run() {
             tx_cache: tx_cache.clone(),
             chat_mtimes: Arc::new(Mutex::new(chat::ChatMtimes::default())),
             process_snapshots: std::sync::Arc::new(session_query::ProcessSnapshotCache::default()),
+            session_runtimes: std::sync::Arc::new(session_query::SessionRuntimeCache::default()),
+            bg_ptys: bgpty::BgPtyRegistry::default(),
             confirms: std::sync::Arc::new(confirm::Confirms::default()),
             update: Mutex::new(None),
             downloaded_update: Mutex::new(None),
@@ -893,13 +909,14 @@ pub fn run() {
             managed_terminal_snapshot,
             managed_terminal_binding,
             write_managed_terminal,
-            resize_managed_terminal,
+            resize_managed_terminal, send_background_prompt,
             stop_managed_terminal,
             get_pending_approval,
             register_approval_consumer,
             unregister_approval_consumer,
             resolve_pending_approval,
             open_attached_terminal,
+            attach_background_session,
             focus_session,
             resume_session,
             restart_session_supported,
@@ -943,6 +960,7 @@ pub fn run() {
             profile::rename_profile,
             profile::set_active_profile,
             profile::delete_profile,
+            profile::merge_profile_into_default,
             new_session,
             install_agent,
             agent_path_gap,
@@ -1120,7 +1138,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_safe_id, live_sessions_blocking, session_connected, tab_class, PageReq, RESUME_GRACE_MS,
+        is_safe_id, live_sessions_blocking, session_connected, tab_class, LiveContext, PageReq,
+        SessionRuntimeIndex, RESUME_GRACE_MS,
     };
     use crate::install::{bump_login_epoch, login_epoch};
     use crate::proc::pid_is_agent;
@@ -1175,12 +1194,17 @@ mod tests {
 
         let cache = std::sync::Mutex::new(meowo_agent::TranscriptCache::new());
         let pty_none = std::collections::HashSet::new();
+        let no_runtimes = SessionRuntimeIndex::new();
         let page = live_sessions_blocking(
             &path,
             &cache,
-            &alive,
-            &pty_none,
+            LiveContext {
+                alive: &alive,
+                pty_live: &pty_none,
+                runtimes: &no_runtimes,
+            },
             "waiting",
+            None,
             None,
             PageReq {
                 before_last_event_at: None,

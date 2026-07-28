@@ -53,7 +53,7 @@ type FocusSessionResult =
   | "unsupported_terminal"
   | "process_ended";
 
-type FocusNoticeKind = FocusSessionResult | "connecting" | "failed";
+type FocusNoticeKind = FocusSessionResult | "connecting" | "failed" | "background";
 
 export function relayEnabledSignature(settings: Settings): string {
   return Object.entries(settings.relay?.per_agent ?? {})
@@ -297,6 +297,12 @@ export function Sticker({
   const buttonMode = openMode === "button";
   const canOpen = (l: Item) => l.connected || !l.archived;
   const openTerminal = (l: Item) => {
+    // Agent 自己派生的后台会话：没有终端窗口可切（daemon 起的 PTY 宿主不是用户的终端），
+    // 也无从恢复——恢复等于跟 supervisor 抢同一个 session id。只说明它是什么、去哪找它。
+    if (l.background) {
+      setFocusNotice({ kind: "background", item: l });
+      return;
+    }
     if (l.connected) {
       if (!l.pid) {
         setFocusNotice({ kind: "connecting", item: l });
@@ -366,6 +372,7 @@ export function Sticker({
           unsupported_terminal: t.sticker.focusUnsupported,
           process_ended: t.sticker.focusEnded,
           failed: t.sticker.focusFailed,
+          background: t.sticker.focusBackground,
           focused: "",
         }[focusNotice.kind])
     : "";
@@ -772,6 +779,21 @@ export function Sticker({
                               {l.cwd.split(/[\\/]/).filter(Boolean).pop() ?? l.cwd}
                             </span>
                           )}
+                          {/* Agent 从这个会话派生出去的后台作业**不在卡片上留痕**：它们自己
+                              不建卡（见后端 hidden_background），源会话卡上也不标数——用户既
+                              管不了这些作业（终端按键无效、发消息在手动模式下不会被执行），
+                              一个数字除了让人困惑并无用处。要处理请回派出它们的终端。 */}
+                          {/* 所属账号徽章：默认账号（profile_name 为 null）不显示——
+                              没建过 profile 的用户零感知。 */}
+                          {l.profile_name && (
+                            <span
+                              className="stk-profile"
+                              data-tip={t.account.activeProfileBadge(l.profile_name)}
+                              data-testid="stk-profile-badge"
+                            >
+                              {l.profile_name}
+                            </span>
+                          )}
                           {l.model && <span className="stk-model">{l.model}</span>}
                         </div>
                       </div>
@@ -898,7 +920,10 @@ export function Sticker({
             // 仅本 GUI 托管的 PTY 能结束（与对话窗标题栏入口同门控）；确认+停止走共用的
             // confirmStopSession。成功后不用做别的：轮询里 connected 翻 false、徽标自退。
             // 失败也由徽标兜底可见——卡片仍显「运行中」即说明没停掉，贴纸窗无独立错误槽位。
-            ctxItem.pty_managed
+            // 后台会话恒不满足 pty_managed（PTY 在 agent 的 daemon 手上），但它有自己的
+            // 结束入口——后端会连上那条旁路 socket 发 kill 控制帧，比对着 pid 下手干净：
+            // 杀进程会被 supervisor 按 respawnFlags 原地拉回来。
+            ctxItem.pty_managed || ctxItem.background
               ? () => {
                   void confirmStopSession(ctxItem.session.id, {
                     title: t.chat.endSession,

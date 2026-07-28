@@ -116,6 +116,20 @@ fn active_id_in(s: &crate::settings::Settings, agent: &str) -> Option<String> {
         .then(|| id.clone())
 }
 
+/// 当前活跃 profile 的**展示名**（None = 默认账号，前端什么都不显示——没建过 profile 的用户
+/// 零感知）。从给定的 settings 里取；active_id_in 已保证 id 在列表中，故能直接取到 name。
+pub(crate) fn active_display_name_in(s: &crate::settings::Settings, agent: &str) -> Option<String> {
+    let id = active_id_in(s, agent)?;
+    let name = s
+        .profiles
+        .get(agent)?
+        .iter()
+        .find(|p| p.id == id)?
+        .name
+        .clone();
+    Some(name)
+}
+
 /// 会话属于哪个账号——由 meowo 拉起 agent 时注入，reporter 作为 agent 的 hook 子进程会继承它，
 /// 据此把会话绑到该 profile 上（`sessions.profile`）。恢复会话时才能回到**同一个**账号。
 ///
@@ -398,6 +412,175 @@ pub(crate) async fn delete_profile(provider: String, id: String) -> Result<(), S
     .map_err(|e| e.to_string())?
 }
 
+/// 把一个账号**合并进默认账号**：数据目录递归并入、会话改挂默认账号、账号从设置移除。
+///
+/// 与删除账号的根本区别是**数据全留下**。安全约束（顺序不能换）：
+/// 1. 文件合并用**不覆盖**语义——目标已存在的一律跳过，默认账号的凭据/配置天然不会被碰；
+///    `history.jsonl` 特判为按行追加去重。任何一步失败整体中止，settings/DB 都不动。
+/// 2. 文件并入完成后才把会话改挂默认账号、从 settings 移除 profile。
+/// 3. 最后 best-effort 删 profile 目录——数据在默认目录已有副本，删不掉只是残留，无害。
+#[tauri::command]
+pub(crate) async fn merge_profile_into_default(provider: String, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || merge_into_default(&provider, &id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 合并的同步实现（命令只是它的 spawn_blocking 包装；集成测试直接调它）。
+pub fn merge_into_default(provider: &str, id: &str) -> Result<(), String> {
+    let plugin = meowo_agent::by_id(provider).ok_or("未知 agent")?;
+    // profile 必须在册且目录还在（同 exists 的口径：防「设置里有、目录没了」的半态）。
+    if !exists(provider, id) {
+        return Err("没有这个账号".to_string());
+    }
+    // 进行中的会话 reporter 仍会把 profile id 写回 sessions.profile——此刻合并会让它们
+    // 变成设置里查不到的幽灵账号，先请用户结束这些会话。
+    let store = crate::open_store(&crate::db_path())?;
+    let live = store
+        .profile_live_session_count(id)
+        .map_err(|e| e.to_string())?;
+    if live > 0 {
+        return Err(format!(
+            "该账号还有 {live} 个进行中的会话，请先结束这些会话再合并"
+        ));
+    }
+
+    let src = data_dir(provider, Some(id)).ok_or("找不到该账号的数据目录")?;
+    let dst = data_dir(provider, None).ok_or("找不到默认账号的数据目录")?;
+    // 文件合并失败 → 整体中止：settings/DB 尚未动，重试不会有半态。
+    merge_dir_no_overwrite(&src, &dst)?;
+
+    // 数据已并入，再把会话归属并过去。
+    store
+        .rehome_profile_sessions(id)
+        .map_err(|e| e.to_string())?;
+    crate::settings::update_settings(|s| {
+        let list = s.profiles.get_mut(provider).ok_or("没有这个账号")?;
+        let pos = list.iter().position(|p| p.id == id).ok_or("没有这个账号")?;
+        list.remove(pos);
+        if s.active_profile.get(provider).is_some_and(|a| a == id) {
+            s.active_profile.remove(provider);
+        }
+        Ok(())
+    })?;
+    // 用量缓存按 agent 分键、不按 profile：账号集合变了，那份额度的归属就说不清了
+    // （与 set_active_profile 清缓存同理由）。
+    crate::account::clear_cached_usage(plugin.id());
+
+    // best-effort 删 profile 目录：merge_dir_no_overwrite 已保证会话日志无损并入
+    // （前缀取超集、真分叉存 .bak 侧车），此刻删源目录不会销毁任何唯一副本。
+    let root = profile_root(provider, id);
+    if root.is_dir() {
+        if let Err(e) = std::fs::remove_dir_all(&root) {
+            eprintln!(
+                "Meowo profile[{provider}/{id}]: 合并后删除账号目录失败（数据已并入默认账号，残留目录无害）：{e}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 递归把 `src` 并入 `dst`，**不覆盖**：目标已存在的文件一律跳过。
+/// 两类例外（都是追加式日志，跳过等于丢数据）：
+/// - `history.jsonl`：目标已存在时按行追加去重（两边的会话历史都保住）；
+/// - 其余 `*.jsonl`（transcript 等会话日志）：走 [`merge_jsonl_no_loss`] 的无损消解。
+///   跨 profile 恢复会在默认目录留下同名**陈旧**副本（`sync_claude_session_files` 的
+///   拷贝产物），若按「已存在即跳过」处理，唯一含有后续消息的新副本就永远并不过来，
+///   随后的删目录把它销毁——对话历史被不可逆地截断到陈旧副本。
+fn merge_dir_no_overwrite(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    // 目标根目录可能压根不存在：`data_dir(provider, None)` 只算路径、不建目录，一个从没在
+    // 默认账号下跑过该 agent 的用户点「合并进默认账号」时，~/.claude 就是不存在的。
+    // 下面只为**子**目录建目录，成不成于是取决于 read_dir 先吐出目录还是文件——先目录就
+    // 顺带建出来了，先文件就 fs::copy 报「系统找不到指定的路径」。这一行把它定死。
+    std::fs::create_dir_all(dst).map_err(|e| format!("创建目录失败：{e}"))?;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("读取账号目录失败：{e}"))? {
+        let entry = entry.map_err(|e| format!("读取账号目录失败：{e}"))?;
+        let name = entry.file_name();
+        let from = entry.path();
+        let to = dst.join(&name);
+        if from.is_dir() {
+            if !to.exists() {
+                std::fs::create_dir_all(&to).map_err(|e| format!("创建目录失败：{e}"))?;
+            }
+            merge_dir_no_overwrite(&from, &to)?;
+        } else if name == "history.jsonl" && to.is_file() {
+            merge_history_jsonl(&from, &to)?;
+        } else if to.is_file() && name.to_string_lossy().ends_with(".jsonl") {
+            merge_jsonl_no_loss(&from, &to)?;
+        } else if !to.exists() {
+            // 目标没有才复制——默认账号的凭据/配置绝不会被覆盖。
+            std::fs::copy(&from, &to).map_err(|e| format!("复制 {} 失败：{e}", from.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// 追加式日志（`*.jsonl`）同名冲突的**无损**消解：
+/// - 一方是另一方的前缀（同一会话的不同进度快照）→ 目标保留/换成超集，零丢失；
+/// - 真分叉（两边各自长出了内容）→ 目标不动，源侧完整存为 `.merge-conflict.bak`
+///   侧车。合并后删除 profile 目录不再可能销毁唯一副本；`.bak` 不以 `.jsonl` 结尾，
+///   不会被 claude 的 transcript 扫描（按 `<sid>.jsonl` 命名）误认。
+fn merge_jsonl_no_loss(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    let read = |p: &std::path::Path| {
+        std::fs::read(p).map_err(|e| format!("读取 {} 失败：{e}", p.display()))
+    };
+    let src = read(from)?;
+    let dst = read(to)?;
+    if dst.len() >= src.len() && dst.starts_with(&src) {
+        return Ok(()); // 目标已是超集（或相同），源无新内容。
+    }
+    if src.starts_with(&dst) {
+        // 源是目标的续写（目标停在陈旧副本）：用超集覆盖——旧内容一字节不少。
+        std::fs::copy(from, to).map_err(|e| format!("复制 {} 失败：{e}", from.display()))?;
+        return Ok(());
+    }
+    // 真分叉：哪边都不能丢。默认侧优先保位，源侧存侧车（重名时递增序号，不覆盖旧侧车）。
+    let name = to
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let mut bak = to.with_file_name(format!("{name}.merge-conflict.bak"));
+    let mut n = 1;
+    while bak.exists() {
+        n += 1;
+        bak = to.with_file_name(format!("{name}.merge-conflict-{n}.bak"));
+    }
+    std::fs::copy(from, &bak).map_err(|e| format!("复制 {} 失败：{e}", from.display()))?;
+    Ok(())
+}
+
+/// history.jsonl 特判：把源文件里**目标还没有的行**追加到目标末尾（按整行去重，保住两边历史）。
+fn merge_history_jsonl(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    let existing =
+        std::fs::read_to_string(dst).map_err(|e| format!("读取 history.jsonl 失败：{e}"))?;
+    let known: std::collections::HashSet<&str> = existing.lines().collect();
+    let incoming =
+        std::fs::read_to_string(src).map_err(|e| format!("读取 history.jsonl 失败：{e}"))?;
+    let mut append = String::new();
+    // 目标末尾没有换行时先补一个，否则追加的第一行会黏在既有末行上。
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        append.push('\n');
+    }
+    for line in incoming.lines() {
+        if !line.is_empty() && !known.contains(line) {
+            append.push_str(line);
+            append.push('\n');
+        }
+    }
+    if append.is_empty() {
+        return Ok(());
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dst)
+        .map_err(|e| format!("写入 history.jsonl 失败：{e}"))?;
+    file.write_all(append.as_bytes())
+        .map_err(|e| format!("写入 history.jsonl 失败：{e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,5 +704,185 @@ mod tests {
 
         // gemini 不支持多账号（数据目录不可覆盖）→ 无论传什么 id 都不注入。
         assert!(env_of(meowo_agent::id::GEMINI, Some("work")).is_empty());
+    }
+
+    /// 活跃 profile 的展示名：命中给展示名；默认账号（无活跃 id）→ None，前端什么都不显示。
+    #[test]
+    fn active_display_name_only_for_custom_profiles() {
+        let mut s = crate::settings::Settings::default();
+        assert_eq!(active_display_name_in(&s, "claude"), None);
+
+        s.profiles.insert(
+            "claude".into(),
+            vec![Profile {
+                id: "work".into(),
+                name: "工作".into(),
+            }],
+        );
+        s.active_profile.insert("claude".into(), "work".into());
+        assert_eq!(
+            active_display_name_in(&s, "claude").as_deref(),
+            Some("工作")
+        );
+
+        // 活跃 id 指向已删除的 profile → 视作默认账号 → None（与 active_id_in 同口径）。
+        s.active_profile.insert("claude".into(), "gone".into());
+        assert_eq!(active_display_name_in(&s, "claude"), None);
+    }
+
+    fn merge_tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("meowo-merge-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 合并的铁律：**目标已存在的文件绝不覆盖**——默认账号的凭据（.credentials.json）、
+    /// 配置天然安全；只有目标没有的文件才从 profile 并过来（含子目录递归）。
+    #[test]
+    fn merge_never_overwrites_existing_files() {
+        let root = merge_tmp("no-overwrite");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join("projects/p1")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join(".credentials.json"), "profile-creds").unwrap();
+        std::fs::write(src.join("projects/p1/a.jsonl"), "profile-session").unwrap();
+        std::fs::write(dst.join(".credentials.json"), "default-creds").unwrap();
+        std::fs::write(dst.join("settings.json"), "default-settings").unwrap();
+
+        merge_dir_no_overwrite(&src, &dst).unwrap();
+
+        // 默认账号的凭据原封不动。
+        assert_eq!(
+            std::fs::read_to_string(dst.join(".credentials.json")).unwrap(),
+            "default-creds"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("settings.json")).unwrap(),
+            "default-settings"
+        );
+        // 目标没有的文件（含子目录里的）并过来了。
+        assert_eq!(
+            std::fs::read_to_string(dst.join("projects/p1/a.jsonl")).unwrap(),
+            "profile-session"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// history.jsonl 是两边的会话历史，不能按「不覆盖」丢掉 profile 那边：按行追加去重。
+    #[test]
+    fn merge_appends_history_lines_deduped() {
+        let root = merge_tmp("history");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        // 目标末尾故意不留换行：追加时必须先补，否则会黏到既有末行上。
+        std::fs::write(dst.join("history.jsonl"), "{\"a\":1}\n{\"b\":2}").unwrap();
+        std::fs::write(src.join("history.jsonl"), "{\"b\":2}\n{\"c\":3}\n").unwrap();
+
+        merge_dir_no_overwrite(&src, &dst).unwrap();
+
+        let merged = std::fs::read_to_string(dst.join("history.jsonl")).unwrap();
+        assert_eq!(merged, "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
+
+        // 目标没有 history.jsonl 时按普通文件复制。
+        std::fs::remove_file(dst.join("history.jsonl")).unwrap();
+        merge_dir_no_overwrite(&src, &dst).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.join("history.jsonl")).unwrap(),
+            "{\"b\":2}\n{\"c\":3}\n"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 跨 profile 恢复的典型现场：默认目录里躺着**陈旧**的同名 transcript（sync 的拷贝产物），
+    /// profile 侧才是含后续消息的续写。「已存在即跳过」会让删目录销毁唯一新副本——
+    /// 前缀关系必须取超集覆盖。
+    #[test]
+    fn merge_overwrites_stale_transcript_with_its_continuation() {
+        let root = merge_tmp("jsonl-prefix");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join("projects/p1")).unwrap();
+        std::fs::create_dir_all(dst.join("projects/p1")).unwrap();
+        std::fs::write(dst.join("projects/p1/sid.jsonl"), "{\"m\":1}\n").unwrap();
+        std::fs::write(src.join("projects/p1/sid.jsonl"), "{\"m\":1}\n{\"m\":2}\n").unwrap();
+        // 反向前缀（目标已是超集）：目标不动，也不产生侧车。
+        std::fs::write(dst.join("projects/p1/done.jsonl"), "{\"m\":1}\n{\"m\":2}\n").unwrap();
+        std::fs::write(src.join("projects/p1/done.jsonl"), "{\"m\":1}\n").unwrap();
+
+        merge_dir_no_overwrite(&src, &dst).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst.join("projects/p1/sid.jsonl")).unwrap(),
+            "{\"m\":1}\n{\"m\":2}\n",
+            "陈旧副本应被续写超集覆盖"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("projects/p1/done.jsonl")).unwrap(),
+            "{\"m\":1}\n{\"m\":2}\n",
+            "目标已是超集时不得回退"
+        );
+        assert!(
+            !dst.join("projects/p1/done.jsonl.merge-conflict.bak")
+                .exists(),
+            "无损消解不应产生侧车"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 真分叉（两边各自长出内容）：默认侧保位，源侧完整存 .bak 侧车——删 profile 目录
+    /// 后两份内容都还在,且 .bak 不以 .jsonl 结尾,不会被 transcript 扫描误认。
+    #[test]
+    fn merge_preserves_divergent_transcript_as_sidecar() {
+        let root = merge_tmp("jsonl-divergent");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("sid.jsonl"), "{\"m\":1}\n{\"d\":1}\n").unwrap();
+        std::fs::write(src.join("sid.jsonl"), "{\"m\":1}\n{\"s\":1}\n").unwrap();
+
+        merge_dir_no_overwrite(&src, &dst).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst.join("sid.jsonl")).unwrap(),
+            "{\"m\":1}\n{\"d\":1}\n",
+            "分叉时默认侧不动"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("sid.jsonl.merge-conflict.bak")).unwrap(),
+            "{\"m\":1}\n{\"s\":1}\n",
+            "源侧必须完整保为侧车"
+        );
+
+        // 再并一次（侧车已占位）：不覆盖旧侧车,递增序号。
+        merge_dir_no_overwrite(&src, &dst).unwrap();
+        assert!(dst.join("sid.jsonl.merge-conflict-2.bak").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 从没在默认账号下跑过该 agent 时，目标目录压根不存在。此前只为**子**目录建目录，
+    /// 于是能不能合并取决于 read_dir 先吐出目录还是文件——先文件就 fs::copy 报
+    /// 「系统找不到指定的路径」。非确定性地坏掉比稳定坏掉更难查。
+    #[test]
+    fn merging_into_a_default_account_that_was_never_used_creates_it() {
+        let root = std::env::temp_dir().join(format!("meowo-merge-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        // 只放文件、不放子目录：正是「先吐出文件」那条分支。
+        std::fs::write(src.join(".credentials.json"), "{}").unwrap();
+        let dst = root.join("never-ran");
+        assert!(!dst.exists());
+
+        merge_dir_no_overwrite(&src, &dst).expect("目标目录不存在也该能合并");
+        assert_eq!(
+            std::fs::read_to_string(dst.join(".credentials.json")).unwrap(),
+            "{}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

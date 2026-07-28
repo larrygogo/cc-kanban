@@ -1,21 +1,64 @@
-import { useCallback, useEffect, useRef, useState, type UIEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getLiveSessionsPage, sessionTone, type LiveSession } from "../api";
+import { getLiveSessionsPage, recentCwds, sessionTone, type LiveSession, type SessionTone } from "../api";
 import { agentAssets, tintStyle } from "../providers";
+import { folderName, pathKey } from "../paths";
+import { Dropdown } from "./menu";
 import { useT } from "../i18n";
 
 /** 每翻一页新增的会话数。滚到底自动加载下一页，直到后端带回 next_cursor = null 为止。 */
 const PAGE_LIMIT = 60;
 
+/** 目录下拉里最多列几个工作目录（后端按最近活跃排序，超出的靠搜索/滚动够不着的本就是冷目录）。 */
+const DIR_LIMIT = 24;
+
 /** board-changed 刷新的冷却窗口（ms）：该事件会三连发（命令写库通知 + db-watcher 回声 +
  *  liveness 轮询），与 App.tsx 看板刷新的 leading+trailing 节流同参数、同行为。 */
 const REFRESH_THROTTLE_MS = 400;
 
-/** cwd 末段目录名作展示，完整路径进 title。与贴纸 stk-repo 同款。 */
-function folderName(cwd: string | null): string {
-  if (!cwd) return "";
-  return cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd;
+const GROUPED_KEY = "meowo-chat-sidebar-grouped";
+const FOLDED_KEY = "meowo-chat-sidebar-folded-dirs";
+
+/** 无 cwd 的会话归到同一组（后端 cwd 可空:ping 型/早期数据）。用不可能与路径撞车的键。 */
+const NO_DIR = "\\u0000no-dir";
+
+/** 组头汇总点的召唤强度序:出错必须先被看见 > 有明确动作要做 > 在等 > 在跑。
+ *  组折起来时用户只剩这一个点可看,取组内最强的那个,否则「折叠即失明」。 */
+const TONE_RANK: Record<SessionTone, number> = {
+  error: 4, pending: 3, waiting: 2, running: 1, offline: 0, ended: 0,
+};
+
+type DirGroup = { key: string; cwd: string | null; label: string; items: LiveSession[] };
+
+/**
+ * 按 cwd 分组,**组序由已有排序派生**:组按「组内第一条会话的位置」排,组内保持原顺序。
+ * 于是后端的 connected-first + 时间倒序原样透过来——正在跑的会话所在目录自然浮到最上面,
+ * 用户原来靠什么找会话,分组后还靠什么找。另起一套组排序(按目录名/会话数)会打乱这一点。
+ */
+function groupByDir(items: LiveSession[]): DirGroup[] {
+  const groups: DirGroup[] = [];
+  const index = new Map<string, DirGroup>();
+  for (const item of items) {
+    const key = item.cwd ? pathKey(item.cwd) : NO_DIR;
+    let group = index.get(key);
+    if (!group) {
+      group = { key, cwd: item.cwd, label: folderName(item.cwd), items: [] };
+      index.set(key, group);
+      groups.push(group);
+    }
+    group.items.push(item);
+  }
+  return groups;
+}
+
+function readFolded(): Set<string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(FOLDED_KEY) || "[]");
+    return new Set(Array.isArray(raw) ? raw.filter((k): k is string => typeof k === "string") : []);
+  } catch {
+    return new Set();
+  }
 }
 
 /**
@@ -24,8 +67,10 @@ function folderName(cwd: string | null): string {
  * 这里不再自设轮询。折叠状态由 ChatWindow 持有（收起后展开入口在标题栏），
  * 本组件收起时整个卸载，数据加载随之停止。
  */
-export function ChatSidebar({ activeId, onSelect, onCollapse }: {
+export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollapse }: {
   activeId: number;
+  /** 有待授权请求的非当前会话：后端不再为此切窗抢焦点，靠这里的徽标召唤用户。 */
+  approvalAwaitingIds: ReadonlySet<number>;
   onSelect: (id: number) => void;
   onCollapse: () => void;
 }) {
@@ -43,6 +88,16 @@ export function ChatSidebar({ activeId, onSelect, onCollapse }: {
   const mountedRef = useRef(true);
   const limitRef = useRef(limit);
   limitRef.current = limit;
+  // 目录筛选:选中的 cwd 原样进后端 search(它 LIKE 匹配 s.cwd,子目录一并命中),
+  // 分页与排序仍全在后端做——前端过滤只能过滤「已加载的这一页」,筛出来的清单是残缺的。
+  const [dirFilter, setDirFilter] = useState<string | null>(null);
+  const dirFilterRef = useRef(dirFilter);
+  dirFilterRef.current = dirFilter;
+  const [dirs, setDirs] = useState<string[]>([]);
+  // 分组开关默认关:不开的人一个像素都感知不到这次改动。
+  const [grouped, setGrouped] = useState(() => localStorage.getItem(GROUPED_KEY) === "1");
+  // 折叠的组(按 pathKey)。侧栏收起时本组件整个卸载,不落盘的话回来全展开了。
+  const [folded, setFolded] = useState<Set<string>>(readFolded);
 
   // refresh = 整段重取替换（首载 / board-changed）；grow = 翻页，只把新条目**追加到尾部**。
   // 追加而非替换：后端对整页做 connected-first 排序，扩大 limit 可能把更深处的活会话
@@ -50,9 +105,15 @@ export function ChatSidebar({ activeId, onSelect, onCollapse }: {
   // 重排交给下一次 refresh（那时用户多半不在翻页途中）。
   const load = useCallback((mode: "refresh" | "grow") => {
     const lim = limitRef.current;
-    return getLiveSessionsPage("all", null, null, lim)
+    const search = dirFilterRef.current;
+    // 目录走专用 cwd 参数(后端斜杠归一后精确比较),不复用 search 的子串 LIKE——
+    // 那会让另一种斜杠写法的会话整批消失,还把兄弟目录/标题命中漏进来。
+    return getLiveSessionsPage("all", null, null, lim, search)
       .then((page) => {
         if (!mountedRef.current) return;
+        // 切目录期间发出的旧请求回来了:它装的是上一个目录的会话,原样落盘会让列表
+        // 与下拉显示的目录对不上。丢弃。
+        if (dirFilterRef.current !== search) return;
         setReachedEnd(page.next_cursor === null);
         if (mode === "grow") {
           setSessions((prev) => {
@@ -65,7 +126,7 @@ export function ChatSidebar({ activeId, onSelect, onCollapse }: {
         }
       })
       .catch(() => {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || dirFilterRef.current !== search) return;
         // 翻页失败：limit 退回上一页的量。不退的话 loading 行永远挂着、重滚也发不出
         // 请求（limit 已被抬高，唯一能救场的只剩恰好路过的 board-changed）。
         if (mode === "grow") setLimit((n) => Math.max(PAGE_LIMIT, n - PAGE_LIMIT));
@@ -124,6 +185,81 @@ export function ChatSidebar({ activeId, onSelect, onCollapse }: {
     if (grew) void loadRef.current("grow");
   }, [limit]);
 
+  // 目录清单与会话列表同源于库,但只在挂载时取一次:board-changed 三连发时重取它没有
+  // 意义(新目录只会在新建会话后出现,那时侧栏本就要重挂或用户会自己刷)。
+  useEffect(() => {
+    recentCwds(DIR_LIMIT)
+      .then((list) => {
+        if (!mountedRef.current) return;
+        // 后端按原始字符串去重;同一目录可能因历史数据斜杠方向不同而重复。这里按归一
+        // key 再去一次重,保留首次出现(最近活跃)的原始写法做显示;筛选走后端的 cwd
+        // 参数,双方都斜杠归一后精确比较,选哪种写法都能命中两种存法的会话。
+        const seen = new Set<string>();
+        setDirs(list.filter((cwd) => {
+          const key = pathKey(cwd);
+          if (!cwd || seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        }));
+      })
+      .catch(() => {});
+  }, []);
+
+  // 切目录 = 换一份数据源:整段重取,并把翻页状态清回首页(不清的话新目录一上来就
+  // 顶着上一个目录翻到的 limit,一次拉几百条)。首挂载不重复触发(那次由挂载 effect 发)。
+  const prevDirRef = useRef<string | null>(null);
+  const dirTouchedRef = useRef(false);
+  useEffect(() => {
+    if (!dirTouchedRef.current) {
+      dirTouchedRef.current = true;
+      prevDirRef.current = dirFilter;
+      return;
+    }
+    if (prevDirRef.current === dirFilter) return;
+    prevDirRef.current = dirFilter;
+    // limitRef 必须**当场**改回去:load 立刻就读它,而 setLimit 要等下一次渲染才落到
+    // limitRef 上——只 setLimit 的话,切目录后的首个请求仍带着上一个目录翻到的 limit。
+    prevLimitRef.current = PAGE_LIMIT;
+    limitRef.current = PAGE_LIMIT;
+    setLimit(PAGE_LIMIT);
+    setReachedEnd(false);
+    setSessions(null);
+    // 在途的 grow 归属上一个目录:它的响应已被 search 守卫丢弃,这里把闸门也放开,
+    // 否则新目录要等那个作废的请求 settle 才能翻页。
+    growingRef.current = false;
+    setGrowing(false);
+    void loadRef.current("refresh");
+  }, [dirFilter]);
+
+  const toggleGrouped = () => setGrouped((prev) => {
+    const next = !prev;
+    localStorage.setItem(GROUPED_KEY, next ? "1" : "0");
+    return next;
+  });
+  const toggleFolded = (key: string) => setFolded((prev) => {
+    const next = new Set(prev);
+    if (!next.delete(key)) next.add(key);
+    localStorage.setItem(FOLDED_KEY, JSON.stringify([...next]));
+    return next;
+  });
+
+  // 分组只在开关打开时算。**它只覆盖已加载的这一页**:滚动翻页会让组长大、后来的
+  // 会话可能落进更靠上的组。选了目录时不存在这个问题(筛选在后端做,清单是完整的)。
+  // 各分组里「未运行会话」的展开状态。刻意不持久化：它是一次浏览中的临时动作，
+  // 下次打开侧栏该回到「只看在跑的」这个默认。
+  const [revealed, setRevealed] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const toggleRevealed = (key: string) =>
+    setRevealed((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+
+  const groups = useMemo(
+    () => (grouped && sessions ? groupByDir(sessions) : null),
+    [grouped, sessions],
+  );
+
   // 滚到底前 120px 就预取下一页。
   const onScroll = (event: UIEvent<HTMLElement>) => {
     if (reachedEnd || sessions === null || growingRef.current) return;
@@ -132,6 +268,49 @@ export function ChatSidebar({ activeId, onSelect, onCollapse }: {
     growingRef.current = true;
     setGrowing(true);
     setLimit((n) => n + PAGE_LIMIT);
+  };
+
+  // 平铺与分组共用同一份条目渲染:两套 JSX 会各自漂移(状态点口径、标题回退文案),
+  // 那正是「贴纸报错、侧栏亮绿点」那类不一致的来源。
+  const renderItem = (item: LiveSession) => {
+    const Icon = agentAssets(item.provider).Icon;
+    const dir = folderName(item.cwd);
+    // 与对话窗标题栏同一套口径(sessionTone,含 errored——贴纸的错误优先级由此
+    // 对齐,不再出现「贴纸报错、侧栏亮绿点」)。offline/ended 不加点——图标置灰
+    // (is-off)已表达「不活跃」,再叠一个灰点是噪声。
+    const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored);
+    const showDot = tone === "running" || tone === "pending" || tone === "waiting" || tone === "error";
+    // 待授权徽标优先于状态点：授权在等用户决策，比「在跑/待处理」都紧急；
+    // 且不依附 connected——离线会话恢复的 agent 同样可能来要权限。
+    const awaitingApproval = approvalAwaitingIds.has(item.session.id);
+    return (
+      <button
+        type="button"
+        key={item.session.id}
+        className={"chat-sidebar-item" + (item.session.id === activeId ? " is-active" : "")}
+        aria-current={item.session.id === activeId ? "true" : undefined}
+        title={item.task_title}
+        onClick={() => onSelect(item.session.id)}
+      >
+        {/* 状态指示兼 agent 标识：连接=品牌色徽标，未连接=灰（与贴纸同一套）。 */}
+        <span
+          className={"chat-sidebar-agent-icon" + (item.connected ? "" : " is-off")}
+          style={tintStyle(item.provider, item.connected)}
+          role="img"
+          aria-label={item.provider}
+        >
+          <Icon />
+          {awaitingApproval
+            ? <i className="chat-sidebar-dot is-approval" role="status" aria-label={t.chat.sidebarApproval} data-tip={t.chat.sidebarApproval} />
+            : showDot && <i className={`chat-sidebar-dot is-${tone}`} role="status" aria-label={t.chat.status[tone]} data-tip={t.chat.status[tone]} />}
+        </span>
+        <span className="chat-sidebar-text">
+          <span className="chat-sidebar-name">{item.task_title || t.sticker.waitingFirstInput}</span>
+          {/* 分组视图里每条再重复一遍目录名是噪声——组头已经写着了。 */}
+          {dir && !grouped && <span className="chat-sidebar-meta" title={item.cwd ?? undefined}>{dir}</span>}
+        </span>
+      </button>
+    );
   };
 
   return (
@@ -164,43 +343,89 @@ export function ChatSidebar({ activeId, onSelect, onCollapse }: {
           </button>
         </div>
       </div>
+      {/* 目录工具条:左侧筛选(收窄到一个目录,后端做,清单完整),右侧分组开关(只重排
+          已加载的这一页)。两者独立——筛选后再分组等于给唯一一组加了个头,也无妨。 */}
+      <div className="chat-sidebar-tools">
+        <Dropdown
+          align="left"
+          value={dirFilter ?? ""}
+          options={[
+            { value: "", label: t.chat.sidebarDirAll },
+            ...dirs.map((cwd) => ({ value: cwd, label: folderName(cwd) })),
+          ]}
+          onChange={(value) => setDirFilter(value ? String(value) : null)}
+        />
+        <button
+          type="button"
+          className={"chat-sidebar-toggle" + (grouped ? " is-on" : "")}
+          aria-pressed={grouped}
+          aria-label={t.chat.sidebarGroup}
+          data-tip={grouped ? t.chat.sidebarGroupOffTip : t.chat.sidebarGroupTip}
+          onClick={toggleGrouped}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <path d="M3 5h8M3 12h14M3 19h10" />
+          </svg>
+        </button>
+      </div>
       <nav className="chat-sidebar-list" aria-label={t.chat.sidebarTitle} onScroll={onScroll}>
         {sessions === null && <div className="chat-sidebar-empty">{t.chat.sidebarLoading}</div>}
-        {sessions !== null && sessions.length === 0 && <div className="chat-sidebar-empty">{t.chat.sidebarEmpty}</div>}
-        {(sessions ?? []).map((item) => {
-          const Icon = agentAssets(item.provider).Icon;
-          const dir = folderName(item.cwd);
-          // 与对话窗标题栏同一套口径(sessionTone,含 errored——贴纸的错误优先级由此
-          // 对齐,不再出现「贴纸报错、侧栏亮绿点」)。offline/ended 不加点——图标置灰
-          // (is-off)已表达「不活跃」,再叠一个灰点是噪声。
-          const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored);
-          const showDot = tone === "running" || tone === "pending" || tone === "waiting" || tone === "error";
-          return (
-            <button
-              type="button"
-              key={item.session.id}
-              className={"chat-sidebar-item" + (item.session.id === activeId ? " is-active" : "")}
-              aria-current={item.session.id === activeId ? "true" : undefined}
-              title={item.task_title}
-              onClick={() => onSelect(item.session.id)}
-            >
-              {/* 状态指示兼 agent 标识：连接=品牌色徽标，未连接=灰（与贴纸同一套）。 */}
-              <span
-                className={"chat-sidebar-agent-icon" + (item.connected ? "" : " is-off")}
-                style={tintStyle(item.provider, item.connected)}
-                role="img"
-                aria-label={item.provider}
-              >
-                <Icon />
-                {showDot && <i className={`chat-sidebar-dot is-${tone}`} role="status" aria-label={t.chat.status[tone]} data-tip={t.chat.status[tone]} />}
-              </span>
-              <span className="chat-sidebar-text">
-                <span className="chat-sidebar-name">{item.task_title || t.sticker.waitingFirstInput}</span>
-                {dir && <span className="chat-sidebar-meta" title={item.cwd ?? undefined}>{dir}</span>}
-              </span>
-            </button>
-          );
-        })}
+        {sessions !== null && sessions.length === 0 && (
+          <div className="chat-sidebar-empty">{dirFilter ? t.chat.sidebarEmptyDir : t.chat.sidebarEmpty}</div>
+        )}
+        {groups
+          ? groups.map((group) => {
+              const isFolded = folded.has(group.key);
+              // 组头汇总点:折起来时它是这一组唯一的状态出口,取组内最强的召唤。
+              const approval = group.items.some((item) => approvalAwaitingIds.has(item.session.id));
+              const tone = group.items
+                .map((item) => sessionTone(item.connected, item.session.status, item.pending_review, item.errored))
+                .reduce<SessionTone | null>((best, cur) => (best && TONE_RANK[best] >= TONE_RANK[cur] ? best : cur), null);
+              const showDot = !!tone && TONE_RANK[tone] > 0;
+              // 「未运行」= 已断开，且不是当前打开的这条——正开着的会话无论死活都得留在
+              // 视野里，否则用户一进来就找不到自己在哪。
+              const live = (item: LiveSession) => item.connected || item.session.id === activeId;
+              const idle = group.items.filter((item) => !live(item));
+              // 一条活的都没有就不收：那会让展开分组后空空如也，比排得长更难用。
+              const canCollapse = idle.length > 0 && idle.length < group.items.length;
+              const shown = canCollapse && !revealed.has(group.key) ? group.items.filter(live) : group.items;
+              return (
+                <div className="chat-sidebar-group" key={group.key}>
+                  <button
+                    type="button"
+                    className="chat-sidebar-group-head"
+                    aria-expanded={!isFolded}
+                    title={group.cwd ?? undefined}
+                    onClick={() => toggleFolded(group.key)}
+                  >
+                    <svg className={"chat-sidebar-caret" + (isFolded ? " is-folded" : "")} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                    <span className="chat-sidebar-group-name">{group.label || t.chat.sidebarNoDir}</span>
+                    {approval
+                      ? <i className="chat-sidebar-dot is-approval" role="status" aria-label={t.chat.sidebarApproval} data-tip={t.chat.sidebarApproval} />
+                      : showDot && <i className={`chat-sidebar-dot is-${tone}`} role="status" aria-label={t.chat.status[tone]} data-tip={t.chat.status[tone]} />}
+                    <span className="chat-sidebar-group-count">{group.items.length}</span>
+                  </button>
+                  {!isFolded && shown.map(renderItem)}
+                  {/* 未运行的会话默认收起：一个跑了一阵的目录里，历史会话能堆到几十条，
+                      把当前真正在跑的那一两条挤出视野。折起来但不丢——点一下就回来。 */}
+                  {!isFolded && canCollapse && (
+                    <button
+                      type="button"
+                      className="chat-sidebar-more"
+                      aria-expanded={revealed.has(group.key)}
+                      onClick={() => toggleRevealed(group.key)}
+                    >
+                      {revealed.has(group.key)
+                        ? t.chat.sidebarHideIdle
+                        : t.chat.sidebarShowIdle(idle.length)}
+                    </button>
+                  )}
+                </div>
+              );
+            })
+          : (sessions ?? []).map(renderItem)}
         {/* 下一页在路上。挂在真实在途状态上：翻页失败会清掉它，不会留下一个永远
             转不完的 loading 行。 */}
         {sessions !== null && sessions.length > 0 && growing && (

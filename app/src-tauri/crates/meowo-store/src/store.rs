@@ -996,6 +996,29 @@ impl Store {
         }
     }
 
+    /// 某账号（profile）名下仍处于 running/waiting 的会话数。
+    ///
+    /// 「合并进默认账号」的安全门：进行中的会话 reporter 仍会把 profile id 写回
+    /// `sessions.profile`，此刻合并会让它们变成设置里查不到的幽灵账号。
+    pub fn profile_live_session_count(&self, profile: &str) -> Result<i64, StoreError> {
+        let n = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE profile = ?1 AND status IN ('running','waiting')",
+            [profile],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
+    /// 把某账号名下的会话全部改挂默认账号（profile 置 NULL），返回行数。
+    /// 「合并进默认账号」用：数据目录并入后，会话归属也跟着并过去。
+    pub fn rehome_profile_sessions(&self, profile: &str) -> Result<usize, StoreError> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET profile = NULL WHERE profile = ?1",
+            [profile],
+        )?;
+        Ok(n)
+    }
+
     /// 取会话存的 cwd。
     pub fn session_cwd(&self, session_id: i64) -> Result<Option<String>, StoreError> {
         let r = self.conn.query_row(
@@ -1330,5 +1353,71 @@ mod recent_cwds_tests {
         );
         // limit 生效。
         assert_eq!(store.recent_cwds(1).unwrap(), vec!["C:/projA".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod profile_rehome_tests {
+    use super::*;
+
+    /// rehome 把该账号名下的会话全部改挂默认账号（NULL），默认账号与别的账号的会话不动。
+    #[test]
+    fn rehome_moves_only_that_profiles_sessions() {
+        let store = Store::open_in_memory().unwrap();
+        let pid = store
+            .upsert_project_by_root("C:/root", "root", 100)
+            .unwrap();
+        let (a, _) = store.start_session(pid, "s-a", 100).unwrap();
+        let (b, _) = store.start_session(pid, "s-b", 200).unwrap();
+        let (c, _) = store.start_session(pid, "s-c", 300).unwrap();
+        store.set_session_profile(a, Some("work")).unwrap();
+        store.set_session_profile(b, Some("work")).unwrap();
+        store.set_session_profile(c, Some("other")).unwrap();
+
+        assert_eq!(store.rehome_profile_sessions("work").unwrap(), 2);
+        assert_eq!(store.session_profile(a).unwrap(), None);
+        assert_eq!(store.session_profile(b).unwrap(), None);
+        // 别的账号不受影响。
+        assert_eq!(store.session_profile(c).unwrap(), Some("other".into()));
+        // 再合并一次是幂等的（没有行可动）。
+        assert_eq!(store.rehome_profile_sessions("work").unwrap(), 0);
+    }
+
+    /// 合并的安全门只数 running/waiting：已结束的会话不挡合并。
+    #[test]
+    fn live_count_only_blocks_on_running_or_waiting() {
+        let store = Store::open_in_memory().unwrap();
+        let pid = store
+            .upsert_project_by_root("C:/root", "root", 100)
+            .unwrap();
+        let (ended, _) = store.start_session(pid, "s-ended", 100).unwrap();
+        let (running, _) = store.start_session(pid, "s-running", 200).unwrap();
+        store.set_session_profile(ended, Some("work")).unwrap();
+        store.set_session_profile(running, Some("work")).unwrap();
+        store
+            .set_session_status(ended, SessionStatus::Ended, 300)
+            .unwrap();
+
+        assert_eq!(store.profile_live_session_count("work").unwrap(), 1);
+        assert_eq!(store.profile_live_session_count("other").unwrap(), 0);
+    }
+
+    /// 会话卡的 profile 必须透出原始 id——app 层据此解析展示名，前端据此决定显不显示徽章。
+    #[test]
+    fn live_sessions_carries_profile_id() {
+        let store = Store::open_in_memory().unwrap();
+        let pid = store
+            .upsert_project_by_root("C:/root", "root", 100)
+            .unwrap();
+        let (with, _) = store.start_session(pid, "s-with", 100).unwrap();
+        let (without, _) = store.start_session(pid, "s-without", 200).unwrap();
+        store.set_session_profile(with, Some("work")).unwrap();
+
+        let page = store
+            .live_sessions(Some("all"), None, None, None, 10)
+            .unwrap();
+        let find = |id: i64| page.iter().find(|s| s.session.id == id).unwrap();
+        assert_eq!(find(with).profile.as_deref(), Some("work"));
+        assert_eq!(find(without).profile, None);
     }
 }

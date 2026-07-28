@@ -342,6 +342,41 @@ fn capture_model_menu() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
+/// kimi 审批面板取证：发一条必然触发工具审批的 prompt，抓面板原文（选项文案/编号形态/
+/// 光标标记），再按数字键证实「1/2/3 直接选中」。
+///
+/// **Windows 上抓不到**：kimi.exe 的 launcher shim 在裸 ConPTY 下即退（见 kimi/mod.rs
+/// `interrupt_input` 注释），探针只能拿到一帧退出清理序列。kimi 审批面板的形态与按键
+/// 语义已完成**官方源码取证**（MoonshotAI/kimi-code @ 0.29，approval-panel.ts），结论
+/// 固化在 docs/research/tui-menu-captures-2026-07.md 与 terminalAttention.ts 的
+/// `kimi:command-approval` 规则里。本探针留给非 Windows 平台复核用。
+///
+/// 用法（会真的发一条 prompt、消耗额度）：
+///   cargo test -p meowo-app --test capture_model_menu capture_approval_panel -- --ignored --nocapture
+#[test]
+#[ignore = "会拉起真实 agent 进程并发一条 prompt(耗额度);仅供手动调研"]
+fn capture_approval_panel() {
+    let (mut writer, rx, mut child, cwd) = boot_agent();
+    let send = |writer: &mut Box<dyn std::io::Write + Send>, bytes: &[u8]| {
+        let _ = writer.write_all(bytes).and_then(|_| writer.flush());
+    };
+    // echo 带随机串，避开用户配置里可能存在的 Bash 放行规则，确保面板一定弹。
+    let probe = format!("echo meowo-approval-probe-{}", std::process::id());
+    send(&mut writer, format!("请立即用 Bash 工具执行 `{probe}`，不要做任何其他事。").as_bytes());
+    std::thread::sleep(Duration::from_millis(400));
+    send(&mut writer, b"\r");
+    // 模型应答 + 工具调用 + 面板渲染，给足时间。
+    let panel = read_answering_dsr(&rx, &mut writer, Duration::from_millis(3000), Duration::from_secs(90));
+    eprintln!("=== 审批面板(可见文本,尾部) ===\n{}", tail_lines(&visible(&panel), 30));
+    eprintln!("=== 审批面板原始字节(尾 1500,看光标/编号/样式序列) ===\n{:?}", tail(&panel, 1500));
+    // 数字键直接选中(官方文档:1/2/3 直选)。按 1 批准后应看到命令真的跑了。
+    send(&mut writer, b"1");
+    let after = read_answering_dsr(&rx, &mut writer, Duration::from_millis(2500), Duration::from_secs(30));
+    eprintln!("=== 按 1 之后(可见文本,尾部) ===\n{}", tail_lines(&visible(&after), 15));
+    let _ = child.kill();
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
 fn env_ms(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()

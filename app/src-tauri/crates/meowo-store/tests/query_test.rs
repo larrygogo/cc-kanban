@@ -640,6 +640,38 @@ fn live_sessions_search_matches_cwd_and_escapes_wildcards() {
     );
 }
 
+/// 目录筛选是斜杠归一的**精确**匹配,不是 search 的子串 LIKE:历史数据里同一目录
+/// 存着两种斜杠写法,任选一种筛选都必须双双命中;兄弟目录(前缀关系)与标题命中
+/// 不得漏进目录限定的结果。
+#[test]
+fn live_sessions_cwd_filter_normalizes_slashes_and_is_exact() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 1).unwrap();
+    let (fwd, _) = store.start_session(pid, "fwd", 100).unwrap();
+    store.on_user_prompt(fwd, "正斜杠", 110).unwrap();
+    store.set_session_cwd(fwd, "C:/work/proj", 120).unwrap();
+    let (back, _) = store.start_session(pid, "back", 200).unwrap();
+    store.on_user_prompt(back, "反斜杠", 210).unwrap();
+    store.set_session_cwd(back, r"C:\work\proj", 220).unwrap();
+    // 兄弟目录:名字是筛选目录的前缀延伸,子串语义会误命中。
+    let (sibling, _) = store.start_session(pid, "sibling", 300).unwrap();
+    store.on_user_prompt(sibling, "兄弟目录", 310).unwrap();
+    store.set_session_cwd(sibling, "C:/work/proj2", 320).unwrap();
+    // 标题含目录字符串:目录筛选不该被标题命中污染。
+    let (titled, _) = store.start_session(pid, "titled", 400).unwrap();
+    store.on_user_prompt(titled, "讨论 C:/work/proj 的问题", 410).unwrap();
+    store.set_session_cwd(titled, "C:/elsewhere", 420).unwrap();
+
+    for spelling in ["C:/work/proj", r"C:\work\proj", "C:/work/proj/"] {
+        let hits = store
+            .live_sessions_filtered(Some("all"), None, Some(spelling), None, None, 100)
+            .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|l| l.session.cc_session_id.as_str()).collect();
+        assert!(ids.contains(&"fwd") && ids.contains(&"back"), "写法 {spelling} 应命中两种存法: {ids:?}");
+        assert_eq!(hits.len(), 2, "写法 {spelling} 不得混入兄弟目录/标题命中: {ids:?}");
+    }
+}
+
 #[test]
 fn live_sessions_waiting_sorted_ascending_and_paginates() {
     let store = Store::open_in_memory().unwrap();
@@ -713,4 +745,46 @@ fn live_sessions_falls_back_to_default_provider_for_blank_provider() {
     };
     assert_eq!(got(empty), Some(meowo_store::DEFAULT_PROVIDER));
     assert_eq!(got(blank), Some(meowo_store::DEFAULT_PROVIDER));
+}
+
+/// 看板把 agent 自建的后台会话整个藏了，总数必须按**同一口径**扣掉——只在
+/// running/waiting 候选里扣是不够的：一条已结束但有标题的后台会话不在候选集里，
+/// 却照样计进 total，于是角标数出一条用户在列表里找不到的会话。
+#[test]
+fn hidden_sessions_are_subtracted_with_the_same_rule_as_totals() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/repo", "repo", 100).unwrap();
+
+    let mk = |cc: &str, title: &str, ended: bool, archived: bool, at: i64| {
+        let (id, _) = store.start_session(pid, cc, at).unwrap();
+        store.set_session_title(id, title, at).unwrap();
+        if ended {
+            store.end_session(id, at + 1).unwrap();
+        }
+        if archived {
+            store.set_session_archived(id, true, at + 2).unwrap();
+        }
+        id
+    };
+    mk("mine", "我的会话", false, false, 100);
+    mk("bg-running", "后台在跑", false, false, 200);
+    mk("bg-ended", "后台已结束", true, false, 300); // 候选集捞不到它，但它在 total 里
+    mk("bg-archived", "后台已归档", true, true, 400);
+    // 空壳（已结束 + 未命名）本就不进 total，重复扣会把数字扣穿。
+    let (shell, _) = store.start_session(pid, "bg-shell", 500).unwrap();
+    store.end_session(shell, 501).unwrap();
+
+    let (total, archived) = store.live_sessions_totals().unwrap();
+    assert_eq!(total, 4, "四条有标题的；未命名空壳不算");
+    assert_eq!(archived, 1);
+
+    let hidden = ["bg-running", "bg-ended", "bg-archived", "bg-shell"].map(String::from);
+    let (hidden_total, hidden_archived) = store.live_totals_for(&hidden).unwrap();
+    assert_eq!(hidden_total, 3, "空壳本就不在 total 里，不能重复扣");
+    assert_eq!(hidden_archived, 1);
+    assert_eq!(total - hidden_total, 1, "藏完只剩用户自己那条");
+    assert_eq!(archived - hidden_archived, 0);
+
+    // 一个都不隐藏时不该误伤。
+    assert_eq!(store.live_totals_for(&[]).unwrap(), (0, 0));
 }

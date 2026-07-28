@@ -4,11 +4,12 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { appConfirm } from "../confirm";
-import { agentChatUi, clipboardImageFingerprint, confirmStopSession, getChatHistory, getPendingApproval, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, resolvePendingApproval, savePastedAttachment, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
+import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, getChatHistory, getPendingApproval, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, resolvePendingApproval, savePastedAttachment, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
 import { useT } from "../i18n";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { agentAssets, tintStyle } from "../providers";
 import { reduceChatEvents } from "../chat/reducer";
+import { ApprovalCard } from "./chat/ApprovalCard";
 import { ContextMeter } from "./chat/ContextMeter";
 import { TodoPanel } from "./chat/TodoPanel";
 import { Transcript } from "./chat/Transcript";
@@ -60,21 +61,58 @@ function approvalSuggestionTip(suggestion: unknown, index: number, t: ReturnType
   return detail ? `${base} · ${detail}` : base;
 }
 
+const PROCEED_QUESTION = /^do you want to proceed\?$/i;
+
 function claudeCommandApprovalDetails(text: string) {
-  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
-  const marker = lines.findIndex((line) => /this command requires approval/i.test(line));
-  let before = marker >= 0 ? lines.slice(0, marker) : lines;
+  // TUI 把标题行用横线铺满整屏宽（"Do you want to proceed? ──────"）。这些框线是
+  // 排版，不是内容：行尾的要剥掉，整行都是框线的整行丢弃。
+  const lines = text.split("\n")
+    // U+2500–U+257F 是 Unicode 的制表符块（─ ━ │ ┌ ╌ … TUI 画框全用它）。
+    .map((line) => line.replace(/[\s─-╿]+$/u, "").trim())
+    .filter((line) => line && !/^[\s─-╿|+-]+$/u.test(line));
+  // 问句是审批框的末行，它之后的东西不属于这次请求。同样取**最后一次**出现——重绘
+  // 残留会让同一句问话在缓冲里出现好几遍，取第一处就会把两屏内容都收进命令区。
+  const questionIndex = lines.reduce((found, line, index) => (PROCEED_QUESTION.test(line) ? index : found), -1);
+  const question = questionIndex >= 0 ? lines[questionIndex] : "";
+  let before = questionIndex >= 0 ? lines.slice(0, questionIndex) : lines;
+  const marker = before.findIndex((line) => /this command requires approval/i.test(line));
+  if (marker >= 0) before = before.slice(0, marker);
   // 审批框以工具头（"Bash command"）开头；只取最后一个工具头之后的内容，
   // 避免把上一屏残留的输出并进命令文本。
   const header = before.reduce((found, line, index) => (/^bash command$/i.test(line) ? index : found), -1);
   if (header >= 0) before = before.slice(header + 1);
+  before = before.filter((line) => !PROCEED_QUESTION.test(line));
+  // 末行是「用途说明」这个判断，只有认出了框的边界（工具头或 requires-approval 行）
+  // 才成立。认不出时整段进命令区，不去猜哪一行是说明——猜错就是把半条命令当成说明
+  // 单独拎出来显示，比不显示更误导。
+  const framed = header >= 0 || marker >= 0;
+  const description = framed && before.length >= 2 ? before[before.length - 1] : "";
   return {
+    tool: "Bash",
     // 长命令会按终端宽度硬换行成多行；除末行（用途说明）外全部并入命令整段显示，
     // 不能按「倒数第二行是命令」取——那只会摘到换行后的最后一个片段。
-    command: before.length >= 2 ? before.slice(0, -1).join("\n") : before[0] ?? "",
-    description: before.length >= 2 ? before[before.length - 1] : "",
-    question: lines.find((line) => /do you want to proceed\?/i.test(line)) ?? "",
+    command: (description ? before.slice(0, -1) : before).join("\n"),
+    description,
+    question,
   };
+}
+
+/// kimi 审批面板的文本详情（官方源码取证 apps/kimi-code/.../approval-panel.ts @ 0.29）：
+/// 标题行 ▶ <按工具定制的问题>（Run this command? / Write this file? / Approve X?），
+/// 之下是命令/diff 等 display 块。详情区剥掉框线与标题，正文整段进 pre；
+/// 工具名从标题反推，反推不到就留空（工具行整体不显示，比显示一个猜的名字诚实）。
+function kimiCommandApprovalDetails(text: string) {
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean)
+    .filter((line) => !/^[─━═|-]+$/.test(line));
+  const headerIndex = lines.findIndex((line) => /^▶\s*[^\n]+\?$/.test(line));
+  const question = headerIndex >= 0 ? lines[headerIndex].replace(/^▶\s*/, "") : "";
+  const command = (headerIndex >= 0 ? lines.slice(headerIndex + 1) : lines).join("\n");
+  const tool = /run this command/i.test(question) ? "Bash"
+    : /write this file/i.test(question) ? "Write"
+    : /apply these edits/i.test(question) ? "Edit"
+    : /stop this task/i.test(question) ? "TaskStop"
+    : /^approve ([^\n?]+)\?$/i.exec(question)?.[1] ?? "";
+  return { tool, command, description: "", question };
 }
 
 /// 两次 history 的**渲染相关**字段是否完全一致。稳态轮询里这些值一轮都不变，
@@ -244,7 +282,17 @@ export function ChatWindow() {
   const [sendError, setSendError] = useState("");
   // 运行中发出的插话:CLI 把它们排队到回合结束,期间 transcript 不显示——这里记账给
   // 用户回执。消解见轮询侧 effect(回合结束整单清空;单条提前现身 transcript 也移除)。
-  const [queuedInterjections, setQueuedInterjections] = useState<string[]>([]);
+  // 带 id 而非裸文本:用户可手动移除单条回执,重复文本按下标删会在自动消解并发时错位。
+  // 水位线快照(priorUserText / priorItemIds):消解只认**入队之后**才出现的证据——
+  // 「包含」匹配对短插话(ok/继续/yes)常态性命中旧消息,没有水位线的话回执在下一次
+  // 轮询就消失,而消息还在 CLI 队列里,复现了回执本要防止的「我的消息不见了」。
+  const [queuedInterjections, setQueuedInterjections] = useState<{
+    id: number;
+    text: string;
+    priorUserText: string | null;
+    priorItemIds: ReadonlySet<string>;
+  }[]>([]);
+  const queuedIdRef = useRef(0);
   // 会话确实还活在用户自己的终端里（后端按 pid 判定）：就地给接管入口，而不是把用户
   // 打发去终端页自己找按钮。retryRef 记住被拒的那个动作，接管成功后原样重放。
   const [needsTakeover, setNeedsTakeover] = useState(false);
@@ -289,6 +337,9 @@ export function ChatWindow() {
   if (view === "terminal") terminalEverShownRef.current = true;
   const terminalMounted = terminalEverShownRef.current || terminalMonitorNeeded;
   const [approval, setApproval] = useState<PendingApproval | null>(null);
+  // 非当前会话的待授权请求（后端已不为此切窗抢焦点）：侧边栏亮徽标召唤用户自己过去。
+  // 只进不出会越攒越多——clear 事件、切到该会话、请求落到当前会话三条路径都负责摘除。
+  const [approvalAwaitingIds, setApprovalAwaitingIds] = useState<ReadonlySet<number>>(() => new Set());
   const [brokerOwnsReview, setBrokerOwnsReview] = useState(false);
   const externalRunning = isExternallyHeld(history?.status);
   // 展示层状态口径:DB status 必须经存活校正才能显示「在跑」,存活事实只信后端 connected
@@ -297,6 +348,31 @@ export function ChatWindow() {
   // ManagedTerminal 后停更,PTY 退出后悬死 true,把 tone 钉死「运行中」——已整根拆除)。
   // history 未加载时按离线处理,避免首帧闪一下运行态。
   const tone = sessionTone(history?.connected ?? false, history?.status, history?.pendingReview, history?.errored);
+  // 后台会话的 transcript 可能**永远是空的**:claude 以 fork/resume 起的后台 worker 存在
+  // 不落盘的老毛病(实测 2.1.220:新会话文件里只有 ai-title / agent-name 两行元数据,正文
+  // 既不在自己名下、也不在 fork 源里,只活在进程内存)。对这类会话,对话页给不出任何东西,
+  // 而终端旁路拿得到完整画面——那就直接落在终端页,别让用户对着一句「还没有对话记录」发呆。
+  // 只在首次加载判一次:此后用户自己切到哪就是哪。
+  const autoTerminalRef = useRef(false);
+  useEffect(() => {
+    if (autoTerminalRef.current || !history) return;
+    autoTerminalRef.current = true;
+    // 只在**确认没有任何内容**时才切：items 空只说明这一帧没读到，而 hook 落库的最近往来
+    // 是独立证据——两者都空才是真的没东西可显示。曾经只看 items，把一个有对话的后台会话
+    // 也甩去了终端页，用户以为对话丢了。
+    const hasAnything =
+      history.items.length > 0 || !!history.lastUserText || !!history.lastAiText;
+    if (history.background && !hasAnything) setView("terminal");
+  }, [history]);
+  // 后台会话(Agent 自己托管的,见 LiveSession.background):画面不在托管 PTY 表里,要先接上
+  // 那条旁路 socket,终端页才有东西可看。只接一次;接失败(worker 已退出/花名册没它了)就
+  // 让终端页维持空画面——它本来就不是我们能拉起的进程,没有可重试的动作。
+  const bgAttached = useRef(false);
+  useEffect(() => {
+    if (!history?.background || bgAttached.current) return;
+    bgAttached.current = true;
+    attachBackgroundSession(sessionId).catch(() => {});
+  }, [history?.background, sessionId]);
   // 窗口标题随会话与状态更新:任务栏/Alt-Tab 上也能看出 agent 在跑还是在等。
   // 后端 apply_language 已不再写 chat 窗标题(双写互相覆盖);窗口无装饰,标题只出现在
   // 任务栏,宜短。▶=在跑,●=等待/待处理,离线不加记号。
@@ -505,8 +581,20 @@ export function ChatWindow() {
     // （xterm 创建 + 两个 listen + 一次全量 backlog 拉取）。终端模式下 view 仍是 terminal，
     // 常驻照旧生效，不影响「切会话保持终端模式」。
     terminalEverShownRef.current = viewRef.current === "terminal";
+    // 这两个是「每个会话判一次」的一次性闸门，换会话必须重开：不重置的话，从一个后台
+    // 会话切到另一个，第二个的画面永远接不上（attach 只跑过一次），落页判断也只对本窗口
+    // 加载的第一个会话生效过。
+    bgAttached.current = false;
+    autoTerminalRef.current = false;
     offsetRef.current = 0;
     activeSessionRef.current = id;
+    // 人已经切过来了，授权徽标的使命完成——接下来的审批卡由本会话轮询接管。
+    setApprovalAwaitingIds((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
     setItems([]);
     setHistory(null);
     setQuestionCustomText("");
@@ -662,14 +750,34 @@ export function ChatWindow() {
     let cancelled = false;
     listen<PendingApproval>("pending-approval", (event) => {
       if (event.payload.sessionId === activeSessionRef.current) {
+        setApprovalAwaitingIds((prev) => {
+          if (!prev.has(event.payload.sessionId)) return prev;
+          const next = new Set(prev);
+          next.delete(event.payload.sessionId);
+          return next;
+        });
         setBrokerOwnsReview(true);
         setApproval(event.payload);
         // 用户正在终端视图里操作时别把界面切回对话（焦点在 xterm，切换会打断输入）；
         // 不在终端才拉回来——审批卡在对话页，没人看就等于卡住。
         if (viewRef.current !== "terminal") setView("chat");
+      } else {
+        // 别的会话要授权：不切窗不抢焦点（后端只闪任务栏），侧边栏亮徽标等用户自己过去。
+        setApprovalAwaitingIds((prev) => {
+          if (prev.has(event.payload.sessionId)) return prev;
+          const next = new Set(prev);
+          next.add(event.payload.sessionId);
+          return next;
+        });
       }
     }).then((fn) => { if (cancelled) fn(); else unApproval = fn; }).catch(() => {});
     listen<PendingApproval>("pending-approval-cleared", (event) => {
+      setApprovalAwaitingIds((prev) => {
+        if (!prev.has(event.payload.sessionId)) return prev;
+        const next = new Set(prev);
+        next.delete(event.payload.sessionId);
+        return next;
+      });
       if (event.payload.sessionId === activeSessionRef.current) {
         setApproval((current) => current?.requestId === event.payload.requestId ? null : current);
       }
@@ -705,13 +813,6 @@ export function ChatWindow() {
     }
     el.scrollTop = el.scrollHeight;
   }, [items, view]);
-
-  useLayoutEffect(() => {
-    if (view !== "chat" || terminalAttention?.id !== "interactive:numbered-selector" || !followRef.current) return;
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [terminalAttention, view]);
 
   // 终端页会把焦点交给 xterm（且 footer 整个卸载，回来的 textarea 是全新节点）；
   // 用户切回对话时把焦点还给输入框。只在「终端 → 对话」的切换沿触发——chat 内的
@@ -856,6 +957,12 @@ export function ChatWindow() {
     try {
       await startManagedTerminal(sessionId, 100, 30);
     } catch (error) {
+      // Agent 自己的守护进程托管着它（FleetView 后台会话）：接管这条路走不通——杀掉进程
+      // 只会被 supervisor 按 respawnFlags 拉回来。给一句说明而不是一个注定失败的按钮。
+      if (history?.background) {
+        setSendError(t.chat.sendBackgroundSession);
+        return false;
+      }
       // 后端确认进程仍活着 → 接管要杀掉外部进程，必须由用户显式确认，不能由一次发送代劳。
       if (externalRunning) {
         setNeedsTakeover(true);
@@ -921,6 +1028,27 @@ export function ChatWindow() {
       if (await openTerminalMenu(bare)) setPrompt("");
       return;
     }
+    // 后台会话不消费 stdin,往它的 PTY 写按键石沉大海。送话走 Agent 守护进程的控制通道:
+    // 发出后 agent 就开始干活,回复照常落进 transcript,本页的轮询照常显示。
+    if (history?.background) {
+      if (attachments.length > 0) { setSendError(t.chat.sendBackgroundNoAttachments); return; }
+      setSending(true);
+      setSendError("");
+      try {
+        await sendBackgroundPrompt(sessionId, bare);
+        // 守护进程回的 ok 只代表**收下了这条投递**,不代表 agent 会处理它:处于手动模式
+        // 或正在收尾的 worker 不消费投递,消息就此蒸发。而这类会话的 transcript 往往不
+        // 落盘(见上面的说明),对话页也验证不了它到底有没有被消化。
+        // 所以**不清空输入框**——宁可让用户自己按需清掉,也不要把一条没人处理的消息连同
+        // 用户刚打的字一起吞掉(实测踩过:输入框一空,内容再也找不回来)。
+        setSendError(t.chat.sendBackgroundQueued);
+      } catch (error) {
+        setSendError(String(error));
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
     retryRef.current = () => sendPrompt();
     // 运行中发出的消息会被 CLI **排队**到回合结束才处理,期间 transcript 里看不到它
     // ——不记下来的话,消息在 GUI 上像消失了一样。发送成功后进排队清单,由轮询侧
@@ -928,7 +1056,21 @@ export function ChatWindow() {
     const interjecting = tone === "running";
     const queuedText = bare || t.chat.queuedAttachmentOnly;
     const markQueued = () => {
-      if (interjecting) setQueuedInterjections((current) => [...current, queuedText]);
+      if (interjecting) {
+        queuedIdRef.current += 1;
+        const id = queuedIdRef.current;
+        // 水位线快照:此刻已有的最近用户消息与 transcript 尾部条目都算旧证据,消解
+        // 一律不认(见 queuedInterjections 声明处)。
+        const priorItemIds: ReadonlySet<string> = new Set(
+          items.slice(-12).filter((item) => item.type === "user_text").map((item) => item.id),
+        );
+        setQueuedInterjections((current) => [...current, {
+          id,
+          text: queuedText,
+          priorUserText: history?.lastUserText ?? null,
+          priorItemIds,
+        }]);
+      }
     };
     // 原生图片附加:仅当「单一图片附件 + 粘贴来源 + 剪贴板此刻仍是这张图 + 插件声明
     // TUI 支持 Ctrl-V 图片粘贴」。任一不满足(含指纹比对失败、占位符超时)都静默退回
@@ -967,31 +1109,43 @@ export function ChatWindow() {
     await new Promise((resolve) => window.setTimeout(resolve, 500));
     await sendPrompt();
   };
-  /// 立即处理已排队的插话:只发中断键——当前回合停止后,CLI 自己会接着处理队列。
-  const flushQueuedNow = () => {
+  /// 只发中断键,停掉当前回合、不发送任何内容。composer 上的裸「中断」与排队条的
+  /// 「立即插话」是同一个动作,只是语境不同:后者停下当前回合后,CLI 自己会接着处理队列。
+  const sendInterrupt = () => {
     const interrupt = chatUi?.interrupt_input;
     if (!interrupt) return;
     void writeManagedTerminal(sessionId, interrupt)
       .catch((error) => setSendError(error instanceof Error ? error.message : String(error)));
   };
+  /// 手动移除一条排队回执。**只动 GUI 记账**:消息已经写进 PTY,CLI 队列里的它照常
+  /// 在回合结束后执行——按钮文案与 tip 必须说清这点,否则用户会以为消息被撤回了。
+  const dismissQueued = (id: number) =>
+    setQueuedInterjections((current) => current.filter((item) => item.id !== id));
   // 排队插话的消解:回合结束(tone 离开 running)= CLI 开始处理队列,整单清空;
   // 某条提前出现在 transcript/兜底时间线里也单独移除(插话打断当前回合时 CLI 立即
   // 处理队列,tone 不离开 running,只有这条路径能收走回执)。匹配用「包含」而非全等:
   // 落盘文本会带附件指令和 TUI 的 [Image #N] 占位前缀,hook 的 lastUserText 又把换行
-  // 归一成空格,全等永远失配,回执会一直挂着误导用户。updater 里同引用短路,防
-  // setState 新引用触发自循环。
+  // 归一成空格,全等永远失配,回执会一直挂着误导用户。「包含」的代价由水位线兜住:
+  // 只认入队之后才出现的证据——lastUserText 要与入队时快照不同,transcript 条目要
+  // 不在入队时的尾部快照里;否则「ok」「继续」这类短插话立刻子串命中上一回合的旧
+  // 消息,回执在消息还排着队时就消失了。updater 里同引用短路,防 setState 新引用
+  // 触发自循环。
   useEffect(() => {
     setQueuedInterjections((current) => {
       if (current.length === 0) return current;
       if (tone !== "running") return [];
       const collapse = (text: string) => text.replace(/\s+/g, " ").trim();
       const recent = items.slice(-12);
-      const next = current.filter((text) => {
+      const next = current.filter(({ text, priorUserText, priorItemIds }) => {
         const needle = collapse(text);
         const seen = (candidate: string | null | undefined) =>
           !!candidate && collapse(candidate).includes(needle);
-        return !seen(history?.lastUserText)
-          && !recent.some((item) => item.type === "user_text" && seen((item as { text?: string }).text));
+        const lastUserChanged = history?.lastUserText != null
+          && collapse(history.lastUserText) !== collapse(priorUserText ?? "");
+        return !(lastUserChanged && seen(history?.lastUserText))
+          && !recent.some((item) => item.type === "user_text"
+            && !priorItemIds.has(item.id)
+            && seen((item as { text?: string }).text));
       });
       return next.length === current.length ? current : next;
     });
@@ -1155,12 +1309,41 @@ export function ChatWindow() {
     }
   };
 
-  const commandAttention = terminalAttention?.id === "claude:command-approval" ? terminalAttention : null;
+  // 输入框有没有东西,决定了 composer 右下角那颗圆钮的身份:空 + 回合运行中 = 停止键,
+  // 否则 = 发送键。两个判定要用同一份口径,别在 JSX 里各算各的。
+  const hasDraft = prompt.trim().length > 0 || attachments.length > 0;
+  const canInterrupt = tone === "running" && !!chatUi?.interrupt_input;
+  const stopMode = canInterrupt && !hasDraft;
+
+  // 屏幕上有活的选择器/提示时锁住 composer——**禁用而非卸载**:卸载会让 textarea 变成
+  // 全新节点(草稿的光标/滚动、聚焦全丢)、整个底栏跳没,而锁的目的只是「别把正文打进
+  // 选择器」(文字会过滤选项、回车会提交焦点项,见 sendPrompt 的软拦)。inert 属性经
+  // ref 设置:React 18 的属性表还不认识 inert,JSX 直写过不了类型检查。
+  const composerLocked = !!terminalAttention;
+  const composeRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = composeRef.current;
+    if (!el) return;
+    if (composerLocked) el.setAttribute("inert", "");
+    else el.removeAttribute("inert");
+  }, [composerLocked, view]);
+
+  const commandAttention = terminalAttention && (terminalAttention.id === "claude:command-approval" || terminalAttention.id === "kimi:command-approval") ? terminalAttention : null;
   const interactiveAttention = terminalAttention?.id === "interactive:numbered-selector" ? terminalAttention : null;
-  const commandApproval = commandAttention ? claudeCommandApprovalDetails(commandAttention.text) : null;
+  const commandApproval = commandAttention
+    ? commandAttention.id === "kimi:command-approval"
+      ? kimiCommandApprovalDetails(commandAttention.text)
+      : claudeCommandApprovalDetails(commandAttention.text)
+    : null;
   const commandOptions = commandAttention?.options ?? [];
-  const commandDeny = commandOptions.find((option) => /^no\b/i.test(option.label));
-  const commandAllowOnce = commandOptions.find((option) => /^yes$/i.test(option.label.trim())) ?? commandOptions[0];
+  // claude 的选项文案是 Yes/No，kimi 是 Approve once/Reject——两家的按钮语义同一套。
+  // 拒绝项两轮匹配:先找裸文案(kimi 的 "Reject" 不能被 "Reject with feedback" 抢注),
+  // 找不到再按词首前缀兜底——claude 的长文案拒绝项("No, and tell Claude what to do
+  // differently (esc)")只有前缀能认;全等匹配会让它漏网,被下面的 commandRemember
+  // (「既非拒绝也非允许的第一项」)吸收,点「允许并记住」实际发出的是拒绝按键。
+  const commandDeny = commandOptions.find((option) => /^(?:no|reject)$/i.test(option.label.trim()))
+    ?? commandOptions.find((option) => /^(?:no|reject)\b/i.test(option.label.trim()));
+  const commandAllowOnce = commandOptions.find((option) => /^(?:yes|approve once|approve)$/i.test(option.label.trim())) ?? commandOptions[0];
   const commandRemember = commandOptions.find((option) => option !== commandDeny && option !== commandAllowOnce);
   const chooseTerminalOption = (option: { input: string } | undefined) => {
     if (!option) return;
@@ -1179,6 +1362,26 @@ export function ChatWindow() {
       })
       .catch((error) => setSendError(String(error)));
   };
+  // Esc = 拒绝本次请求。审批卡上的 kbd 徽章得说话算话,键在这里真绑上。
+  // 只绑这一个安全方向:Enter→允许没绑,也不打算绑——输入框外随手一个回车就放行一条
+  // 命令,换不来那点快捷。焦点在输入框/终端里时让开,那里的 Esc 另有主人（收补全菜单、
+  // 写进 PTY）。无依赖数组是有意的:每次渲染重绑一个 keydown,换闭包永远新鲜。
+  useEffect(() => {
+    const terminalDeny = view === "chat" && commandAttention && commandApproval ? commandDeny : undefined;
+    const brokerDeny = view === "chat" && !terminalAttention && approval ? approval : undefined;
+    if (!terminalDeny && !brokerDeny) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable)) return;
+      event.preventDefault();
+      if (terminalDeny) chooseTerminalOption(terminalDeny);
+      else void decideApproval("deny");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
   const chooseInteractiveOption = (option: TerminalAttentionOption) => {
     if (!option.input) return;
     if (option.kind === "choice") {
@@ -1213,6 +1416,7 @@ export function ChatWindow() {
     <div className={"chat-window" + (view === "terminal" ? " is-terminal" : "")}>
       {!sidebarCollapsed && <ChatSidebar
         activeId={sessionId}
+        approvalAwaitingIds={approvalAwaitingIds}
         onSelect={(id) => { if (id !== sessionId) resetTo(id); }}
         onCollapse={toggleSidebar}
       />}
@@ -1304,38 +1508,6 @@ export function ChatWindow() {
         {/* Agent 自己维护的待办清单。它不属于时间线（会被反复整份改写），故固定在底部
             而不是插进消息流里——否则每改一次待办就多一条历史。 */}
         {!loading && (history?.todos?.length ?? 0) > 0 && <TodoPanel todos={history!.todos} />}
-        {interactiveAttention && <section className="chat-inline-question" role="alert">
-          <div className="chat-inline-question-head">
-            <strong>{history?.pendingReview === "plan" ? t.chat.planTitle : t.chat.questionTitle}</strong>
-            {interactiveAttention.text && <span>{interactiveAttention.text}</span>}
-            {/* 仅收起,不向 PTY 写任何字节:识别是启发式的,误报/过期的卡必须有不产生
-                副作用的出口(同屏有签名去重不会复弹;真提示仍在终端页等)。 */}
-            <button type="button" className="chat-attention-dismiss" aria-label={t.chat.attentionDismiss} data-tip={t.chat.attentionDismissTip} onClick={() => setTerminalAttention(null)}>×</button>
-          </div>
-          <div className="chat-inline-question-options">
-            {interactiveAttention.options?.filter((option) => option.kind === "choice").map((option) => (
-              <button type="button" disabled={!option.input} className={option.selected ? "is-selected" : ""} key={`${option.position}:${option.label}`} onClick={() => chooseInteractiveOption(option)}>
-                <i aria-hidden="true">{option.selected ? "✓" : ""}</i>
-                <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
-              </button>
-            ))}
-          </div>
-          {interactiveAttention.options?.filter((option) => option.kind === "input").map((option) => (
-            <div className="chat-inline-question-custom" key={option.input}>
-              <input value={questionCustomText} onChange={(event) => setQuestionCustomText(event.target.value)} placeholder={t.chat.customAnswerPlaceholder}
-                onKeyDown={(event) => { if (event.key === "Enter") submitCustomAnswer(option); }} />
-              <button type="button" disabled={!questionCustomText.trim() || !option.input} onClick={() => submitCustomAnswer(option)}>{t.chat.addCustomAnswer}</button>
-            </div>
-          ))}
-          <div className="chat-inline-question-actions">
-            {interactiveAttention.options?.filter((option) => option.kind === "chat").map((option) => (
-              <button type="button" disabled={!option.input} key={`${option.position}:${option.label}`} onClick={() => chooseInteractiveOption(option)}>{t.chat.chatAboutThis}</button>
-            ))}
-            {interactiveAttention.options?.filter((option) => option.kind === "submit").map((option) => (
-              <button type="button" disabled={!option.input} className="is-primary" key={`${option.position}:${option.label}`} onClick={() => chooseInteractiveOption(option)}>{t.chat.submitAnswer}</button>
-            ))}
-          </div>
-        </section>}
       </main>
       {/* Agent 正在跑但 transcript 半天不落新行时，页面此前毫无动静，像卡死。
           运行条原在滚动流内、Transcript 之后——上翻历史就随内容滚出视口。移到 main 与
@@ -1346,79 +1518,138 @@ export function ChatWindow() {
         </div>
       )}
       {/* 排队回执:运行中发出的插话被 CLI 排队到回合结束,期间 transcript 不显示——
-          没有这条回执,消息在 GUI 上像消失了。中断键有声明时给「立即插话」出口。 */}
+          没有这条回执,消息在 GUI 上像消失了。中断键有声明时给「立即插话」出口;
+          逐条列出并可单独移除(仅清本 GUI 的记账,消息撤不回,见 dismissQueued)。 */}
       {view === "chat" && !loading && tone === "running" && queuedInterjections.length > 0 && (
         <div className="chat-queued" role="status">
-          <span>{t.chat.queuedInterjections(queuedInterjections.length)}</span>
-          {chatUi?.interrupt_input && (
-            <button type="button" data-tip={t.chat.interjectNowTip} onClick={flushQueuedNow}>{t.chat.interjectNow}</button>
-          )}
+          <div className="chat-queued-head">
+            <span>{t.chat.queuedInterjections(queuedInterjections.length)}</span>
+            {chatUi?.interrupt_input && (
+              <button type="button" data-tip={t.chat.interjectNowTip} onClick={sendInterrupt}>{t.chat.interjectNow}</button>
+            )}
+          </div>
+          <ul className="chat-queued-list">
+            {queuedInterjections.map((item) => (
+              <li key={item.id}>
+                <span>{item.text}</span>
+                <button
+                  type="button"
+                  className="chat-queued-dismiss"
+                  aria-label={t.chat.queuedDismiss}
+                  data-tip={t.chat.queuedDismissTip}
+                  onClick={() => dismissQueued(item.id)}
+                >×</button>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
-      {view === "chat" && commandAttention && commandApproval && <section className="chat-approval chat-terminal-command-approval" role="alert">
-        <div className="chat-approval-copy">
-          <strong>{t.chat.approvalTitle}</strong>
-          <div className="chat-approval-tool"><span>{t.chat.approvalTool}</span><code>Bash</code></div>
-          {commandApproval.description && <span>{commandApproval.description}</span>}
-          {commandApproval.question && <span>{commandApproval.question}</span>}
-          {commandApproval.command && <div className="chat-approval-detail">
-            <span>{t.chat.approvalInput}</span>
-            <pre>{commandApproval.command}</pre>
-          </div>}
+      {/* ── 审批/交互卡:统一走 ApprovalCard 外壳(标题/徽章/正文/左右动作组一套视觉),
+          同屏最多一张——交互选择器、命令审批、其他屏幕提示、broker 审批四种来源互斥。
+          「仅收起」不向 PTY 写任何字节:识别是启发式的,误报/过期的卡必须有不产生
+          副作用的出口(同屏有签名去重不会复弹;真提示仍在终端页等)。 ── */}
+      {view === "chat" && interactiveAttention && <ApprovalCard
+        className="chat-screen-approval"
+        title={history?.pendingReview === "plan" ? t.chat.planTitle : t.chat.questionTitle}
+        badge={t.chat.approvalPending}
+        sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setTerminalAttention(null)}>{t.chat.attentionDismiss}</button>}
+        actions={<>
+          {interactiveAttention.options?.filter((option) => option.kind === "chat").map((option) => (
+            <button type="button" disabled={!option.input} key={`${option.position}:${option.label}`} onClick={() => chooseInteractiveOption(option)}>{t.chat.chatAboutThis}</button>
+          ))}
+          {interactiveAttention.options?.filter((option) => option.kind === "submit").map((option) => (
+            <button type="button" disabled={!option.input} className="is-allow" key={`${option.position}:${option.label}`} onClick={() => chooseInteractiveOption(option)}>{t.chat.submitAnswer}</button>
+          ))}
+        </>}
+      >
+        {interactiveAttention.text && <span className="chat-approval-prewrap">{interactiveAttention.text}</span>}
+        <div className="chat-approval-options">
+          {interactiveAttention.options?.filter((option) => option.kind === "choice").map((option) => (
+            <button type="button" disabled={!option.input} className={option.selected ? "is-selected" : ""} key={`${option.position}:${option.label}`} onClick={() => chooseInteractiveOption(option)}>
+              <i aria-hidden="true">{option.selected ? "✓" : ""}</i>
+              <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
+            </button>
+          ))}
         </div>
-        <div className="chat-approval-actions">
+        {interactiveAttention.options?.filter((option) => option.kind === "input").map((option) => (
+          <div className="chat-approval-custom" key={option.input}>
+            <input value={questionCustomText} onChange={(event) => setQuestionCustomText(event.target.value)} placeholder={t.chat.customAnswerPlaceholder}
+              onKeyDown={(event) => { if (event.key === "Enter") submitCustomAnswer(option); }} />
+            <button type="button" disabled={!questionCustomText.trim() || !option.input} onClick={() => submitCustomAnswer(option)}>{t.chat.addCustomAnswer}</button>
+          </div>
+        ))}
+      </ApprovalCard>}
+      {view === "chat" && commandAttention && commandApproval && <ApprovalCard
+        className="chat-screen-approval"
+        title={t.chat.approvalTitle}
+        badge={t.chat.approvalPending}
+        sideActions={<>
           <button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setTerminalAttention(null)}>{t.chat.attentionDismiss}</button>
-          {commandDeny && <button type="button" className="is-deny" onClick={() => chooseTerminalOption(commandDeny)}>{t.chat.deny}</button>}
-          {commandAllowOnce && <button type="button" className="is-allow" onClick={() => chooseTerminalOption(commandAllowOnce)}>{t.chat.allowOnce}</button>}
-          {commandRemember && <button type="button" className="is-allow is-persistent" onClick={() => chooseTerminalOption(commandRemember)}>
-            {t.chat.allowRemember}{commandRemember.label.match(/for:\s*(.+)$/i)?.[1] ? ` · ${commandRemember.label.match(/for:\s*(.+)$/i)?.[1]}` : ""}
+          {commandRemember && <button type="button" className="is-persistent" onClick={() => chooseTerminalOption(commandRemember)}>
+            {/* kimi 的「Approve for this session」只记本会话，不是 claude 的持久规则——文案不能混。 */}
+            {commandAttention.id === "kimi:command-approval"
+              ? t.chat.allowSession
+              : `${t.chat.allowRemember}${commandRemember.label.match(/for:\s*(.+)$/i)?.[1] ? ` · ${commandRemember.label.match(/for:\s*(.+)$/i)?.[1]}` : ""}`}
           </button>}
-        </div>
-      </section>}
-      {view === "chat" && terminalAttention && !commandAttention && !interactiveAttention && <section className="chat-terminal-attention" role="alert">
-        <div className="chat-terminal-attention-copy">
-          <strong>{terminalAttention.id === "interactive:numbered-selector"
-            ? history?.pendingReview === "plan" ? t.chat.planTitle : t.chat.questionTitle
-            : terminalAttention.id === "claude:long-session-resume"
-            ? t.chat.longSessionPromptTitle
-            : terminalAttention.id === "claude:command-approval"
-              ? t.chat.approvalTitle
-            : terminalAttention.options?.length && terminalAttention.id.startsWith("provider:")
-              ? t.chat.trustPromptTitle
-              : t.chat.terminalPromptTitle}</strong>
-          {terminalAttention.id === "interactive:numbered-selector"
+        </>}
+        actions={<>
+          {commandDeny && <button type="button" className="is-deny" onClick={() => chooseTerminalOption(commandDeny)}>
+            {t.chat.deny}<kbd aria-hidden="true">Esc</kbd>
+          </button>}
+          {commandAllowOnce && <button type="button" className="is-allow" onClick={() => chooseTerminalOption(commandAllowOnce)}>{t.chat.allowOnce}</button>}
+        </>}
+      >
+        {commandApproval.tool && <div className="chat-approval-tool"><span>{t.chat.approvalTool}</span><code>{commandApproval.tool}</code></div>}
+        {commandApproval.description && <span>{commandApproval.description}</span>}
+        {commandApproval.question && <span>{commandApproval.question}</span>}
+        {commandApproval.command && <div className="chat-approval-detail">
+          <span>{t.chat.approvalInput}</span>
+          <pre>{commandApproval.command}</pre>
+        </div>}
+      </ApprovalCard>}
+      {view === "chat" && terminalAttention && !commandAttention && !interactiveAttention && <ApprovalCard
+        className="chat-screen-approval"
+        title={terminalAttention.id === "claude:long-session-resume"
+          ? t.chat.longSessionPromptTitle
+          : terminalAttention.id === "claude:command-approval"
+            ? t.chat.approvalTitle
+          : terminalAttention.options?.length && terminalAttention.id.startsWith("provider:")
+            ? t.chat.trustPromptTitle
+            : t.chat.terminalPromptTitle}
+        badge={t.chat.approvalPending}
+        sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setTerminalAttention(null)}>{t.chat.attentionDismiss}</button>}
+        actions={!terminalAttention.options?.length && <>
+          {/* 取消发 Esc——在 Claude 里会打断正在跑的回合,与零副作用的「仅收起」是两回事。 */}
+          <button type="button" onClick={() => {
+            void writeManagedTerminal(sessionId, "\x1b")
+              .then(() => setTerminalAttention(null))
+              .catch((error) => setSendError(String(error)));
+          }}>{t.chat.terminalPromptCancel}</button>
+          <button type="button" className="is-allow" onClick={() => {
+            void writeManagedTerminal(sessionId, "\r")
+              .then(() => setTerminalAttention(null))
+              .catch((error) => setSendError(String(error)));
+          }}>{t.chat.terminalPromptConfirm}</button>
+        </>}
+      >
+        {terminalAttention.id === "claude:long-session-resume"
+          ? <span>{t.chat.longSessionPromptHelp}</span>
+          : terminalAttention.id === "claude:command-approval"
             ? <pre>{terminalAttention.text}</pre>
-            : terminalAttention.id === "claude:long-session-resume"
-            ? <span>{t.chat.longSessionPromptHelp}</span>
-            : terminalAttention.id === "claude:command-approval"
-              ? <pre>{terminalAttention.text}</pre>
-            : !terminalAttention.options?.length && <>
-              <span>{t.chat.terminalPromptHelp}</span>
-              <pre>{terminalAttention.text}</pre>
-            </>}
-        </div>
-        <div className={`chat-terminal-attention-actions${terminalAttention.options?.length === 2 ? " has-two-options" : ""}`}>
-          {terminalAttention.options?.length ? terminalAttention.options.map((option, index) => (
+          : !terminalAttention.options?.length && <>
+            <span>{t.chat.terminalPromptHelp}</span>
+            <pre>{terminalAttention.text}</pre>
+          </>}
+        {(terminalAttention.options?.length ?? 0) > 0 && <div className="chat-approval-options">
+          {terminalAttention.options!.map((option, index) => (
             // 走同一个 chooseTerminalOption：它还负责关掉菜单识别窗口、并在模型菜单
             // 选完后主动刷新模型（`/model` 切换不产生 Stop hook，不刷就一直显示旧值）。
-            <button type="button" className={index === 0 ? "is-primary is-option" : "is-option"} key={`${index}:${option.label}`} onClick={() => chooseTerminalOption(option)}>{option.label}</button>
-          )) : <>
-            <button type="button" className="is-primary" onClick={() => {
-              void writeManagedTerminal(sessionId, "\r")
-                .then(() => setTerminalAttention(null))
-                .catch((error) => setSendError(String(error)));
-            }}>{t.chat.terminalPromptConfirm}</button>
-            <button type="button" onClick={() => {
-              void writeManagedTerminal(sessionId, "\x1b")
-                .then(() => setTerminalAttention(null))
-                .catch((error) => setSendError(String(error)));
-            }}>{t.chat.terminalPromptCancel}</button>
-          </>}
-          {/* 仅收起(不写 PTY):与「取消」不同——取消会发 Esc,在 Claude 里会打断正在
-              跑的回合;误报/已在终端处理过的卡需要一个零副作用出口。 */}
-          <button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setTerminalAttention(null)}>{t.chat.attentionDismiss}</button>
-        </div>
-      </section>}
+            <button type="button" className={index === 0 ? "is-primary" : ""} key={`${index}:${option.label}`} onClick={() => chooseTerminalOption(option)}>
+              <span><b>{option.label}</b></span>
+            </button>
+          ))}
+        </div>}
+      </ApprovalCard>}
       {terminalMounted && (
         <div className={`chat-terminal-pane${view !== "terminal" ? " is-background" : ""}`} aria-hidden={view !== "terminal"}>
           <ManagedTerminal
@@ -1426,6 +1657,13 @@ export function ChatWindow() {
             sessionId={sessionId}
             status={history?.status}
             visible={view === "terminal"}
+            background={history?.background ?? false}
+            // 后台会话的按键注定无效。第一下就把用户领到对话页——那里的输入框走 daemon 的
+            // 送话通道，是真能用的。原先的做法是让他打完一整句再弹错误，等于白打。
+            onBackgroundInput={() => {
+              setView("chat");
+              setSendError(t.chat.sendBackgroundKeysMovedYou);
+            }}
             attentionMarkers={chatUi?.startup_attention_markers ?? []}
             interactivePrompt={terminalInteractivePrompt}
             expectMenu={menuWatching}
@@ -1435,38 +1673,46 @@ export function ChatWindow() {
           />
         </div>
       )}
-      {view === "chat" && !terminalAttention && (approval || (!brokerOwnsReview && history?.pendingReview)) && <section className="chat-approval" role="alert">
-        <div className="chat-approval-copy">
-          <strong>{approval ? t.chat.approvalTitle : history?.pendingReview === "question" ? t.chat.questionTitle : history?.pendingReview === "plan" ? t.chat.planTitle : t.chat.approvalTitle}</strong>
-          {approval ? <>
-            <div className="chat-approval-tool"><span>{t.chat.approvalTool}</span><code>{approval.toolName}</code></div>
-            {approval.description && <span>{approval.description}</span>}
-            {approval.input && <div className="chat-approval-detail">
-              <span>{t.chat.approvalInput}</span>
-              <pre>{approval.input}</pre>
-            </div>}
-          {/* 「GUI 托管中」只信后端 ptyManaged(每轮轮询新鲜):此前的前端 managedPtyActive
-              在探测循环移交后停更,PTY 退出后悬死 true,这里会一直显示「正在读取终端」。 */}
-          </> : <span>{history?.ptyManaged ? t.chat.approvalReadingTerminal : t.chat.approvalInTerminal}</span>}
-        </div>
-        {approval ? <div className="chat-approval-actions">
-          <button type="button" className="is-deny" disabled={resolvingApproval} onClick={() => void decideApproval("deny")}>{t.chat.deny}</button>
-          <button type="button" className="is-allow" disabled={resolvingApproval} onClick={() => void decideApproval("allow_once")}>{t.chat.allowOnce}</button>
-          {/* `?? []`：类型上字段恒在（DTO 保证），但旧后端/新前端错配时负载可能缺它——
-              一个可选按钮组不值得让整个 ChatWindow 白屏。 */}
-          {(approval.permissionSuggestions ?? []).map((suggestion, index) => (
+      {/* broker 审批卡(claude hook 劫走的请求)与「有 pendingReview 但 GUI 接不了」的降级态。
+          注意它**没有**「仅收起」:收起等于让 hook 干等到 300s 超时,只能 allow/deny/持久放行。 */}
+      {view === "chat" && !terminalAttention && (approval || (!brokerOwnsReview && history?.pendingReview)) && <ApprovalCard
+        title={approval ? t.chat.approvalTitle : history?.pendingReview === "question" ? t.chat.questionTitle : history?.pendingReview === "plan" ? t.chat.planTitle : t.chat.approvalTitle}
+        badge={t.chat.approvalPending}
+        sideActions={approval
+          /* `?? []`：类型上字段恒在（DTO 保证），但旧后端/新前端错配时负载可能缺它——
+             一个可选按钮组不值得让整个 ChatWindow 白屏。
+             持久放行归左侧组：它的作用域比「这一次」大得多，不该和本次决定并排争主位。 */
+          ? (approval.permissionSuggestions ?? []).map((suggestion, index) => (
             <button
               type="button"
-              className="is-allow is-persistent"
+              className="is-persistent"
               key={index}
               data-tip={approvalSuggestionTip(suggestion, index, t)}
               disabled={resolvingApproval}
               onClick={() => void decideApproval(`suggestion:${index}`)}
             >{approvalSuggestionLabel(suggestion, index, t)}</button>
-          ))}
-        </div> : <button type="button" onClick={() => setView("terminal")}>{t.chat.openTerminal}</button>}
-      </section>}
-      {view === "chat" && !terminalAttention && <footer className="chat-compose">
+          ))
+          : undefined}
+        actions={approval ? <>
+          {/* 右端两颗是「就这一次」的决定：拒绝（中性，也是 Esc 的落点）、允许一次（主按钮）。 */}
+          <button type="button" className="is-deny" disabled={resolvingApproval} onClick={() => void decideApproval("deny")}>
+            {t.chat.deny}<kbd aria-hidden="true">Esc</kbd>
+          </button>
+          <button type="button" className="is-allow" disabled={resolvingApproval} onClick={() => void decideApproval("allow_once")}>{t.chat.allowOnce}</button>
+        </> : <button type="button" onClick={() => setView("terminal")}>{t.chat.openTerminal}</button>}
+      >
+        {approval ? <>
+          <div className="chat-approval-tool"><span>{t.chat.approvalTool}</span><code>{approval.toolName}</code></div>
+          {approval.description && <span>{approval.description}</span>}
+          {approval.input && <div className="chat-approval-detail">
+            <span>{t.chat.approvalInput}</span>
+            <pre>{approval.input}</pre>
+          </div>}
+        {/* 「GUI 托管中」只信后端 ptyManaged(每轮轮询新鲜):此前的前端 managedPtyActive
+            在探测循环移交后停更,PTY 退出后悬死 true,这里会一直显示「正在读取终端」。 */}
+        </> : <span>{history?.ptyManaged ? t.chat.approvalReadingTerminal : t.chat.approvalInTerminal}</span>}
+      </ApprovalCard>}
+      {view === "chat" && <footer ref={composeRef} className={"chat-compose" + (composerLocked ? " is-locked" : "")}>
         {slashMatches.length > 0 && <div className="dd-menu chat-slash-menu" role="listbox" ref={slashMenuRef}>
           {slashMatches.map((command, index) => (
             <button type="button" key={command.name} role="option" aria-selected={index === slashActive} className="chat-slash-item"
@@ -1493,7 +1739,16 @@ export function ChatWindow() {
           value={prompt}
           rows={1}
           aria-label={t.chat.inputLabel}
-          placeholder={sendError ? t.chat.inputUnavailable : t.chat.inputPlaceholder}
+          disabled={composerLocked}
+          // 后台会话不吃 inputUnavailable 那句：它说的是「尚未接管，请先切换到终端」，
+          // 而后台会话恰恰相反——终端页是没用的那一页，这个输入框才是唯一能发出去的地方。
+          placeholder={
+            composerLocked
+              ? t.chat.inputLocked
+              : sendError && !history?.background
+                ? t.chat.inputUnavailable
+                : t.chat.inputPlaceholder
+          }
           onChange={(event) => { setPrompt(event.target.value); setSendError(""); setSlashIndex(0); setSlashDismissed(false); }}
           onPaste={(event) => {
             const files = Array.from(event.clipboardData?.files ?? []);
@@ -1523,6 +1778,16 @@ export function ChatWindow() {
                 setSlashIndex(0);
                 return;
               }
+            }
+            // Ctrl/⌘+Enter = 先中断当前回合再发送。原来这是 composer 上一颗常驻按钮，
+            // 但它和右边的圆钮是两个「把话递出去」的入口，摆在一起只会让人先停下来
+            // 分辨该按哪个。降成加速键：默认路径（Enter 排队、圆钮停止）各司其职，
+            // 一步到位的组合动作留给知道自己要什么的人。
+            if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              if (canInterrupt && hasDraft) void interruptAndSend();
+              else void sendPrompt();
+              return;
             }
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
@@ -1641,16 +1906,28 @@ export function ChatWindow() {
           {history?.contextPct != null && (
             <ContextMeter pct={history.contextPct} window={history.contextWindow} t={t} />
           )}
-          {/* 强制插话:仅在「正在运行 + 有可发内容 + 插件声明了中断键」时出现——
-              先停当前回合再发送,与普通发送(排队等回合结束)是明确的两个动作。 */}
-          {tone === "running" && chatUi?.interrupt_input && (prompt.trim().length > 0 || attachments.length > 0) && (
-            <button type="button" className="chat-interject-button" data-tip={t.chat.interruptAndSendTip} onClick={() => void interruptAndSend()} disabled={sending}>
-              {t.chat.interruptAndSend}
-            </button>
-          )}
-          <span className="chat-compose-hint">Enter ↵</span>
-          <button type="button" className="chat-send-button" aria-label={sending ? t.chat.sending : t.chat.send} onClick={() => void sendPrompt()} disabled={(!prompt.trim() && attachments.length === 0) || sending}>
-            {sending
+          {/* 停止态留空:方块图标已经把「停」说清楚了,旁边再写两个字只是重复,而这一行
+              还挤着模型、权限模式、用量。文字说明去 tooltip 和 aria-label(圆钮上都有)。
+              元素本身不能省——它的 margin-left:auto 负责把圆钮顶到最右。
+              有草稿时挂上 Ctrl+Enter=打断并发送的说明:那个动作已从常驻按钮降成加速键
+              (见 textarea 的 onKeyDown),这里是它剩下的唯一去处。 */}
+          <span
+            className="chat-compose-hint"
+            data-tip={canInterrupt && hasDraft ? t.chat.interruptAndSendTip : undefined}
+          >{stopMode ? "" : "Enter ↵"}</span>
+          {/* 主圆钮双身份:回合运行中且输入框是空的 → 它就是停止键(黑圆方块,一按停当前
+              回合)。发出去的消息撤不回,能叫停的只有这个键,它不该藏在草稿或次级按钮后面。
+              一旦开始打字,身份让回「发送」——那时用户要的是把话递进去,停回合走左边的
+              「打断并发送」。sending 只可能发生在有草稿时,与 stopMode 天然互斥。 */}
+          <button
+            type="button"
+            className={"chat-send-button" + (stopMode ? " is-stop" : "")}
+            aria-label={stopMode ? t.chat.interruptNow : sending ? t.chat.sending : t.chat.send}
+            data-tip={stopMode ? t.chat.interruptNowTip : undefined}
+            onClick={() => { if (stopMode) sendInterrupt(); else void sendPrompt(); }}
+            disabled={stopMode ? false : (!prompt.trim() && attachments.length === 0) || sending}
+          >
+            {stopMode || sending
               ? <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
               : <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5" /></svg>}
           </button>

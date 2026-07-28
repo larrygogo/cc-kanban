@@ -155,6 +155,45 @@ describe("断开会话不再催人交互", () => {
   });
 });
 
+describe("会话卡片的所属账号徽章", () => {
+  it("归属自定义账号的会话显示账号徽章", () => {
+    render(<Sticker filter="all" data={[mk({ profile: "work", profile_name: "工作" })]} />);
+    expect(screen.getByTestId("stk-profile-badge").textContent).toBe("工作");
+  });
+
+  it("默认账号（profile_name 为 null）不显示徽章——没建过账号的用户零感知", () => {
+    render(<Sticker filter="all" data={[mk({ profile: null, profile_name: null })]} />);
+    expect(screen.queryByTestId("stk-profile-badge")).toBeNull();
+  });
+});
+
+/// Agent 自己派出的后台会话（Claude Code 的 FleetView）：用户没开过它，看板却多出一张卡。
+/// 它由 agent 的守护进程托管，Meowo 既接管不了、也没有终端窗口可切——卡片必须标明来历，
+/// 并且不给那些注定失败的入口。
+describe("会话卡片的后台会话标注", () => {
+  it("点开后台会话不去定位终端，只说明它是什么、去哪找它", () => {
+    const { container } = render(<Sticker filter="all" data={[mk({ background: true, connected: true })]} />);
+    fireEvent.click(container.querySelector(".stk-card")!);
+    // focus_session 会在 daemon 起的 PTY 宿主上落空（它没有终端窗口），根本不该发出去。
+    expect(invokeMock).not.toHaveBeenCalledWith("focus_session", expect.anything());
+    expect(screen.getByText(zh.sticker.focusBackground)).toBeTruthy();
+  });
+
+  /// 后台会话的 PTY 不在我们手上（pty_managed 恒 false），但 Agent 给了官方的结束入口：
+  /// 后端连上那条旁路 socket 发 kill 控制帧。所以菜单该有「结束会话」——直接杀 pid 才是
+  /// 错的（supervisor 会按 respawnFlags 把它拉回来）。
+  it("后台会话给「结束会话」，走与托管会话同一条命令", async () => {
+    const { container } = render(
+      <Sticker filter="all" data={[mk({ background: true, pty_managed: false })]} />,
+    );
+    fireEvent.contextMenu(container.querySelector(".stk-card")!);
+    const item = screen.getByText(zh.chat.endSession);
+    invokeMock.mockImplementationOnce(() => Promise.resolve(true) as Promise<unknown> as Promise<void>);
+    fireEvent.click(item);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("stop_managed_terminal", { sessionId: 1 }));
+  });
+});
+
 describe("Sticker", () => {
   it("中转状态切换时立即重新读取账号配额状态", async () => {
     render(<Sticker filter="all" data={[]} />);

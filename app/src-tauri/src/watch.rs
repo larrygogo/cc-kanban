@@ -16,7 +16,7 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use sysinfo::{ProcessRefreshKind, RefreshKind, System};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 /// board-changed 的全局合流窗口。发出一次后的这段时间内，新来的事件不再各自 emit，
 /// 只在窗口末尾补发一次（携带最后一个 reason）。
@@ -300,17 +300,20 @@ pub(crate) fn pending_fingerprint(
     pending_review.map(|kind| format!("{kind}:{last_event_at}"))
 }
 
-/// 弹一条「点击即聚焦该会话终端」的桌面通知。构建+show 放主线程：winrt toast 的 show() 需在
-/// COM STA 上调用，Tauri 主线程即 STA；on_activated 回调由 OS 经 COM 激活机制投递（与消息泵无关），
-/// show() 后 Rust 端 Toast 可安全释放（OS 持有通知引用）。回调里调 focus_session_terminal
-/// （它自己 spawn 干净线程做 UIA，不阻塞主线程）。app 仅 Windows。
+/// 弹一条「点击即跳到该会话」的桌面通知。落点按会话归属分流：GUI 托管会话（PTY 由 Meowo
+/// 持有，进程组里没有可聚焦的外部终端窗口）→ 打开/聚焦对话窗口并切到该会话；外部终端
+/// 会话 → 原来的 focus_session_terminal（它自己 spawn 干净线程做 UIA，不阻塞主线程）。
+/// 构建+show 放主线程：winrt toast 的 show() 需在 COM STA 上调用，Tauri 主线程即 STA；
+/// on_activated 回调由 OS 经 COM 激活机制投递（与消息泵无关），show() 后 Rust 端 Toast
+/// 可安全释放（OS 持有通知引用）。app 仅 Windows。
 #[cfg(target_os = "windows")]
-// 参数数量超限（8 个）是现有设计需要；重构签名风险大，暂以 allow 豁免。
+// 参数数量超限（9 个）是现有设计需要；重构签名风险大，暂以 allow 豁免。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show_session_notification(
     app: &tauri::AppHandle,
     title: String,
     body: String,
+    session_id: i64,
     pid: i64,
     focus_title: String,
     focus_cwd: Option<String>,
@@ -327,6 +330,7 @@ pub(crate) fn show_session_notification(
         app.config().identifier.clone()
     };
     let activate_app_id = app_id.clone();
+    let click_app = app.clone();
     let _ = app.run_on_main_thread(move || {
         let _ = Toast::new(&app_id)
             .title(&title)
@@ -335,6 +339,16 @@ pub(crate) fn show_session_notification(
                 // 点击后 toast 不会自动从"通知中心"消失（Windows 设计如此），主动清掉本应用
                 // 的历史通知。回调线程由 OS 经 COM 投递、已初始化 WinRT，可直接调 History。
                 clear_delivered_toasts(&activate_app_id);
+                // 托管会话的 PTY 归 Meowo，进程组里没有可见终端窗口，focus_session_terminal
+                // 必然落空——点击应该打开对话窗口并落在该会话上（点击是明确意图，切会话正合适）。
+                if click_app
+                    .state::<crate::AppState>()
+                    .ptys
+                    .is_managed(session_id)
+                {
+                    crate::window::open_chat_window_detached(click_app.clone(), session_id);
+                    return Ok(());
+                }
                 let title = focus_title.clone();
                 let cwd = focus_cwd.clone();
                 let token = focus_token.clone();
@@ -360,28 +374,35 @@ fn clear_delivered_toasts(app_id: &str) {
 }
 
 #[cfg(target_os = "macos")]
-// 参数数量超限（8 个）是现有设计需要；重构签名风险大，暂以 allow 豁免。
+// 参数数量超限（9 个）是现有设计需要；重构签名风险大，暂以 allow 豁免。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show_session_notification(
     _app: &tauri::AppHandle,
     title: String,
     body: String,
+    session_id: i64,
     pid: i64,
     _focus_title: String, // macOS 按 pid->tty 定位终端，标题用不上
     _focus_cwd: Option<String>,
     _focus_token: Option<String>,
     _title_based: bool,
 ) {
-    crate::macos::notify::post(crate::macos::notify::NotifyJob { title, body, pid });
+    crate::macos::notify::post(crate::macos::notify::NotifyJob {
+        title,
+        body,
+        session_id,
+        pid,
+    });
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-// 参数数量超限（8 个）是现有设计需要；重构签名风险大，暂以 allow 豁免。
+// 参数数量超限（9 个）是现有设计需要；重构签名风险大，暂以 allow 豁免。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show_session_notification(
     _app: &tauri::AppHandle,
     _title: String,
     _body: String,
+    _session_id: i64,
     _pid: i64,
     _focus_title: String,
     _focus_cwd: Option<String>,
@@ -517,6 +538,7 @@ pub(crate) fn spawn_liveness_watch(
                                 &app,
                                 tr(lang, "notify.error").into(),
                                 format!("{} · {}", s.project_name, e.label),
+                                s.session.id,
                                 pid,
                                 display_title.clone(),
                                 s.cwd.clone(),
@@ -549,6 +571,7 @@ pub(crate) fn spawn_liveness_watch(
                                     &app,
                                     tr(lang, key).into(),
                                     format!("{} · {}", s.project_name, display_title),
+                                    s.session.id,
                                     pid,
                                     display_title.clone(),
                                     s.cwd.clone(),
@@ -579,6 +602,7 @@ pub(crate) fn spawn_liveness_watch(
                                     &app,
                                     tr(lang, "notify.waiting").into(),
                                     format!("{} · {}", s.project_name, display_title),
+                                    s.session.id,
                                     pid,
                                     display_title.clone(),
                                     s.cwd.clone(),

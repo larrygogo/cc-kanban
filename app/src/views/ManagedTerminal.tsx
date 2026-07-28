@@ -109,6 +109,17 @@ export function findFakeCaret(buffer: InverseScanBuffer | undefined, rows: numbe
 }
 
 type ManagedTerminalProps = {
+  /**
+   * Agent 自己托管的后台会话。它**不能**被「接管」：正文常常没落盘（claude 的 fork/resume
+   * worker 只写两行元数据）， 只会得到 No conversation found + 退出码 1。
+   * 画面另有旁路可看（后端的 attach_background_session），所以这里只需收起那个按钮。
+   */
+  background?: boolean;
+  /**
+   * 用户在**后台会话**的终端里按了键。这些按键注定无效（worker 不消费 stdin），所以不下发，
+   * 转由宿主把用户领到真能发消息的地方（对话页）。
+   */
+  onBackgroundInput?: () => void;
   sessionId: number;
   status?: string;
   visible?: boolean;
@@ -126,7 +137,7 @@ type ManagedTerminalProps = {
   rearmRef?: MutableRefObject<(() => void) | null>;
 };
 
-export function ManagedTerminal({ sessionId, status, visible = true, onUserSubmit, attentionMarkers = [], interactivePrompt = false, expectMenu = false, grammar, onAttention, rearmRef: externalRearmRef }: ManagedTerminalProps) {
+export function ManagedTerminal({ sessionId, status, background = false, onBackgroundInput, visible = true, onUserSubmit, attentionMarkers = [], interactivePrompt = false, expectMenu = false, grammar, onAttention, rearmRef: externalRearmRef }: ManagedTerminalProps) {
   const t = useT();
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -146,6 +157,8 @@ export function ManagedTerminal({ sessionId, status, visible = true, onUserSubmi
   /// 终端就永远定格在旧内容上。effect 内部把重置逻辑挂到这里，供 start/takeover 调用。
   const rearmRef = useRef<(() => void) | null>(null);
   const onUserSubmitRef = useRef(onUserSubmit);
+  const onBackgroundInputRef = useRef(onBackgroundInput);
+  const backgroundRef = useRef(background);
   const attentionMarkersRef = useRef(attentionMarkers);
   const interactivePromptRef = useRef(interactivePrompt);
   const expectMenuRef = useRef(expectMenu);
@@ -156,6 +169,8 @@ export function ManagedTerminal({ sessionId, status, visible = true, onUserSubmi
   const attentionReportedRef = useRef<string | null>(null);
   const lastScreenRef = useRef("");
   onUserSubmitRef.current = onUserSubmit;
+  onBackgroundInputRef.current = onBackgroundInput;
+  backgroundRef.current = background;
   attentionMarkersRef.current = attentionMarkers;
   interactivePromptRef.current = interactivePrompt;
   expectMenuRef.current = expectMenu;
@@ -263,6 +278,13 @@ export function ManagedTerminal({ sessionId, status, visible = true, onUserSubmi
       // 转发——那是 TUI 正在等的；用户真实按键不匹配回放过滤的形态，照常放行。
       const payload = replayingHistory ? stripTerminalReplies(data) : data;
       if (!payload) return;
+      // 后台会话的 worker 不消费 stdin（取证见后端 bgpty.rs 的模块文档）：这些按键写下去
+      // 服务端会收、PTY 会写，claude 那头就是不理。与其让用户打完一整句再弹「不接受终端
+      // 按键」，不如第一下就把他送到真能发消息的地方去。
+      if (backgroundRef.current) {
+        onBackgroundInputRef.current?.();
+        return;
+      }
       if (payload.includes("\r")) {
         onUserSubmitRef.current?.();
       }
@@ -656,10 +678,13 @@ export function ManagedTerminal({ sessionId, status, visible = true, onUserSubmi
       )}
       {!initializing && !active && (
         <div className="managed-terminal-cover">
-          <div>{error || (exitCode !== undefined ? t.chat.terminalExited(exitCode) : externalRunning ? t.chat.terminalExternal : t.chat.terminalReady)}</div>
-          <button type="button" onClick={() => void (externalRunning ? takeover() : start())} disabled={starting}>
-            {starting ? t.chat.terminalStarting : externalRunning ? t.chat.terminalTakeover : t.chat.terminalStart}
-          </button>
+          <div>{error || (background ? t.chat.terminalBackgroundGone : exitCode !== undefined ? t.chat.terminalExited(exitCode) : externalRunning ? t.chat.terminalExternal : t.chat.terminalReady)}</div>
+          {/* 后台会话不给接管按钮：那条路对它必然失败（见 background 的说明）。 */}
+          {!background && (
+            <button type="button" onClick={() => void (externalRunning ? takeover() : start())} disabled={starting}>
+              {starting ? t.chat.terminalStarting : externalRunning ? t.chat.terminalTakeover : t.chat.terminalStart}
+            </button>
+          )}
         </div>
       )}
       {active && (

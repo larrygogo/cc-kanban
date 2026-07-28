@@ -21,6 +21,7 @@
 //! 故直查包内的 `bin/claude.exe`（该 npm 包分发的是原生二进制，不是 JS 入口）。
 
 pub mod account;
+pub mod fleet;
 pub mod install;
 pub mod setup;
 pub mod telemetry;
@@ -504,6 +505,10 @@ impl AgentPlugin for Claude {
     }
     fn telemetry(&self) -> Option<&'static dyn TelemetryCap> {
         Some(&telemetry::TELEMETRY)
+    }
+    /// FleetView 的后台会话（`sessions/<pid>.json` 的 `kind: "bg"`）。
+    fn runtime(&self) -> Option<&'static dyn crate::caps::RuntimeCap> {
+        Some(&fleet::CLAUDE_RUNTIME)
     }
     fn account(&self) -> Option<&'static dyn crate::account::AccountCap> {
         Some(&account::ACCOUNT)

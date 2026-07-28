@@ -56,9 +56,77 @@ pub(crate) async fn managed_terminal_snapshot(
     since: Option<u64>,
 ) -> Result<super::pty::PtySnapshot, String> {
     let ptys = state.ptys.clone();
-    tauri::async_runtime::spawn_blocking(move || ptys.snapshot(session_id, since.unwrap_or(0)))
+    let bg = state.bg_ptys.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let since = since.unwrap_or(0);
+        // 后台会话（claude FleetView）的画面走旁路 socket，不在托管 PTY 表里。它优先：
+        // 接上了就说明用户正在这个窗口看它，托管表里那份必然是空壳。
+        bg.snapshot(session_id, since)
+            .unwrap_or_else(|| ptys.snapshot(session_id, since))
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 接上一个后台会话的画面。它的 PTY 在 claude 自己的守护进程手里，meowo 只能旁路连上去看
+/// （读 + 改尺寸 + 结束），不能像托管会话那样重启或写入——键盘输入另有一道 attach 流程未通。
+#[tauri::command]
+pub(crate) async fn attach_background_session(
+    state: State<'_, super::AppState>,
+    session_id: i64,
+) -> Result<(), String> {
+    let db_path = state.db_path.clone();
+    let bg = state.bg_ptys.clone();
+    tauri::async_runtime::spawn_blocking(move || attach_background(&db_path, &bg, session_id))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?
+}
+
+/// 向一个后台会话发消息。走 Agent 守护进程的控制通道，不经过 PTY——那条路对后台 worker
+/// 无效（它不消费 stdin）。发出后 agent 就开始干活，回复照常落进 transcript，对话页照常显示。
+#[tauri::command]
+pub(crate) async fn send_background_prompt(
+    state: State<'_, super::AppState>,
+    session_id: i64,
+    text: String,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("消息为空".into());
+    }
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let control = background_endpoint(&db_path, session_id)?
+            .control
+            .ok_or("找不到 Agent 的控制通道，无法向后台会话发消息")?;
+        super::bgpty::send_prompt(&control, &text)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 查花名册拿这个会话的接入点。阻塞（读库 + 读文件），只在 spawn_blocking 里调。
+fn background_endpoint(
+    db_path: &std::path::Path,
+    session_id: i64,
+) -> Result<meowo_agent::BackgroundEndpoint, String> {
+    let store = super::open_store(db_path)?;
+    let session = store.get_session(session_id).map_err(|e| e.to_string())?;
+    let provider = store
+        .session_provider(session_id)
+        .map_err(|e| e.to_string())?;
+    meowo_agent::resolve(Some(&provider))
+        .and_then(|agent| agent.runtime())
+        .and_then(|runtime| runtime.background_endpoint(&session.cc_session_id))
+        .ok_or_else(|| "这个后台会话已经不在 Agent 的花名册里了".to_string())
+}
+
+/// 查花名册 → 连上去。阻塞（读文件 + 连 socket），只在 spawn_blocking 里调。
+fn attach_background(
+    db_path: &std::path::Path,
+    bg: &super::bgpty::BgPtyRegistry,
+    session_id: i64,
+) -> Result<(), String> {
+    bg.attach(session_id, &background_endpoint(db_path, session_id)?)
 }
 
 #[tauri::command]
@@ -76,9 +144,17 @@ pub(crate) async fn write_managed_terminal(
     data: String,
 ) -> Result<(), String> {
     let ptys = state.ptys.clone();
-    tauri::async_runtime::spawn_blocking(move || ptys.write(session_id, data.as_bytes()))
-        .await
-        .map_err(|e| e.to_string())?
+    let bg = state.bg_ptys.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // 后台会话不消费 stdin，往它的 PTY 写按键石沉大海。与其静默吞掉（用户会以为
+        // 打进去了），不如明说那条路在哪——送话走对话页，见 send_background_prompt。
+        if !ptys.is_managed(session_id) && bg.is_active(session_id) {
+            return Err("后台会话不接受终端按键，请在对话页发送消息".to_string());
+        }
+        ptys.write(session_id, data.as_bytes())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -89,9 +165,32 @@ pub(crate) async fn resize_managed_terminal(
     rows: u16,
 ) -> Result<(), String> {
     let ptys = state.ptys.clone();
-    tauri::async_runtime::spawn_blocking(move || ptys.resize(session_id, cols, rows))
-        .await
-        .map_err(|e| e.to_string())?
+    let bg = state.bg_ptys.clone();
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if ptys.is_managed(session_id) {
+            return ptys.resize(session_id, cols, rows);
+        }
+        if bg.is_active(session_id) {
+            return bg.resize(session_id, cols, rows);
+        }
+        // 先按普通会话办，失败了再考虑后台会话那条路。顺序不能反：resize 在拖窗口时每 80ms
+        // 就来一次，而 attach_background 要开一次 SQLite 再读一遍花名册——对着一屏普通会话
+        // 反复付这个代价太亏。失败了才试后台，代价只落在真正需要它的那一次上。
+        let Err(direct) = ptys.resize(session_id, cols, rows) else {
+            return Ok(());
+        };
+        // 后台会话的画面可能还没接上：对话页发起 attach 与终端视图的首次 resize 在赛跑，
+        // 输了就会报「PTY 会话未运行」——画面明明已经在显示了。
+        // 接不上就把**普通会话那条错**还回去：对一个从来不是后台会话的 session 说
+        //「已经不在 Agent 的花名册里了」，等于拿一个它没用过的功能来解释失败。
+        if attach_background(&db_path, &bg, session_id).is_err() {
+            return Err(direct);
+        }
+        bg.resize(session_id, cols, rows)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -100,9 +199,27 @@ pub(crate) async fn stop_managed_terminal(
     session_id: i64,
 ) -> Result<(), String> {
     let ptys = state.ptys.clone();
-    tauri::async_runtime::spawn_blocking(move || ptys.stop(session_id))
-        .await
-        .map_err(|e| e.to_string())?
+    let bg = state.bg_ptys.clone();
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // 托管 PTY 优先：那是我们自己 spawn 的进程，stop 一步到位。
+        if ptys.is_managed(session_id) {
+            return ptys.stop(session_id);
+        }
+        // 后台会话要走它自己的 kill 控制帧：对着 pid 下手会被 supervisor 按 respawnFlags
+        // 原地拉回来，用户看到的是「点了结束，它又活了」。没接上就先接——用户从卡片菜单
+        // 直接结束时，这个窗口可能从没打开过它的画面。
+        //
+        // 接不上就把**普通会话那条错**还回去。托管 PTY 恰好在这一刻退出是常事（结束按钮
+        // 按 650ms 轮询的 pty_managed 亮灭），那时该说「PTY 会话未运行」，而不是拿
+        //「已经不在 Agent 的花名册里了」去解释一个用户根本没碰过的功能。
+        if !bg.is_active(session_id) && attach_background(&db_path, &bg, session_id).is_err() {
+            return ptys.stop(session_id);
+        }
+        bg.kill(session_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

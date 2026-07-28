@@ -208,6 +208,13 @@ export type LiveSession = {
   connected: boolean;
   /** 本 GUI 进程正托管该会话的 PTY；门控贴纸卡片菜单「结束会话」的可见性。 */
   pty_managed: boolean;
+  /**
+   * 由 agent 自己的后台守护进程托管（Claude Code FleetView 的后台会话）。这类卡片是
+   * agent 在会话中途自行派生的——用户没开过它，看板却凭空多出一张卡。界面据此标注来历，
+   * 并收起接管/结束/定位终端：那几条路对它注定失败（supervisor 会把被杀的进程拉回来，
+   * 它也没有终端窗口可切）。
+   */
+  background: boolean;
   archived: boolean;
   archived_at: number | null;
   cwd: string | null;
@@ -232,6 +239,10 @@ export type LiveSession = {
   last_user_text: string | null;
   /** agent 身份（如 "claude"）。DB 里可能存着本版本不认识的 id，故不是联合类型。 */
   provider: AgentId;
+  /** 会话所属的账号（profile id）；null = 默认账号。 */
+  profile: string | null;
+  /** 所属账号的展示名（profile 已删时回退 id 本身）；null = 默认账号，不显示徽章。 */
+  profile_name: string | null;
 };
 
 export type LiveSessionCounts = {
@@ -342,6 +353,24 @@ export type ManagedTerminalSnapshot = ManagedTerminalSnapshotDto;
 export function startManagedTerminal(sessionId: number, cols: number, rows: number): Promise<void> {
   return invoke("start_managed_terminal", { sessionId, cols, rows });
 }
+/**
+ * 接上一个后台会话的画面（Agent 自己托管的会话，见 LiveSession.background）。
+ *
+ * 走的是 Agent 留给自己 UI 的那条旁路 socket：能看画面、能改尺寸、能结束，但**不能发消息**
+ * ——键盘输入另有一道 attach 流程尚未打通。所以接上之后只把终端视图当只读画面用。
+ */
+export function attachBackgroundSession(sessionId: number): Promise<void> {
+  return invoke("attach_background_session", { sessionId });
+}
+
+/**
+ * 向后台会话发一条消息。走 Agent 守护进程的控制通道，不经过 PTY——后台 worker 不消费
+ * stdin，往它的终端写按键会石沉大海。发出后 agent 就开始干活，回复照常落进 transcript。
+ */
+export function sendBackgroundPrompt(sessionId: number, text: string): Promise<void> {
+  return invoke("send_background_prompt", { sessionId, text });
+}
+
 export function takeoverManagedTerminal(sessionId: number, cols: number, rows: number): Promise<void> {
   return invoke("takeover_managed_terminal", { sessionId, cols, rows });
 }
@@ -416,11 +445,15 @@ export function getLiveSessionsPage(
   filter: StickerFilter,
   search: string | null,
   cursor: PageCursor | null,
-  limit: number
+  limit: number,
+  /** 目录筛选:斜杠归一的精确匹配(后端做),与 search 的子串搜索语义分开——
+      同一目录的两种斜杠写法都命中,兄弟目录/标题命中不漏进来。 */
+  cwd: string | null = null
 ): Promise<LiveSessionsPage> {
   return invoke<unknown>("get_live_sessions_page", {
     filter,
     search: search && search.trim() ? search : null,
+    cwd: cwd && cwd.trim() ? cwd : null,
     // Tauri 按 camelCase 匹配 Rust 命令参数；snake_case 键会被静默当成缺失（Option → None），
     // 游标永远失效、「加载更多」重复返回第一页。
     beforeLastEventAt: cursor?.last_event_at ?? null,
@@ -658,6 +691,8 @@ export type ProviderAccountPayload = {
   usage: ProviderUsage | null;
   usage_supported: boolean;
   relay_enabled?: boolean;
+  /** 当前活跃账号的展示名；null/缺省 = 默认账号（不显示任何账号提示）。 */
+  active_profile_name?: string | null;
 };
 
 export function getAccounts(): Promise<ProviderAccountPayload[]> {
@@ -802,6 +837,14 @@ export function setActiveProfile(provider: AgentId, id: string | null): Promise<
 /** 删除账号，**连同它的整个目录**（凭据、配置、该账号的会话历史）。不可逆。 */
 export function deleteProfile(provider: AgentId, id: string): Promise<void> {
   return invoke("delete_profile", { provider, id });
+}
+
+/**
+ * 把账号**合并进默认账号**：数据目录并入（不覆盖默认账号已有的文件）、会话改挂默认账号、
+ * 账号从列表移除。与删除的根本区别是数据全留下。有进行中的会话时后端会拒绝。
+ */
+export function mergeProfileIntoDefault(provider: AgentId, id: string): Promise<void> {
+  return invoke("merge_profile_into_default", { provider, id });
 }
 
 /**

@@ -66,6 +66,10 @@ export function useMenuPopup({
     const close = () => setOpen(false);
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      // 这次 Esc 被菜单消费掉了,必须标记 preventDefault:document 冒泡在 window 之前,
+      // 后面还有 ChatWindow 的窗口级「Esc=拒绝审批」监听(它以 defaultPrevented 让路)。
+      // 不标记的话,关个下拉菜单的同一次按键会顺手把 agent 的审批请求拒了。
+      e.preventDefault();
       setOpen(false);
       // Esc 后焦点归还触发钮，键盘用户不至于丢焦点；但只在焦点确实落在菜单容器内时归还——
       // 鼠标开着菜单、焦点在输入框时按 Esc 不能把焦点抢回按钮。

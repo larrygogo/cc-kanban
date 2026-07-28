@@ -111,6 +111,8 @@ fn trim_first_page<T>(items: &mut Vec<T>, full: bool, full_read: bool) -> bool {
 struct LiveSignals {
     alive: std::sync::Arc<std::collections::HashSet<i64>>,
     pty_live: bool,
+    /// agent 自建后台会话的索引(claude FleetView),与看板共享同一份 TTL 快照。
+    runtimes: std::sync::Arc<super::session_query::SessionRuntimeIndex>,
 }
 
 /// errored 的重采样间隔:transcript 分析走共享 mtime 缓存,但 agent 流式输出期间文件
@@ -188,6 +190,11 @@ fn load_chat_history(
         has_more: false,
         errored: false,
         pty_managed: live.pty_live,
+        background: super::session_query::is_background(
+            &live.runtimes,
+            &header.provider,
+            &header.cc_session_id,
+        ),
         last_user_text: header.last_user_text.clone(),
         last_ai_text: header.last_ai_text.clone(),
     };
@@ -414,6 +421,7 @@ pub(crate) async fn get_chat_history(
     // 进程表采样(TTL 缓存,与看板共享)在 spawn_blocking 里做:冷采样 Windows 上要
     // 30-120ms,不能挂在 async-runtime 线程上。PTY 活性是纯内存查表,留在外面无妨。
     let snapshots = state.process_snapshots.clone();
+    let runtimes = state.session_runtimes.clone();
     let pty_live = state.ptys.is_active(session_id);
     tauri::async_runtime::spawn_blocking(move || {
         load_chat_history(
@@ -423,6 +431,7 @@ pub(crate) async fn get_chat_history(
             LiveSignals {
                 alive: snapshots.snapshot(),
                 pty_live,
+                runtimes: runtimes.snapshot(),
             },
             session_id,
             offset,

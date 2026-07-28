@@ -229,7 +229,7 @@ mod tests {
         assert!(!confirms.parent_released("chat")); // 2→1:还有确认框挂着,不恢复
         assert!(confirms.parent_released("chat")); // 1→0:恢复
         assert!(confirms.parent_released("chat")); // 计数缺失:宁可多恢复一次
-        // 不同父窗互不影响。
+                                                   // 不同父窗互不影响。
         assert!(confirms.parent_disabled("main"));
         assert!(confirms.parent_released("chat"));
         assert!(confirms.parent_released("main"));

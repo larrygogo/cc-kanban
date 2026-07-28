@@ -366,6 +366,94 @@ describe("terminalAttention", () => {
       "No",
     ]);
   });
+
+  /// kimi 审批面板(ApprovalPanel):面板形态与按键语义为官方源码取证
+  /// (apps/kimi-code/src/tui/components/dialogs/approval-panel.ts @ 0.29)。
+  /// PermissionRequest hook 是 observation-only,屏幕识别是 GUI 审批的唯一通道。
+  it("turns Kimi's approval panel into digit-keyed choices, dropping feedback options", () => {
+    const prompt = [
+      "\x1b[2J────────────────────────",
+      "  ▶ Run this command?",
+      "",
+      "  $ echo meowo-approval-probe-1234",
+      "  Run the probe command",
+      "",
+      "  ▶ 1. Approve once",
+      "    2. Approve for this session",
+      "    3. Reject",
+      "    4. Reject with feedback",
+      "",
+      "  ↑/↓ select · 1/2/3/4 choose · ↵ confirm",
+      "────────────────────────",
+    ].join("\r\n");
+    const attention = terminalAttention(prompt, [], false, false, { provider: "kimi", selectorAnchors: [] });
+    expect(attention?.id).toBe("kimi:command-approval");
+    // 详情保留标题与命令,不含选项、按键提示和框线。
+    expect(attention?.text).toContain("Run this command?");
+    expect(attention?.text).toContain("echo meowo-approval-probe-1234");
+    expect(attention?.text).not.toContain("Approve once");
+    expect(attention?.text).not.toContain("choose");
+    // 数字键直接选中提交(源码 selectAndSubmit),按钮 input 就是数字本身;
+    // 「Reject with feedback」要现场输入反馈,卡片完成不了,不收。
+    expect(attention?.options?.map((option) => [option.label, option.input])).toEqual([
+      ["Approve once", "1"],
+      ["Approve for this session", "2"],
+      ["Reject", "3"],
+    ]);
+  });
+
+  /// kimi 重绘不清屏:上一条命令的面板残留在缓冲上方。标题/提示行若锚定**首个**匹配,
+  /// 卡片标题与命令会锁在残影上,数字键却打给屏幕最下方的活动面板——看着 A 批准了 B。
+  /// (与 claude 路径的 lastIndexOf 同一课,见 terminalAttention 内注释。)
+  it("kimi 面板残影:标题与命令取最后一份面板,不锁在残影上", () => {
+    const prompt = [
+      "\x1b[2J  ▶ Run this command?",
+      "  $ echo old-command-A",
+      "  ▶ 1. Approve once",
+      "    2. Reject",
+      "  ↑/↓ select · 1/2 choose · ↵ confirm",
+      "  ▶ Run this command?",
+      "  $ rm -rf build-B",
+      "  ▶ 1. Approve once",
+      "    2. Reject",
+      "  ↑/↓ select · 1/2 choose · ↵ confirm",
+    ].join("\r\n");
+    const attention = terminalAttention(prompt, [], false, false, { provider: "kimi", selectorAnchors: [] });
+    expect(attention?.id).toBe("kimi:command-approval");
+    expect(attention?.text).toContain("rm -rf build-B");
+    expect(attention?.text).not.toContain("old-command-A");
+  });
+
+  /// 命令正文里的顶格编号行(多行 commit message、带编号的输出)不是残影选项:回扫
+  /// 钳位曾把上下文起点截到它后面,审批卡上命令开头(含 Bash command 标题)整段消失,
+  /// 用户批准一条自己看不全的命令。残影选择器的判定要求编号组里带焦点光标。
+  it("claude 审批:命令内的编号列表不截断上下文,也不解析成选项", () => {
+    const prompt = [
+      "\x1b[2JBash command",
+      'git commit -m "fix: parser',
+      "1. fix parser",
+      "2. add tests",
+      '"',
+      "Commit the fix",
+      "This command requires approval",
+      "Do you want to proceed?",
+      "❯ 1. Yes",
+      "  2. No",
+    ].join("\r\n");
+    const attention = terminalAttention(prompt, []);
+    expect(attention?.id).toBe("claude:command-approval");
+    expect(attention?.text).toContain("Bash command");
+    expect(attention?.text).toContain("git commit");
+    expect(attention?.text).toContain("1. fix parser");
+    expect(attention?.text).toContain("2. add tests");
+    expect(attention?.options?.map((option) => option.label)).toEqual(["Yes", "No"]);
+  });
+
+  it("kimi 审批面板规则严格按 provider 门控:别家会话引用同一画面不弹卡", () => {
+    const prompt = "\x1b[2J  ▶ Run this command?\r\n  ▶ 1. Approve once\r\n    2. Reject\r\n  ↑/↓ select · 1/2 choose · ↵ confirm";
+    expect(terminalAttention(prompt, [], false, false, { provider: "claude", selectorAnchors: [] })).toBeNull();
+    expect(terminalAttention(prompt, [], false, false, { provider: "kimi", selectorAnchors: [] })?.id).toBe("kimi:command-approval");
+  });
 });
 
 describe("modeFromScreen", () => {

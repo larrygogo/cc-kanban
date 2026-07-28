@@ -115,6 +115,18 @@ fn inner_of(script: &str) -> String {
         .to_string()
 }
 
+/// 从包装脚本正文里取出它内嵌的 meowo-reporter 路径（`… | "<reporter>" statusline …` 那行）。
+/// 与 [`inner_of`] 取的是同一批行里互补的那条：那边排除 reporter 行，这边只要 reporter 行。
+fn embedded_reporter(script: &str) -> Option<String> {
+    script
+        .lines()
+        .filter(|l| l.contains("$input") && l.contains('|'))
+        .filter_map(|l| l.split_once('|').map(|(_, r)| r.trim()))
+        .find(|r| r.contains(" statusline"))
+        .and_then(|r| r.split('"').nth(1))
+        .map(str::to_string)
+}
+
 /// 把一条 statusLine 命令层层剥到最内的**用户真实命令**：只要它指向我方生成的包装脚本，就取出
 /// 该脚本的 inner 接着剥。剥到成环（两个包装脚本互指）则整条丢弃——环里没有用户的命令，只有
 /// 我们自己的历史残留，留着就是那颗 fork 炸弹。
@@ -273,18 +285,204 @@ fn statusline_amend(
             Ok(format!("{pretty}\n"))
         }
         None => {
-            // 幂等命中（settings 已指向我们的脚本）但脚本缺失或内容损坏（读不到 / 不含我方生成标记）。
+            // 幂等命中（settings 已指向我们的脚本）但脚本本身不可用。三种损坏：
             // 缺失：用户删 ~/.meowo 重置数据时 board.db 会被 Store::open 自动重建，本脚本却不会；
-            // 损坏：旧版裸写留下的半截文件、杀软截断。两者下不补建则状态栏每次渲染报 No such file、
-            // Context% 永久断供——而 probe 的幂等判定只认 settings 里的路径，不会发现脚本坏了。
-            // 原 inner 已无从恢复，退化为自渲染版兜底。
-            let intact = read(&script_path).is_some_and(|t| t.contains(WRAPPER_MARK));
-            if !intact {
-                let script = build_script(&to_bash_path(reporter), "");
-                let _ = write_statusline_script(&script_path, &script);
+            // 损坏：旧版裸写留下的半截文件、杀软截断；
+            // 失效：脚本完整且带标记，但**内嵌的 reporter 路径已不存在**——app 换了目录、仓库
+            //   结构调整（target 从仓库根挪进 app/src-tauri）都会造成。hooks 那侧有存在性兜底
+            //   （`wiring.rs` 对 claimed/bundled 双双 filter exists），脚本这侧原先没有，于是两者
+            //   分叉：hooks 照常工作，状态栏却每次渲染都 No such file 而永久空白。
+            // 三者下不补建则 Context% 永久断供——而 probe 的幂等判定只认 settings 里的路径，
+            // 不会发现脚本坏了。
+            let existing = read(&script_path);
+            let intact = existing
+                .as_deref()
+                .is_some_and(|t| t.contains(WRAPPER_MARK));
+            let embedded = existing.as_deref().and_then(embedded_reporter);
+            let reporter_alive = embedded
+                .as_deref()
+                .is_some_and(|p| std::path::Path::new(p).exists());
+            // 只查存在性不够:旧安装目录/第二个 Meowo 实例遗留的 reporter 仍在盘上时,
+            // 陈旧路径照样通过 exists——hooks 由 wiring 指向新 reporter,statusline 却
+            // 继续喂旧二进制,两者静默分叉(本仓库记忆笔记里的双实例/陈旧路径陷阱)。
+            // 内嵌路径必须与本次接线的 reporter 一致;大小写不敏感,Windows 路径大小写
+            // 漂移不该造成每次启动都重写一遍脚本。
+            let current = to_bash_path(reporter);
+            let reporter_current = embedded
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case(&current));
+            if !intact || !reporter_alive || !reporter_current {
+                // 重建原因必须留痕：这条路径原先完全静默，而它的失效症状（Context% 断供、
+                // 状态栏空白，hooks 却一切正常）极难被认出来是路径问题。
+                match embedded.as_deref() {
+                    Some(stale) if intact && !reporter_alive => eprintln!(
+                        "Meowo repair[claude]: statusline 内嵌的 reporter 已不存在（{stale}），重建指向 {reporter}"
+                    ),
+                    Some(stale) if intact => eprintln!(
+                        "Meowo repair[claude]: statusline 内嵌的 reporter 指向别处的旧副本（{stale}），改指 {reporter}"
+                    ),
+                    _ => eprintln!(
+                        "Meowo repair[claude]: statusline 脚本缺失或损坏，重建指向 {reporter}"
+                    ),
+                }
+                // inner 能从旧脚本里捞回来就捞（失效场景脚本是完整的，用户的下游命令还在）；
+                // 缺失/损坏时捞不到，退化为自渲染版兜底。
+                let inner = existing.as_deref().map(inner_of).unwrap_or_default();
+                let script = build_script(&to_bash_path(reporter), &inner);
+                if write_statusline_script(&script_path, &script).is_err() {
+                    eprintln!("Meowo repair[claude]: statusline 脚本重建写入失败，下次启动重试");
+                }
             }
             Ok(text.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod statusline_staleness_tests {
+    use super::*;
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("meowo-statusline-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// 一份 settings：statusLine 已指向该脚本（＝ probe 的幂等分支）。
+    fn settings_pointing_at(script: &std::path::Path) -> String {
+        let bash = to_bash_path(&script.to_string_lossy());
+        serde_json::to_string_pretty(&json!({
+            "statusLine": { "type": "command", "command": format!("bash \"{bash}\"") }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn embedded_reporter_parses_both_script_shapes() {
+        // 自渲染版（无 inner）与带下游版，reporter 都在那条 ` statusline` 行上。
+        assert_eq!(
+            embedded_reporter(&build_script("C:/a/meowo-reporter.exe", "")).as_deref(),
+            Some("C:/a/meowo-reporter.exe")
+        );
+        assert_eq!(
+            embedded_reporter(&build_script("C:/a/meowo-reporter.exe", "claude-hud")).as_deref(),
+            Some("C:/a/meowo-reporter.exe")
+        );
+        assert_eq!(embedded_reporter("#!/usr/bin/env bash\necho hi\n"), None);
+    }
+
+    /// **本次回归的主角**：脚本完整、带生成标记，但内嵌的 reporter 已不存在（app 换目录、
+    /// target 从仓库根迁进 app/src-tauri 都会造成）。旧实现只看 `WRAPPER_MARK` 就判定 intact，
+    /// 于是永不重建——hooks 那侧有 exists 兜底照常工作，状态栏却每次渲染 No such file 而永久空白。
+    #[test]
+    fn stale_embedded_reporter_triggers_rebuild() {
+        let dir = tmp_dir("stale");
+        let script = dir.join("statusline.sh");
+        let live = dir.join("meowo-reporter.exe");
+        std::fs::write(&live, b"").unwrap();
+        std::fs::write(
+            &script,
+            build_script("C:/gone/target/debug/meowo-reporter.exe", ""),
+        )
+        .unwrap();
+
+        let text = settings_pointing_at(&script);
+        let ctx = WiringContext {
+            fallback_reporter: None,
+            meowo_dir: &dir,
+        };
+        let out = statusline_amend(&text, &ctx, &live.to_string_lossy()).unwrap();
+
+        // settings 保持幂等（原样返回），只有脚本被就地修好。
+        assert_eq!(out, text);
+        let rebuilt = std::fs::read_to_string(&script).unwrap();
+        let want = to_bash_path(&live.to_string_lossy());
+        assert_eq!(embedded_reporter(&rebuilt).as_deref(), Some(want.as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 重建不得丢掉用户的下游 statusLine 命令：失效场景下脚本是完整的，inner 还在里面，
+    /// 一律传空串会把 claude-hud 之类的自定义渲染器静默抹掉。
+    #[test]
+    fn rebuild_preserves_user_inner_command() {
+        let dir = tmp_dir("inner");
+        let script = dir.join("statusline.sh");
+        let live = dir.join("meowo-reporter.exe");
+        std::fs::write(&live, b"").unwrap();
+        std::fs::write(
+            &script,
+            build_script("C:/gone/meowo-reporter.exe", "claude-hud --fancy"),
+        )
+        .unwrap();
+
+        let text = settings_pointing_at(&script);
+        let ctx = WiringContext {
+            fallback_reporter: None,
+            meowo_dir: &dir,
+        };
+        statusline_amend(&text, &ctx, &live.to_string_lossy()).unwrap();
+
+        let rebuilt = std::fs::read_to_string(&script).unwrap();
+        // 必须同时断言「确实重建了」：只验 inner 的话，不重建的旧实现也会通过——
+        // 脚本原样保留时 inner 当然还在。
+        let want = to_bash_path(&live.to_string_lossy());
+        assert_eq!(embedded_reporter(&rebuilt).as_deref(), Some(want.as_str()));
+        assert_eq!(inner_of(&rebuilt), "claude-hud --fancy");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 陈旧但仍存在的 reporter(旧安装目录/第二个实例的遗留)也要触发重建:只查
+    /// exists 会让 statusline 一直喂旧二进制,与 wiring 指向的新 reporter 静默分叉。
+    #[test]
+    fn stale_but_existing_reporter_from_elsewhere_triggers_rebuild() {
+        let dir = tmp_dir("elsewhere");
+        let script = dir.join("statusline.sh");
+        let live = dir.join("meowo-reporter.exe");
+        let old = dir.join("old-install-meowo-reporter.exe");
+        std::fs::write(&live, b"").unwrap();
+        std::fs::write(&old, b"").unwrap(); // 旧副本仍在盘上,exists 挡不住它。
+        std::fs::write(
+            &script,
+            build_script(&to_bash_path(&old.to_string_lossy()), "claude-hud"),
+        )
+        .unwrap();
+
+        let text = settings_pointing_at(&script);
+        let ctx = WiringContext {
+            fallback_reporter: None,
+            meowo_dir: &dir,
+        };
+        let out = statusline_amend(&text, &ctx, &live.to_string_lossy()).unwrap();
+
+        assert_eq!(out, text);
+        let rebuilt = std::fs::read_to_string(&script).unwrap();
+        let want = to_bash_path(&live.to_string_lossy());
+        assert_eq!(embedded_reporter(&rebuilt).as_deref(), Some(want.as_str()));
+        // 用户下游命令照旧保留。
+        assert_eq!(inner_of(&rebuilt), "claude-hud");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// reporter 仍然存在时必须保持幂等——否则每次接线都重写一遍脚本。
+    #[test]
+    fn live_embedded_reporter_stays_untouched() {
+        let dir = tmp_dir("live");
+        let script = dir.join("statusline.sh");
+        let live = dir.join("meowo-reporter.exe");
+        std::fs::write(&live, b"").unwrap();
+        let original = build_script(&to_bash_path(&live.to_string_lossy()), "");
+        std::fs::write(&script, &original).unwrap();
+
+        let text = settings_pointing_at(&script);
+        let ctx = WiringContext {
+            fallback_reporter: None,
+            meowo_dir: &dir,
+        };
+        statusline_amend(&text, &ctx, &live.to_string_lossy()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&script).unwrap(), original);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
