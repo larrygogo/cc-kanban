@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getLiveSessionsPage, recentCwds, sessionTone, type LiveSession, type SessionTone } from "../api";
+import { confirmStopSession, getLiveSessionsPage, getSettings, recentCwds, sessionTone, type CardMenuMode, type LiveSession, type SessionTone, type Settings } from "../api";
 import { agentAssets, tintStyle } from "../providers";
 import { folderName, pathKey } from "../paths";
 import { Dropdown } from "./menu";
+import { CardContextMenu } from "./sticker/CardContextMenu";
+import { editorKeyDown, loadStarred } from "./sticker/helpers";
+import { MoreIcon, NoteIcon, TopIcon } from "./sticker/icons";
+import { STAR_KEY } from "./sticker/types";
 import { useT } from "../i18n";
 
 /** 每翻一页新增的会话数。滚到底自动加载下一页，直到后端带回 next_cursor = null 为止。 */
@@ -231,6 +235,102 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
     void loadRef.current("refresh");
   }, [dirFilter]);
 
+  // 会话操作菜单:与看板卡片是同一个 CardContextMenu、同一批动作(置顶/便签/重命名/归档/
+  // 新建会话/打开目录/结束会话)。两处共用一个组件是刻意的——菜单项一旦各写一份,迟早
+  // 会一边有、另一边没有。触发方式:条目右键,或条目上的「⋯」按钮。
+  const [ctxMenu, setCtxMenu] = useState<{ sid: number; x: number; y: number } | null>(null);
+  // 触发方式跟随「卡片菜单」设置(card_menu_mode),与看板同一个开关、同一套语义:
+  // button = 条目上的「⋯」按钮,context = 右键。**二选一**,不同时存在——两个入口并存
+  // 时,改设置的人会以为没生效(另一个还在),不改的人则平白多一个不知从哪来的按钮。
+  // 首帧占位 context 与看板一致;真实默认(button)由 getSettings 校正。
+  const [menuMode, setMenuMode] = useState<CardMenuMode>("context");
+  useEffect(() => {
+    const apply = (s: Settings) => setMenuMode(s.card_menu_mode ?? "button");
+    let live = false;
+    getSettings().then((s) => { if (!live) apply(s); }).catch(() => {});
+    // cleanup 可能先于 listen resolve:cancelled 标记防监听器泄漏(同看板写法)。
+    let cancelled = false;
+    let un: (() => void) | undefined;
+    listen<Settings>("settings-changed", (event) => { live = true; apply(event.payload); })
+      .then((fn) => { if (cancelled) fn(); else un = fn; })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      try { un?.(); } catch { /* noop */ }
+    };
+  }, []);
+  // 菜单内容按 id 现查:刷新后置顶/便签/归档态自动跟上,会话消失则菜单自然收起。
+  const ctxItem = ctxMenu ? (sessions ?? []).find((s) => s.session.id === ctxMenu.sid) ?? null : null;
+  // 置顶与看板共用同一份 localStorage(键沿用 meowo-starred,改键会丢用户已有数据),
+  // 两个界面看到的是同一批置顶会话,且都排到最前(见下方 ordered)。
+  const [starred, setStarred] = useState<Set<string>>(loadStarred);
+  const toggleStar = (ccSessionId: string) => setStarred((prev) => {
+    const next = new Set(prev);
+    if (!next.delete(ccSessionId)) next.add(ccSessionId);
+    localStorage.setItem(STAR_KEY, JSON.stringify([...next]));
+    return next;
+  });
+  // 重命名 / 便签:与看板一样就地编辑(同一条会话上只开一个编辑器)。
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [draft, setDraft] = useState("");
+  const [notingId, setNotingId] = useState<number | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
+  // 动作失败必须可见:静默吞掉的话,用户点了「重命名」只会看到名字没变,以为是自己没点上。
+  const [actionError, setActionError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!actionError) return;
+    const timer = window.setTimeout(() => setActionError(null), 4_000);
+    return () => window.clearTimeout(timer);
+  }, [actionError]);
+
+  const startRename = (item: LiveSession) => {
+    setNotingId(null);
+    setDraft(item.task_title && item.task_title !== "(未命名会话)" ? item.task_title : "");
+    setEditingId(item.session.id);
+  };
+  const submitRename = (item: LiveSession) => {
+    const title = draft.trim();
+    if (title && title !== item.task_title) {
+      invoke("rename_session", { cwd: item.cwd, sessionId: item.session.cc_session_id, title, provider: item.provider })
+        .catch(() => setActionError(t.sticker.renameFailed));
+    }
+    setEditingId(null);
+  };
+  const startNote = (item: LiveSession) => {
+    setEditingId(null);
+    setNoteDraft(item.note ?? "");
+    setNotingId(item.session.id);
+  };
+  const submitNote = (item: LiveSession) => {
+    if (noteDraft !== (item.note ?? "")) {
+      invoke("set_session_note", { sessionId: item.session.cc_session_id, note: noteDraft })
+        .catch(() => setActionError(t.sticker.noteFailed));
+    }
+    setNotingId(null);
+  };
+  const toggleArchived = (item: LiveSession) => {
+    const target = !item.archived;
+    const id = item.session.id;
+    // 归档 = 从 "all" 里消失,乐观摘掉(不等 IPC 往返),失败重取拉回。当前打开的那条也照摘:
+    // 已归档 = 已收纳,列表里就不该再有它,哪怕右边还开着它的对话。
+    setSessions((prev) => prev?.filter((s) => s.session.id !== id) ?? prev);
+    // 归档的正是当前打开的这条:右边也得跟着走,否则「收起来了却还摊在桌上」。
+    // 切到列表里的下一条;它是唯一一条时留在原地(空窗比自作主张关窗好)。
+    if (target && id === activeId) {
+      const following = (ordered ?? []).find((s) => s.session.id !== id);
+      if (following) onSelect(following.session.id);
+    }
+    invoke("set_archived", { sessionId: id, archived: target }).catch(() => {
+      setActionError(t.chat.sidebarActionFailed);
+      void loadRef.current("refresh");
+    });
+  };
+  const endSession = (item: LiveSession) => {
+    void confirmStopSession(item.session.id, { title: t.chat.endSession, message: t.chat.endSessionConfirm })
+      .catch((error) => setActionError(String(error)));
+  };
+  const openMenuAt = (item: LiveSession, x: number, y: number) => setCtxMenu({ sid: item.session.id, x, y });
+
   const toggleGrouped = () => setGrouped((prev) => {
     const next = !prev;
     localStorage.setItem(GROUPED_KEY, next ? "1" : "0");
@@ -255,9 +355,19 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
       return next;
     });
 
+  // 置顶浮顶:与看板同一条规则(置顶的排最前),否则「置顶」名不副实——标记亮着、位置没动。
+  // Array.sort 稳定,非置顶的相对次序原样保留(后端 connected-first + 时间倒序)。
+  // 分组开着时排序发生在**分组之前**:组内置顶在前,而组序由「组内第一条的位置」派生,
+  // 于是含置顶会话的目录也跟着上浮——两套顺序不打架。
+  const ordered = useMemo(() => {
+    if (!sessions || starred.size === 0) return sessions;
+    const rank = (item: LiveSession) => (starred.has(item.session.cc_session_id) ? 0 : 1);
+    return [...sessions].sort((a, b) => rank(a) - rank(b));
+  }, [sessions, starred]);
+
   const groups = useMemo(
-    () => (grouped && sessions ? groupByDir(sessions) : null),
-    [grouped, sessions],
+    () => (grouped && ordered ? groupByDir(ordered) : null),
+    [grouped, ordered],
   );
 
   // 滚到底前 120px 就预取下一页。
@@ -283,14 +393,35 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
     // 待授权徽标优先于状态点：授权在等用户决策，比「在跑/待处理」都紧急；
     // 且不依附 connected——离线会话恢复的 agent 同样可能来要权限。
     const awaitingApproval = approvalAwaitingIds.has(item.session.id);
+    const editing = editingId === item.session.id;
+    const noting = notingId === item.session.id;
+    // 条目从 <button> 改成 role=button 的 <div>：里面要放「⋯」按钮，button 套 button 是
+    // 非法 HTML（浏览器会把内层拆出去）。键盘可达性靠 tabIndex + Enter/Space 补齐。
     return (
-      <button
-        type="button"
+      <div
         key={item.session.id}
+        role="button"
+        tabIndex={0}
         className={"chat-sidebar-item" + (item.session.id === activeId ? " is-active" : "")}
         aria-current={item.session.id === activeId ? "true" : undefined}
         title={item.task_title}
-        onClick={() => onSelect(item.session.id)}
+        onClick={() => {
+          // 编辑态下点条目只用于收起编辑器，不切会话（输入框自身已 stopPropagation）。
+          if (editing || noting) { setEditingId(null); setNotingId(null); return; }
+          onSelect(item.session.id);
+        }}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return; // 内部按钮/输入框自理
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault(); // 空格不要滚动列表
+          if (editing || noting) { setEditingId(null); setNotingId(null); return; }
+          onSelect(item.session.id);
+        }}
+        onContextMenu={(event) => {
+          if (menuMode !== "context") return; // 按钮模式下右键交还给系统
+          event.preventDefault();
+          openMenuAt(item, event.clientX, event.clientY);
+        }}
       >
         {/* 状态指示兼 agent 标识：连接=品牌色徽标，未连接=灰（与贴纸同一套）。 */}
         <span
@@ -305,11 +436,57 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
             : showDot && <i className={`chat-sidebar-dot is-${tone}`} role="status" aria-label={t.chat.status[tone]} data-tip={t.chat.status[tone]} />}
         </span>
         <span className="chat-sidebar-text">
-          <span className="chat-sidebar-name">{item.task_title || t.sticker.waitingFirstInput}</span>
+          {editing ? (
+            <input
+              className="chat-sidebar-edit"
+              autoFocus
+              value={draft}
+              placeholder={t.sticker.renamePlaceholder}
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={editorKeyDown(() => submitRename(item), () => setEditingId(null))}
+              onBlur={() => submitRename(item)}
+            />
+          ) : (
+            <span className="chat-sidebar-name">
+              {starred.has(item.session.cc_session_id) && (
+                <span className="chat-sidebar-star" role="img" aria-label={t.sticker.star}><TopIcon /></span>
+              )}
+              {item.task_title || t.sticker.waitingFirstInput}
+            </span>
+          )}
           {/* 分组视图里每条再重复一遍目录名是噪声——组头已经写着了。 */}
-          {dir && !grouped && <span className="chat-sidebar-meta" title={item.cwd ?? undefined}>{dir}</span>}
+          {dir && !grouped && !noting && <span className="chat-sidebar-meta" title={item.cwd ?? undefined}>{dir}</span>}
+          {/* 便签写完要看得见，否则「添加便签」等于写进黑洞。编辑中的那条让位给输入框。 */}
+          {!noting && item.note && (
+            <span className="chat-sidebar-note" title={item.note}><NoteIcon />{item.note}</span>
+          )}
+          {noting && (
+            <input
+              className="chat-sidebar-edit"
+              autoFocus
+              value={noteDraft}
+              placeholder={t.sticker.notePlaceholder}
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) => setNoteDraft(event.target.value)}
+              onKeyDown={editorKeyDown(() => submitNote(item), () => setNotingId(null))}
+              onBlur={() => submitNote(item)}
+            />
+          )}
         </span>
-      </button>
+        {menuMode === "button" && (
+          <button
+            type="button"
+            className="chat-sidebar-item-menu"
+            aria-label={t.sticker.cardMenu}
+            onClick={(event) => {
+              event.stopPropagation(); // 点菜单不切会话
+              const rect = event.currentTarget.getBoundingClientRect();
+              openMenuAt(item, rect.right, rect.bottom + 4);
+            }}
+          ><MoreIcon /></button>
+        )}
+      </div>
     );
   };
 
@@ -382,9 +559,11 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
                 .map((item) => sessionTone(item.connected, item.session.status, item.pending_review, item.errored))
                 .reduce<SessionTone | null>((best, cur) => (best && TONE_RANK[best] >= TONE_RANK[cur] ? best : cur), null);
               const showDot = !!tone && TONE_RANK[tone] > 0;
-              // 「未运行」= 已断开，且不是当前打开的这条——正开着的会话无论死活都得留在
-              // 视野里，否则用户一进来就找不到自己在哪。
-              const live = (item: LiveSession) => item.connected || item.session.id === activeId;
+              // 「未运行」= 已断开，且不是当前打开的这条，也不是置顶的那些——正开着的会话
+              // 无论死活都得留在视野里（否则用户一进来就找不到自己在哪），置顶的更是：
+              // 用户刚亲手把它顶上来，转头被折进「显示 N 个未运行会话」里等于白顶。
+              const live = (item: LiveSession) =>
+                item.connected || item.session.id === activeId || starred.has(item.session.cc_session_id);
               const idle = group.items.filter((item) => !live(item));
               // 一条活的都没有就不收：那会让展开分组后空空如也，比排得长更难用。
               const canCollapse = idle.length > 0 && idle.length < group.items.length;
@@ -425,13 +604,34 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
                 </div>
               );
             })
-          : (sessions ?? []).map(renderItem)}
+          : (ordered ?? []).map(renderItem)}
         {/* 下一页在路上。挂在真实在途状态上：翻页失败会清掉它，不会留下一个永远
             转不完的 loading 行。 */}
         {sessions !== null && sessions.length > 0 && growing && (
           <div className="chat-sidebar-empty">{t.chat.sidebarLoading}</div>
         )}
       </nav>
+      {/* 动作失败的唯一出口（重命名/便签/归档）：4s 后自动消失。 */}
+      {actionError && <div className="chat-sidebar-error" role="status">{actionError}</div>}
+      {ctxMenu && ctxItem && (
+        <CardContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          starred={starred.has(ctxItem.session.cc_session_id)}
+          hasNote={!!ctxItem.note}
+          archived={ctxItem.archived}
+          onStar={() => toggleStar(ctxItem.session.cc_session_id)}
+          onNote={() => startNote(ctxItem)}
+          onRename={() => startRename(ctxItem)}
+          onArchive={() => toggleArchived(ctxItem)}
+          onNewSession={() => void invoke("open_new_session_window", { cwd: ctxItem.cwd, provider: ctxItem.provider }).catch(() => {})}
+          onOpenDir={ctxItem.cwd ? () => void invoke("open_project_dir", { cwd: ctxItem.cwd }).catch(() => {}) : null}
+          // 结束会话只对本 GUI 托管的 PTY 开放（与看板同一门控）：外部终端里跑的会话
+          // 杀不了，后台会话杀了也会被 supervisor 拉回来。
+          onEndSession={ctxItem.pty_managed && !ctxItem.background ? () => endSession(ctxItem) : null}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
       {/* 常驻底部：会话列表可能很长并滚动，设置入口不能跟着滚走。 */}
       <div className="chat-sidebar-footer">
         <button

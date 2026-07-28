@@ -185,7 +185,10 @@ describe("ChatSidebar", () => {
 
     fireEvent.scroll(list);
     await screen.findByRole("button", { name: /新活会话/ });
-    const names = within(list).getAllByRole("button").map((b) => b.textContent ?? "");
+    // 只看会话条目：每条右侧还有个「⋯」菜单按钮，混进来会把索引全打乱。
+    const names = within(list).getAllByRole("button")
+      .filter((b) => b.className.includes("chat-sidebar-item") && !b.className.includes("menu"))
+      .map((b) => b.textContent ?? "");
     expect(names[0]).toContain("会话 0");
     expect(names[59]).toContain("会话 59");
     // 新条目（含被后端顶到最前的活会话）只允许出现在原有 60 条之后。
@@ -313,6 +316,151 @@ describe("ChatSidebar", () => {
     render(<ChatSidebar activeId={2} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
     expect(await screen.findByRole("button", { name: /临时活儿/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /改侧栏/ })).toBeNull();
+  });
+
+  /**
+   * 会话菜单与看板卡片是同一个 CardContextMenu、同一批动作。侧栏条目从 <button> 改成
+   * role=button 的 <div> 是为了能在里面放「⋯」按钮（button 套 button 非法）。
+   */
+  describe("会话菜单", () => {
+    const listed = [session(1, "改侧栏", { connected: true }), session(2, "旧任务")];
+    /** menuMode 跟随「卡片菜单」设置：不传 = 右键模式（getSettings 无响应时的占位默认）。 */
+    const renderList = async (activeId = 1, cardMenuMode?: "button" | "context") => {
+      invoke.mockImplementation((command: string) => {
+        if (command === "get_live_sessions_page") return Promise.resolve(listed);
+        if (command === "get_settings" && cardMenuMode) return Promise.resolve({ card_menu_mode: cardMenuMode });
+        return Promise.resolve();
+      });
+      render(<ChatSidebar activeId={activeId} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
+      await screen.findByRole("button", { name: /改侧栏/ });
+    };
+
+    it("右键条目弹出菜单，归档走 set_archived 并把条目乐观摘掉", async () => {
+      await renderList();
+      fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "归档" }));
+      expect(invoke).toHaveBeenCalledWith("set_archived", { sessionId: 2, archived: true });
+      // 侧栏取的是 "all"（不含已归档）：点完当场消失，不等下一轮刷新。
+      await waitFor(() => expect(screen.queryByRole("button", { name: /旧任务/ })).toBeNull());
+    });
+
+    /// 已归档 = 已收纳，列表里就不该再有它——正开着它的对话也一样，且右边要跟着换走，
+    /// 否则「收起来了却还摊在桌上」。
+    it("归档当前会话：摘掉它并切到下一条", async () => {
+      const onSelect = vi.fn();
+      invoke.mockImplementation((command: string) =>
+        Promise.resolve(command === "get_live_sessions_page" ? listed : undefined));
+      render(<ChatSidebar activeId={1} approvalAwaitingIds={new Set()} onSelect={onSelect} onCollapse={() => {}} />);
+      await screen.findByRole("button", { name: /改侧栏/ });
+      fireEvent.contextMenu(screen.getByRole("button", { name: /改侧栏/ }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "归档" }));
+      expect(invoke).toHaveBeenCalledWith("set_archived", { sessionId: 1, archived: true });
+      expect(onSelect).toHaveBeenCalledWith(2);
+      await waitFor(() => expect(screen.queryByRole("button", { name: /改侧栏/ })).toBeNull());
+    });
+
+    /// 归档的不是当前会话时不该乱切——用户只是在收拾别的会话。
+    it("归档别的会话不动当前对话", async () => {
+      const onSelect = vi.fn();
+      invoke.mockImplementation((command: string) =>
+        Promise.resolve(command === "get_live_sessions_page" ? listed : undefined));
+      render(<ChatSidebar activeId={1} approvalAwaitingIds={new Set()} onSelect={onSelect} onCollapse={() => {}} />);
+      await screen.findByRole("button", { name: /改侧栏/ });
+      fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "归档" }));
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    /// 触发方式与看板共用 card_menu_mode，且**二选一**：两个入口并存时，改了设置的人
+    /// 会以为没生效（另一个还在），没改的人平白多一个不知从哪来的按钮。
+    it("按钮模式下才有「⋯」，右键交还给系统", async () => {
+      await renderList(1, "button");
+      const menus = await screen.findAllByRole("button", { name: "更多操作" });
+      expect(menus).toHaveLength(2);
+      const contextEvent = fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
+      expect(contextEvent).toBe(true); // 未 preventDefault
+      expect(screen.queryByRole("menuitem", { name: "归档" })).toBeNull();
+    });
+
+    /// 菜单吃掉的 Esc 必须标记 preventDefault：对话窗有窗口级的「Esc = 拒绝审批」监听
+    /// （以 defaultPrevented 让路），而 document 冒泡在 window 之前——不标记的话，
+    /// 关个右键菜单的同一次按键会顺手把 agent 的审批请求拒了。
+    it("Esc 关菜单时吃掉这次按键，不落到「拒绝审批」上", async () => {
+      await renderList();
+      fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
+      expect(await screen.findByRole("menuitem", { name: "归档" })).toBeTruthy();
+      // fireEvent 返回 !defaultPrevented：false = 这次按键已被菜单消费掉。
+      expect(fireEvent.keyDown(document, { key: "Escape" })).toBe(false);
+      await waitFor(() => expect(screen.queryByRole("menuitem", { name: "归档" })).toBeNull());
+    });
+
+    it("右键模式下不渲染「⋯」按钮", async () => {
+      await renderList(1, "context");
+      fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
+      expect(await screen.findByRole("menuitem", { name: "归档" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "更多操作" })).toBeNull();
+    });
+
+    it("「⋯」按钮同样打开菜单，重命名就地编辑并写回后端", async () => {
+      await renderList(1, "button");
+      const menus = await screen.findAllByRole("button", { name: "更多操作" });
+      fireEvent.click(menus[1]);
+      fireEvent.click(await screen.findByRole("menuitem", { name: "重命名" }));
+      const input = screen.getByPlaceholderText("输入名称，回车保存");
+      fireEvent.change(input, { target: { value: "改个名" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(invoke).toHaveBeenCalledWith("rename_session", {
+        cwd: "C:/Users/me/workspace/meowo", sessionId: "cc-2", title: "改个名", provider: "claude",
+      });
+    });
+
+    it("便签写完看得见，失败给出提示", async () => {
+      invoke.mockImplementation((command: string) => {
+        if (command === "get_live_sessions_page") return Promise.resolve([session(2, "旧任务", { note: "先跑一遍测试" })]);
+        if (command === "set_session_note") return Promise.reject(new Error("db busy"));
+        return Promise.resolve();
+      });
+      render(<ChatSidebar activeId={0} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
+      // 已有便签直接显示在条目里——写了看不见的备忘等于没写。
+      expect(await screen.findByText("先跑一遍测试")).toBeTruthy();
+      fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "编辑便签" }));
+      const input = screen.getByPlaceholderText("写点备忘…");
+      fireEvent.change(input, { target: { value: "改成先看日志" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(await screen.findByText("便签保存失败，请稍后再试。")).toBeTruthy();
+    });
+
+    it("置顶与看板共用同一份存储（键沿用 meowo-starred）", async () => {
+      await renderList();
+      fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "置顶" }));
+      expect(JSON.parse(localStorage.getItem("meowo-starred") ?? "[]")).toEqual(["cc-2"]);
+    });
+
+    /// 「置顶」得真的顶上去：只亮标记不动位置，等于名不副实。
+    it("置顶的会话排到最前，其余相对次序不变", async () => {
+      await renderList();
+      const names = () => screen.getAllByRole("button")
+        .filter((b) => b.className.includes("chat-sidebar-item") && !b.className.includes("menu"))
+        .map((b) => b.textContent ?? "");
+      expect(names()[0]).toContain("改侧栏");
+      fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "置顶" }));
+      await waitFor(() => expect(names()[0]).toContain("旧任务"));
+      expect(names()[1]).toContain("改侧栏");
+    });
+
+    /// 置顶的会话已断开时也不该被折进「显示 N 个未运行会话」——用户刚亲手顶上来的。
+    it("分组视图里置顶的会话不被折进未运行", async () => {
+      localStorage.setItem("meowo-chat-sidebar-grouped", "1");
+      localStorage.setItem("meowo-starred", JSON.stringify(["cc-2"]));
+      invoke.mockImplementation((command: string) =>
+        Promise.resolve(command === "get_live_sessions_page" ? listed : undefined));
+      render(<ChatSidebar activeId={1} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
+      expect(await screen.findByRole("button", { name: /旧任务/ })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: /显示 .* 个未运行会话/ })).toBeNull();
+    });
   });
 
   it("survives a backend without the sessions command", async () => {

@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { appConfirm } from "../confirm";
-import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, getChatHistory, getPendingApproval, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, resolvePendingApproval, savePastedAttachment, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
+import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, getChatHistory, getLiveSessionsPage, getPendingApproval, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, resolvePendingApproval, savePastedAttachment, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
 import { useT } from "../i18n";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { agentAssets, tintStyle } from "../providers";
@@ -14,6 +14,7 @@ import { ContextMeter } from "./chat/ContextMeter";
 import { TodoPanel } from "./chat/TodoPanel";
 import { Transcript } from "./chat/Transcript";
 import { ChatSidebar } from "./ChatSidebar";
+import { ArchiveIcon } from "./sticker/icons";
 import { ManagedTerminal } from "./ManagedTerminal";
 import { appendTerminalText, modeFromScreen, terminalAttention as detectTerminalAttention, visibleTerminalText, type AttentionGrammar, type TerminalAttention, type TerminalAttentionOption } from "../terminalAttention";
 import { useMenuPopup } from "./menu";
@@ -337,7 +338,9 @@ export function ChatWindow() {
   if (view === "terminal") terminalEverShownRef.current = true;
   const terminalMounted = terminalEverShownRef.current || terminalMonitorNeeded;
   const [approval, setApproval] = useState<PendingApproval | null>(null);
-  // 非当前会话的待授权请求（后端已不为此切窗抢焦点）：侧边栏亮徽标召唤用户自己过去。
+  // 非当前会话的待授权请求：侧边栏亮徽标召唤用户自己过去。注意后端 **会** 为 broker 接管的
+  // 审批把窗口切到目标会话（见 pty.rs 的 ensure_approval_window，不切的代价是请求 10s 后
+  // 回落 TUI），所以这里是兜底：切换竞态期间、以及消费者已注册在别的会话时到达的请求。
   // 只进不出会越攒越多——clear 事件、切到该会话、请求落到当前会话三条路径都负责摘除。
   const [approvalAwaitingIds, setApprovalAwaitingIds] = useState<ReadonlySet<number>>(() => new Set());
   const [brokerOwnsReview, setBrokerOwnsReview] = useState(false);
@@ -400,6 +403,35 @@ export function ChatWindow() {
       setSendError(String(e));
     } finally {
       setEndingSession(false);
+    }
+  };
+  // 「归档」:此前只有贴纸看板的卡片菜单能归档。用户读完一个会话往往就停在对话窗里,
+  // 要收纳它却得先切回看板、在一堆卡片里找回同一条——把入口补在这里,读完即可收。
+  // 语义与看板逐字一致(同一条 set_archived,同一个 archived 列):只改看板可见性,
+  // 不动进程、不影响本窗继续对话,故不做二次确认(误点再点一次即还原)。
+  const [archiving, setArchiving] = useState(false);
+  const toggleArchived = async () => {
+    if (!history || archiving) return;
+    const next = !history.archived;
+    setArchiving(true);
+    // 乐观翻转:IPC 往返 + 下一轮轮询才回真值,期间按钮维持旧文案会让人以为没点上。
+    // 失败回滚并报错——静默失败等于骗用户「已归档」。
+    setHistory((current) => (current ? { ...current, archived: next } : current));
+    try {
+      await invoke("set_archived", { sessionId, archived: next });
+      // 归档 = 收纳:侧栏里它当场消失,右边却还停在它的对话上,等于「收起来了却还摊在桌上」。
+      // 顺手切到列表里的下一条会话。取不到(它是唯一一条,或查询失败)就留在原地——
+      // 空窗比自作主张关窗好,用户仍可继续读这段对话。
+      if (next) {
+        const page = await getLiveSessionsPage("all", null, null, 5).catch(() => null);
+        const following = page?.items.find((item) => item.session.id !== sessionId);
+        if (following) resetTo(following.session.id);
+      }
+    } catch (e) {
+      setHistory((current) => (current ? { ...current, archived: !next } : current));
+      setSendError(String(e));
+    } finally {
+      setArchiving(false);
     }
   };
   const [resolvingApproval, setResolvingApproval] = useState(false);
@@ -1461,6 +1493,19 @@ export function ChatWindow() {
           <i data-tauri-drag-region />
           {t.chat.status[tone]}
         </span>
+        {history && (
+          <button
+            type="button"
+            className={"chat-archive" + (history.archived ? " is-on" : "")}
+            disabled={archiving}
+            aria-pressed={history.archived}
+            aria-label={history.archived ? t.sticker.unarchive : t.sticker.archive}
+            data-tip={history.archived ? t.chat.unarchiveTip : t.chat.archiveTip}
+            onClick={() => void toggleArchived()}
+          >
+            <ArchiveIcon archived={history.archived} />
+          </button>
+        )}
         {history?.ptyManaged && (
           <button type="button" className="chat-end" disabled={endingSession} data-tip={t.chat.endSessionConfirm} onClick={() => void endSession()}>
             {endingSession ? t.chat.terminalStopping : t.chat.endSession}

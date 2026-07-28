@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
@@ -154,6 +154,35 @@ describe("ManagedTerminal", () => {
     });
     render(<ManagedTerminal sessionId={163} status="ended" />);
     expect(await screen.findByRole("button", { name: "在 Meowo 中接管" })).toBeTruthy();
+  });
+
+  /// 后台会话「没画面」有两种成因：worker 真退了，或只是旁路没接上。此前一律说成
+  /// 「已结束」，于是一个还在跑的 worker 被谎报成死的，而且不给任何出路。
+  it("后台会话没接上时说没接上并给重接入口，而不是谎报已结束", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(noPty);
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" background />);
+    expect(await screen.findByText(/没能接上这个后台会话的画面/)).toBeTruthy();
+    expect(screen.queryByText(/这个后台会话已结束/)).toBeNull();
+    // 接管/启动对后台会话必然失败，不给；能做的只有再接一次。
+    expect(screen.queryByRole("button", { name: /接管/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "重新接入" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("attach_background_session", { sessionId: 163 }));
+  });
+
+  /// 拿到退出码才是真的结束了：那时既要说结束，也不该再给重接按钮。
+  it("后台 worker 真的退出后说已结束，且收起重接按钮", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve({ ...noPty, exited: true, exitCode: 0 });
+      }
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="ended" background />);
+    expect(await screen.findByText(/这个后台会话已结束/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "重新接入" })).toBeNull();
   });
 
   it("shows the initializing cover until the managed PTY produces its first output", async () => {

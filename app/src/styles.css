@@ -2971,6 +2971,13 @@ select.ns-input {
 .chat-end { white-space: nowrap; }
 .chat-end:hover:not(:disabled) { color: var(--cc-err-vivid); background: color-mix(in srgb, var(--cc-err-vivid) 10%, transparent); }
 .chat-end:disabled { opacity: .6; cursor: default; }
+/* 「归档」：与看板卡片菜单同一动作，做成图标按钮——标题栏横向已被状态徽标、结束会话、
+   视图页签占满，再加一个文字按钮会把标题挤没。归档后按钮留在原位并高亮（is-on），
+   它同时是「本会话已归档」的唯一提示。 */
+.chat-archive { width: 28px; height: 28px; flex: 0 0 auto; display: grid; place-items: center; border: 0; border-radius: var(--r-7); color: var(--cc-text-faint); background: transparent; cursor: pointer; }
+.chat-archive:hover:not(:disabled) { color: var(--cc-text); background: var(--cc-surface-hover); }
+.chat-archive.is-on { color: var(--cc-accent-text); background: var(--cc-accent-soft); }
+.chat-archive:disabled { opacity: .6; cursor: default; }
 .chat-view-tabs { display: flex; padding: var(--sp-3); border: 0; border-radius: var(--r-10); background: color-mix(in srgb, var(--cc-text) 5%, transparent); }
 .chat-view-tabs button.is-active { color: var(--cc-text); background: var(--cc-bg); box-shadow: 0 1px 4px rgba(0,0,0,.08); }
 /* position:relative 不能省：chat-terminal-attention 是 absolute 浮层，必须锚在内容列内居中，
@@ -3005,11 +3012,14 @@ select.ns-input {
 @media (prefers-reduced-motion: reduce) { .chat-sidebar-caret { transition: none; } }
 /* 「显示 N 个未运行会话」：缩进对齐组内条目，弱化到接近纯文本——它是一条揭示动作，
    不该和真正的会话条目抢注意力。 */
-.chat-sidebar-more { display: block; width: 100%; padding: var(--sp-4) var(--sp-8) var(--sp-4) var(--sp-24); border: 0; background: none; text-align: left; color: var(--cc-text-faint); font: inherit; font-size: var(--fs-11); cursor: pointer; }
-.chat-sidebar-more:hover { color: var(--cc-text-dim); background: var(--cc-surface-hover); }
+/* 圆角与左缩进都对齐会话条目（10px 内边距 + 15px 徽标 + 9px 间隔 = 34px）：直角通栏的
+   hover 底色横在一列圆角条目中间格外扎眼，而它本就该是这列里最不起眼的一行。 */
+.chat-sidebar-more { display: block; width: 100%; padding: var(--sp-4) var(--sp-10) var(--sp-4) 34px; border: 0; border-radius: var(--r-9); background: none; text-align: left; color: var(--cc-text-faint); font: inherit; font-size: var(--fs-11); cursor: pointer; }
+.chat-sidebar-more:hover { color: var(--cc-text-dim); background: color-mix(in srgb, var(--cc-text) 4%, transparent); }
 .chat-sidebar-empty { padding: var(--sp-14) var(--sp-8); color: var(--cc-text-faint); font-size: var(--fs-11); text-align: center; }
-/* 选中态只用中性底色，无左缘条。 */
-.chat-sidebar-item { display: flex; align-items: flex-start; gap: var(--sp-9); padding: var(--sp-8) var(--sp-10); border: 0; border-radius: var(--r-9); color: var(--cc-text-dim); background: transparent; font: inherit; text-align: left; cursor: pointer; }
+/* 选中态只用中性底色，无左缘条。position:relative 是「⋯」菜单按钮的定位锚（它绝对
+   定位浮在右上角，见 .chat-sidebar-item-menu——不占位才不会让每行 hover 时跳动）。 */
+.chat-sidebar-item { position: relative; display: flex; align-items: flex-start; gap: var(--sp-9); padding: var(--sp-8) var(--sp-10); border: 0; border-radius: var(--r-9); color: var(--cc-text-dim); background: transparent; font: inherit; text-align: left; cursor: pointer; }
 .chat-sidebar-item:hover { background: var(--cc-surface-hover); }
 .chat-sidebar-item.is-active { color: var(--cc-text); background: color-mix(in srgb, var(--cc-text) 7%, transparent); }
 /* agent 徽标：连接=品牌色（tintStyle inline 注入），断开=灰。对齐标题行视觉中线。 */
@@ -3025,10 +3035,35 @@ select.ns-input {
 .chat-sidebar-dot.is-error { background: var(--cc-err-vivid); }
 /* 待授权：琥珀色 + 比 pending(1.8s) 更急的脉冲——授权在阻塞 agent，召唤强度最高。 */
 .chat-sidebar-dot.is-approval { background: var(--cc-warn-vivid); animation: chat-running-pulse 0.9s ease-in-out infinite; }
-.chat-sidebar-text { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
-.chat-sidebar-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-12); font-weight: 500; line-height: 1.4; }
+/* 文本列吃满剩余宽度：右侧「⋯」按钮靠 margin-left:auto 贴边，文本超长时先截断自己。 */
+.chat-sidebar-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.chat-sidebar-name { display: flex; align-items: center; gap: var(--sp-4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-12); font-weight: 500; line-height: 1.4; }
 .chat-sidebar-item.is-active .chat-sidebar-name { font-weight: 600; }
+/* 置顶标记：与看板同一份 localStorage，这里只做标记（侧栏不做浮顶排序，见组件注释）。 */
+.chat-sidebar-star { flex: 0 0 auto; display: inline-flex; color: var(--cc-accent-text); }
+.chat-sidebar-star svg { width: 11px; height: 11px; }
 .chat-sidebar-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cc-text-faint); font-size: var(--fs-10); }
+/* 便签：一行截断（完整内容进 title）。写了看不见的备忘等于没写。 */
+.chat-sidebar-note { display: flex; align-items: center; gap: var(--sp-4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cc-text-faint); font-size: var(--fs-10); }
+.chat-sidebar-note svg { flex: 0 0 auto; width: 10px; height: 10px; }
+/* 就地编辑（重命名/便签）：铺满文本列，视觉上顶掉原来那一行，不撑宽条目。 */
+.chat-sidebar-edit { width: 100%; min-width: 0; padding: var(--sp-2) var(--sp-5); border: 1px solid var(--cc-accent-border); border-radius: var(--r-5); color: var(--cc-text); background: var(--cc-bg); font: inherit; font-size: var(--fs-11); }
+.chat-sidebar-edit:focus { outline: none; border-color: var(--cc-accent); }
+/* 「⋯」菜单按钮：**绝对定位**浮在条目右上角，不参与 flex 布局——参与的话，平时留白
+   一列 20px 死白（会话名平白被截断），hover 时又会把只有一行文字的条目撑高 3px，
+   于是鼠标扫过列表每一行都在跳。脱离文档流后，hover 前后的行宽行高分毫不动。
+   底色不透明：它浮在文字上方，透明的话会与标题尾部糊在一起。
+   键盘 focus 也要能召出来，否则纯键盘用户够不着菜单。 */
+.chat-sidebar-item-menu { position: absolute; right: var(--sp-6); top: var(--sp-6); width: 20px; height: 20px; display: none; place-items: center; padding: 0; border: 0; border-radius: var(--r-5); color: var(--cc-text-dim); background: color-mix(in srgb, var(--cc-text) 10%, var(--cc-bg)); cursor: pointer; }
+.chat-sidebar-item:hover .chat-sidebar-item-menu,
+.chat-sidebar-item:focus-within .chat-sidebar-item-menu,
+.chat-sidebar-item-menu:focus-visible { display: grid; }
+/* 没有 hover 的设备（触屏）常显：那里既悬不上去也不好右键，藏起来等于没有菜单。 */
+@media (hover: none) { .chat-sidebar-item-menu { display: grid; } }
+.chat-sidebar-item-menu:hover { color: var(--cc-text); background: color-mix(in srgb, var(--cc-text) 18%, var(--cc-bg)); }
+.chat-sidebar-item-menu svg { width: 14px; height: 14px; }
+/* 动作失败提示：贴在列表与底栏之间，红字但不占常驻高度（4s 后自行消失）。 */
+.chat-sidebar-error { flex: 0 0 auto; padding: var(--sp-6) var(--sp-10); color: var(--cc-err-vivid); font-size: var(--fs-10); }
 .chat-scroll {
   flex: 1;
   overflow: auto;
@@ -3049,6 +3084,18 @@ select.ns-input {
 }
 .chat-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.72; letter-spacing: -.006em; user-select: text; }
 .chat-message.is-user .chat-text { font-size: var(--fs-13); line-height: 1.58; }
+/* 斜杠命令（/clear、/loop …）：transcript 里是一条 XML 包裹的用户消息，这里渲染成
+   命令徽章。用户气泡的底色去掉——它不是一句话，是一次操作，视觉上该更轻。 */
+.chat-message.is-user.is-command { padding: 0; background: transparent; }
+.chat-command { display: inline-flex; align-items: center; gap: var(--sp-6); padding: var(--sp-4) var(--sp-10); border: 1px solid var(--cc-border); border-radius: var(--r-7); color: var(--cc-text-dim); background: color-mix(in srgb, var(--cc-text) 4%, var(--cc-bg)); font-size: var(--fs-11); }
+.chat-command + .chat-command { margin-left: var(--sp-6); }
+.chat-command-icon { display: inline-flex; color: var(--cc-text-faint); }
+.chat-command-name { font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, "Roboto Mono", monospace; color: var(--cc-text); }
+.chat-command-args { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cc-text-faint); }
+/* 命令输出复用 .chat-tool 的折叠外观，但它挂在用户气泡里，左右不再外扩。 */
+.chat-command-out { margin: var(--sp-6) 0 0; }
+.chat-command-out summary { min-height: 30px; padding: 0 var(--sp-10); }
+.chat-command-out pre { padding: var(--sp-8) var(--sp-10); }
 .chat-tool { position: relative; margin: var(--sp-1) var(--sp-6); border: 0; border-radius: var(--r-9); color: var(--cc-text-dim); background: transparent; }
 .chat-tool summary { min-height: 38px; padding: 0 var(--sp-11) 0 var(--sp-14); display: flex; align-items: center; gap: var(--sp-9); cursor: pointer; font-size: var(--fs-11); list-style: none; border-radius: var(--r-9); }
 .chat-tool summary::-webkit-details-marker { display: none; }

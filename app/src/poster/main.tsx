@@ -153,10 +153,10 @@ const SCENES: Record<string, () => JSX.Element> = {
   manage: () => (
     <div className="poster">
       <h2 className="h2">点开就能管</h2>
-      <p className="sub">星标 · 便签 · 改名 · 归档，悬停才出现</p>
+      <p className="sub">置顶 · 便签 · 改名 · 归档，悬停才出现</p>
       <Shot filter="all" items={[noted, s2, s3, s4]} width={640} height={640} />
       <div className="chips">
-        {["星标置顶", "本地便签", "直接改名", "归档隐藏", "标题 / 仓库名搜索"].map((c) => (
+        {["置顶会话", "本地便签", "直接改名", "归档隐藏", "标题 / 仓库名搜索"].map((c) => (
           <span key={c} className="chip">{c}</span>
         ))}
       </div>

@@ -269,7 +269,7 @@ describe("Sticker", () => {
     expect(container.querySelector(".stk-sub")).toBeNull();
   });
 
-  it("右键菜单星标切换状态并持久化到 localStorage,操作后菜单关闭", () => {
+  it("右键菜单置顶切换状态并持久化到 localStorage,操作后菜单关闭", () => {
     localStorage.removeItem("meowo-starred");
     const { container } = render(<Sticker filter="all" data={[mk({ session: { id: 7, project_id: 1, cc_session_id: "star-me", status: "running", started_at: 0, last_event_at: Date.now(), ended_at: null } })]} />);
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
@@ -280,7 +280,7 @@ describe("Sticker", () => {
     localStorage.removeItem("meowo-starred");
   });
 
-  it("右键打开菜单:含星标/便签/重命名/归档四项,Escape 关闭", () => {
+  it("右键打开菜单:含置顶/便签/重命名/归档四项,Escape 关闭", () => {
     const { container } = render(<Sticker filter="all" data={[mk()]} />);
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     const menu = document.querySelector(".ctx-menu")!;
@@ -357,7 +357,7 @@ describe("Sticker", () => {
     expect(screen.queryByText(zh.chat.endSession)).toBeNull();
   });
 
-  it("已星标/有便签/已归档的会话,菜单项显示反向文案", () => {
+  it("已置顶/有便签/已归档的会话,菜单项显示反向文案", () => {
     localStorage.setItem("meowo-starred", JSON.stringify(["s"]));
     const { container } = render(<Sticker filter="archived" data={[mk({ archived: true, note: "有便签" })]} />);
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
@@ -421,7 +421,7 @@ describe("Sticker", () => {
     expect(cards[1].querySelector(".stk-title")?.textContent).toBe("旧");
   });
 
-  it("已星标会话排到列表最前", () => {
+  it("已置顶会话排到列表最前", () => {
     localStorage.setItem("meowo-starred", JSON.stringify(["b"]));
     const { container } = render(<Sticker filter="all" data={[
       mk({ task_title: "甲", current_activity: null, session: { id: 1, project_id: 1, cc_session_id: "a", status: "running", started_at: 0, last_event_at: Date.now(), ended_at: null } }),

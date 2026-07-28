@@ -524,8 +524,12 @@ impl PtyBroker {
     /// 无提示等满五分钟。
     ///
     /// 窗口不存在：没有进行中的输入可打断，新开窗口直接落在该会话上，等消费者注册。
-    /// 窗口已存在：用户可能正在别的会话里输入，**绝不能**切会话/抢焦点——闪任务栏提醒
-    /// （前端另靠 pending-approval 在侧边栏亮徽标），等用户自己切到该会话注册消费者。
+    /// 窗口已存在：**同样切到该会话**并闪任务栏。曾经这里只闪不切（怕打断用户在别的会话
+    /// 里的输入），代价是「窗口开在会话 A、会话 B 来要审批」这种常态下用户得在 10s 内自己
+    /// 注意到闪烁并点开 B，否则请求被撤回、答成 pass 退回 TUI——那 10s 是按 WebView2 冷启动
+    /// 量的，不是按人的反应时间量的。取舍已经翻面：宁可切走一次，也不要让审批悄悄回落。
+    /// 前端的侧栏授权徽标（approvalAwaitingIds）随之退居兜底：它覆盖切换竞态、以及消费者
+    /// 已注册在别的会话时到达的请求。
     ///
     /// 两个分支都只做**有界**等待，等不到就返回 false 让调用方撤回请求并答 `pass`，
     /// 提示回落到 agent 自己的审批界面。已存在的窗口尤其不能无界等（此前直接返回
@@ -1184,6 +1188,24 @@ impl PtyBroker {
             .map_err(|_| "attach 状态锁已损坏")?
             .ok_or("attach 服务未启动")?;
         Ok(())
+    }
+
+    /// 此刻 broker 手里还压着审批请求的会话（批量版，供看板/角标一次取齐）。
+    ///
+    /// 这是「agent 真的在等你批」的**实时**事实源：`PermissionRequest` hook 阻塞期间请求挂在
+    /// 这儿，hook 一返回（放行 / 拒绝 / 交还终端）就没了。DB 里的 `pending_review` 则要等到
+    /// 下一个 hook 事件（PostToolUse/Stop）才清——被放行的工具跑多久，那个标记就滞留多久。
+    pub(crate) fn approval_session_ids(&self) -> HashSet<i64> {
+        self.attach
+            .approvals
+            .lock()
+            .map(|approvals| {
+                approvals
+                    .values()
+                    .map(|pending| pending.request.session_id)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn pending_approval(&self, session_id: i64) -> Option<ApprovalRequest> {

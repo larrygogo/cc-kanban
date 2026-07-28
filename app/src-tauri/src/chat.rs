@@ -111,6 +111,10 @@ fn trim_first_page<T>(items: &mut Vec<T>, full: bool, full_read: bool) -> bool {
 struct LiveSignals {
     alive: std::sync::Arc<std::collections::HashSet<i64>>,
     pty_live: bool,
+    /// broker 此刻还压着这个会话的审批请求。用于 `pending_review` 的存活校正
+    /// (见 session_query::pending_review_live):hook 落库的那一位在权限已放行后仍会
+    /// 滞留到 PostToolUse——被放行的工具跑 20 分钟,对话页就错挂 20 分钟「Agent 请求权限」。
+    broker_approval: bool,
     /// agent 自建后台会话的索引(claude FleetView),与看板共享同一份 TTL 快照。
     runtimes: std::sync::Arc<super::session_query::SessionRuntimeIndex>,
 }
@@ -155,10 +159,12 @@ fn load_chat_history(
         items: Vec::new(),
         offset,
         reset: false,
-        pending_review: header
-            .pending_review
-            .as_deref()
-            .and_then(PendingReviewKind::from_stored),
+        pending_review: super::session_query::pending_review_live(
+            &header.provider,
+            header.pending_review.as_deref(),
+            live.broker_approval,
+        )
+        .and_then(PendingReviewKind::from_stored),
         model: context.model,
         agent_modes: Vec::new(),
         context_pct: context.used_pct,
@@ -195,6 +201,7 @@ fn load_chat_history(
             &header.provider,
             &header.cc_session_id,
         ),
+        archived: header.archived,
         last_user_text: header.last_user_text.clone(),
         last_ai_text: header.last_ai_text.clone(),
     };
@@ -423,6 +430,7 @@ pub(crate) async fn get_chat_history(
     let snapshots = state.process_snapshots.clone();
     let runtimes = state.session_runtimes.clone();
     let pty_live = state.ptys.is_active(session_id);
+    let broker_approval = state.ptys.pending_approval(session_id).is_some();
     tauri::async_runtime::spawn_blocking(move || {
         load_chat_history(
             &db_path,
@@ -432,6 +440,7 @@ pub(crate) async fn get_chat_history(
                 alive: snapshots.snapshot(),
                 pty_live,
                 runtimes: runtimes.snapshot(),
+                broker_approval,
             },
             session_id,
             offset,

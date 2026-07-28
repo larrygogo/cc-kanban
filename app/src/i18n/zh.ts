@@ -55,8 +55,9 @@ export const zh = {
     openChat: "查看完整对话",
     newSession: "新建会话",
     previewMark: "最近",
-    star: "星标置顶",
-    unstar: "取消星标",
+    // 界面文案是「置顶」；存储键与内部标识仍叫 star（meowo-starred），改了会丢用户已有数据。
+    star: "置顶",
+    unstar: "取消置顶",
     noteAdd: "添加便签",
     noteEdit: "编辑便签",
     notePlaceholder: "写点备忘…",
@@ -226,6 +227,9 @@ export const zh = {
     terminalExternal: "会话仍在外部终端运行；这里同步显示对话，但不会重复启动同一会话",
     terminalStart: "在 Meowo 中接管",
     terminalBackgroundGone: "这个后台会话已结束。它的对话内容 Agent 没有写进文件，无法恢复——上方保留了它最后的终端输出。",
+    // 没接上旁路 ≠ 会话结束：worker 可能还在跑，只是花名册/socket 暂时查不到。
+    terminalBackgroundLost: "没能接上这个后台会话的画面。它可能还在跑——重新接入试试；若是 Agent 已经收走了它，画面就不会再有了。",
+    terminalBackgroundRetry: "重新接入",
     terminalTakeover: "结束外部进程并接管",
     terminalTakeoverConfirm: "接管会先结束外部终端中的 Agent，再在 Meowo 中恢复同一会话。是否继续？",
     terminalStarting: "正在启动终端…",
@@ -236,6 +240,9 @@ export const zh = {
     endSession: "结束会话",
     // 对话页标题栏与终端页操作条共用同一段确认文案(confirmStopSession)。
     endSessionConfirm: "结束会话会终止正在运行的 Agent 进程，进行中的任务会被打断。是否继续？",
+    // 标题栏归档按钮的提示：说清「只是从看板收起」，别让人以为会关掉/删掉会话。
+    archiveTip: "归档：从看板收起这个会话（不影响本窗对话）",
+    unarchiveTip: "取消归档：让这个会话回到看板",
     terminalAttach: "在外部终端同步打开",
     modelMenuOpen: "终端里已打开模型菜单，点此收起",
     // 交互式斜杠命令（/config、/resume 等）发出后的过渡横幅：识别成功会变成选项卡片；
@@ -281,6 +288,10 @@ export const zh = {
     terminalPromptCancel: "取消 / 返回",
     sidebarTitle: "会话",
     sidebarCollapse: "收起会话列表",
+    sidebarActionFailed: "操作失败，请稍后再试。",
+    // 斜杠命令在 transcript 里是一条 XML 包裹的用户消息，渲染成徽章而非标签原文。
+    localCommand: "本地命令",
+    commandOutput: "命令输出",
     sidebarApproval: "等待你的授权",
     sidebarExpand: "展开会话列表",
     sidebarEmpty: "暂无会话",
@@ -407,7 +418,7 @@ export const zh = {
     sessionOpenInChat: "对话窗口",
     sessionOpenInTerminal: "外部终端",
     cardMenu: "卡片菜单",
-    cardMenuDesc: "星标、便签、重命名等操作的打开方式；触屏等不便右键的设备可改用卡片按钮",
+    cardMenuDesc: "置顶、便签、重命名等操作的打开方式；触屏等不便右键的设备可改用卡片按钮",
     cardMenuContext: "右键菜单",
     cardMenuButton: "卡片按钮",
     langAuto: "跟随系统",
@@ -641,7 +652,7 @@ export const zh = {
     },
     cardmenu: {
       title: "卡片菜单：整理每个会话",
-      desc: "把鼠标移到卡片上，右上角会出现「⋯」菜单——星标、便签、改名、归档、新建会话、打开目录都在这里。",
+      desc: "把鼠标移到卡片上，右上角会出现「⋯」菜单——置顶、便签、改名、归档、新建会话、打开目录都在这里。",
       mode: "选卡片上的菜单按钮，或右键呼出",
     },
     window: {

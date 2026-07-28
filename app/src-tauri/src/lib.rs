@@ -1195,6 +1195,7 @@ mod tests {
         let cache = std::sync::Mutex::new(meowo_agent::TranscriptCache::new());
         let pty_none = std::collections::HashSet::new();
         let no_runtimes = SessionRuntimeIndex::new();
+        let no_approvals = std::collections::HashSet::new();
         let page = live_sessions_blocking(
             &path,
             &cache,
@@ -1202,6 +1203,7 @@ mod tests {
                 alive: &alive,
                 pty_live: &pty_none,
                 runtimes: &no_runtimes,
+                approvals: &no_approvals,
             },
             "waiting",
             None,

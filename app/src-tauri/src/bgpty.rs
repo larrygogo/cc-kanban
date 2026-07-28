@@ -240,10 +240,24 @@ impl BgPtyRegistry {
             closed: AtomicBool::new(false),
             exit_code: Mutex::new(None),
         });
-        self.sessions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(session_id, session.clone());
+        // 登记要**持锁复核**一次：上面的 is_active 与这里之间有一整个 connect() 的窗口，
+        // 而一次窗口打开就有三处并发调 attach（对话页的 attach effect、终端首帧 resize 的
+        // 兜底、stop 前的兜底）。不复核的话两条连接都建成，后 insert 的把前一个 Arc 顶掉，
+        // 被顶掉那条的 read_loop 线程与管道句柄成了孤儿，活到 worker 退出为止——每开一个
+        // 后台会话漏一次。复核发现别人抢先就丢弃自己这条（drop 关句柄），不 spawn 读线程。
+        {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if sessions
+                .get(&session_id)
+                .is_some_and(|existing| !existing.closed.load(Ordering::Acquire))
+            {
+                return Ok(());
+            }
+            sessions.insert(session_id, session.clone());
+        }
 
         let auth = endpoint.auth.clone();
         let worker = session.clone();
@@ -329,6 +343,31 @@ impl BgPtyRegistry {
 ///
 /// 阻塞（连 socket + 等一行响应），只在 spawn_blocking 里调。
 pub(crate) fn send_prompt(
+    control: &meowo_agent::BackgroundControl,
+    text: &str,
+) -> Result<(), String> {
+    // 整套「连 socket + 发一行 + 等一行回执」丢进独立线程，主线程限时等结果：Wire 是类型
+    // 擦除过的 Read/Write（Windows 那端还是命名管道 File，本就没有 set_read_timeout），
+    // 没法在句柄上设超时。守护进程收下连接却不回话（supervisor 卡死）时，原来的写法会让
+    // read 永久阻塞——占死一个 spawn_blocking 工位，而用户点的「发送」永远不返回。
+    // 超时后这条线程留给 OS 收尾（它至多阻塞到对端关闭），但每次发送最多产生一条。
+    let (tx, rx) = std::sync::mpsc::channel();
+    let control = control.clone();
+    let text = text.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(send_prompt_blocking(&control, &text));
+    });
+    match rx.recv_timeout(std::time::Duration::from_millis(SEND_PROMPT_TIMEOUT_MS)) {
+        Ok(result) => result,
+        Err(_) => Err("后台会话没有回执（守护进程可能无响应），消息未确认送达。".to_string()),
+    }
+}
+
+/// 等一行回执的上限。守护进程正常时是本机 socket 上的一次往返（毫秒级）；给到 10s 是留给
+/// 它正忙着写盘/换页的余量，再久就该让用户拿回控制权，而不是对着一个不返回的按钮等。
+const SEND_PROMPT_TIMEOUT_MS: u64 = 10_000;
+
+fn send_prompt_blocking(
     control: &meowo_agent::BackgroundControl,
     text: &str,
 ) -> Result<(), String> {

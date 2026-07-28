@@ -280,6 +280,12 @@ pub(crate) async fn get_live_sessions_counts(
                 candidate.last_event_at,
                 now,
             );
+            // 这里**刻意不做** pending_review 的存活校正（pending_review_live）：tab 归属由
+            // SQL 谓词决定（running 要求 `pending_review IS NULL`、waiting 收下所有非 NULL，
+            // 见 query.rs 的 live_sessions），角标必须与那条谓词同源。只在这一端校正的话，
+            // 一条「已放行但标记滞留」的 running 会话会被数进 running、却因 SQL 仍看得见那
+            // 一位而进不了 running 列表——数字与列表当场打架，正是这套口径最忌讳的事。
+            // 校正只作用于**展示**（卡片 pill / 对话页 / 托盘通知），不参与分类。
             match tab_class(
                 connected,
                 &candidate.status,
@@ -317,6 +323,7 @@ pub(crate) async fn get_live_sessions_page(
     let snapshots = state.process_snapshots.clone();
     let runtimes = state.session_runtimes.clone();
     let pty_live = state.ptys.active_session_ids();
+    let approvals = state.ptys.approval_session_ids();
     let filter = normalize_filter(filter);
     tauri::async_runtime::spawn_blocking(move || {
         let alive = snapshots.snapshot();
@@ -328,6 +335,7 @@ pub(crate) async fn get_live_sessions_page(
                 alive: &alive,
                 pty_live: &pty_live,
                 runtimes: &runtimes,
+                approvals: &approvals,
             },
             &filter,
             search.as_deref(),
@@ -397,6 +405,33 @@ pub(crate) fn session_connected(
     pid_alive || now.saturating_sub(last_event_at) < RESUME_GRACE_MS
 }
 
+/// 「待批准」此刻是否还成立——`pending_review` 的存活校正，与 [`session_connected`] 对
+/// `status` 做的事同构：DB 里那一位是 hook 落库的滞后快照，直接展示就会撒谎。
+///
+/// **claude 这类由 hook 决定权限的 provider**（[`permission_hook_decides`]）：真相在 broker。
+/// `PermissionRequest` hook 阻塞期间请求挂在 broker 上；hook 一返回就没了——要么用户在 GUI
+/// 里批了/拒了，要么没有 GUI 消费者、交还终端由用户当场处理。三种结局都意味着**没人再等**，
+/// 可 DB 里的 `pending_review` 要等下一个 hook 事件（PostToolUse/Stop）才清：被放行的工具
+/// 跑 20 分钟，对话页就错挂 20 分钟「Agent 请求权限」，而终端里 agent 正忙着干活。
+///
+/// Question/Plan 不做这个校正：它们由 `PreToolUse`（AskUserQuestion/ExitPlanMode）落库、
+/// 不经 broker，而那两个工具本身就是「停下来等人」——等的期间 DB 标记正是对的。
+pub(crate) fn pending_review_live<'a>(
+    provider: &str,
+    pending_review: Option<&'a str>,
+    broker_holds_approval: bool,
+) -> Option<&'a str> {
+    match pending_review {
+        Some("approval")
+            if !broker_holds_approval
+                && meowo_agent::by_id(provider).is_some_and(|p| p.permission_hook_decides()) =>
+        {
+            None
+        }
+        other => other,
+    }
+}
+
 /// Single definition shared by list filtering and tab counters.
 pub(crate) fn tab_class(
     connected: bool,
@@ -428,6 +463,9 @@ pub(crate) struct LiveContext<'a> {
     pub(crate) pty_live: &'a std::collections::HashSet<i64>,
     /// agent 自建后台会话的索引(见 [`SessionRuntimeCache`])。
     pub(crate) runtimes: &'a SessionRuntimeIndex,
+    /// 此刻 broker 手里还压着审批请求的会话(见 [`pending_review_live`])。DB 的
+    /// `pending_review` 是滞后快照,要靠它校正,否则被放行的工具跑多久就错挂多久「待批准」。
+    pub(crate) approvals: &'a std::collections::HashSet<i64>,
 }
 
 pub(crate) fn live_sessions_blocking(
@@ -472,8 +510,19 @@ pub(crate) fn live_sessions_blocking(
         let batch_tail = sessions
             .last()
             .map(|session| (session.session.last_event_at, session.session.id));
-        for session in sessions {
+        for mut session in sessions {
             scanned += 1;
+            // 「待批准」的存活校正,与下面 connected 校正 status 是同一套路数(见
+            // pending_review_live):hook 落库的那一位在权限已放行后仍会滞留到 PostToolUse。
+            // 只改**卡片展示**(pill / 状态点),不改这条会话落在哪个 tab——归属由 SQL 谓词
+            // 决定,角标也数那一份(见 get_live_sessions_counts 的注释)。于是「已放行但标记
+            // 滞留」的会话仍待在待交互 tab 里,只是卡片如实显示运行中;数字两端一致,不打架。
+            session.pending_review = pending_review_live(
+                &session.provider,
+                session.pending_review.as_deref(),
+                live.approvals.contains(&session.session.id),
+            )
+            .map(str::to_string);
             let scan_pos = PageCursor {
                 last_event_at: session.session.last_event_at,
                 id: session.session.id,
@@ -597,6 +646,11 @@ fn enrich(
         inner: session,
         connected,
         pty_managed,
+        // 当前隐藏规则下**恒为 false**：上面 `runtime.background` 为真的行已经整条丢掉
+        // （后台会话一律不上看板，见 hidden_background）。字段留着不是摆设——放宽隐藏规则
+        // 时（比如只藏查不到源的那些）这里立刻有值可发，前端的后台会话分支（贴纸的
+        // 「去 FleetView 找它」提示、结束会话入口）也就随之活过来。改隐藏规则的人请连带
+        // 检查那几处：它们目前只被合成数据的测试覆盖，线上走不到。
         background: runtime.background,
         errored: error_label.is_some(),
         error_label,
@@ -615,6 +669,42 @@ mod tests {
     fn unknown_filters_degrade_to_all() {
         assert_eq!(normalize_filter("unknown".into()), "all");
         assert_eq!(normalize_filter("waiting".into()), "waiting");
+    }
+
+    /// 真实翻车：终端里 agent 正跑着一条 20 分钟的 shell 命令，对话页却挂着「Agent 请求
+    /// 权限 · 待授权」。权限早被放行（GUI 里批了，或没有 GUI 消费者、用户在终端当场批的），
+    /// 但 DB 的 `pending_review` 要等 PostToolUse 才清——工具跑多久就错挂多久。
+    /// 对 hook 决定权限的 provider，实时真相在 broker：它空了就说明没人再等。
+    #[test]
+    fn a_settled_permission_request_stops_claiming_the_agent_is_waiting() {
+        // claude/codex 的 PermissionRequest hook 阻塞等决策：broker 空 = 已尘埃落定。
+        assert_eq!(pending_review_live("claude", Some("approval"), false), None);
+        assert_eq!(pending_review_live("codex", Some("approval"), false), None);
+        // hook 还压着请求 = agent 真的停在那儿等你批。
+        assert_eq!(
+            pending_review_live("claude", Some("approval"), true),
+            Some("approval")
+        );
+        // Question/Plan 由 PreToolUse 落库、不经 broker，而那两个工具本身就是停下来等人。
+        assert_eq!(
+            pending_review_live("claude", Some("question"), false),
+            Some("question")
+        );
+        assert_eq!(
+            pending_review_live("claude", Some("plan"), false),
+            Some("plan")
+        );
+        // 不接管决策的 provider（kimi 的该事件 observation-only）：待批状态只有 DB 这一个
+        // 来源，broker 空不代表已处理——照旧显示，卡片提示去终端处理。未知 provider 同理。
+        assert_eq!(
+            pending_review_live("kimi", Some("approval"), false),
+            Some("approval")
+        );
+        assert_eq!(
+            pending_review_live("who-knows", Some("approval"), false),
+            Some("approval")
+        );
+        assert_eq!(pending_review_live("claude", None, false), None);
     }
 
     /// 空壳会话不能靠 transcript 里一行 `ai-title` 赖着不走：store 的计数按 **DB 标题**
@@ -729,6 +819,7 @@ mod tests {
         let alive = std::collections::HashSet::new();
         let pty_none = std::collections::HashSet::new();
         let no_runtimes = SessionRuntimeIndex::new();
+        let no_approvals = std::collections::HashSet::new();
         let page = live_sessions_blocking(
             &db,
             &cache,
@@ -736,6 +827,7 @@ mod tests {
                 alive: &alive,
                 pty_live: &pty_none,
                 runtimes: &no_runtimes,
+                approvals: &no_approvals,
             },
             "all",
             None,
@@ -802,6 +894,7 @@ mod tests {
         let cache = Mutex::new(meowo_agent::TranscriptCache::default());
         let pty_none = std::collections::HashSet::new();
         let no_runtimes = SessionRuntimeIndex::new();
+        let no_approvals = std::collections::HashSet::new();
         let mut seen = std::collections::HashSet::new();
         let mut cursor: Option<(i64, i64)> = None;
         const PAGE: usize = 100;
@@ -813,6 +906,7 @@ mod tests {
                     alive: &alive,
                     pty_live: &pty_none,
                     runtimes: &no_runtimes,
+                    approvals: &no_approvals,
                 },
                 "all",
                 None,
@@ -870,6 +964,7 @@ mod tests {
         let alive = std::collections::HashSet::new();
         let pty_none = std::collections::HashSet::new();
         let no_runtimes = SessionRuntimeIndex::new();
+        let no_approvals = std::collections::HashSet::new();
         let visible = live_sessions_blocking(
             &db,
             &cache,
@@ -877,6 +972,7 @@ mod tests {
                 alive: &alive,
                 pty_live: &pty_none,
                 runtimes: &no_runtimes,
+                approvals: &no_approvals,
             },
             "all",
             None,

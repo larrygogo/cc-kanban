@@ -76,7 +76,7 @@ function HeroBoard({ t }: { t: Dict }) {
 }
 
 // 卡片菜单：一张卡片右上角「⋯」按钮高亮 + 展开的操作菜单。项与图标对齐真实 CardContextMenu：
-// 星标 / 便签 / 改名 / 归档 —分隔线— 新建会话 / 打开目录，共 6 项。
+// 置顶 / 便签 / 改名 / 归档 —分隔线— 新建会话 / 打开目录，共 6 项。
 const CARD_MENU_ICONS: ReactNode[] = [
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.79 21.55a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.554 10.34a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z" /></svg>,
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11l5-5V5a2 2 0 0 0-2-2z" /><path d="M15 21v-5a1 1 0 0 1 1-1h5" /></svg>,

@@ -476,10 +476,24 @@ pub(crate) fn spawn_liveness_watch(
                 // 错误 + 待交互通知：仅扫连接中的会话（活跃，数量少）。同时统计菜单栏状态摘要。
                 let mut present: HashMap<String, String> = HashMap::new();
                 let (mut tray_running, mut tray_waiting) = (0usize, 0usize);
-                for s in store
+                // 「待批准」的存活校正快照(见 session_query::pending_review_live)。托盘摘要与
+                // 待审批通知都读 pending_review,不校正的话:权限早已放行、agent 正跑着长工具,
+                // 托盘却一直亮「需关注」——那一位要等 PostToolUse 才清。
+                // try_state:本线程可能早于 AppState 注册,拿不到就退回不校正(等同旧行为)。
+                let approvals = app
+                    .try_state::<crate::AppState>()
+                    .map(|state| state.ptys.approval_session_ids())
+                    .unwrap_or_default();
+                for mut s in store
                     .live_sessions(Some("all"), None, None, None, 1000)
                     .unwrap_or_default()
                 {
+                    s.pending_review = crate::session_query::pending_review_live(
+                        &s.provider,
+                        s.pending_review.as_deref(),
+                        approvals.contains(&s.session.id),
+                    )
+                    .map(str::to_string);
                     if s.session.status == "ended" || !pid_is_agent(&sys, s.pid.unwrap_or(0)) {
                         continue;
                     }

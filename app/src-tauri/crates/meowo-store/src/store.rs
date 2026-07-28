@@ -28,6 +28,9 @@ pub struct SessionHeader {
     /// 不提供结构化 transcript 时，对话窗口用它们渲染临时时间线，而不是一片空白。
     pub last_user_text: Option<String>,
     pub last_ai_text: Option<String>,
+    /// 已归档（与看板 `LiveSession.archived` 同一列）。对话窗标题栏据此在「归档 / 取消
+    /// 归档」之间切换——归档态只影响看板可见性，不影响会话本身能否继续对话。
+    pub archived: bool,
 }
 
 /// statusline 写入的单会话上下文快照。字段各自可能缺失（provider 不支持 / 首帧未到）。
@@ -858,7 +861,7 @@ impl Store {
             .query_row(
                 "SELECT s.cc_session_id, s.status, s.cwd, s.provider, s.pending_review, \
                         t.title, t.current_activity, s.last_user_text, s.last_ai_text, \
-                        s.pid, s.last_event_at \
+                        s.pid, s.last_event_at, s.archived \
                  FROM sessions s LEFT JOIN tasks t ON t.session_id = s.id \
                  WHERE s.id = ?1 LIMIT 1",
                 [session_id],
@@ -883,6 +886,7 @@ impl Store {
                         last_ai_text: row.get(8)?,
                         pid: row.get(9)?,
                         last_event_at: row.get(10)?,
+                        archived: row.get::<_, i64>(11)? != 0,
                     })
                 },
             )

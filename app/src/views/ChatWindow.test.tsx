@@ -966,6 +966,58 @@ describe("ChatWindow", () => {
     expect(screen.queryByRole("textbox", { name: "发送消息给 Agent" })).toBeNull();
   });
 
+  /// 归档此前只有看板的卡片菜单能做：读完一个会话想收起它，得先切回看板、在一堆卡片里
+  /// 找回同一条。入口补进标题栏后，按钮本身也是「这条已归档」的唯一提示，故点完必须当场
+  /// 翻面（乐观），失败再翻回来并报错——静默失败等于骗用户「已归档」。
+  it("标题栏归档当前会话：按钮当场翻面，失败回滚并报错", async () => {
+    window.history.replaceState({}, "", "/?sessionId=7");
+    const base = {
+      sessionId: 7, title: "要收起的会话", status: "ended", provider: "claude", cwd: null,
+      supported: true, offset: 0, reset: false, pendingReview: null, items: [], archived: false,
+    };
+    let archiveFails = false;
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve(base);
+      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "set_archived") return archiveFails ? Promise.reject(new Error("db busy")) : Promise.resolve();
+      // 归档后要切走：这里只有它自己一条，没有可切的下一条，窗口留在原地。
+      if (command === "get_live_sessions_page") return Promise.resolve([]);
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    fireEvent.click(await screen.findByRole("button", { name: "归档" }));
+    expect(invoke).toHaveBeenCalledWith("set_archived", { sessionId: 7, archived: true });
+    // 翻面后按钮变成「取消归档」——它是这条会话已归档的唯一提示。
+    expect(await screen.findByRole("button", { name: "取消归档" })).toBeTruthy();
+
+    archiveFails = true;
+    fireEvent.click(screen.getByRole("button", { name: "取消归档" }));
+    // 失败回滚：按钮退回归档态，并且错误可见。
+    expect(await screen.findByRole("button", { name: "取消归档" })).toBeTruthy();
+    expect(await screen.findByText(/db busy/)).toBeTruthy();
+  });
+
+  /// 归档 = 收纳：侧栏里当场消失，右边却还停在它的对话上等于「收起来了还摊在桌上」。
+  /// 归档后自动切到列表里的下一条会话。
+  it("归档当前会话后切到下一条", async () => {
+    window.history.replaceState({}, "", "/?sessionId=7");
+    const histories: Record<number, unknown> = {
+      7: { sessionId: 7, title: "要收起的", status: "ended", provider: "claude", cwd: null, supported: true, offset: 0, reset: false, pendingReview: null, items: [], archived: false },
+      9: { sessionId: 9, title: "下一条", status: "ended", provider: "claude", cwd: null, supported: true, offset: 0, reset: false, pendingReview: null, items: [], archived: false },
+    };
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_chat_history") return Promise.resolve(histories[args?.sessionId as number]);
+      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "get_live_sessions_page") {
+        return Promise.resolve([{ session: { id: 9, cc_session_id: "cc-9", status: "ended" }, task_title: "下一条", connected: false, provider: "claude", cwd: null }]);
+      }
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    fireEvent.click(await screen.findByRole("button", { name: "归档" }));
+    expect(await screen.findByText("下一条")).toBeTruthy();
+  });
+
   it("collapses the sidebar into a title-bar toggle and restores it", async () => {
     window.history.replaceState({}, "", "/?sessionId=7");
     respondWithHistory({
@@ -1146,6 +1198,10 @@ describe("ChatWindow", () => {
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("start_managed_terminal", { sessionId: 16, cols: 100, rows: 30 }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 16, data: "继续" }), { timeout: 3_000 });
+    // 等回车也落地再结束本用例:正文与回车之间隔着 SUBMIT_GAP_MS,提前收工的话这次写入会在
+    // 后面某个用例执行到一半时才落进共享的 invoke.mock.calls,把那边的「零副作用」断言打翻
+    // (真实现场:软拦用例偶发失败在这条 sessionId 16 的 "\r" 上)。
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 16, data: "\r" }), { timeout: 3_000 });
   });
 
   it("keeps the prompt and reports a managed terminal that exits during startup", async () => {
@@ -1408,7 +1464,11 @@ describe("ChatWindow", () => {
     });
     render(<ChatWindow />);
     expect(await screen.findByText("Agent 正在等待你的回答")).toBeTruthy();
-    const writes = () => invoke.mock.calls.filter(([command]) => command === "write_managed_terminal").length;
+    // 只数**本会话**的写入:invoke 的调用记录是全测试文件共享的,别的用例卸载后仍在飞的
+    // 异步写入会迟到落进来(见 sessionId 16 那个用例的收尾注释)。
+    const writes = () => invoke.mock.calls.filter(
+      ([command, args]) => command === "write_managed_terminal" && (args as { sessionId: number }).sessionId === 47,
+    ).length;
     const writesBefore = writes();
     fireEvent.click(screen.getByRole("button", { name: "仅收起" }));
     // 零副作用断言必须**同步**做(点击处理器只 setTerminalAttention(null),纯同步):
@@ -1448,7 +1508,12 @@ describe("ChatWindow", () => {
     // 拒绝(队列首个 false):软拦确认返回 false → 不向终端写任何内容。
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("confirm_dialog", expect.anything()));
-    expect(invoke.mock.calls.some(([command]) => command === "write_managed_terminal")).toBe(false);
+    // 只看**本会话**的写入:invoke 的调用记录是全测试文件共享的,别的用例卸载后仍在飞的
+    // 异步写入(正文与回车之间隔着 SUBMIT_GAP_MS)会迟到落进来,不限定 sessionId 就会把
+    // 那些无关写入算到这里头上。
+    expect(invoke.mock.calls.some(
+      ([command, args]) => command === "write_managed_terminal" && (args as { sessionId: number }).sessionId === 48,
+    )).toBe(false);
     // 等第一次发送的异步守卫彻底收尾(sending→false,按钮从「发送中…」回到「发送」),
     // 否则慢机上(macOS CI)第二次 Enter 会撞进 sending 守卫被吞掉,等不到下面的 write。
     await waitFor(() => expect(screen.getByRole("button", { name: "发送" })).toBeTruthy());
