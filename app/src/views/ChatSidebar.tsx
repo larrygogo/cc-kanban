@@ -73,7 +73,9 @@ function readFolded(): Set<string> {
  */
 export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollapse }: {
   activeId: number;
-  /** 有待授权请求的非当前会话：后端不再为此切窗抢焦点，靠这里的徽标召唤用户。 */
+  /** 有待授权请求的非当前会话：靠这里的徽标召唤用户。后端 **会** 为 broker 接管的审批把
+   *  窗口切到目标会话（见 pty.rs 的 ensure_approval_window），这里是切换竞态与
+   *  「消费者已注册在别的会话」时的兜底。 */
   approvalAwaitingIds: ReadonlySet<number>;
   onSelect: (id: number) => void;
   onCollapse: () => void;
@@ -92,8 +94,9 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   const mountedRef = useRef(true);
   const limitRef = useRef(limit);
   limitRef.current = limit;
-  // 目录筛选:选中的 cwd 原样进后端 search(它 LIKE 匹配 s.cwd,子目录一并命中),
-  // 分页与排序仍全在后端做——前端过滤只能过滤「已加载的这一页」,筛出来的清单是残缺的。
+  // 目录筛选:选中的 cwd 走后端的**专用 cwd 参数**(斜杠归一后精确比较,子目录一并命中),
+  // 不是 search 的子串 LIKE——理由见下面 load 里的注释。分页与排序仍全在后端做:前端过滤
+  // 只能过滤「已加载的这一页」,筛出来的清单是残缺的。
   const [dirFilter, setDirFilter] = useState<string | null>(null);
   const dirFilterRef = useRef(dirFilter);
   dirFilterRef.current = dirFilter;
@@ -109,15 +112,16 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   // 重排交给下一次 refresh（那时用户多半不在翻页途中）。
   const load = useCallback((mode: "refresh" | "grow") => {
     const lim = limitRef.current;
-    const search = dirFilterRef.current;
+    const dir = dirFilterRef.current;
     // 目录走专用 cwd 参数(后端斜杠归一后精确比较),不复用 search 的子串 LIKE——
     // 那会让另一种斜杠写法的会话整批消失,还把兄弟目录/标题命中漏进来。
-    return getLiveSessionsPage("all", null, null, lim, search)
+    // (search 这里恒传 null:侧栏没有搜索框,筛选只有目录这一维。)
+    return getLiveSessionsPage("all", null, null, lim, dir)
       .then((page) => {
         if (!mountedRef.current) return;
         // 切目录期间发出的旧请求回来了:它装的是上一个目录的会话,原样落盘会让列表
         // 与下拉显示的目录对不上。丢弃。
-        if (dirFilterRef.current !== search) return;
+        if (dirFilterRef.current !== dir) return;
         setReachedEnd(page.next_cursor === null);
         if (mode === "grow") {
           setSessions((prev) => {
@@ -130,7 +134,7 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
         }
       })
       .catch(() => {
-        if (!mountedRef.current || dirFilterRef.current !== search) return;
+        if (!mountedRef.current || dirFilterRef.current !== dir) return;
         // 翻页失败：limit 退回上一页的量。不退的话 loading 行永远挂着、重滚也发不出
         // 请求（limit 已被抬高，唯一能救场的只剩恰好路过的 board-changed）。
         if (mode === "grow") setLimit((n) => Math.max(PAGE_LIMIT, n - PAGE_LIMIT));

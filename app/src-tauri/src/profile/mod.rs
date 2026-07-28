@@ -554,7 +554,9 @@ fn merge_jsonl_no_loss(from: &std::path::Path, to: &std::path::Path) -> Result<(
 fn merge_history_jsonl(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     let existing =
         std::fs::read_to_string(dst).map_err(|e| format!("读取 history.jsonl 失败：{e}"))?;
-    let known: std::collections::HashSet<&str> = existing.lines().collect();
+    // mut + insert 判重：源文件**自己**也可能有重复行（两个 profile 从同一份历史分叉出来，
+    // 各自又追加过同样的命令）。只对着目标查的话，那些行会被原样追加两遍。
+    let mut known: std::collections::HashSet<&str> = existing.lines().collect();
     let incoming =
         std::fs::read_to_string(src).map_err(|e| format!("读取 history.jsonl 失败：{e}"))?;
     let mut append = String::new();
@@ -563,10 +565,12 @@ fn merge_history_jsonl(src: &std::path::Path, dst: &std::path::Path) -> Result<(
         append.push('\n');
     }
     for line in incoming.lines() {
-        if !line.is_empty() && !known.contains(line) {
-            append.push_str(line);
-            append.push('\n');
+        // insert 返回 false = 这行已经见过（目标里有，或本次已追加过一次）。
+        if line.is_empty() || !known.insert(line) {
+            continue;
         }
+        append.push_str(line);
+        append.push('\n');
     }
     if append.is_empty() {
         return Ok(());

@@ -278,10 +278,30 @@ fn fork_parents(config_dirs: &[PathBuf]) -> HashMap<String, String> {
         .filter_map(|worker| {
             let child = worker.get("sessionId")?.as_str()?.to_string();
             let source = worker.pointer("/dispatch/launch/sessionId")?.as_str()?;
-            let parent = Path::new(source).file_stem()?.to_str()?.to_string();
+            let parent = transcript_stem(source)?.to_string();
             (parent != child).then_some((child, parent))
         })
         .collect()
+}
+
+/// transcript 路径 → 会话 id（末段去扩展名）。
+///
+/// **不能**用 `Path::file_stem`：花名册里的路径是**写它那台机器**的形态，而 `Path` 的分隔符
+/// 认定随**运行平台**变——一条 Windows 路径拿到 macOS 上解析时 `\` 不算分隔符，整串会被当成
+/// 一个文件名，取出来的「父会话 id」成了 `C:\Users\…\parent-one`（CI 在 macOS 上就是这么挂的）。
+/// 两种分隔符都切。
+fn transcript_stem(source: &str) -> Option<&str> {
+    let name = source.rsplit(['/', '\\']).next()?;
+    if name.is_empty() {
+        return None;
+    }
+    // 去掉扩展名（`.jsonl`）；没有点、或点在开头（隐藏文件）时原样返回。
+    Some(
+        name.rsplit_once('.')
+            .map(|(stem, _)| stem)
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or(name),
+    )
 }
 
 /// 花名册里所有 worker 条目。花名册是 supervisor 的**活**记录，worker 退出后条目就没了。
@@ -540,6 +560,24 @@ mod tests {
         assert_eq!(index["child"].forked_from.as_deref(), Some("parent-one"));
         // resume 自己不是 fork：认了的话作业会变成自己的父亲，卡片上凭空多出一个计数。
         assert_eq!(index["self"].forked_from, None);
+    }
+
+    /// 花名册里的路径是**写它那台机器**的形态，解析却发生在**运行 meowo 的机器**上。
+    /// 用 `Path::file_stem` 时两者必须同平台，否则整条路径被当成一个文件名——CI 在
+    /// macOS 上跑上面那条 Windows 路径的用例就是这么挂的。
+    #[test]
+    fn a_transcript_path_yields_its_session_id_on_either_platform() {
+        assert_eq!(
+            transcript_stem(r"C:\Users\x\.claude\projects\p\parent-one.jsonl"),
+            Some("parent-one")
+        );
+        assert_eq!(
+            transcript_stem("/Users/x/.claude/projects/p/parent-one.jsonl"),
+            Some("parent-one")
+        );
+        // 没有目录、没有扩展名的裸 id 原样返回。
+        assert_eq!(transcript_stem("bare-id"), Some("bare-id"));
+        assert_eq!(transcript_stem(""), None);
     }
 
     #[test]

@@ -9,14 +9,28 @@ import sys
 import time
 from pathlib import Path
 
+USAGE = "usage: trigger-approval.py <session_id> [--tool NAME] [--desc TEXT]"
+
+def take_flag(args: list[str], flag: str, default: str) -> str:
+    """取 `--flag 值`。写了旗标却没跟值时报用法，而不是抛 IndexError 糊一脸调用栈。"""
+    if flag not in args:
+        return default
+    index = args.index(flag) + 1
+    if index >= len(args):
+        raise SystemExit(f"{flag} 需要一个值\n{USAGE}")
+    return args[index]
+
 def main() -> int:
     args = sys.argv[1:]
     if not args:
-        print("usage: trigger-approval.py <session_id> [--tool NAME] [--desc TEXT]")
+        print(USAGE)
         return 2
-    session_id = int(args[0])
-    tool = args[args.index("--tool") + 1] if "--tool" in args else "Bash"
-    desc = args[args.index("--desc") + 1] if "--desc" in args else "运行测试命令(模拟授权请求,直接点拒绝即可)"
+    try:
+        session_id = int(args[0])
+    except ValueError:
+        raise SystemExit(f"session_id 必须是数字，收到 {args[0]!r}\n{USAGE}")
+    tool = take_flag(args, "--tool", "Bash")
+    desc = take_flag(args, "--desc", "运行测试命令(模拟授权请求,直接点拒绝即可)")
 
     discovery_path = Path.home() / ".meowo" / "approval-broker.json"
     discovery = json.loads(discovery_path.read_text(encoding="utf-8"))
