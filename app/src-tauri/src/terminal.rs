@@ -1705,13 +1705,23 @@ pub(crate) async fn takeover_managed_terminal(
 
 /// 在用户选定的外部终端里起 attach 客户端，把托管 PTY 镜像过去。
 /// Agent 与 PTY 都不迁移——外部窗口只是同一个 PTY 的第二个视图。
+///
+/// **macOS 上先查重**：该会话已有在线的外部视图（broker 订阅表非空）时不再开新窗口，
+/// 只把宿主终端应用带到前台。没有这层，每点一次卡片就多一个镜像窗口——Ghostty 尤甚
+/// （`open -na` 每次都是整个新实例）。Windows 不做：wt 开的是新标签页且我们拿不到
+/// attach 客户端的窗口句柄，「激活到不确定的窗口」比多开一个标签更糟。
 pub(crate) fn attach_in_external_terminal(
     broker: &crate::pty::PtyBroker,
     sid: i64,
 ) -> Result<(), String> {
     broker.ensure_attachable(sid)?;
-    let reporter = crate::setup::sibling_reporter().ok_or("找不到 meowo-reporter attach 客户端")?;
     let terminal = load_settings().resume_terminal;
+    #[cfg(target_os = "macos")]
+    if broker.has_external_viewer(sid) {
+        activate_resume_terminal_app(&terminal);
+        return Ok(());
+    }
+    let reporter = crate::setup::sibling_reporter().ok_or("找不到 meowo-reporter attach 客户端")?;
     // endpoint/token/protocol 不进 argv：attach 客户端自行读 discovery 文件
     //（与审批桥接同一来源，含 pid 判活），token 不暴露在进程参数里。
     let argv = vec![
@@ -1725,6 +1735,21 @@ pub(crate) fn attach_in_external_terminal(
     } else {
         Err("打开外部同步终端失败".into())
     }
+}
+
+/// 把设置里选定的终端应用带到前台（`open -a`，不带 `-n` 不会新起实例、也不传参）。
+/// 镜像与 spawn 路径同一套「未装回退 Terminal」判定——激活目标要对准视图实际所在的应用。
+/// best-effort：激活失败没有更好的补救，也不值得为此报错打断用户。
+#[cfg(target_os = "macos")]
+fn activate_resume_terminal_app(terminal: &str) {
+    let app = if terminal.eq_ignore_ascii_case("ghostty") && ghostty_installed() {
+        "Ghostty"
+    } else if terminal.to_ascii_lowercase().contains("iterm") && iterm_installed() {
+        "iTerm"
+    } else {
+        "Terminal"
+    };
+    let _ = std::process::Command::new("open").args(["-a", app]).spawn();
 }
 
 /// 把用户带到会话所在的视图，按 `session_open_in` 分发。

@@ -1170,6 +1170,31 @@ impl PtyBroker {
             .and_then(|bindings| bindings.get(&temp_id).copied())
     }
 
+    /// 该会话此刻是否有外部同步终端（attach 客户端）在线。
+    ///
+    /// 订阅表只在 handle_attach 里增删：客户端断开（外部终端窗口被关）时 read 循环 EOF、
+    /// 同一函数尾部立即摘除订阅——「非空」与「确有活的外部视图」严格同步，可作
+    /// 「再点卡片该聚焦已有窗口还是新开一个」的判据。对话窗口不经 socket 订阅，不计入。
+    ///
+    /// 目前仅 macOS 的 attach 查重调用（Windows 刻意不做，见 attach_in_external_terminal）；
+    /// 逻辑平台无关，留在 cfg 外全平台编译与单测。
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn has_external_viewer(&self, session_id: i64) -> bool {
+        self.sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| {
+                sessions.get(&session_id).map(|session| {
+                    session
+                        .subscribers
+                        .lock()
+                        .map(|subscribers| !subscribers.is_empty())
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    }
+
     /// attach 前置校验：会话确实由本进程的 PTY 持有，且 attach 服务已在监听。
     /// 刻意不返回 endpoint/token——它们经 discovery 文件（unix 下 0600）交给客户端，
     /// 不进外部终端的进程参数（argv 对同机其他进程可见，token 等于 PTY 完全接管权）。
@@ -1703,6 +1728,22 @@ mod tests {
             output_end: AtomicU64::new(0),
             subscribers: Mutex::new(Vec::new()),
         })
+    }
+
+    /// has_external_viewer 的口径：订阅表非空才算有外部视图；订阅被摘（窗口关闭）
+    /// 或会话不存在都判 false——判 true 会让「点卡片」只激活应用而不开新视图，误判即失联。
+    #[test]
+    fn external_viewer_presence_follows_the_subscriber_table() {
+        let broker = PtyBroker::default();
+        assert!(!broker.has_external_viewer(7), "无此会话必须判 false");
+        let managed = dummy_managed(7);
+        broker.sessions.lock().unwrap().insert(7, managed.clone());
+        assert!(!broker.has_external_viewer(7), "无订阅必须判 false");
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>();
+        managed.subscribers.lock().unwrap().push((1, tx));
+        assert!(broker.has_external_viewer(7));
+        managed.subscribers.lock().unwrap().clear();
+        assert!(!broker.has_external_viewer(7), "订阅摘除后必须回落 false");
     }
 
     #[test]
