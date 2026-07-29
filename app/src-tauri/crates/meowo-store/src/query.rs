@@ -42,6 +42,11 @@ pub struct LiveCandidate {
     pub pending_review: Option<String>,
     pub pid: Option<i64>,
     pub last_event_at: i64,
+    /// agent 的会话 id 与所属 agent：供 app 层查会话的运行形态(agent 自己落盘的索引)。
+    /// 有些会话 SQL 无从判断该不该数——最典型的是 agent 预热出来的待命进程,它在库里
+    /// 与常规会话别无二致,只有 agent 自己的花名册知道它还没被派活。
+    pub cc_session_id: String,
+    pub provider: Option<String>,
 }
 
 /// 当前活跃区的一张会话卡。
@@ -77,6 +82,9 @@ pub struct LiveSession {
     pub last_user_text: Option<String>,
     /// agent 提供方：claude（默认）/ kimi…，前端据此换图标/标签。
     pub provider: String,
+    /// 会话所属的账号（profile id）；None = 默认账号。这里传原始 id，
+    /// id → 展示名的解析在 app 层做（它才读得到 settings.json）。
+    pub profile: Option<String>,
 }
 
 /// 转义 SQL LIKE 通配符，使用户输入里的 `%` `_` `\` 作字面量匹配（配合 `LIKE … ESCAPE '\'`）。
@@ -253,11 +261,28 @@ impl Store {
         before_id: Option<i64>,
         limit: usize,
     ) -> Result<Vec<LiveSession>, StoreError> {
+        self.live_sessions_filtered(filter, search, None, before_last_event_at, before_id, limit)
+    }
+
+    /// [`Self::live_sessions`] 的全参形态,多一个 `cwd` 目录过滤。目录过滤是**精确匹配**,
+    /// 不是搜索:同一目录在库里同时存着 `C:/x` 与 `C:\x` 两种写法(历史数据,侧栏分组按
+    /// 归一 key 也视作同一目录),双方都归一(反斜杠→斜杠、去尾斜杠、ASCII 不分大小写)后
+    /// 比较。若复用 search 的子串 LIKE:另一种写法的会话从「已筛选」列表整批消失,还会把
+    /// 兄弟目录(`C:/proj` 命中 `C:/proj2`)和标题/项目名命中漏进本应目录限定的结果里。
+    pub fn live_sessions_filtered(
+        &self,
+        filter: Option<&str>,
+        search: Option<&str>,
+        cwd: Option<&str>,
+        before_last_event_at: Option<i64>,
+        before_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<LiveSession>, StoreError> {
         use rusqlite::types::Value;
         const SELECT: &str = "SELECT s.id, s.project_id, s.cc_session_id, s.status, s.started_at, s.last_event_at, s.ended_at,
                 p.name, t.id, t.title, t.current_activity, t.column_name, s.pid, s.archived, s.cwd, s.archived_at,
                 sc.used_pct, sc.window_size, sc.model, sn.note,
-                s.pending_review, s.last_ai_text, s.last_user_text, s.provider
+                s.pending_review, s.last_ai_text, s.last_user_text, s.provider, s.profile
          FROM sessions s
          JOIN projects p ON p.id = s.project_id
          LEFT JOIN tasks t ON t.session_id = s.id
@@ -288,6 +313,14 @@ impl Store {
             params.push(Value::Text(pat.clone()));
             params.push(Value::Text(pat.clone()));
             params.push(Value::Text(pat));
+        }
+
+        // 目录过滤:斜杠归一 + 去尾斜杠后的精确比较(NOCASE 只管 ASCII,盘符/常见路径够用;
+        // CJK 无大小写之分不受影响)。理由见 live_sessions_filtered 文档注释。
+        if let Some(dir) = cwd.map(str::trim).filter(|s| !s.is_empty()) {
+            conditions.push("RTRIM(REPLACE(s.cwd, '\\', '/'), '/') = ? COLLATE NOCASE".into());
+            let normalized = dir.replace('\\', "/");
+            params.push(Value::Text(normalized.trim_end_matches('/').to_string()));
         }
 
         // waiting 等最久优先（ASC），游标取「更大」的；其它 DESC，游标取「更小」的。
@@ -348,6 +381,7 @@ impl Store {
                 let last_ai_text: Option<String> = r.get(21)?;
                 let last_user_text: Option<String> = r.get(22)?;
                 let provider: Option<String> = r.get(23)?;
+                let profile: Option<String> = r.get(24)?;
                 Ok((
                     session,
                     project_name,
@@ -367,6 +401,7 @@ impl Store {
                     last_ai_text,
                     last_user_text,
                     provider,
+                    profile,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -394,6 +429,7 @@ impl Store {
             last_ai_text,
             last_user_text,
             provider,
+            profile,
         ) in rows
         {
             let todos = task_id
@@ -426,6 +462,7 @@ impl Store {
                 provider: provider
                     .filter(|p| !p.trim().is_empty())
                     .unwrap_or_else(|| crate::DEFAULT_PROVIDER.to_string()),
+                profile,
             });
         }
         Ok(out)
@@ -462,6 +499,39 @@ impl Store {
         Ok((total, archived))
     }
 
+    /// 在 [`Self::live_sessions_totals`] 的**同一口径**下，这批 agent 会话各占了多少
+    /// total / archived。
+    ///
+    /// 给列表那边隐藏掉的会话做减法用。隐藏与否只有 app 层知道（要查 agent 自己落盘的
+    /// 索引），SQL 无从判断，所以由调用方把 id 报进来。不这么做的话，一条已结束但有标题的
+    /// 后台会话仍计进 total、列表里却看不到——正是「角标 60、列表 11」那类打架。
+    pub fn live_totals_for(&self, cc_session_ids: &[String]) -> Result<(i64, i64), StoreError> {
+        const CHUNK: usize = 900;
+        let (mut total, mut archived) = (0i64, 0i64);
+        for chunk in cc_session_ids.chunks(CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            // WHERE 子句与 live_sessions_totals 逐字相同——两处口径必须同生共死。
+            let sql = format!(
+                "SELECT COUNT(*), COALESCE(SUM(s.archived = 1), 0)
+                 FROM sessions s
+                 LEFT JOIN tasks t ON t.session_id = s.id
+                 WHERE s.cc_session_id IN ({placeholders}) AND NOT (
+                     LOWER(TRIM(COALESCE(t.title, ''))) = 'ping'
+                     OR (s.status = 'ended'
+                         AND TRIM(COALESCE(t.title, '')) IN ('', '(未命名会话)')
+                         AND NOT EXISTS (SELECT 1 FROM todos td WHERE td.task_id = t.id)))"
+            );
+            let (n, a): (i64, i64) = self.conn.query_row(
+                &sql,
+                rusqlite::params_from_iter(chunk),
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            total += n;
+            archived += a;
+        }
+        Ok((total, archived))
+    }
+
     /// 可能落入 running / waiting 的会话（未归档、未结束，且 status/pending_review 使其够格）。
     ///
     /// 只吐出**判定 connected 所需的原料**，不做统计——见 [`Self::live_sessions_totals`] 的说明。
@@ -475,7 +545,8 @@ impl Store {
     /// 剔除，否则 running/waiting 角标会数出一条用户在列表里找不到的会话。
     pub fn live_count_candidates(&self) -> Result<Vec<LiveCandidate>, StoreError> {
         let mut st = self.conn.prepare(
-            "SELECT s.id, s.status, s.pending_review, s.pid, s.last_event_at FROM sessions s
+            "SELECT s.id, s.status, s.pending_review, s.pid, s.last_event_at,
+                    s.cc_session_id, s.provider FROM sessions s
              LEFT JOIN tasks t ON t.session_id = s.id
              WHERE s.archived = 0 AND s.status != 'ended'
                AND (s.status IN ('running','waiting') OR s.pending_review IS NOT NULL)
@@ -488,6 +559,8 @@ impl Store {
                 pending_review: r.get(2)?,
                 pid: r.get(3)?,
                 last_event_at: r.get(4)?,
+                cc_session_id: r.get(5)?,
+                provider: r.get(6)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

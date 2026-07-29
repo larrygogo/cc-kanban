@@ -100,6 +100,21 @@ describe("NewSessionPanel (独立窗口)", () => {
     expect(await screen.findByTestId("ns-hooks-warn")).toBeTruthy();
   });
 
+  it("非默认账号活跃时启动按钮旁提示将使用的账号；默认账号不提示", async () => {
+    render(<NewSessionPanel />);
+    await screen.findByTestId("ns-launch");
+    // 默认 mock 无 active_profile_name（默认账号）→ 什么都不显示（零感知底线）。
+    expect(screen.queryByTestId("ns-active-profile")).toBeNull();
+
+    cleanup();
+    api.getAccounts.mockResolvedValue([
+      { provider: "claude", account: { email: "a@b.c" }, usage: null, usage_supported: true, active_profile_name: "工作" },
+    ]);
+    render(<NewSessionPanel />);
+    const hint = await screen.findByTestId("ns-active-profile");
+    expect(hint.textContent).toBe(zh.newSession.activeProfile("工作"));
+  });
+
   it("启动失败显示错误，不关窗", async () => {
     api.newSession.mockRejectedValue("启动终端失败");
     render(<NewSessionPanel />);

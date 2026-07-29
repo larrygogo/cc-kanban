@@ -54,6 +54,9 @@ pub struct ProviderAccountPayload {
     pub usage: Option<ProviderUsage>,
     pub usage_supported: bool,
     pub relay_enabled: bool,
+    /// 当前活跃 profile 的展示名；None = 默认账号（前端不显示任何账号提示——
+    /// 没建过 profile 的用户零感知，与 profile 功能的安全底线一致）。
+    pub active_profile_name: Option<String>,
 }
 
 // ═══ 能力取用 ═══

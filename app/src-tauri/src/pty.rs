@@ -521,8 +521,20 @@ impl PtyBroker {
 
     /// 审批 broker 只有在对应对话窗确实可用时才能接管请求。外部终端启动的 agent 也能从
     /// discovery 文件发现 broker，但那不代表此刻有 GUI 消费者；若直接入队，会让原 TUI
-    /// 无提示等满五分钟。收到请求时主动打开/切换到对应会话，等到窗口注册消费者为止；
-    /// 期限内没等到则由调用方撤回请求并返回 `pass`，由 agent 自己的审批界面接管。
+    /// 无提示等满五分钟。
+    ///
+    /// 窗口不存在：没有进行中的输入可打断，新开窗口直接落在该会话上，等消费者注册。
+    /// 窗口已存在：**同样切到该会话**并闪任务栏。曾经这里只闪不切（怕打断用户在别的会话
+    /// 里的输入），代价是「窗口开在会话 A、会话 B 来要审批」这种常态下用户得在 10s 内自己
+    /// 注意到闪烁并点开 B，否则请求被撤回、答成 pass 退回 TUI——那 10s 是按 WebView2 冷启动
+    /// 量的，不是按人的反应时间量的。取舍已经翻面：宁可切走一次，也不要让审批悄悄回落。
+    /// 前端的侧栏授权徽标（approvalAwaitingIds）随之退居兜底：它覆盖切换竞态、以及消费者
+    /// 已注册在别的会话时到达的请求。
+    ///
+    /// 两个分支都只做**有界**等待，等不到就返回 false 让调用方撤回请求并答 `pass`，
+    /// 提示回落到 agent 自己的审批界面。已存在的窗口尤其不能无界等（此前直接返回
+    /// true）：窗口可能最小化、侧栏收起时徽标无处渲染，而 hook 正压着 TUI 自己的面板
+    /// ——handle_approval 会盲等满 300s，期间哪儿都看不到提示。
     fn ensure_approval_window(&self, session_id: i64) -> bool {
         if self.has_approval_consumer(session_id) {
             return true;
@@ -530,7 +542,15 @@ impl PtyBroker {
         let Some(app) = self.attach.app.lock().ok().and_then(|app| app.clone()) else {
             return false;
         };
+        // 无论窗口在不在，都要把它切到**这个**会话上：注册审批消费者的是对话页那套
+        // useEffect，只有会话切过去了才会注册。曾经在窗口已存在时只闪一下任务栏就干等，
+        // 于是「窗口开在会话 A、会话 B 来要审批」这种常态下，用户得在 10 秒内自己注意到
+        // 闪烁、在侧栏找到 B 并点开，否则请求被撤回、答成 pass 退回 TUI——那 10 秒是按
+        // WebView2 冷启动量的，不是按人的反应时间量的。
         crate::window::open_chat_window_detached(app.clone(), session_id);
+        if let Some(window) = app.get_webview_window("chat") {
+            let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
+        }
         // 等前端完成 session 切换并显式注册。窗口可见只能证明 WebView 存在，不能证明它已监听
         // pending-approval；以消费者租约为准，避免请求落在两个 useEffect 之间。
         // 期限 10s：首次 WebView2 冷启动（内核初始化 + bundle 加载 + React 挂载 + 注册 IPC）
@@ -639,7 +659,17 @@ impl PtyBroker {
                 command.env("MEOWO_PTY_PROTOCOL", CURRENT_PROTOCOL_VERSION.to_string());
             }
         }
+        // 终端归一化:GUI 的托管 PTY 是给人看的全彩 xterm.js 渲染面,颜色必须可用。TERM
+        // 之外还得管颜色开关——meowo 常从设了 NO_COLOR 的上游派生(典型:被某个 agent 的
+        // "捕获输出用"子环境启动,那里为拿干净输出会置 NO_COLOR=1),CommandBuilder 默认
+        // 继承整份父环境,这个 no-color.org 的业界停用信号就一路带进子 agent,Claude Code
+        // 等 CLI 见之即把颜色全数剥掉。显式摘掉继承来的 NO_COLOR,再补上正向信号,让托管
+        // 终端的着色只由这里说了算,不受外部环境摆布。FORCE_COLOR 兜住 ConPTY 上 isatty
+        // 偶发探测不到 tty 的情况;真实色深由 COLORTERM/TERM 抬到 truecolor。
+        command.env_remove("NO_COLOR");
         command.env("TERM", "xterm-256color");
+        command.env("COLORTERM", "truecolor");
+        command.env("FORCE_COLOR", "1");
 
         let child = pair
             .slave
@@ -1158,6 +1188,24 @@ impl PtyBroker {
             .map_err(|_| "attach 状态锁已损坏")?
             .ok_or("attach 服务未启动")?;
         Ok(())
+    }
+
+    /// 此刻 broker 手里还压着审批请求的会话（批量版，供看板/角标一次取齐）。
+    ///
+    /// 这是「agent 真的在等你批」的**实时**事实源：`PermissionRequest` hook 阻塞期间请求挂在
+    /// 这儿，hook 一返回（放行 / 拒绝 / 交还终端）就没了。DB 里的 `pending_review` 则要等到
+    /// 下一个 hook 事件（PostToolUse/Stop）才清——被放行的工具跑多久，那个标记就滞留多久。
+    pub(crate) fn approval_session_ids(&self) -> HashSet<i64> {
+        self.attach
+            .approvals
+            .lock()
+            .map(|approvals| {
+                approvals
+                    .values()
+                    .map(|pending| pending.request.session_id)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn pending_approval(&self, session_id: i64) -> Option<ApprovalRequest> {
@@ -1867,7 +1915,10 @@ mod tests {
             scanner.feed(b"\x1bP+q544e\x1b\\"),
             (b"\x1bP+q544e\x1b\\".to_vec(), 0)
         );
-        assert_eq!(scanner.feed(b"\x1b_Ga=q\x1b\\"), (b"\x1b_Ga=q\x1b\\".to_vec(), 0));
+        assert_eq!(
+            scanner.feed(b"\x1b_Ga=q\x1b\\"),
+            (b"\x1b_Ga=q\x1b\\".to_vec(), 0)
+        );
         // 这些序列之后的探测仍有人答。
         assert_eq!(scanner.feed(b"\x1b[6n"), (vec![], 1));
         // 真正的可见字节才停机。

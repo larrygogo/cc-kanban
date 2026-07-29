@@ -5,6 +5,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import {
+  attachBackgroundSession,
   confirmStopSession,
   isExternallyHeld,
   managedTerminalSnapshot,
@@ -109,6 +110,17 @@ export function findFakeCaret(buffer: InverseScanBuffer | undefined, rows: numbe
 }
 
 type ManagedTerminalProps = {
+  /**
+   * Agent 自己托管的后台会话。它**不能**被「接管」：正文常常没落盘（claude 的 fork/resume
+   * worker 只写两行元数据）， 只会得到 No conversation found + 退出码 1。
+   * 画面另有旁路可看（后端的 attach_background_session），所以这里只需收起那个按钮。
+   */
+  background?: boolean;
+  /**
+   * 用户在**后台会话**的终端里按了键。这些按键注定无效（worker 不消费 stdin），所以不下发，
+   * 转由宿主把用户领到真能发消息的地方（对话页）。
+   */
+  onBackgroundInput?: () => void;
   sessionId: number;
   status?: string;
   visible?: boolean;
@@ -126,7 +138,7 @@ type ManagedTerminalProps = {
   rearmRef?: MutableRefObject<(() => void) | null>;
 };
 
-export function ManagedTerminal({ sessionId, status, visible = true, onUserSubmit, attentionMarkers = [], interactivePrompt = false, expectMenu = false, grammar, onAttention, rearmRef: externalRearmRef }: ManagedTerminalProps) {
+export function ManagedTerminal({ sessionId, status, background = false, onBackgroundInput, visible = true, onUserSubmit, attentionMarkers = [], interactivePrompt = false, expectMenu = false, grammar, onAttention, rearmRef: externalRearmRef }: ManagedTerminalProps) {
   const t = useT();
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -146,6 +158,8 @@ export function ManagedTerminal({ sessionId, status, visible = true, onUserSubmi
   /// 终端就永远定格在旧内容上。effect 内部把重置逻辑挂到这里，供 start/takeover 调用。
   const rearmRef = useRef<(() => void) | null>(null);
   const onUserSubmitRef = useRef(onUserSubmit);
+  const onBackgroundInputRef = useRef(onBackgroundInput);
+  const backgroundRef = useRef(background);
   const attentionMarkersRef = useRef(attentionMarkers);
   const interactivePromptRef = useRef(interactivePrompt);
   const expectMenuRef = useRef(expectMenu);
@@ -156,6 +170,8 @@ export function ManagedTerminal({ sessionId, status, visible = true, onUserSubmi
   const attentionReportedRef = useRef<string | null>(null);
   const lastScreenRef = useRef("");
   onUserSubmitRef.current = onUserSubmit;
+  onBackgroundInputRef.current = onBackgroundInput;
+  backgroundRef.current = background;
   attentionMarkersRef.current = attentionMarkers;
   interactivePromptRef.current = interactivePrompt;
   expectMenuRef.current = expectMenu;
@@ -263,6 +279,13 @@ export function ManagedTerminal({ sessionId, status, visible = true, onUserSubmi
       // 转发——那是 TUI 正在等的；用户真实按键不匹配回放过滤的形态，照常放行。
       const payload = replayingHistory ? stripTerminalReplies(data) : data;
       if (!payload) return;
+      // 后台会话的 worker 不消费 stdin（取证见后端 bgpty.rs 的模块文档）：这些按键写下去
+      // 服务端会收、PTY 会写，claude 那头就是不理。与其让用户打完一整句再弹「不接受终端
+      // 按键」，不如第一下就把他送到真能发消息的地方去。
+      if (backgroundRef.current) {
+        onBackgroundInputRef.current?.();
+        return;
+      }
       if (payload.includes("\r")) {
         onUserSubmitRef.current?.();
       }
@@ -601,6 +624,22 @@ export function ManagedTerminal({ sessionId, status, visible = true, onUserSubmi
     }
   };
 
+  /// 重新接上后台会话的画面旁路。首次接入由 ChatWindow 在拿到 history.background 时发起，
+  /// 但它可能失败（花名册里暂时查不到、socket 还没起来），而这类会话我们又拉不起来——
+  /// 唯一能做的就是再试一次接。没有这个入口时，一次失败就永远停在空画面上。
+  const reattach = async () => {
+    setStarting(true);
+    setError("");
+    try {
+      await attachBackgroundSession(sessionId);
+      rearmRef.current?.(); // 偏移归零重拉：接上的是别人已经跑了一阵的 PTY。
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setStarting(false);
+    }
+  };
+
   const takeover = async () => {
     const terminal = terminalRef.current;
     if (!terminal) return;
@@ -656,10 +695,25 @@ export function ManagedTerminal({ sessionId, status, visible = true, onUserSubmi
       )}
       {!initializing && !active && (
         <div className="managed-terminal-cover">
-          <div>{error || (exitCode !== undefined ? t.chat.terminalExited(exitCode) : externalRunning ? t.chat.terminalExternal : t.chat.terminalReady)}</div>
-          <button type="button" onClick={() => void (externalRunning ? takeover() : start())} disabled={starting}>
-            {starting ? t.chat.terminalStarting : externalRunning ? t.chat.terminalTakeover : t.chat.terminalStart}
-          </button>
+          {/* 后台会话的「没画面」有两种截然不同的成因，此前一律说成「已结束」：worker 明明
+              还在跑、只是旁路没接上时，那句话是错的，而且不给任何出路。只有拿到退出码
+              （worker 真的退了）才说结束，否则说「没接上」并给一次重接。 */}
+          <div>{error || (background
+            ? (exitCode !== undefined ? t.chat.terminalBackgroundGone : t.chat.terminalBackgroundLost)
+            : exitCode !== undefined ? t.chat.terminalExited(exitCode) : externalRunning ? t.chat.terminalExternal : t.chat.terminalReady)}</div>
+          {/* 后台会话不给接管/启动按钮：那两条路对它必然失败（见 background 的说明）；
+              还没拿到退出码时给「重新接入」——唯一对它有效的动作。 */}
+          {background
+            ? exitCode === undefined && (
+              <button type="button" onClick={() => void reattach()} disabled={starting}>
+                {starting ? t.chat.terminalStarting : t.chat.terminalBackgroundRetry}
+              </button>
+            )
+            : (
+              <button type="button" onClick={() => void (externalRunning ? takeover() : start())} disabled={starting}>
+                {starting ? t.chat.terminalStarting : externalRunning ? t.chat.terminalTakeover : t.chat.terminalStart}
+              </button>
+            )}
         </div>
       )}
       {active && (

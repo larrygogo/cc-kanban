@@ -10,6 +10,7 @@ import {
   setActiveProfile,
   renameProfile,
   deleteProfile,
+  mergeProfileIntoDefault,
   type AgentId,
   type AgentDescriptor,
   type ProfileView,
@@ -416,6 +417,13 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
           <div className="provider-card-title-row">
             <span className="provider-name">{name}</span>
             {!relayEnabled && isLoggedIn && acc?.plan && <span className="provider-badge provider-badge-plan">{acc.plan}</span>}
+            {/* 活跃账号持续可见：切到过自定义账号就一直挂着这个徽章，防「切过一次就忘了」。
+                默认账号（active_profile_name 为空）不显示——没建过账号的用户零感知。 */}
+            {!relayEnabled && payload?.active_profile_name && (
+              <span className="provider-badge" data-testid={"agent-profile-" + provider}>
+                {t.account.activeProfileBadge(payload.active_profile_name)}
+              </span>
+            )}
             {statusBadge && <span className={"provider-badge" + (installed === false ? " provider-badge-off" : "")}>{statusBadge}</span>}
           </div>
           {/* 账号信息紧贴标题下方。邮箱可能很长，单行省略；title 属性兜住完整值。 */}
@@ -755,6 +763,23 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
   };
 
   /**
+   * 合并进默认账号：会话与历史数据并入默认账号，账号本身从列表消失——与删除的根本区别是
+   * **数据全留下**（删除是连目录一起抹掉）。有进行中的会话时后端会拒绝，错误就地显示。
+   *
+   * 不可逆，故与删除同规：走 tauri 的 confirm，不写 window.confirm。
+   */
+  const merge = async (p: ProfileView) => {
+    if (!p.id) return; // 默认账号没有「合并进自己」
+    const label = p.name || p.id;
+    const yes = await confirm(t.account.mergeProfileConfirm(label), {
+      title: t.account.mergeProfile,
+      kind: "warning",
+    }).catch(() => false);
+    if (!yes) return;
+    run(() => mergeProfileIntoDefault(provider, p.id!));
+  };
+
+  /**
    * 退出登录。**与删除账号不是一回事**：登出只清凭据，目录、配置、会话历史都留着，之后还能登回来；
    * 删除则连目录一起抹掉，且默认账号根本删不掉（那是 agent 自己的目录）——所以登出是它唯一的退出手段。
    *
@@ -902,6 +927,12 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
                 // 用户的凭据、配置和**全部会话历史**，那不是 meowo 该替他做的决定。
                 ...(p.id
                   ? [
+                      // 合并也只给自定义账号：它是「数据已拆散」的自救出口，默认账号无需合并进自己。
+                      {
+                        key: "merge",
+                        label: t.account.mergeProfile,
+                        onSelect: () => merge(p),
+                      },
                       {
                         key: "delete",
                         label: t.account.deleteProfile,

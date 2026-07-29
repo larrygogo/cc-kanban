@@ -22,6 +22,17 @@ errored: boolean,
  */
 ptyManaged: boolean, 
 /**
+ * 由 agent 自己的后台守护进程托管（claude FleetView 的后台会话），与看板
+ * `LiveItem.background` 同源。这类会话既不在用户的终端里，也接管不了（杀进程会被
+ * supervisor 拉回来），输入框的引导文案必须换一套——让用户回终端的 FleetView。
+ */
+background: boolean, 
+/**
+ * 已归档（与看板 `LiveItem.archived` 同一列）。对话窗标题栏据此在「归档 / 取消归档」
+ * 之间切换：归档只改看板可见性，不动会话本身——归档态的会话照样能继续对话。
+ */
+archived: boolean, 
+/**
  * Agent 自己维护的待办清单（快照式待办工具经 hook 落库）。空 = 该会话没有清单，
  * 或该 agent 的待办是增量事件而非快照（当前版本的 Claude Code 即如此）。
  */

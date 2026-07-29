@@ -156,7 +156,7 @@ const ZH: Dict = {
     ai: "AI",
     you: "你",
     justNow: "刚刚",
-    menu: { star: "星标置顶", note: "添加便签", rename: "重命名", archive: "归档", newSession: "新建会话", openDir: "打开项目目录" },
+    menu: { star: "置顶", note: "添加便签", rename: "重命名", archive: "归档", newSession: "新建会话", openDir: "打开项目目录" },
   },
   theme: {
     eyebrowHome: "你的桌面，你说了算",

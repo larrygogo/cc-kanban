@@ -17,6 +17,7 @@ import {
   isLoggedIn,
 } from "../api";
 import { agentAssets, tintStyle } from "../providers";
+import { normalizePath, pathKey } from "../paths";
 import { Dropdown } from "./menu";
 import { useAgentListRefresh } from "../useAgents";
 import { useTauriEvent } from "../hooks/useTauriEvent";
@@ -39,21 +40,6 @@ function FolderIcon() {
       <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
     </svg>
   );
-}
-
-/** 统一路径分隔符：Windows 路径用反斜杠，Unix 路径用正斜杠。
- *  用于消除 URL 参数/前端输入与后端数据库中 cwd 的斜杠方向不一致。 */
-function normalizePath(p: string): string {
-  if (!p) return p;
-  if (/^[A-Za-z]:/.test(p)) {
-    return p.replace(/\//g, "\\");
-  }
-  return p.replace(/\\/g, "/");
-}
-
-/** 用于去重的路径 key：Windows 路径忽略大小写。 */
-function pathKey(p: string): string {
-  return /^[A-Za-z]:/.test(p) ? p.toLowerCase() : p;
 }
 
 /** 独立窗口页（label="new-session"）：新建一个全新会话。成功后 emit 通知主看板弹 toast 并自关。 */
@@ -84,6 +70,9 @@ export function NewSessionPanel(): ReactElement {
   const [opts, setOpts] = useState<Record<string, string>>({});
   // null = 尚未拿到账号（或取不到）→ 不显示未登录提示，避免误闪/误报。
   const [loggedIn, setLoggedIn] = useState<Record<string, boolean> | null>(null);
+  // 各 provider 当前活跃账号的展示名（null = 默认账号）。非默认账号活跃时在启动按钮旁提示，
+  // 防「切过一次账号就忘了，新会话全写进隔离账号」。
+  const [activeProfiles, setActiveProfiles] = useState<Record<string, string | null>>({});
   const loginOperations = useLoginOperations((event) => {
     const p = event.provider;
     // 登录成功与否是该 provider 的客观事实，与当前选中谁无关。
@@ -124,11 +113,14 @@ export function NewSessionPanel(): ReactElement {
         getAccounts()
           .then((rows) => {
             const m: Record<string, boolean> = {};
+            const ap: Record<string, string | null> = {};
             for (const { id } of list) {
               const row = rows.find((r) => r.provider === id);
               if (row) m[id] = isLoggedIn(row);
+              ap[id] = row?.active_profile_name ?? null;
             }
             setLoggedIn(m);
+            setActiveProfiles(ap);
           })
           .catch(() => setLoggedIn(null));
       })
@@ -394,6 +386,12 @@ export function NewSessionPanel(): ReactElement {
       </div>
 
       <div className="ns-actions">
+        {/* 非默认账号活跃时明说：新会话将写进那个隔离账号。默认账号不显示——零感知底线。 */}
+        {activeProfiles[provider] && (
+          <span className="ns-profile-hint" data-testid="ns-active-profile">
+            {t.newSession.activeProfile(activeProfiles[provider]!)}
+          </span>
+        )}
         <button type="button" className="ns-btn" onClick={closeWin}>
           {t.newSession.cancel}
         </button>

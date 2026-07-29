@@ -1,9 +1,9 @@
-// 卡片右键/菜单按钮弹出的操作菜单：星标/便签/重命名/归档/新建会话/打开目录。
+// 卡片右键/菜单按钮弹出的操作菜单：置顶/便签/重命名/归档/新建会话/打开目录。
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useT } from "../../i18n";
-import { ArchiveIcon, FolderIcon, NoteIcon, PencilIcon, PlusIcon, StarIcon, StopIcon } from "./icons";
+import { ArchiveIcon, FolderIcon, NoteIcon, PencilIcon, PlusIcon, StopIcon, TopIcon } from "./icons";
 
-// 卡片右键菜单：星标/便签/重命名/归档收拢于此（替代原 hover 图标行，卡片标题行更干净）。
+// 卡片右键菜单：置顶/便签/重命名/归档收拢于此（替代原 hover 图标行，卡片标题行更干净）。
 // fixed 定位 + useLayoutEffect 钳位：贴纸窗口小，菜单贴边时向内收、不被窗口边缘裁掉。
 // 关闭时机：点菜单外任意处 / Escape / 窗口失焦 / 任一菜单项执行后。
 export function CardContextMenu({
@@ -65,7 +65,13 @@ export function CardContextMenu({
       if (!ref.current?.contains(e.target as Node)) onClose();
     };
     const key = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      // 这次 Esc 被菜单消费掉了,必须标记 preventDefault(同 menu.tsx 的下拉菜单):本菜单
+      // 现在也挂在对话窗的侧栏上,而那里有窗口级的「Esc = 拒绝审批」监听(以 defaultPrevented
+      // 让路)。document 冒泡在 window 之前——不标记的话,关个右键菜单的同一次按键会顺手
+      // 把 agent 的审批请求拒了。
+      e.preventDefault();
+      onClose();
     };
     document.addEventListener("click", clickAway, true);
     document.addEventListener("contextmenu", ctxAway, true);
@@ -85,7 +91,7 @@ export function CardContextMenu({
   return (
     <div ref={ref} className="ctx-menu" role="menu" style={pos} onClick={(e) => e.stopPropagation()}>
       <button type="button" role="menuitem" className="ctx-item" onClick={act(onStar)}>
-        <StarIcon starred={starred} />
+        <TopIcon />
         {starred ? t.sticker.unstar : t.sticker.star}
       </button>
       <button type="button" role="menuitem" className="ctx-item" onClick={act(onNote)}>

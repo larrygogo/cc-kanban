@@ -90,7 +90,10 @@ describe("Dropdown（统一菜单 primitive）", () => {
     const container = btn.parentElement as HTMLElement;
     fireEvent.keyDown(container, { key: "ArrowDown" });
     expect(document.activeElement).not.toBe(btn);
-    fireEvent.keyDown(document, { key: "Escape" });
+    // fireEvent 返回 false = 事件被 preventDefault:菜单消费掉这次 Esc 必须做标记,
+    // 否则同一次按键会继续落到 ChatWindow 的窗口级「Esc=拒绝审批」监听上,
+    // 关个菜单顺手把 agent 的审批请求拒了。
+    expect(fireEvent.keyDown(document, { key: "Escape" })).toBe(false);
     expect(screen.queryByRole("option")).toBeNull();
     expect(document.activeElement).toBe(btn);
     // 重新打开后点外部（mousedown 落在容器之外）关闭

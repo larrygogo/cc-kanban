@@ -1,4 +1,4 @@
-// 贴纸看板的纯逻辑 helper：行内编辑键盘处理、相对时间、星标持久化、tab 过滤。
+// 贴纸看板的纯逻辑 helper：行内编辑键盘处理、相对时间、置顶持久化、tab 过滤。
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { Dict } from "../../i18n/zh";
 import { DAY_MS, STAR_KEY, type Item, type Tab } from "./types";
@@ -20,7 +20,8 @@ export function fmtAgo(ms: number, t: Dict): string {
   return t.time.dayAgo(Math.floor(h / 24));
 }
 
-/** 读取已星标会话集合（按 cc_session_id 持久化，跨重启/换库稳定）。 */
+/** 读取已置顶会话集合（按 cc_session_id 持久化，跨重启/换库稳定）。
+ *  存储键沿用 star 命名（meowo-starred）：界面改叫「置顶」后不动键名，改了会丢用户已有数据。 */
 export function loadStarred(): Set<string> {
   try {
     const raw = JSON.parse(localStorage.getItem(STAR_KEY) ?? "[]");

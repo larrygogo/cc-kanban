@@ -70,3 +70,34 @@ xterm)里 opencode 的输入是否可用——若同样不可用,这是比菜单
 | gemini | `/model` | 本轮真机 | 本轮真机(↓/Enter) | ✅ 框线数字菜单(本轮) |
 | codex | `/model` | 无(更新器+网络拦路) | 无 | ❌ 等环境恢复后重跑 |
 | opencode | `/models` | 无(输入通道死,按键矩阵已穷举) | 无 | ❌ 先查生产路径输入是否可用 |
+
+## kimi 审批面板(2026-07-24,源码取证)——已接线
+
+**取证途径说明**:kimi.exe 的 launcher shim 在裸 ConPTY 下即退(见 kimi/mod.rs
+`interrupt_input` 注释),`capture_approval_panel` 自动探针抓不到画面。本轮改用
+**官方开源仓库源码取证**(MoonshotAI/kimi-code @ 0.29,
+`apps/kimi-code/src/tui/components/dialogs/approval-panel.ts` + `reverse-rpc/approval/adapter.ts`),
+面板形态与按键语义均为源码确证:
+
+```
+────────────────────────────────────────
+  ▶ Run this command?            ← 标题按工具定制:Bash=Run this command? /
+                                    Write=Write this file? / Edit=Apply these edits? /
+                                    TaskStop=Stop this task? / ExitPlanMode=Ready to build with this plan? /
+                                    其他=Approve <tool>?
+  $ echo hello                   ← display 块(shell 前缀 $;diff/文件另有渲染)
+  ▶ 1. Approve once              ← 选中项前缀 ▶(非 ❯)
+    2. Approve for this session
+    3. Reject
+    4. Reject with feedback      ← requires_feedback:选中后进入行内输入,不直接提交
+  ↑/↓ select · 1/2/3/4 choose · ↵ confirm   ← 稳定签名行
+────────────────────────────────────────
+```
+
+- **数字键直接选中并提交**(`selectAndSubmit`),GUI 按钮只需打 `"1"`/`"2"`/`"3"`,
+  无需光标相对移动;↑/↓ 循环导航,Enter 提交,Esc/Ctrl-C/Ctrl-D = 拒绝。
+- 默认选项四档(ExitPlanMode/plan_review 为 Approve…+Reject+Revise;goal_start 另有一套);
+  「Reject with feedback」「Revise」需要现场输入反馈,GUI 卡片不收,想写反馈去终端。
+- kimi 的 PermissionRequest hook 是 observation-only(官方文档,5s 超时),broker
+  审批桥对它保持关闭;已据此实现 `kimi:command-approval`(terminalAttention.ts)
+  屏幕识别兜底,provider 门控,ChatWindow 复用命令审批卡渲染。

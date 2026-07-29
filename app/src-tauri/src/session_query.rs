@@ -1,5 +1,6 @@
 //! Live-session query service and Tauri adapters.
 
+use meowo_agent::SessionRuntime;
 use meowo_store::LiveSession;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -36,6 +37,101 @@ impl ProcessSnapshotCache {
         *slot = Some((now, pids.clone()));
         pids
     }
+}
+
+/// agent 自建后台会话的索引失效周期。比进程表快照(900ms)宽松:一个会话的**出身**在它整个
+/// 生命里不会变,只在新会话出现时才需要重扫,而每次扫描是几个几百字节的 json。
+const RUNTIME_SNAPSHOT_TTL_MS: i64 = 3_000;
+
+/// `provider → (session id → 运行形态)`。分两层是为了让热路径按 `&str` 查，不必为每行
+/// 会话克隆出一个元组 key。
+pub(crate) type SessionRuntimeIndex =
+    std::collections::HashMap<&'static str, std::collections::HashMap<String, SessionRuntime>>;
+
+/// agent 自建后台会话的索引缓存。与 [`ProcessSnapshotCache`] 同理:一次界面刷新里
+/// 计数与列表两条查询共享同一次扫描。
+#[derive(Default)]
+pub(crate) struct SessionRuntimeCache {
+    slot: Mutex<Option<(i64, Arc<SessionRuntimeIndex>)>>,
+}
+
+impl SessionRuntimeCache {
+    pub(crate) fn snapshot(&self) -> Arc<SessionRuntimeIndex> {
+        self.snapshot_with(super::now_ms(), collect_session_runtimes)
+    }
+
+    fn snapshot_with(
+        &self,
+        now: i64,
+        sample: impl FnOnce() -> SessionRuntimeIndex,
+    ) -> Arc<SessionRuntimeIndex> {
+        let mut slot = self.slot.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some((sampled_at, index)) = slot.as_ref() {
+            if now.saturating_sub(*sampled_at) < RUNTIME_SNAPSHOT_TTL_MS {
+                return index.clone();
+            }
+        }
+        let index = Arc::new(sample());
+        *slot = Some((now, index.clone()));
+        index
+    }
+}
+
+/// 扫一遍所有声明了 runtime 能力的 agent。目前只有 claude(FleetView 的后台会话);
+/// 没声明的 agent 连一个空 map 都不进索引,查表恒为 miss = 一视同仁。
+fn collect_session_runtimes() -> SessionRuntimeIndex {
+    meowo_agent::all()
+        .iter()
+        .filter_map(|plugin| Some((plugin.id().as_str(), plugin.runtime()?.session_runtimes())))
+        .collect()
+}
+
+/// 该会话是否由 agent 自己的后台守护进程托管(claude FleetView 的 `kind: "bg"`)。
+/// 查不到 = 普通会话:索引只是**额外**信息源,缺了它不该改变任何既有判断。
+pub(crate) fn is_background(
+    index: &SessionRuntimeIndex,
+    provider: &str,
+    cc_session_id: &str,
+) -> bool {
+    index
+        .get(provider)
+        .and_then(|sessions| sessions.get(cc_session_id))
+        .is_some_and(|runtime| runtime.background)
+}
+
+/// 这个会话该不该从看板上拿掉。
+///
+/// **后台会话一律拿掉**：它们是 agent 自己在会话中途派生的，用户没开过、看不懂凭空多出的
+/// 卡片，而且几乎操作不了——键盘输入无效（worker 不消费 stdin），发消息守护进程虽收下但
+/// 手动模式下不执行（取证见 `bgpty.rs` 的模块文档）。给它一张和普通会话一样的卡，等于
+/// 承诺了一堆做不到的事。
+///
+/// 源会话卡上也**不留痕**（不标「+N 后台作业」之类的数）：用户既处理不了这些作业，一个
+/// 数字除了让人困惑并无用处。代价是后台作业在 meowo 里彻底不可见——这是明确的取舍：宁可
+/// 少显示，也不要一屏点开全是死胡同的卡片。要处理它们请回派出它们的终端。
+pub(crate) fn hidden_background(
+    index: &SessionRuntimeIndex,
+    provider: &str,
+    cc_session_id: &str,
+) -> bool {
+    // 眼下就是 is_background 本身。留一个独立名字是因为两者问的是**不同的问题**——
+    // 「它是不是后台会话」与「它该不该从看板上消失」——把后者写成前者的别名，将来要放宽
+    // 隐藏规则（比如只藏查得到源的那些）时改一处即可，不会让列表和角标各改各的。
+    is_background(index, provider, cc_session_id)
+}
+
+/// 该会话的运行形态全貌。查不到 = 普通会话,取默认值(全 false / None)——索引只是**额外**
+/// 信息源,缺了它不该改变任何既有判断。
+fn runtime_of(
+    index: &SessionRuntimeIndex,
+    provider: &str,
+    cc_session_id: &str,
+) -> meowo_agent::SessionRuntime {
+    index
+        .get(provider)
+        .and_then(|sessions| sessions.get(cc_session_id))
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -90,10 +186,31 @@ pub(crate) struct LiveItem {
     /// 本 GUI 进程正托管该会话的 PTY。门控卡片菜单「结束会话」的可见性——外部终端里
     /// 跑的会话杀不了（要先走接管），与对话窗 ChatHistoryDto.pty_managed 同口径。
     pty_managed: bool,
+    /// 由 agent 自己的后台守护进程托管（claude FleetView 的后台会话）。这类卡片是 agent
+    /// 在会话中途自行派生的，用户没开过它，界面必须标注出来，并收起接管/结束——那两条
+    /// 路对它注定失败（supervisor 会把被杀的进程按 respawnFlags 拉回来）。
+    background: bool,
     errored: bool,
     error_label: Option<String>,
     error_raw: Option<String>,
     preview: Option<String>,
+    /// 所属账号的展示名（None = 默认账号，前端不显示徽章）。由 profile id 经 settings 解析；
+    /// profile 已被删除（查不到）时回退 id 本身——宁可显示原始 id 也不丢归属信息。
+    profile_name: Option<String>,
+}
+
+/// profile id → 展示名。查不到（profile 已删）回退 id 本身。纯函数便于单测。
+fn resolve_profile_name(
+    settings: &super::settings::Settings,
+    provider: &str,
+    id: &str,
+) -> String {
+    settings
+        .profiles
+        .get(provider)
+        .and_then(|list| list.iter().find(|p| p.id == id))
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| id.to_string())
 }
 
 /// 翻页游标：**SQL 扫描位置**（排序前）。响应里的 items 会做 connected-first 排序，
@@ -122,14 +239,40 @@ pub(crate) async fn get_live_sessions_counts(
     let snapshots = state.process_snapshots.clone();
     // 托管 PTY 活跃 = 进程必在(meowo 自己 spawn 的),hook 未认领 pid / 事件宽限过期时兜底。
     let pty_live = state.ptys.active_session_ids();
+    let runtimes = state.session_runtimes.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let alive = snapshots.snapshot();
+        let runtimes = runtimes.snapshot();
         let store = super::open_store(&db_path)?;
-        let (total, archived) = store.live_sessions_totals().map_err(|e| e.to_string())?;
+        let (mut total, mut archived) = store.live_sessions_totals().map_err(|e| e.to_string())?;
+        // 列表把后台会话整个藏了（见 hidden_background），总数也得同口径扣掉。不能只在
+        // 下面的候选循环里扣：候选集只含「未归档 + 未结束 + running/waiting」，而一条**已
+        // 结束**但有标题的后台会话照样计进 total、列表里却永远看不到——那正是「角标数出
+        // 一条用户找不到的会话」。所以按 id 直接向 DB 问一次，用与 totals 逐字相同的口径。
+        let hidden: Vec<String> = runtimes
+            .values()
+            .flat_map(|sessions| sessions.iter())
+            .filter(|(_, runtime)| runtime.background)
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !hidden.is_empty() {
+            let (n, a) = store.live_totals_for(&hidden).map_err(|e| e.to_string())?;
+            total -= n;
+            archived -= a;
+        }
         let candidates = store.live_count_candidates().map_err(|e| e.to_string())?;
         let now = super::now_ms();
         let (mut running, mut waiting) = (0i64, 0i64);
         for candidate in candidates {
+            // 后台会话列表里看不到（enrich 无条件丢弃），running/waiting 也不能数——
+            // 否则用户会对着一个找不到对应卡片的数字发懵。total 已在上面按同一口径扣过。
+            if hidden_background(
+                &runtimes,
+                candidate.provider.as_deref().unwrap_or_default(),
+                &candidate.cc_session_id,
+            ) {
+                continue;
+            }
             let connected = session_connected(
                 &candidate.status,
                 candidate.pid,
@@ -137,6 +280,12 @@ pub(crate) async fn get_live_sessions_counts(
                 candidate.last_event_at,
                 now,
             );
+            // 这里**刻意不做** pending_review 的存活校正（pending_review_live）：tab 归属由
+            // SQL 谓词决定（running 要求 `pending_review IS NULL`、waiting 收下所有非 NULL，
+            // 见 query.rs 的 live_sessions），角标必须与那条谓词同源。只在这一端校正的话，
+            // 一条「已放行但标记滞留」的 running 会话会被数进 running、却因 SQL 仍看得见那
+            // 一位而进不了 running 列表——数字与列表当场打架，正是这套口径最忌讳的事。
+            // 校正只作用于**展示**（卡片 pill / 对话页 / 托盘通知），不参与分类。
             match tab_class(
                 connected,
                 &candidate.status,
@@ -163,6 +312,7 @@ pub(crate) async fn get_live_sessions_page(
     state: State<'_, super::AppState>,
     filter: String,
     search: Option<String>,
+    cwd: Option<String>,
     before_last_event_at: Option<i64>,
     before_id: Option<i64>,
     limit: usize,
@@ -171,17 +321,25 @@ pub(crate) async fn get_live_sessions_page(
     let tx_cache = state.tx_cache.clone();
     // 采样进 spawn_blocking,理由同 get_live_sessions_counts。
     let snapshots = state.process_snapshots.clone();
+    let runtimes = state.session_runtimes.clone();
     let pty_live = state.ptys.active_session_ids();
+    let approvals = state.ptys.approval_session_ids();
     let filter = normalize_filter(filter);
     tauri::async_runtime::spawn_blocking(move || {
         let alive = snapshots.snapshot();
+        let runtimes = runtimes.snapshot();
         live_sessions_blocking(
             &db_path,
             &tx_cache,
-            &alive,
-            &pty_live,
+            LiveContext {
+                alive: &alive,
+                pty_live: &pty_live,
+                runtimes: &runtimes,
+                approvals: &approvals,
+            },
             &filter,
             search.as_deref(),
+            cwd.as_deref(),
             PageReq {
                 before_last_event_at,
                 before_id,
@@ -247,6 +405,33 @@ pub(crate) fn session_connected(
     pid_alive || now.saturating_sub(last_event_at) < RESUME_GRACE_MS
 }
 
+/// 「待批准」此刻是否还成立——`pending_review` 的存活校正，与 [`session_connected`] 对
+/// `status` 做的事同构：DB 里那一位是 hook 落库的滞后快照，直接展示就会撒谎。
+///
+/// **claude 这类由 hook 决定权限的 provider**（[`permission_hook_decides`]）：真相在 broker。
+/// `PermissionRequest` hook 阻塞期间请求挂在 broker 上；hook 一返回就没了——要么用户在 GUI
+/// 里批了/拒了，要么没有 GUI 消费者、交还终端由用户当场处理。三种结局都意味着**没人再等**，
+/// 可 DB 里的 `pending_review` 要等下一个 hook 事件（PostToolUse/Stop）才清：被放行的工具
+/// 跑 20 分钟，对话页就错挂 20 分钟「Agent 请求权限」，而终端里 agent 正忙着干活。
+///
+/// Question/Plan 不做这个校正：它们由 `PreToolUse`（AskUserQuestion/ExitPlanMode）落库、
+/// 不经 broker，而那两个工具本身就是「停下来等人」——等的期间 DB 标记正是对的。
+pub(crate) fn pending_review_live<'a>(
+    provider: &str,
+    pending_review: Option<&'a str>,
+    broker_holds_approval: bool,
+) -> Option<&'a str> {
+    match pending_review {
+        Some("approval")
+            if !broker_holds_approval
+                && meowo_agent::by_id(provider).is_some_and(|p| p.permission_hook_decides()) =>
+        {
+            None
+        }
+        other => other,
+    }
+}
+
 /// Single definition shared by list filtering and tab counters.
 pub(crate) fn tab_class(
     connected: bool,
@@ -268,15 +453,30 @@ pub(crate) struct PageReq {
     pub(crate) limit: usize,
 }
 
+/// 一次列表查询共享的**外部事实观测**：DB 之外、随时可变、必须现采的那几样。三者的采样
+/// 都在同一个 spawn_blocking 里完成、生命周期一致，故打包同行——而不是各占一个参数位。
+pub(crate) struct LiveContext<'a> {
+    /// 进程表快照(TTL 缓存,与角标查询共享一次采样)。
+    pub(crate) alive: &'a std::collections::HashSet<i64>,
+    /// 托管 PTY 活跃的会话集合:hook 未认领 pid / 事件宽限过期时的存活兜底,
+    /// 与对话窗口(chat.rs 的 connected)同口径,两边不再各说各话。
+    pub(crate) pty_live: &'a std::collections::HashSet<i64>,
+    /// agent 自建后台会话的索引(见 [`SessionRuntimeCache`])。
+    pub(crate) runtimes: &'a SessionRuntimeIndex,
+    /// 此刻 broker 手里还压着审批请求的会话(见 [`pending_review_live`])。DB 的
+    /// `pending_review` 是滞后快照,要靠它校正,否则被放行的工具跑多久就错挂多久「待批准」。
+    pub(crate) approvals: &'a std::collections::HashSet<i64>,
+}
+
 pub(crate) fn live_sessions_blocking(
     db_path: &Path,
     tx_cache: &Mutex<meowo_agent::TranscriptCache>,
-    alive: &std::collections::HashSet<i64>,
-    // 托管 PTY 活跃的会话集合:hook 未认领 pid / 事件宽限过期时的存活兜底,
-    // 与对话窗口(chat.rs 的 connected)同口径,两边不再各说各话。
-    pty_live: &std::collections::HashSet<i64>,
+    live: LiveContext<'_>,
     filter: &str,
     search: Option<&str>,
+    // 目录筛选(侧栏「按目录」):斜杠归一的精确匹配,与 search 的子串语义分开走,
+    // 见 store 的 live_sessions_filtered 文档注释。
+    cwd: Option<&str>,
     page: PageReq,
 ) -> Result<LiveSessionsPage, String> {
     if page.limit == 0 {
@@ -304,28 +504,44 @@ pub(crate) fn live_sessions_blocking(
     let mut next_cursor: Option<PageCursor> = None;
     'fill: loop {
         let sessions = store
-            .live_sessions(Some(filter), search, cursor_ts, cursor_id, batch_limit)
+            .live_sessions_filtered(Some(filter), search, cwd, cursor_ts, cursor_id, batch_limit)
             .map_err(|e| e.to_string())?;
         let raw_len = sessions.len();
         let batch_tail = sessions
             .last()
             .map(|session| (session.session.last_event_at, session.session.id));
-        for session in sessions {
+        for mut session in sessions {
             scanned += 1;
+            // 「待批准」的存活校正,与下面 connected 校正 status 是同一套路数(见
+            // pending_review_live):hook 落库的那一位在权限已放行后仍会滞留到 PostToolUse。
+            // 只改**卡片展示**(pill / 状态点),不改这条会话落在哪个 tab——归属由 SQL 谓词
+            // 决定,角标也数那一份(见 get_live_sessions_counts 的注释)。于是「已放行但标记
+            // 滞留」的会话仍待在待交互 tab 里,只是卡片如实显示运行中;数字两端一致,不打架。
+            session.pending_review = pending_review_live(
+                &session.provider,
+                session.pending_review.as_deref(),
+                live.approvals.contains(&session.session.id),
+            )
+            .map(str::to_string);
             let scan_pos = PageCursor {
                 last_event_at: session.session.last_event_at,
                 id: session.session.id,
             };
-            let pty_managed = pty_live.contains(&session.session.id);
+            let pty_managed = live.pty_live.contains(&session.session.id);
             let connected = session_connected(
                 &session.session.status,
                 session.pid,
-                process_alive(session.pid, alive, pty_managed),
+                process_alive(session.pid, live.alive, pty_managed),
                 session.session.last_event_at,
                 now,
             );
             if !connectivity_filtered || connected {
-                if let Some(item) = enrich(tx_cache, session, connected, pty_managed) {
+                let runtime = runtime_of(
+                    live.runtimes,
+                    &session.provider,
+                    &session.session.cc_session_id,
+                );
+                if let Some(item) = enrich(tx_cache, session, connected, pty_managed, &runtime) {
                     items.push(item);
                 }
             }
@@ -347,6 +563,16 @@ pub(crate) fn live_sessions_blocking(
     }
     // 稳定排序：已连接的顶到最前，同组内保持 SQL 的时间倒序。
     items.sort_by_key(|item| std::cmp::Reverse(item.connected));
+    // 本页有归属自定义账号的会话才读一次 settings——全默认账号（没建过 profile 的用户）
+    // 不为一个恒空的字段在热路径上付一次读盘。
+    if items.iter().any(|item| item.inner.profile.is_some()) {
+        let settings = super::settings::load_settings();
+        for item in &mut items {
+            if let Some(id) = item.inner.profile.as_deref() {
+                item.profile_name = Some(resolve_profile_name(&settings, &item.inner.provider, id));
+            }
+        }
+    }
     Ok(LiveSessionsPage { items, next_cursor })
 }
 
@@ -356,8 +582,13 @@ fn dropped_from_list(title: &str, connected: bool, todos: &[meowo_store::Todo]) 
     if title.eq_ignore_ascii_case("ping") {
         return true;
     }
-    let unnamed = title.is_empty() || title == "(未命名会话)";
-    !connected && unnamed && todos.is_empty()
+    !connected && is_shell_title(title) && todos.is_empty()
+}
+
+/// 还没拿到名字的会话：没标题，或顶着占位标题。
+fn is_shell_title(title: &str) -> bool {
+    let title = title.trim();
+    title.is_empty() || title == "(未命名会话)"
 }
 
 /// 补上 transcript 里的标题/错误/预览。返回 `None` 表示这条不该出现在列表里
@@ -367,12 +598,24 @@ fn enrich(
     mut session: LiveSession,
     connected: bool,
     pty_managed: bool,
+    runtime: &meowo_agent::SessionRuntime,
 ) -> Option<LiveItem> {
+    // 后台会话一律不建卡（理由见 hidden_background）。排在最前：省掉一次 transcript 读盘，
+    // 这类会话的正文本来也多半没落盘。
+    if runtime.background {
+        return None;
+    }
     // DB 数据已能定夺去留时先裁决，省掉 transcript 的文件 IO：只有会从 transcript
     // 补标题的 provider（目前 claude），未命名会话才可能被翻案；其余 provider 标题
     // 以 DB 为准，注定被丢的行不必为解析 transcript 付一次 open/read。
     let resolves_title = super::agent_resolves_transcript_title(&session.provider);
-    if !resolves_title && dropped_from_list(session.task_title.trim(), connected, &session.todos) {
+    // 去留只认 **DB 里的标题**，与 store 的 live_sessions_totals 同源。transcript 解析出的
+    // 名字只管显示——曾经拿覆盖后的标题做判定，于是空壳会话靠 transcript 里一行 `ai-title`
+    // 就赖着不走：store 认为它是空壳（不计数），列表却显示它，角标与列表当场打架。
+    // 真实案例：claude 的 fork/resume 后台 worker 只写 ai-title / agent-name 两行元数据，
+    // 一条对话都没有，卡片却顶着个名字、点开一片空白、还恢复不了。
+    let db_title = session.task_title.clone();
+    if !resolves_title && dropped_from_list(db_title.trim(), connected, &session.todos) {
         return None;
     }
     let mut error_label = None;
@@ -396,17 +639,25 @@ fn enrich(
         }
         preview = info.preview;
     }
-    if dropped_from_list(session.task_title.trim(), connected, &session.todos) {
+    if dropped_from_list(db_title.trim(), connected, &session.todos) {
         return None;
     }
     Some(LiveItem {
         inner: session,
         connected,
         pty_managed,
+        // 当前隐藏规则下**恒为 false**：上面 `runtime.background` 为真的行已经整条丢掉
+        // （后台会话一律不上看板，见 hidden_background）。字段留着不是摆设——放宽隐藏规则
+        // 时（比如只藏查不到源的那些）这里立刻有值可发，前端的后台会话分支（贴纸的
+        // 「去 FleetView 找它」提示、结束会话入口）也就随之活过来。改隐藏规则的人请连带
+        // 检查那几处：它们目前只被合成数据的测试覆盖，线上走不到。
+        background: runtime.background,
         errored: error_label.is_some(),
         error_label,
         error_raw,
         preview,
+        // 展示名在组页阶段统一解析（见 live_sessions_blocking 尾部）。
+        profile_name: None,
     })
 }
 
@@ -418,6 +669,107 @@ mod tests {
     fn unknown_filters_degrade_to_all() {
         assert_eq!(normalize_filter("unknown".into()), "all");
         assert_eq!(normalize_filter("waiting".into()), "waiting");
+    }
+
+    /// 真实翻车：终端里 agent 正跑着一条 20 分钟的 shell 命令，对话页却挂着「Agent 请求
+    /// 权限 · 待授权」。权限早被放行（GUI 里批了，或没有 GUI 消费者、用户在终端当场批的），
+    /// 但 DB 的 `pending_review` 要等 PostToolUse 才清——工具跑多久就错挂多久。
+    /// 对 hook 决定权限的 provider，实时真相在 broker：它空了就说明没人再等。
+    #[test]
+    fn a_settled_permission_request_stops_claiming_the_agent_is_waiting() {
+        // claude/codex 的 PermissionRequest hook 阻塞等决策：broker 空 = 已尘埃落定。
+        assert_eq!(pending_review_live("claude", Some("approval"), false), None);
+        assert_eq!(pending_review_live("codex", Some("approval"), false), None);
+        // hook 还压着请求 = agent 真的停在那儿等你批。
+        assert_eq!(
+            pending_review_live("claude", Some("approval"), true),
+            Some("approval")
+        );
+        // Question/Plan 由 PreToolUse 落库、不经 broker，而那两个工具本身就是停下来等人。
+        assert_eq!(
+            pending_review_live("claude", Some("question"), false),
+            Some("question")
+        );
+        assert_eq!(
+            pending_review_live("claude", Some("plan"), false),
+            Some("plan")
+        );
+        // 不接管决策的 provider（kimi 的该事件 observation-only）：待批状态只有 DB 这一个
+        // 来源，broker 空不代表已处理——照旧显示，卡片提示去终端处理。未知 provider 同理。
+        assert_eq!(
+            pending_review_live("kimi", Some("approval"), false),
+            Some("approval")
+        );
+        assert_eq!(
+            pending_review_live("who-knows", Some("approval"), false),
+            Some("approval")
+        );
+        assert_eq!(pending_review_live("claude", None, false), None);
+    }
+
+    /// 空壳会话不能靠 transcript 里一行 `ai-title` 赖着不走：store 的计数按 **DB 标题**
+    /// 判空壳（已结束 + 未命名 + 无待办），列表若按解析后的标题判，两个数字当场打架。
+    /// claude 的 fork/resume 后台 worker 正是这样——只写 ai-title / agent-name 两行元数据，
+    /// 一条对话都没有，卡片却顶着个名字、点开一片空白、还恢复不了。
+    #[test]
+    fn a_transcript_title_cannot_keep_an_empty_session_on_the_board() {
+        // 已结束 + DB 未命名 + 无待办 = 空壳，无论 transcript 解析出什么名字都该丢。
+        assert!(dropped_from_list("(未命名会话)", false, &[]));
+        assert!(dropped_from_list("", false, &[]));
+        // 还连着、或有待办、或 DB 本来就有名字 → 都不是空壳。
+        assert!(!dropped_from_list("(未命名会话)", true, &[]));
+        assert!(!dropped_from_list("真实标题", false, &[]));
+    }
+
+    /// 后台会话一律不上看板：用户没开过它们、也几乎操作不了（打字无效，发消息守护进程
+    /// 收下但手动模式下不执行）。列表与角标必须同口径剔除，否则角标数出一条用户在列表里
+    /// 找不到的会话——这条口径以前打过架。
+    #[test]
+    fn background_sessions_are_kept_off_the_board_entirely() {
+        let index = fixture();
+        assert!(hidden_background(&index, "claude", "job-a"));
+        assert!(hidden_background(&index, "claude", "spare-one"));
+        // 用户自己开的会话、别的 agent、查无此人：一概不剔除。
+        assert!(!hidden_background(&index, "claude", "mine"));
+        assert!(!hidden_background(&index, "codex", "job-a"));
+        assert!(!hidden_background(&index, "claude", "nobody"));
+    }
+
+    /// 一个用户自己的会话 + 它派生的两个后台作业 + 一个预热进程。
+    fn fixture() -> SessionRuntimeIndex {
+        let bg = |parent: Option<&str>, spare: bool| meowo_agent::SessionRuntime {
+            background: true,
+            spare,
+            forked_from: parent.map(str::to_string),
+            ..Default::default()
+        };
+        let claude = [
+            ("mine".to_string(), meowo_agent::SessionRuntime::default()),
+            ("job-a".to_string(), bg(Some("mine"), false)),
+            ("job-b".to_string(), bg(Some("mine"), false)),
+            ("spare-one".to_string(), bg(None, true)),
+        ]
+        .into_iter()
+        .collect();
+        [("claude", claude)].into_iter().collect()
+    }
+
+    /// id → 展示名：命中 settings 用展示名；profile 已删（查不到）回退 id 本身——
+    /// 宁可显示原始 id 也不丢归属信息；跨 agent 的同 id 不能串。
+    #[test]
+    fn profile_name_resolves_from_settings_with_id_fallback() {
+        let mut s = super::super::settings::Settings::default();
+        s.profiles.insert(
+            "claude".into(),
+            vec![crate::profile::Profile {
+                id: "work".into(),
+                name: "工作".into(),
+            }],
+        );
+        assert_eq!(resolve_profile_name(&s, "claude", "work"), "工作");
+        // profile 已删 / 别的 agent：回退 id 本身。
+        assert_eq!(resolve_profile_name(&s, "claude", "gone"), "gone");
+        assert_eq!(resolve_profile_name(&s, "codex", "work"), "work");
     }
 
     /// 侧栏没有「加载更多」，一次请求拿到多少就显示多少。空会话是在取完一批**之后**
@@ -466,12 +818,19 @@ mod tests {
         let cache = Mutex::new(meowo_agent::TranscriptCache::default());
         let alive = std::collections::HashSet::new();
         let pty_none = std::collections::HashSet::new();
+        let no_runtimes = SessionRuntimeIndex::new();
+        let no_approvals = std::collections::HashSet::new();
         let page = live_sessions_blocking(
             &db,
             &cache,
-            &alive,
-            &pty_none,
+            LiveContext {
+                alive: &alive,
+                pty_live: &pty_none,
+                runtimes: &no_runtimes,
+                approvals: &no_approvals,
+            },
             "all",
+            None,
             None,
             PageReq {
                 before_last_event_at: None,
@@ -534,6 +893,8 @@ mod tests {
 
         let cache = Mutex::new(meowo_agent::TranscriptCache::default());
         let pty_none = std::collections::HashSet::new();
+        let no_runtimes = SessionRuntimeIndex::new();
+        let no_approvals = std::collections::HashSet::new();
         let mut seen = std::collections::HashSet::new();
         let mut cursor: Option<(i64, i64)> = None;
         const PAGE: usize = 100;
@@ -541,9 +902,14 @@ mod tests {
             let page = live_sessions_blocking(
                 &db,
                 &cache,
-                &alive,
-                &pty_none,
+                LiveContext {
+                    alive: &alive,
+                    pty_live: &pty_none,
+                    runtimes: &no_runtimes,
+                    approvals: &no_approvals,
+                },
                 "all",
+                None,
                 None,
                 PageReq {
                     before_last_event_at: cursor.map(|c| c.0),
@@ -597,12 +963,19 @@ mod tests {
         // alive 传空集 → 全部按「未连接」判定，正是列表过滤最狠的情形（可见条数下界）。
         let alive = std::collections::HashSet::new();
         let pty_none = std::collections::HashSet::new();
+        let no_runtimes = SessionRuntimeIndex::new();
+        let no_approvals = std::collections::HashSet::new();
         let visible = live_sessions_blocking(
             &db,
             &cache,
-            &alive,
-            &pty_none,
+            LiveContext {
+                alive: &alive,
+                pty_live: &pty_none,
+                runtimes: &no_runtimes,
+                approvals: &no_approvals,
+            },
             "all",
+            None,
             None,
             PageReq {
                 before_last_event_at: None,

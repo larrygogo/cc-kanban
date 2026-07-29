@@ -122,10 +122,12 @@ pub trait AgentPlugin: Sync {
         &[]
     }
 
-    /// 中断当前回合的按键序列。证据要求同其他屏幕交互声明:claude 为 Esc(官方文档的
-    /// 中断行为),codex 为 Esc(其状态行自述 "esc to interrupt",真机 capture 在档,
-    /// 见 docs/research/tui-menu-captures-2026-07.md);kimi 有 Interrupt hook 事件但
-    /// **按键**未取证,gemini/opencode 无证据——一律 None,宁缺毋滥。
+    /// 中断当前回合的按键序列。默认 None:未取证的 provider 不出中断按钮。现状是五家
+    /// 都覆写成了 Esc,但证据分级不同——claude(官方文档)、codex(状态行自述 "esc to
+    /// interrupt",真机 capture 在档,见 docs/research/tui-menu-captures-2026-07.md)、
+    /// kimi(2026-07 真机人工确认)为确证;gemini/opencode 是约定推断,各自插件里写明了
+    /// 存疑点。声明它的代价低(误发 Esc 至多是多停一个回合),但**发出去的消息撤不回**,
+    /// 这个键是 GUI 上唯一能叫停当前回合的手段,故不取证也宁可给。
     fn interrupt_input(&self) -> Option<&'static str> {
         None
     }
@@ -275,12 +277,20 @@ pub trait AgentPlugin: Sync {
     /// 310s hook）。GUI 审批桥只对声明它的 agent 生效：observation-only 的 PermissionRequest
     /// （kimi，5s 超时、忽略 hookSpecificOutput）若也弹 GUI 审批卡，卡片既控制不了真实审批，
     /// 用户点「允许」还会错误清掉 pending_review——真实提示仍在终端里等人。
+    /// kimi 的 GUI 审批改走屏幕识别兜底（terminalAttention 的 `kimi:command-approval`，
+    /// 形态与按键语义为官方源码取证，见 docs/research/tui-menu-captures-2026-07.md）。
     fn permission_hook_decides(&self) -> bool {
         false
     }
 
     /// 会话遥测（Stop 正文/模型、上下文占用、transcript、重命名回写）。None = 全部降级。
     fn telemetry(&self) -> Option<&'static dyn TelemetryCap> {
+        None
+    }
+
+    /// 会话运行形态（哪些会话由 agent 自己的后台守护进程托管）。None = 该 agent 没有后台会话
+    /// 这回事，宿主把所有会话一视同仁。
+    fn runtime(&self) -> Option<&'static dyn crate::caps::RuntimeCap> {
         None
     }
 
@@ -1034,5 +1044,15 @@ mod tests {
             .telemetry()
             .unwrap()
             .write_rename("s", None, "t"));
+    }
+
+    /// 只有 claude 有「agent 自己拉起后台会话」这回事（FleetView）。其余 agent 不声明
+    /// runtime，宿主据此把它们的会话一视同仁，而不是去猜一个空索引的含义。
+    #[test]
+    fn runtime_slot_is_declared_only_where_background_sessions_exist() {
+        assert!(by_id("claude").unwrap().runtime().is_some());
+        for id in ["kimi", "codex", "gemini", "opencode"] {
+            assert!(by_id(id).unwrap().runtime().is_none(), "{id} 没有后台会话");
+        }
     }
 }

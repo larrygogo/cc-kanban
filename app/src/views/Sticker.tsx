@@ -53,7 +53,7 @@ type FocusSessionResult =
   | "unsupported_terminal"
   | "process_ended";
 
-type FocusNoticeKind = FocusSessionResult | "connecting" | "failed";
+type FocusNoticeKind = FocusSessionResult | "connecting" | "failed" | "background";
 
 export function relayEnabledSignature(settings: Settings): string {
   return Object.entries(settings.relay?.per_agent ?? {})
@@ -226,7 +226,8 @@ export function Sticker({
     };
   }, []);
 
-  // 会话星标：星标的会话永远排到列表最前（跨重启保留）。与「置顶窗口(pin)」是两回事。
+  // 会话置顶：置顶的会话永远排到列表最前（跨重启保留）。与「置顶窗口(alwaysOnTop)」是两回事——
+  // 那是窗口行为，图标也刻意分开（这里 TopIcon，窗口那边 PinIcon）。存储键沿用 meowo-starred。
   const [starred, setStarred] = useState<Set<string>>(loadStarred);
   const toggleStar = (sid: string) => {
     setStarred((prev) => {
@@ -259,7 +260,7 @@ export function Sticker({
   };
 
   // 卡片右键菜单：记录目标会话 id 与打开坐标。item 每次渲染按 id 从 data 现查——
-  // 数据刷新后菜单内容(星标/便签/归档态)保持最新,会话消失则菜单自然不渲染。
+  // 数据刷新后菜单内容(置顶/便签/归档态)保持最新,会话消失则菜单自然不渲染。
   const [ctxMenu, setCtxMenu] = useState<{ sid: number; x: number; y: number } | null>(null);
   const ctxItem = ctxMenu ? data.find((l) => l.session.id === ctxMenu.sid) ?? null : null;
 
@@ -297,6 +298,14 @@ export function Sticker({
   const buttonMode = openMode === "button";
   const canOpen = (l: Item) => l.connected || !l.archived;
   const openTerminal = (l: Item) => {
+    // Agent 自己派生的后台会话：没有终端窗口可切（daemon 起的 PTY 宿主不是用户的终端），
+    // 也无从恢复——恢复等于跟 supervisor 抢同一个 session id。只说明它是什么、去哪找它。
+    // 注意：后端当前把这类会话整条藏掉（session_query 的 hidden_background），所以
+    // `l.background` 线上恒为 false，本分支是放宽隐藏规则后的预备（测试用合成数据覆盖）。
+    if (l.background) {
+      setFocusNotice({ kind: "background", item: l });
+      return;
+    }
     if (l.connected) {
       if (!l.pid) {
         setFocusNotice({ kind: "connecting", item: l });
@@ -366,11 +375,12 @@ export function Sticker({
           unsupported_terminal: t.sticker.focusUnsupported,
           process_ended: t.sticker.focusEnded,
           failed: t.sticker.focusFailed,
+          background: t.sticker.focusBackground,
           focused: "",
         }[focusNotice.kind])
     : "";
 
-  // 先按当前 tab 过滤，再排序：星标恒在最前。match(tab) 是安全网（后端已按 tab/search 过滤，
+  // 先按当前 tab 过滤，再排序：置顶恒在最前。match(tab) 是安全网（后端已按 tab/search 过滤，
   // 这里兜底防御性重过滤一遍）；搜索过滤已下沉后端（父组件按 search 请求当前 tab 内全库），
   // 本组件不再做客户端搜索过滤。waiting「等最久优先」由后端 ASC 排序保证，客户端只做 starred 浮顶。
   // useMemo 缓存：编辑便签/重命名时每次按键都会重渲染，不必每次重跑 filter+sort。
@@ -735,9 +745,9 @@ export function Sticker({
                                   invoke("open_chat_window", { sessionId: l.session.id }).catch(() => {});
                                 }}
                               ><ChatIcon /></button>
-                              {/* 星标/便签/重命名/归档操作收进卡片菜单（CardContextMenu），标题行不再挤 hover 图标。
+                              {/* 置顶/便签/重命名/归档操作收进卡片菜单（CardContextMenu），标题行不再挤 hover 图标。
                                   默认右键触发；card_menu_mode=button（触屏等不便右键）时改为此处的常显菜单按钮，
-                                  两种触发方式二选一。星标态由卡片金角、便签由便签块表达，收起入口不丢信息。 */}
+                                  两种触发方式二选一。置顶态由卡片金角、便签由便签块表达，收起入口不丢信息。 */}
                               {menuMode === "button" && (
                                 <button
                                   type="button"
@@ -770,6 +780,21 @@ export function Sticker({
                           {l.cwd && (
                             <span className="stk-repo" data-tip={l.cwd}>
                               {l.cwd.split(/[\\/]/).filter(Boolean).pop() ?? l.cwd}
+                            </span>
+                          )}
+                          {/* Agent 从这个会话派生出去的后台作业**不在卡片上留痕**：它们自己
+                              不建卡（见后端 hidden_background），源会话卡上也不标数——用户既
+                              管不了这些作业（终端按键无效、发消息在手动模式下不会被执行），
+                              一个数字除了让人困惑并无用处。要处理请回派出它们的终端。 */}
+                          {/* 所属账号徽章：默认账号（profile_name 为 null）不显示——
+                              没建过 profile 的用户零感知。 */}
+                          {l.profile_name && (
+                            <span
+                              className="stk-profile"
+                              data-tip={t.account.activeProfileBadge(l.profile_name)}
+                              data-testid="stk-profile-badge"
+                            >
+                              {l.profile_name}
                             </span>
                           )}
                           {l.model && <span className="stk-model">{l.model}</span>}
@@ -898,7 +923,10 @@ export function Sticker({
             // 仅本 GUI 托管的 PTY 能结束（与对话窗标题栏入口同门控）；确认+停止走共用的
             // confirmStopSession。成功后不用做别的：轮询里 connected 翻 false、徽标自退。
             // 失败也由徽标兜底可见——卡片仍显「运行中」即说明没停掉，贴纸窗无独立错误槽位。
-            ctxItem.pty_managed
+            // 后台会话恒不满足 pty_managed（PTY 在 agent 的 daemon 手上），但它有自己的
+            // 结束入口——后端会连上那条旁路 socket 发 kill 控制帧，比对着 pid 下手干净：
+            // 杀进程会被 supervisor 按 respawnFlags 原地拉回来。
+            ctxItem.pty_managed || ctxItem.background
               ? () => {
                   void confirmStopSession(ctxItem.session.id, {
                     title: t.chat.endSession,

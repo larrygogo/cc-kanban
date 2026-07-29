@@ -27,6 +27,7 @@ const api = vi.hoisted(() => ({
   setActiveProfile: vi.fn(),
   renameProfile: vi.fn(),
   deleteProfile: vi.fn(),
+  mergeProfileIntoDefault: vi.fn(),
 }));
 vi.mock("../api", async (o) => ({ ...(await o<typeof import("../api")>()), ...api }));
 const dialog = vi.hoisted(() => ({ confirm: vi.fn() }));
@@ -297,6 +298,26 @@ describe("AccountSection agent 卡", () => {
     fireEvent.click(await screen.findByTestId("agent-logout-claude"));
     await waitFor(() => expect(dialog.confirm).toHaveBeenCalled());
     expect(api.logoutAgent).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 活跃账号持续可见：切到过自定义账号，provider 卡片标题行就一直挂着「账号：<名>」徽章——
+   * 这是「切过一次就忘了，之后会话全写进隔离账号」的防线。默认账号（active_profile_name 缺席）
+   * 什么都不显示：没建过账号的用户零感知。
+   */
+  it("非默认账号活跃时卡片显示账号徽章，默认账号不显示", async () => {
+    render(<AccountSection />);
+    await screen.findByTestId("agent-card-claude");
+    // 默认 mock 没有 active_profile_name（默认账号）→ 无徽章。
+    expect(screen.queryByTestId("agent-profile-claude")).toBeNull();
+
+    api.getAccounts.mockResolvedValue([
+      { provider: "claude", account: { email: "a@b.c" }, usage: null, usage_supported: true, active_profile_name: "工作" },
+    ]);
+    cleanup();
+    render(<AccountSection />);
+    const badge = await screen.findByTestId("agent-profile-claude");
+    expect(badge.textContent).toBe(zh.account.activeProfileBadge("工作"));
   });
 
   it("模型卡内用官方账号 / API 中转二选一，预配置完整时可直接切换", async () => {
@@ -894,6 +915,68 @@ describe("AccountSection 账号的增删改", () => {
 
     await waitFor(() => expect(screen.getByTestId("profile-add-claude")).toBeTruthy());
     expect(api.createProfile).not.toHaveBeenCalled();
+  });
+});
+
+describe("AccountSection 合并进默认账号", () => {
+  const twoProfiles = () =>
+    api.listProfiles.mockResolvedValue([
+      { id: null, name: "", active: false, account: { email: "a@b.c" } },
+      { id: "work", name: "工作", active: true, account: { email: "w@b.c" } },
+    ]);
+
+  /**
+   * 合并是「数据已拆散」的自救出口：会话与历史并入默认账号，账号本身消失。不可逆，
+   * 故与删除同规——必须弹确认（tauri confirm，不是 window.confirm），确认框里写明不可逆。
+   */
+  it("确认后调 mergeProfileIntoDefault，确认框写明不可逆", async () => {
+    twoProfiles();
+    api.mergeProfileIntoDefault.mockResolvedValue(undefined);
+    render(<AccountSection />);
+
+    fireEvent.click(await screen.findByTestId("profile-menu-claude-work"));
+    fireEvent.click(screen.getByTestId("profile-menu-claude-work-merge"));
+    await waitFor(() => expect(dialog.confirm).toHaveBeenCalled());
+    // 确认文案必须讲清后果：数据并入默认账号 + 不可逆。
+    expect(dialog.confirm.mock.calls[0][0]).toContain("工作");
+    expect(dialog.confirm.mock.calls[0][0]).toContain("不可逆");
+    await waitFor(() =>
+      expect(api.mergeProfileIntoDefault).toHaveBeenCalledWith("claude", "work")
+    );
+  });
+
+  it("确认框点取消 → 不合并", async () => {
+    twoProfiles();
+    dialog.confirm.mockResolvedValue(false);
+    render(<AccountSection />);
+
+    fireEvent.click(await screen.findByTestId("profile-menu-claude-work"));
+    fireEvent.click(screen.getByTestId("profile-menu-claude-work-merge"));
+    await waitFor(() => expect(dialog.confirm).toHaveBeenCalled());
+    expect(api.mergeProfileIntoDefault).not.toHaveBeenCalled();
+  });
+
+  /** 默认账号没有「合并进自己」——它是合并的终点，菜单里不该出现这一项。 */
+  it("默认账号的操作菜单没有合并项", async () => {
+    twoProfiles();
+    render(<AccountSection />);
+
+    fireEvent.click(await screen.findByTestId("profile-menu-claude-__default__"));
+    expect(screen.queryByTestId("profile-menu-claude-__default__-merge")).toBeNull();
+    // 删除项同样不给（既有纪律），合并项与它并列管理。
+    expect(screen.queryByTestId("profile-menu-claude-__default__-delete")).toBeNull();
+  });
+
+  /** 后端拒绝（如有进行中的会话）时错误就地展示，不静默。 */
+  it("合并失败（后端拒绝）时错误就地展示", async () => {
+    twoProfiles();
+    api.mergeProfileIntoDefault.mockRejectedValue("该账号还有 2 个进行中的会话，请先结束这些会话再合并");
+    render(<AccountSection />);
+
+    fireEvent.click(await screen.findByTestId("profile-menu-claude-work"));
+    fireEvent.click(screen.getByTestId("profile-menu-claude-work-merge"));
+    await waitFor(() => expect(api.mergeProfileIntoDefault).toHaveBeenCalled());
+    await screen.findByText(/进行中的会话/);
   });
 });
 

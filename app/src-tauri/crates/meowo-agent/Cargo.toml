@@ -23,5 +23,9 @@ name = "subagent_live"
 path = "tests/subagent_live.rs"
 
 [[test]]
+name = "fleet_live"
+path = "tests/fleet_live.rs"
+
+[[test]]
 name = "todo_live"
 path = "tests/todo_live.rs"

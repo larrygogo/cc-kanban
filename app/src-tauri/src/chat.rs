@@ -9,20 +9,30 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
-/// Per-session transcript mtimes used to detect same-length rewrites.
+/// Per-session transcript (mtime, path) used to detect same-length rewrites
+/// and transcript relocation across profiles.
 #[derive(Default)]
 pub(crate) struct ChatMtimes {
-    entries: std::collections::HashMap<i64, (std::time::SystemTime, u64)>,
+    entries: std::collections::HashMap<i64, ChatMtimeEntry>,
     tick: u64,
     /// errored 的节流缓存:(采样时刻, 值)。见 [`ERRORED_SAMPLE_MS`]。
     errored: std::collections::HashMap<i64, (i64, bool)>,
 }
 
+#[derive(Clone)]
+struct ChatMtimeEntry {
+    mtime: std::time::SystemTime,
+    version: u64,
+    /// 上次解析的 transcript 路径。跨 profile 恢复会把会话文件复制到另一个数据目录，
+    /// 路径解析随 mtime 切到新文件——字节偏移是对旧文件的记账，必须察觉切换并全量重读。
+    path: std::path::PathBuf,
+}
+
 impl ChatMtimes {
     const CAP: usize = 32;
 
-    fn get(&self, session_id: i64) -> Option<(std::time::SystemTime, u64)> {
-        self.entries.get(&session_id).copied()
+    fn get(&self, session_id: i64) -> Option<ChatMtimeEntry> {
+        self.entries.get(&session_id).cloned()
     }
 
     /// Compare-and-swap prevents a slower read from overwriting a newer observation.
@@ -31,21 +41,30 @@ impl ChatMtimes {
         session_id: i64,
         seen_version: Option<u64>,
         mtime: std::time::SystemTime,
+        path: std::path::PathBuf,
     ) {
-        if self.entries.get(&session_id).map(|(_, v)| *v) != seen_version {
+        if self.entries.get(&session_id).map(|e| e.version) != seen_version {
             return;
         }
-        self.put(session_id, mtime);
+        self.put(session_id, mtime, path);
     }
 
-    fn put(&mut self, session_id: i64, mtime: std::time::SystemTime) {
+    fn put(&mut self, session_id: i64, mtime: std::time::SystemTime, path: std::path::PathBuf) {
         self.tick += 1;
-        self.entries.insert(session_id, (mtime, self.tick));
+        let version = self.tick;
+        self.entries.insert(
+            session_id,
+            ChatMtimeEntry {
+                mtime,
+                version,
+                path,
+            },
+        );
         if self.entries.len() > Self::CAP {
             let oldest = self
                 .entries
                 .iter()
-                .min_by_key(|(_, (_, tick))| *tick)
+                .min_by_key(|(_, entry)| entry.version)
                 .map(|(id, _)| *id);
             if let Some(id) = oldest {
                 self.entries.remove(&id);
@@ -92,6 +111,12 @@ fn trim_first_page<T>(items: &mut Vec<T>, full: bool, full_read: bool) -> bool {
 struct LiveSignals {
     alive: std::sync::Arc<std::collections::HashSet<i64>>,
     pty_live: bool,
+    /// broker 此刻还压着这个会话的审批请求。用于 `pending_review` 的存活校正
+    /// (见 session_query::pending_review_live):hook 落库的那一位在权限已放行后仍会
+    /// 滞留到 PostToolUse——被放行的工具跑 20 分钟,对话页就错挂 20 分钟「Agent 请求权限」。
+    broker_approval: bool,
+    /// agent 自建后台会话的索引(claude FleetView),与看板共享同一份 TTL 快照。
+    runtimes: std::sync::Arc<super::session_query::SessionRuntimeIndex>,
 }
 
 /// errored 的重采样间隔:transcript 分析走共享 mtime 缓存,但 agent 流式输出期间文件
@@ -112,8 +137,8 @@ fn load_chat_history(
         .lock()
         .ok()
         .and_then(|seen| seen.get(session_id));
-    let prev_mtime = prev.map(|(mtime, _)| mtime);
-    let prev_version = prev.map(|(_, version)| version);
+    let prev_mtime = prev.as_ref().map(|entry| entry.mtime);
+    let prev_version = prev.as_ref().map(|entry| entry.version);
     let store = super::open_store(db_path)?;
     let header = store
         .session_header(session_id)
@@ -134,10 +159,12 @@ fn load_chat_history(
         items: Vec::new(),
         offset,
         reset: false,
-        pending_review: header
-            .pending_review
-            .as_deref()
-            .and_then(PendingReviewKind::from_stored),
+        pending_review: super::session_query::pending_review_live(
+            &header.provider,
+            header.pending_review.as_deref(),
+            live.broker_approval,
+        )
+        .and_then(PendingReviewKind::from_stored),
         model: context.model,
         agent_modes: Vec::new(),
         context_pct: context.used_pct,
@@ -169,6 +196,12 @@ fn load_chat_history(
         has_more: false,
         errored: false,
         pty_managed: live.pty_live,
+        background: super::session_query::is_background(
+            &live.runtimes,
+            &header.provider,
+            &header.cc_session_id,
+        ),
+        archived: header.archived,
         last_user_text: header.last_user_text.clone(),
         last_ai_text: header.last_ai_text.clone(),
     };
@@ -212,9 +245,20 @@ fn load_chat_history(
         history.reset = offset > 0;
         return Ok(history);
     };
-    let delta = meowo_agent::read_chat_delta(spec, &path, offset, prev_mtime);
+    // 路径切换(跨 profile 恢复后解析到另一个数据目录里的延续文件):前端的字节偏移
+    // 是对旧文件的记账,对新文件无意义——从头重读并向前端标记 reset,清空重灌。
+    let path_changed = prev.as_ref().is_some_and(|entry| entry.path != path);
+    let (base_offset, base_mtime) = if path_changed {
+        (0, None)
+    } else {
+        (offset, prev_mtime)
+    };
+    let mut delta = meowo_agent::read_chat_delta(spec, &path, base_offset, base_mtime);
+    if path_changed && offset > 0 {
+        delta.reset = true;
+    }
     if let (Ok(mut seen), Some(mtime)) = (chat_mtimes.lock(), delta.mtime) {
-        seen.put_if_current(session_id, prev_version, mtime);
+        seen.put_if_current(session_id, prev_version, mtime, path.clone());
     }
     history.offset = delta.offset;
     history.reset = delta.reset;
@@ -384,7 +428,9 @@ pub(crate) async fn get_chat_history(
     // 进程表采样(TTL 缓存,与看板共享)在 spawn_blocking 里做:冷采样 Windows 上要
     // 30-120ms,不能挂在 async-runtime 线程上。PTY 活性是纯内存查表,留在外面无妨。
     let snapshots = state.process_snapshots.clone();
+    let runtimes = state.session_runtimes.clone();
     let pty_live = state.ptys.is_active(session_id);
+    let broker_approval = state.ptys.pending_approval(session_id).is_some();
     tauri::async_runtime::spawn_blocking(move || {
         load_chat_history(
             &db_path,
@@ -393,6 +439,8 @@ pub(crate) async fn get_chat_history(
             LiveSignals {
                 alive: snapshots.snapshot(),
                 pty_live,
+                runtimes: runtimes.snapshot(),
+                broker_approval,
             },
             session_id,
             offset,
@@ -529,17 +577,21 @@ mod tests {
         assert!(save_pasted_attachment_blocking("empty.bin".into(), String::new()).is_err());
     }
 
+    fn any_path() -> std::path::PathBuf {
+        std::path::PathBuf::from("t.jsonl")
+    }
+
     #[test]
     fn stale_mtime_observations_cannot_overwrite_newer_ones() {
         let base = std::time::SystemTime::UNIX_EPOCH;
         let newer = base + std::time::Duration::from_secs(10);
         let mut cache = ChatMtimes::default();
-        cache.put(7, base);
-        let version_a = cache.get(7).map(|(_, version)| version);
+        cache.put(7, base, any_path());
+        let version_a = cache.get(7).map(|entry| entry.version);
         let version_b = version_a;
-        cache.put_if_current(7, version_b, newer);
-        cache.put_if_current(7, version_a, base);
-        assert_eq!(cache.get(7).map(|(mtime, _)| mtime), Some(newer));
+        cache.put_if_current(7, version_b, newer, any_path());
+        cache.put_if_current(7, version_a, base, any_path());
+        assert_eq!(cache.get(7).map(|entry| entry.mtime), Some(newer));
     }
 
     #[test]
@@ -547,15 +599,40 @@ mod tests {
         let base = std::time::SystemTime::UNIX_EPOCH;
         let mut cache = ChatMtimes::default();
         let hot = 1_i64;
-        cache.put(hot, base);
+        cache.put(hot, base, any_path());
         for i in 0..(ChatMtimes::CAP as i64 + 5) {
-            cache.put(100 + i, base);
-            cache.put(hot, base + std::time::Duration::from_secs(i as u64 + 1));
+            cache.put(100 + i, base, any_path());
+            cache.put(
+                hot,
+                base + std::time::Duration::from_secs(i as u64 + 1),
+                any_path(),
+            );
         }
         assert!(cache.entries.len() <= ChatMtimes::CAP);
         assert!(cache.get(hot).is_some());
-        assert_eq!(cache.get(100), None);
+        assert!(cache.get(100).is_none());
         assert!(cache.get(100 + ChatMtimes::CAP as i64 + 4).is_some());
+    }
+
+    #[test]
+    fn mtime_cache_remembers_the_transcript_path_per_session() {
+        let base = std::time::SystemTime::UNIX_EPOCH;
+        let mut cache = ChatMtimes::default();
+        cache.put(7, base, std::path::PathBuf::from("old.jsonl"));
+        let prev = cache.get(7).expect("entry");
+        // 模拟 load_chat_history 的路径切换判定:跨 profile 恢复后解析到的新文件
+        // 必须被认作「换了文件」,触发从头重读,而不是沿用旧文件的字节偏移。
+        assert!(prev.path != std::path::Path::new("new.jsonl"));
+        cache.put_if_current(
+            7,
+            Some(prev.version),
+            base,
+            std::path::PathBuf::from("new.jsonl"),
+        );
+        assert_eq!(
+            cache.get(7).map(|entry| entry.path),
+            Some(std::path::PathBuf::from("new.jsonl"))
+        );
     }
 
     #[test]
