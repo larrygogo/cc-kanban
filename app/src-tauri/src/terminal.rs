@@ -430,6 +430,10 @@ pub(crate) fn ghostty_installed() -> bool {
 
 /// 读设置得出「打开未连接会话」用的终端宿主（macOS）。缺省 Terminal.app；
 /// 选了 iTerm2 但未安装时回退 Terminal.app（避免 AppleScript 静默失败）。
+///
+/// 注意：设置为 ghostty 时这里也落到 Terminal.app——Ghostty 没有 AppleScript 支持，
+/// 聚焦（按 tty 定位窗口）与 focus 流程里的 resume 回退都无法定位它；只有
+/// `spawn_in_terminal` 的**新开终端**路径支持 Ghostty。这是已知取舍，不是疏漏。
 #[cfg(target_os = "macos")]
 pub(crate) fn resume_terminal_kind() -> crate::term_script::TermKind {
     use crate::term_script::TermKind;
@@ -546,11 +550,7 @@ fn copy_dir_merge(source: &std::path::Path, target: &std::path::Path) -> Result<
     for entry in std::fs::read_dir(source).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let destination = target.join(entry.file_name());
-        if entry
-            .file_type()
-            .map_err(|error| error.to_string())?
-            .is_dir()
-        {
+        if entry.file_type().map_err(|error| error.to_string())?.is_dir() {
             copy_dir_merge(&entry.path(), &destination)?;
         } else if !file_unchanged(&entry.path(), &destination) {
             std::fs::copy(entry.path(), destination).map_err(|error| error.to_string())?;
@@ -634,12 +634,8 @@ fn prepare_claude_session_for_active_profile(
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn record_resumed_profile(session_id: &str, profile: Option<&str>) {
-    let Ok(store) = open_store(&db_path()) else {
-        return;
-    };
-    let Ok(Some(id)) = store.find_session_id_pub(session_id) else {
-        return;
-    };
+    let Ok(store) = open_store(&db_path()) else { return };
+    let Ok(Some(id)) = store.find_session_id_pub(session_id) else { return };
     let _ = store.set_session_profile(id, profile);
 }
 
@@ -680,11 +676,7 @@ mod cross_account_resume_tests {
             "conversation"
         );
         for bucket in ["file-history", "session-env", "tasks"] {
-            assert!(target_root
-                .join(bucket)
-                .join(session)
-                .join("item")
-                .is_file());
+            assert!(target_root.join(bucket).join(session).join("item").is_file());
         }
         assert!(target_root
             .join("projects/project")
@@ -692,10 +684,7 @@ mod cross_account_resume_tests {
             .join("subagents/agent.jsonl")
             .is_file());
         assert!(!target_root.join(".credentials.json").exists());
-        assert_eq!(
-            std::fs::read_to_string(&transcript).unwrap(),
-            "conversation"
-        );
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), "conversation");
         let _ = std::fs::remove_dir_all(root);
     }
 }
@@ -728,17 +717,10 @@ mod session_profile_tests {
             Some("work")
         );
         // 切回默认账号必须得到明确的 None，不能又回落到会话之前所属的 profile。
+        assert_eq!(resume_profile(Some("claude"), Some("work".into()), None), None);
         assert_eq!(
-            resume_profile(Some("claude"), Some("work".into()), None),
-            None
-        );
-        assert_eq!(
-            resume_profile(
-                Some("codex"),
-                Some("original".into()),
-                Some("active".into())
-            )
-            .as_deref(),
+            resume_profile(Some("codex"), Some("original".into()), Some("active".into()))
+                .as_deref(),
             Some("original")
         );
     }
@@ -1177,7 +1159,11 @@ pub(crate) fn env_prefix_posix(env: &[(String, String)]) -> String {
 
 /// POSIX shell 参数逐项单引号包裹并拼接；单引号按 `'\''` 转义。
 ///
-/// 例：`["a", "b'c"] -> "'a' 'b'\\''c'"`。
+/// 例：`["a", "b'c"] -> "'a' 'b'\''c'"`。
+///
+/// 刻意留在 cfg 之外（allow 而非 cfg 门控）：纯字符串逻辑全平台可编译可单测，
+/// Ghostty 本身也支持 Linux——将来加 Linux 终端集成时直接复用（纪律同 `resume_argv_for`）。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn shell_join_for_posix(args: &[String]) -> String {
     args.iter()
         .map(|arg| format!("'{}'", arg.replace('\'', r"'\''")))
@@ -1188,10 +1174,11 @@ fn shell_join_for_posix(args: &[String]) -> String {
 /// 组装给 Ghostty 执行的一条 `sh -lc` 命令。
 ///
 /// - `env_prefix` 形如 `source '<tmp>' && rm -f '<tmp>' && `（见 `env_source_prefix_posix`）；
-/// - `cwd` 非空时先 `cd` 到目标目录；
+/// - `cwd` 非空时先 `cd` 到目标目录（转义同上）；
 /// - `argv` 逐项按 POSIX 单引号规则转义并拼接。
 ///
 /// `argv` 为空时返回 `None`，调用方应视为不可执行。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn ghostty_shell_command(cwd: Option<&str>, argv: &[String], env_prefix: &str) -> Option<String> {
     if argv.is_empty() {
         return None;
@@ -1204,11 +1191,13 @@ fn ghostty_shell_command(cwd: Option<&str>, argv: &[String], env_prefix: &str) -
     Some(cmd)
 }
 
-#[cfg(target_os = "macos")]
 /// 用 Ghostty 新开终端并执行恢复命令。
 ///
-/// 通过 `open -na Ghostty --args -e /bin/sh -lc <cmd>` 拉起，
-/// 返回值表示是否成功发起 spawn（并不等待命令执行完成）。
+/// 经 `open -na Ghostty --args -e /bin/sh -lc <cmd>` 拉起——`open` 走 LaunchServices，
+/// `Command::env` 传不进去，env 注入只能靠命令里 source 临时文件（正好与既有纪律一致）。
+/// `-n` 是必须的：不带它时对已运行的应用 `--args` 根本不会送达；代价是每次都新起一个
+/// Ghostty 实例。返回值表示是否成功发起 spawn（不等待命令执行完成）。
+#[cfg(target_os = "macos")]
 fn resume_session_ghostty(cwd: Option<&str>, argv: &[String], env_prefix: &str) -> bool {
     let Some(cmd) = ghostty_shell_command(cwd, argv, env_prefix) else {
         return false;
@@ -1233,10 +1222,7 @@ pub(crate) fn env_source_prefix_posix(env: &[(String, String)]) -> Result<String
     // （语义同 env_prefix_posix），值按同一套 POSIX 单引号规则转义。
     let mut content = format!("unset {}\n", PROXY_ENV_KEYS.join(" "));
     for (key, value) in env {
-        content.push_str(&format!(
-            "export {key}='{}'\n",
-            value.replace('\'', r"'\''")
-        ));
+        content.push_str(&format!("export {key}='{}'\n", value.replace('\'', r"'\''")));
     }
     let dir = std::env::temp_dir();
     // create_new 杜绝符号链接/抢占覆写；撞名（概率可忽略）换名重试。
@@ -1461,7 +1447,8 @@ pub(crate) fn wrap_with_env_windows(argv: &[String], env: &[(String, String)]) -
     ]
 }
 
-/// macOS 版：按 terminal 选 Terminal.app/iTerm2/Ghostty（iTerm2/Ghostty 未装回退 Terminal），成功 true。
+/// macOS 版：按 terminal 选 Terminal.app/iTerm2/Ghostty（iTerm2/Ghostty 未装回退 Terminal）。
+/// Terminal/iTerm2 走 AppleScript；Ghostty 无 AppleScript，走 `open -na`。成功 true。
 #[cfg(target_os = "macos")]
 pub(crate) fn spawn_in_terminal(
     argv: &[String],
@@ -1470,6 +1457,7 @@ pub(crate) fn spawn_in_terminal(
     env: &[(String, String)],
 ) -> bool {
     if terminal.eq_ignore_ascii_case("ghostty") && ghostty_installed() {
+        // env/cwd 的处理次序与下方 AppleScript 路径一字不差：先建密钥注入文件，再验 cwd。
         let Ok(env_prefix) = env_source_prefix_posix(env) else {
             return false;
         };
@@ -1541,10 +1529,7 @@ pub(crate) async fn new_session(
     // （中转端点只认它配置的那个模型，用户选的别名对它无意义，claude 以最后一个 --model 为准）。
     let mut argv = agent.launch_argv();
     if let Some(sel) = &options {
-        argv.extend(meowo_agent::resolve_launch_args(
-            agent.launch_options(),
-            sel,
-        ));
+        argv.extend(meowo_agent::resolve_launch_args(agent.launch_options(), sel));
     }
     let argv = crate::relay::augment_argv(agent.id(), argv);
     // 代理 + 中转 **+ 当前活跃账号的隔离变量**（`CLAUDE_CONFIG_DIR` 等），三者都在
@@ -1873,8 +1858,8 @@ impl AgentProcessHandle {
     fn open_verified(pid: i64) -> AgentProcessOpen {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
-            PROCESS_TERMINATE,
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+            QueryFullProcessImageNameW,
         };
         if !(1..=u32::MAX as i64).contains(&pid) {
             return AgentProcessOpen::Exited;
@@ -2118,11 +2103,11 @@ mod proxy_env_tests {
     #[test]
     fn posix_env_moves_secrets_into_a_sourced_file() {
         let secret_env = vec![
-            ("ANTHROPIC_API_KEY".to_string(), "sk-ant-secret".to_string()),
             (
-                "HTTPS_PROXY".to_string(),
-                "http://127.0.0.1:7890".to_string(),
+                "ANTHROPIC_API_KEY".to_string(),
+                "sk-ant-secret".to_string(),
             ),
+            ("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string()),
         ];
         let prefix = env_source_prefix_posix(&secret_env).unwrap();
         // 可见命令行只有 source/rm 与文件路径——密钥值绝不能出现在其中。
@@ -2285,10 +2270,7 @@ mod proxy_env_tests {
     fn open_verified_reports_exited_for_unopenable_pids() {
         for pid in [0, -1, i64::MAX, 0x0FFF_FFFF] {
             assert!(
-                matches!(
-                    AgentProcessHandle::open_verified(pid),
-                    AgentProcessOpen::Exited
-                ),
+                matches!(AgentProcessHandle::open_verified(pid), AgentProcessOpen::Exited),
                 "pid={pid} 应判为 Exited"
             );
         }
