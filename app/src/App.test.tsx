@@ -74,7 +74,6 @@ vi.mock("./api", () => ({
     }),
   getSettings: () =>
     Promise.resolve({
-      archive_hide_days: 0,
       notifications_enabled: true,
       theme: "dark",
       opacity: 94,

@@ -383,7 +383,9 @@ export const zh = {
     "认证失败": "认证失败",
   } as Record<string, string>,
   settings: {
-    nav: { general: "通用", appearance: "外观", network: "网络", account: "Agent", about: "关于" },
+    nav: { general: "通用", sessions: "会话", appearance: "外观", network: "网络", account: "Agent", about: "关于" },
+    cardsGroup: "卡片",
+    cardsGroupDesc: "看板上会话卡片的展示与交互",
     updateTag: "新版本",
     close: "关闭",
     autostart: "开机自启",
@@ -394,10 +396,6 @@ export const zh = {
     attentionFlashDesc: "窗口在后台时,会话需要关注就高亮任务栏图标",
     autoUpdate: "自动更新",
     autoUpdateDesc: "自动检查并下载新版本，准备好后由你确认重启",
-    archiveHide: "归档自动隐藏",
-    archiveHideDesc: "归档超过所选时长后，自动从「已归档」中隐藏",
-    hideNever: "永不",
-    hideDays: (d: number) => `${d} 天`,
     resumeTerm: "默认终端",
     // 会话本身一律跑在 Meowo 的 PTY 里；这一项只决定「要用外部终端时」开哪个，
     // 它不再决定会话在哪里运行（那是 sessionOpenIn）。

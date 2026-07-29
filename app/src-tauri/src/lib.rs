@@ -1900,9 +1900,9 @@ mod tests {
         // 空文件 / 老文件缺字段 → 默认开启（向后兼容）
         let empty: Settings = serde_json::from_str("{}").unwrap();
         assert!(empty.notifications_enabled);
+        // archive_hide_days 已下线；老文件残留该字段应被容忍而非报错。
         let legacy: Settings = serde_json::from_str(r#"{"archive_hide_days":7}"#).unwrap();
         assert!(legacy.notifications_enabled);
-        assert_eq!(legacy.archive_hide_days, 7);
         // 显式关闭可被尊重
         let off: Settings = serde_json::from_str(r#"{"notifications_enabled":false}"#).unwrap();
         assert!(!off.notifications_enabled);

@@ -15,7 +15,6 @@ const invokeMock = vi.hoisted(() =>
   vi.fn((cmd: string, _args?: unknown) => {
     if (cmd === "get_settings") {
       return Promise.resolve({
-        archive_hide_days: 0,
         notifications_enabled: true,
         theme: "dark",
         opacity: 94,
@@ -201,7 +200,7 @@ describe("Sticker", () => {
     await waitFor(() => expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "get_accounts").length).toBe(1));
 
     const officialSettings = {
-      archive_hide_days: 0, notifications_enabled: true, auto_update_enabled: true,
+      notifications_enabled: true, auto_update_enabled: true,
       theme: "dark", opacity: 94, ui_scale: 100, resume_terminal: "wt", language: "auto",
       terminal_open_mode: "card", card_menu_mode: "context", preview_enabled: true,
       sticker_style: "elevated", sticker_color: "classic", sticker_quota_providers: ["claude"],

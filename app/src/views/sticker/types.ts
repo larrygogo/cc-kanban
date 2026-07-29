@@ -4,8 +4,6 @@ import type { LiveSession } from "../../api";
 export type Item = LiveSession & { connected: boolean };
 export type Tab = "all" | "waiting" | "running" | "archived";
 
-export const DAY_MS = 86_400_000;
-
 export const PIN_KEY = "meowo-pinned";
 export const STAR_KEY = "meowo-starred";
 // 用量屏选中的 provider 偏好：折叠/展开会卸载重挂 UsageScreen，持久化以记住上次选择

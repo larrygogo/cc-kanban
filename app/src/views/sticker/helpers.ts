@@ -1,7 +1,7 @@
 // 贴纸看板的纯逻辑 helper：行内编辑键盘处理、相对时间、置顶持久化、tab 过滤。
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { Dict } from "../../i18n/zh";
-import { DAY_MS, STAR_KEY, type Item, type Tab } from "./types";
+import { STAR_KEY, type Item, type Tab } from "./types";
 
 export const editorKeyDown =
   (submit: () => void, cancel: () => void) =>
@@ -31,15 +31,8 @@ export function loadStarred(): Set<string> {
   }
 }
 
-export function match(tab: Tab, l: Item, hideDays = 0): boolean {
-  if (tab === "archived") {
-    if (!l.archived) return false;
-    // 归档超过 hideDays 天自动隐藏；archived_at 缺失的旧条目不隐藏。
-    if (hideDays > 0 && l.archived_at && Date.now() - l.archived_at > hideDays * DAY_MS) {
-      return false;
-    }
-    return true;
-  }
+export function match(tab: Tab, l: Item): boolean {
+  if (tab === "archived") return l.archived;
   if (l.archived) return false; // 已归档的不在其它分类显示
   if (tab === "all") return true;
   // running = AI 自主运行且无需用户介入；waiting = 等用户交互（status=waiting 或 pending_review）。

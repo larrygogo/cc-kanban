@@ -15,20 +15,13 @@ import { Dropdown } from "./menu";
 import { AccountSection } from "./settings/AccountSection";
 import { NetworkSection } from "./settings/NetworkSection";
 
-const hideOptions = (t: Dict) => [
-  { value: 0, label: t.settings.hideNever },
-  { value: 1, label: t.settings.hideDays(1) },
-  { value: 7, label: t.settings.hideDays(7) },
-  { value: 30, label: t.settings.hideDays(30) },
-];
-
 const REPO = "github.com/larrygogo/meowo";
 const REPO_URL = "https://github.com/larrygogo/meowo";
 const SITE = "meowo.io";
 const SITE_URL = "https://meowo.io";
 const openExt = (url: string) => invoke("open_url", { url }).catch(() => {});
 
-type Section = "general" | "appearance" | "network" | "account" | "about";
+type Section = "general" | "sessions" | "appearance" | "network" | "account" | "about";
 
 
 // 打开未连接会话用的终端：按平台给不同选项。WKWebView 的 UA 含 "Mac"/"Win"，与 main.tsx 同步判定一致。
@@ -79,6 +72,16 @@ function IconAgent() {
   );
 }
 
+// 叠放的圆角卡片：会话分区管的是会话与看板卡片。
+function IconCards() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="13" height="13" rx="2.5" />
+      <path d="M8 21h10.5a2.5 2.5 0 0 0 2.5-2.5V8" />
+    </svg>
+  );
+}
+
 // 半填充对比圆：外观/主题的经典图标。
 function IconAppearance() {
   return (
@@ -102,39 +105,97 @@ function IconGlobe() {
 
 
 
+// 通用：应用级设置（语言、自启、更新、通知）。会话与卡片的行为在 SessionsSection。
 function GeneralSection() {
   const t = useT();
   const [autostart, setAutostart] = useState(false);
   const [settings, patch] = useSettingsState();
-  const [availTerms, setAvailTerms] = useState<ResumeTerminal[] | null>(null);
-  const [agents, setAgents] = useState<AgentDescriptor[]>([]);
-  const availAgents = agents.filter((a) => a.installed).map((a) => a.id);
   // dev 下开机自启会注册调试二进制(开机连不上 dev server → 白屏)，故禁用此开关，仅安装版可用。
   const autostartDisabled = import.meta.env.DEV;
   useEffect(() => {
     if (!autostartDisabled) invoke<boolean>("get_autostart").then(setAutostart).catch(() => {});
-    availableTerminals().then(setAvailTerms).catch(() => setAvailTerms([]));
   }, [autostartDisabled]);
-  const reloadAgents = () => {
-    listAgents().then(setAgents).catch(() => {});
-  };
-  useEffect(reloadAgents, []);
-  useAgentListRefresh(reloadAgents); // 装完新 agent 立刻反映
   const toggleAutostart = () => {
     if (autostartDisabled) return;
     const next = !autostart;
     setAutostart(next);
     invoke("set_autostart", { enabled: next }).catch(() => setAutostart(!next));
   };
-  const hideDays = settings?.archive_hide_days ?? 0;
   const notifyOn = settings?.notifications_enabled ?? true;
   const flashOn = settings?.attention_flash_enabled ?? true;
   const autoUpdateOn = settings?.auto_update_enabled ?? true;
-  const previewOn = settings?.preview_enabled ?? true;
-  const changeHideDays = (days: number) => patch({ archive_hide_days: days });
   const toggleNotify = () => patch({ notifications_enabled: !notifyOn });
   const toggleFlash = () => patch({ attention_flash_enabled: !flashOn });
   const toggleAutoUpdate = () => patch({ auto_update_enabled: !autoUpdateOn });
+  return (
+    <>
+      <div className="row-card">
+        <div className="row">
+          <div className="row-text">
+            <div className="row-label">{t.settings.language}</div>
+            <div className="row-desc">{t.settings.languageDesc}</div>
+          </div>
+          <Dropdown
+            value={settings?.language ?? "auto"}
+            options={[
+              { value: "auto" as const, label: t.settings.langAuto },
+              { value: "zh" as const, label: "中文" },
+              { value: "en" as const, label: "English" },
+            ]}
+            onChange={(v) => patch({ language: v })}
+          />
+        </div>
+        <div className="row">
+          <div className="row-text">
+            <div className="row-label">{t.settings.autostart}</div>
+            <div className="row-desc">{t.settings.autostartDesc}</div>
+          </div>
+          <Switch checked={autostart} onChange={toggleAutostart} disabled={autostartDisabled} label={t.settings.autostart} />
+        </div>
+        <div className="row">
+          <div className="row-text">
+            <div className="row-label">{t.settings.autoUpdate}</div>
+            <div className="row-desc">{t.settings.autoUpdateDesc}</div>
+          </div>
+          <Switch checked={autoUpdateOn} onChange={toggleAutoUpdate} label={t.settings.autoUpdate} />
+        </div>
+        <div className="row">
+          <div className="row-text">
+            <div className="row-label">{t.settings.notify}</div>
+            <div className="row-desc">{t.settings.notifyDesc}</div>
+          </div>
+          <Switch checked={notifyOn} onChange={toggleNotify} label={t.settings.notify} />
+        </div>
+        {/* 任务栏闪烁仅 Windows 有效(macOS 由菜单栏徽章承担同一职责),别的平台不显示无效开关。 */}
+        {IS_WIN && <div className="row">
+          <div className="row-text">
+            <div className="row-label">{t.settings.attentionFlash}</div>
+            <div className="row-desc">{t.settings.attentionFlashDesc}</div>
+          </div>
+          <Switch checked={flashOn} onChange={toggleFlash} label={t.settings.attentionFlash} />
+        </div>}
+      </div>
+      <div className="sec-hint">{t.settings.moreSoon}</div>
+    </>
+  );
+}
+
+// 会话：新建/打开/归档等会话行为，外加看板卡片的展示与交互（独立成第二张卡）。
+function SessionsSection() {
+  const t = useT();
+  const [settings, patch] = useSettingsState();
+  const [availTerms, setAvailTerms] = useState<ResumeTerminal[] | null>(null);
+  const [agents, setAgents] = useState<AgentDescriptor[]>([]);
+  const availAgents = agents.filter((a) => a.installed).map((a) => a.id);
+  useEffect(() => {
+    availableTerminals().then(setAvailTerms).catch(() => setAvailTerms([]));
+  }, []);
+  const reloadAgents = () => {
+    listAgents().then(setAgents).catch(() => {});
+  };
+  useEffect(reloadAgents, []);
+  useAgentListRefresh(reloadAgents); // 装完新 agent 立刻反映
+  const previewOn = settings?.preview_enabled ?? true;
   const togglePreview = () => patch({ preview_enabled: !previewOn });
   // 终端选项按平台给，再用后端探测到的「本机实际可用」列表过滤（未装的不列出）。
   const platformOpts = IS_MAC ? RESUME_TERM_OPTIONS_MAC : resumeTermOptionsWin(t);
@@ -157,32 +218,46 @@ function GeneralSection() {
       <div className="row-card">
         <div className="row">
           <div className="row-text">
-            <div className="row-label">{t.settings.autostart}</div>
-            <div className="row-desc">{t.settings.autostartDesc}</div>
+            <div className="row-label">{t.settings.defaultAgent}</div>
+            <div className="row-desc">{t.settings.defaultAgentDesc}</div>
           </div>
-          <Switch checked={autostart} onChange={toggleAutostart} disabled={autostartDisabled} label={t.settings.autostart} />
+          <Dropdown
+            value={defaultAgent}
+            options={defaultAgentOptions}
+            onChange={(v) => patch({ default_agent: v })}
+          />
         </div>
         <div className="row">
           <div className="row-text">
-            <div className="row-label">{t.settings.notify}</div>
-            <div className="row-desc">{t.settings.notifyDesc}</div>
+            <div className="row-label">{t.settings.sessionOpenIn}</div>
+            <div className="row-desc">{t.settings.sessionOpenInDesc}</div>
           </div>
-          <Switch checked={notifyOn} onChange={toggleNotify} label={t.settings.notify} />
+          <Dropdown
+            value={settings?.session_open_in ?? "terminal"}
+            options={[
+              { value: "chat" as const, label: t.settings.sessionOpenInChat },
+              { value: "terminal" as const, label: t.settings.sessionOpenInTerminal },
+            ]}
+            onChange={(v: SessionOpenIn) => patch({ session_open_in: v })}
+          />
         </div>
-        {/* 任务栏闪烁仅 Windows 有效(macOS 由菜单栏徽章承担同一职责),别的平台不显示无效开关。 */}
-        {IS_WIN && <div className="row">
-          <div className="row-text">
-            <div className="row-label">{t.settings.attentionFlash}</div>
-            <div className="row-desc">{t.settings.attentionFlashDesc}</div>
+        {showTermRow && (
+          <div className="row">
+            <div className="row-text">
+              <div className="row-label">{t.settings.resumeTerm}</div>
+              <div className="row-desc">{t.settings.resumeTermDesc}</div>
+            </div>
+            <Dropdown value={resumeTerm} options={termOptions} onChange={changeResumeTerm} />
           </div>
-          <Switch checked={flashOn} onChange={toggleFlash} label={t.settings.attentionFlash} />
-        </div>}
+        )}
+      </div>
+
+      <div className="row-card">
         <div className="row">
           <div className="row-text">
-            <div className="row-label">{t.settings.autoUpdate}</div>
-            <div className="row-desc">{t.settings.autoUpdateDesc}</div>
+            <div className="row-label">{t.settings.cardsGroup}</div>
+            <div className="row-desc">{t.settings.cardsGroupDesc}</div>
           </div>
-          <Switch checked={autoUpdateOn} onChange={toggleAutoUpdate} label={t.settings.autoUpdate} />
         </div>
         <div className="row">
           <div className="row-text">
@@ -207,20 +282,6 @@ function GeneralSection() {
         </div>
         <div className="row">
           <div className="row-text">
-            <div className="row-label">{t.settings.sessionOpenIn}</div>
-            <div className="row-desc">{t.settings.sessionOpenInDesc}</div>
-          </div>
-          <Dropdown
-            value={settings?.session_open_in ?? "terminal"}
-            options={[
-              { value: "chat" as const, label: t.settings.sessionOpenInChat },
-              { value: "terminal" as const, label: t.settings.sessionOpenInTerminal },
-            ]}
-            onChange={(v: SessionOpenIn) => patch({ session_open_in: v })}
-          />
-        </div>
-        <div className="row">
-          <div className="row-text">
             <div className="row-label">{t.settings.cardMenu}</div>
             <div className="row-desc">{t.settings.cardMenuDesc}</div>
           </div>
@@ -233,50 +294,7 @@ function GeneralSection() {
             onChange={(v: CardMenuMode) => patch({ card_menu_mode: v })}
           />
         </div>
-        <div className="row">
-          <div className="row-text">
-            <div className="row-label">{t.settings.language}</div>
-            <div className="row-desc">{t.settings.languageDesc}</div>
-          </div>
-          <Dropdown
-            value={settings?.language ?? "auto"}
-            options={[
-              { value: "auto" as const, label: t.settings.langAuto },
-              { value: "zh" as const, label: "中文" },
-              { value: "en" as const, label: "English" },
-            ]}
-            onChange={(v) => patch({ language: v })}
-          />
-        </div>
-        <div className="row">
-          <div className="row-text">
-            <div className="row-label">{t.settings.defaultAgent}</div>
-            <div className="row-desc">{t.settings.defaultAgentDesc}</div>
-          </div>
-          <Dropdown
-            value={defaultAgent}
-            options={defaultAgentOptions}
-            onChange={(v) => patch({ default_agent: v })}
-          />
-        </div>
-        <div className="row">
-          <div className="row-text">
-            <div className="row-label">{t.settings.archiveHide}</div>
-            <div className="row-desc">{t.settings.archiveHideDesc}</div>
-          </div>
-          <Dropdown value={hideDays} options={hideOptions(t)} onChange={changeHideDays} />
-        </div>
-        {showTermRow && (
-          <div className="row">
-            <div className="row-text">
-              <div className="row-label">{t.settings.resumeTerm}</div>
-              <div className="row-desc">{t.settings.resumeTermDesc}</div>
-            </div>
-            <Dropdown value={resumeTerm} options={termOptions} onChange={changeResumeTerm} />
-          </div>
-        )}
       </div>
-      <div className="sec-hint">{t.settings.moreSoon}</div>
     </>
   );
 }
@@ -481,6 +499,10 @@ export function About() {
             <IconGear />
             <span>{t.settings.nav.general}</span>
           </button>
+          <button className={"nav-item" + (sec === "sessions" ? " on" : "")} aria-current={sec === "sessions" ? "page" : undefined} onClick={() => setSec("sessions")}>
+            <IconCards />
+            <span>{t.settings.nav.sessions}</span>
+          </button>
           <button className={"nav-item" + (sec === "appearance" ? " on" : "")} aria-current={sec === "appearance" ? "page" : undefined} onClick={() => setSec("appearance")}>
             <IconAppearance />
             <span>{t.settings.nav.appearance}</span>
@@ -515,6 +537,8 @@ export function About() {
         <div className="main-body" key={sec}>
           {sec === "general" ? (
             <GeneralSection />
+          ) : sec === "sessions" ? (
+            <SessionsSection />
           ) : sec === "appearance" ? (
             <AppearanceSection />
           ) : sec === "network" ? (

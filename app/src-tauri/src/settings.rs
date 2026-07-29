@@ -58,13 +58,9 @@ fn default_sticker_quota_providers() -> Vec<String> {
 fn default_default_agent() -> String {
     "claude".to_string()
 }
-
 /// 应用设置（持久化到 ~/.meowo/settings.json）。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Settings {
-    /// 归档条目自动隐藏的天数；0 = 永不隐藏。
-    #[serde(default)]
-    pub(crate) archive_hide_days: u32,
     /// 桌面通知总开关（待交互 + 错误）。缺省为开启，兼容老 settings.json。
     #[serde(default = "default_true")]
     pub(crate) notifications_enabled: bool,
@@ -148,7 +144,6 @@ pub(crate) struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            archive_hide_days: 0,
             notifications_enabled: true,
             attention_flash_enabled: true,
             auto_update_enabled: true,

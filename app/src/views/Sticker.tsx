@@ -128,8 +128,7 @@ export function Sticker({
     onSearchChange?.("");
   };
 
-  // 归档自动隐藏天数 + 打开终端方式 + 卡片菜单方式 + 贴纸配额 provider 列表：启动时读设置，并监听实时变更。
-  const [hideDays, setHideDays] = useState(0);
+  // 打开终端方式 + 卡片菜单方式 + 贴纸配额 provider 列表：启动时读设置，并监听实时变更。
   const [openMode, setOpenMode] = useState<TerminalOpenMode>("card");
   // 首帧占位 context（右键，与既有单测对齐）；真实默认由后端 default_card_menu_mode=button
   // 经 getSettings 校正，缺字段时下方 apply 亦回退 button。
@@ -143,7 +142,6 @@ export function Sticker({
 
   useEffect(() => {
     const apply = (s: Settings) => {
-      setHideDays(s.archive_hide_days);
       setOpenMode(s.terminal_open_mode);
       setMenuMode(s.card_menu_mode ?? "button");
       setPreviewEnabled(s.preview_enabled);
@@ -387,13 +385,13 @@ export function Sticker({
   const isStarred = (l: Item) => starred.has(l.session.cc_session_id);
   const shown = useMemo(() => {
     return data
-      .filter((l) => match(tab, l, hideDays))
+      .filter((l) => match(tab, l))
       .sort(
         (a, b) =>
           Number(starred.has(b.session.cc_session_id)) -
           Number(starred.has(a.session.cc_session_id))
       );
-  }, [data, tab, hideDays, starred]);
+  }, [data, tab, starred]);
 
   // 贴纸会话虚拟列表：只挂载可视区 + overscan 内的卡片，避免大量 DOM。
   // estimateSize 取常见卡片高度（无便签/preview 时约 76–84px），实际高度由 measureElement 动态测量。
@@ -434,9 +432,9 @@ export function Sticker({
       };
     }
     const c = {} as Record<Tab, number>;
-    for (const k of TAB_KEYS) c[k] = data.filter((l) => match(k, l, hideDays)).length;
+    for (const k of TAB_KEYS) c[k] = data.filter((l) => match(k, l)).length;
     return c;
-  }, [countsProp, data, hideDays]);
+  }, [countsProp, data]);
 
   // 自绘 overlay 滚动条：原生滚动条全程隐藏(不占布局→无抖动)，这里按滚动位置算出
   // thumb 的高度/位置，浮在内容右侧。null = 内容未超出、不需要滚动条。

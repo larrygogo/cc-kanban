@@ -483,8 +483,6 @@ export function getLiveSessionsPage(
 export type ThemeMode = "dark" | "light" | "system";
 
 export type Settings = {
-  /** 归档条目自动隐藏的天数；0 = 永不隐藏。 */
-  archive_hide_days: number;
   /** 桌面通知总开关（待交互 + 错误）。 */
   notifications_enabled: boolean;
   /** 需要关注且 Meowo 都不在前台时,请求任务栏注意力(Windows 任务栏闪烁)。 */
