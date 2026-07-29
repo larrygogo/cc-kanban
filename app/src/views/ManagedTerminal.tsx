@@ -7,6 +7,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import {
   attachBackgroundSession,
   confirmStopSession,
+  getSettings,
   isExternallyHeld,
   managedTerminalSnapshot,
   openAttachedTerminal,
@@ -15,6 +16,7 @@ import {
   startManagedTerminal,
   takeoverManagedTerminal,
   writeManagedTerminal,
+  type Settings,
 } from "../api";
 import { useT } from "../i18n";
 import type { PtyExitEvent as ExitEvent } from "../generated/contracts/PtyExitEvent";
@@ -61,6 +63,9 @@ function hasVisibleOutput(bytes: Uint8Array): boolean {
 
 /// TUI 迟迟不画东西时的保底：宁可把黑屏交给用户，也不要让 spinner 永远转下去。
 const INITIALIZING_TIMEOUT_MS = 25_000;
+
+/// 行高预设 → xterm lineHeight。normal 即历史硬编码的 1.22（改它会让老用户画面变样）。
+const LINE_HEIGHTS: Record<string, number> = { compact: 1.1, normal: 1.22, relaxed: 1.45 };
 
 /// 剔除「终端自动应答」形态的序列：CPR 光标位置（`\x1b[n;mR`，含 DECXCPR 的 `?` 变体）、
 /// DSR 状态（`\x1b[0n`）、DA1/DA2 设备属性（`…c`）、DECRPM（`…$y`）、OSC 应答（颜色查询
@@ -322,6 +327,26 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
         void resizeManagedTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {});
       }
     }).catch(() => {});
+    // 终端样式（字号/行高）跟随设置：挂载时读一次，settings-changed 到达即热应用——
+    // xterm 支持运行时改 options，改完重新 fit 并把新行列数下发 PTY（网格变了 TUI 必须重画，
+    // 否则输入框位置按旧尺寸算全是错的）。字号钳到 [8,24]：防手改 settings.json 塞出 0 号字。
+    const applyTermStyle = (s: Settings) => {
+      const size = Math.min(24, Math.max(8, s.terminal_font_size ?? 12));
+      const line = LINE_HEIGHTS[s.terminal_line_height] ?? LINE_HEIGHTS.normal;
+      if (terminal.options.fontSize === size && terminal.options.lineHeight === line) return;
+      terminal.options.fontSize = size;
+      terminal.options.lineHeight = line;
+      fit.fit();
+      if (visibleRef.current && terminal.cols > 1 && terminal.rows > 1) {
+        void resizeManagedTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {});
+      }
+    };
+    void getSettings().then((s) => { if (!cancelled) applyTermStyle(s); }).catch(() => {});
+    let unSettings: (() => void) | undefined;
+    listen<Settings>("settings-changed", ({ payload }) => applyTermStyle(payload)).then((un) => {
+      if (cancelled) un();
+      else unSettings = un;
+    }).catch(() => {});
     // 保底：TUI 一直不画东西也不能永远停在 spinner 上。
     const giveUpTimer = window.setTimeout(() => {
       if (!cancelled) { painted = true; setInitialized(true); }
@@ -561,6 +586,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       input.dispose();
       unOutput?.();
       unExit?.();
+      unSettings?.();
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;

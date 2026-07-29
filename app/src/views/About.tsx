@@ -3,7 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAgentListRefresh } from "../useAgents";
-import { availableTerminals, listAgents, agentName, type AgentId, type AgentDescriptor, type ThemeMode, type ResumeTerminal, type TerminalOpenMode, type SessionOpenIn, type CardMenuMode, type StickerStyle } from "../api";
+import { availableTerminals, listAgents, agentName, type AgentId, type AgentDescriptor, type ThemeMode, type ResumeTerminal, type TerminalOpenMode, type SessionOpenIn, type CardMenuMode, type StickerStyle, type TerminalLineHeight } from "../api";
 import { useUpdate, type UpdateStatus } from "../useUpdate";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { useT } from "../i18n";
@@ -318,6 +318,14 @@ const fontSizeOptions = (t: Dict): { value: number; label: string }[] => [
 const OPACITY_MIN = 25;
 const OPACITY_MAX = 100;
 
+const TERM_FONT_MIN = 10;
+const TERM_FONT_MAX = 18;
+const lineHeightOptions = (t: Dict): { value: TerminalLineHeight; label: string }[] => [
+  { value: "compact", label: t.settings.lineCompact },
+  { value: "normal", label: t.settings.lineNormal },
+  { value: "relaxed", label: t.settings.lineRelaxed },
+];
+
 function AppearanceSection() {
   const t = useT();
   const [settings, patch] = useSettingsState();
@@ -326,8 +334,11 @@ function AppearanceSection() {
   const uiScale = settings?.ui_scale ?? 100;
   const stickerStyle = settings?.sticker_style ?? "elevated";
   const stickerColor = settings?.sticker_color ?? "neutral";
+  const termFont = settings?.terminal_font_size ?? 12;
+  const termLine = settings?.terminal_line_height ?? "normal";
   // 钳到 [0,100]：手改 settings.json 为越界值时，避免算出负/超界的 linear-gradient 填充宽度。
   const fill = Math.max(0, Math.min(100, ((opacity - OPACITY_MIN) / (OPACITY_MAX - OPACITY_MIN)) * 100));
+  const termFill = Math.max(0, Math.min(100, ((termFont - TERM_FONT_MIN) / (TERM_FONT_MAX - TERM_FONT_MIN)) * 100));
   return (
     <>
       <div className="row-card">
@@ -377,6 +388,41 @@ function AppearanceSection() {
             onChange={(e) => patch({ opacity: Number(e.target.value) })}
             aria-label={t.settings.opacity}
           />
+        </div>
+      </div>
+
+      <div className="row-card">
+        <div className="row">
+          <div className="row-text">
+            <div className="row-label">{t.settings.terminalGroup}</div>
+            <div className="row-desc">{t.settings.terminalGroupDesc}</div>
+          </div>
+        </div>
+        <div className="row row-col">
+          <div className="row-head">
+            <div className="row-text">
+              <div className="row-label">{t.settings.termFontSize}</div>
+              <div className="row-desc">{t.settings.termFontSizeDesc}</div>
+            </div>
+            <span className="row-val">{termFont}px</span>
+          </div>
+          <input
+            type="range"
+            className="slider"
+            min={TERM_FONT_MIN}
+            max={TERM_FONT_MAX}
+            value={termFont}
+            style={{ background: `linear-gradient(90deg, var(--cc-accent) ${termFill}%, var(--cc-border) ${termFill}%)` }}
+            onChange={(e) => patch({ terminal_font_size: Number(e.target.value) })}
+            aria-label={t.settings.termFontSize}
+          />
+        </div>
+        <div className="row">
+          <div className="row-text">
+            <div className="row-label">{t.settings.termLineHeight}</div>
+            <div className="row-desc">{t.settings.termLineHeightDesc}</div>
+          </div>
+          <Segmented value={termLine} options={lineHeightOptions(t)} onChange={(v) => patch({ terminal_line_height: v })} label={t.settings.termLineHeight} />
         </div>
       </div>
       <div className="sec-hint">{t.settings.appearanceHint}</div>

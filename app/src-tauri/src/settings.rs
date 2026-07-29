@@ -58,6 +58,15 @@ fn default_sticker_quota_providers() -> Vec<String> {
 fn default_default_agent() -> String {
     "claude".to_string()
 }
+/// 终端（PTY 画面）字号，px。缺省 12，与前端 xterm 的历史硬编码一致。
+fn default_terminal_font_size() -> u32 {
+    12
+}
+/// 终端行高预设：compact / normal / relaxed。缺省 normal（即历史硬编码的 1.22）。
+fn default_terminal_line_height() -> String {
+    "normal".to_string()
+}
+
 /// 应用设置（持久化到 ~/.meowo/settings.json）。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Settings {
@@ -100,6 +109,12 @@ pub(crate) struct Settings {
     /// 是否显示卡片 hover「轻推」预览（最近一条 AI 正文）。缺省开启，兼容老 settings.json。
     #[serde(default = "default_true")]
     pub(crate) preview_enabled: bool,
+    /// 终端（PTY 画面）字号（px）。缺省 12，兼容老 settings.json。
+    #[serde(default = "default_terminal_font_size")]
+    pub(crate) terminal_font_size: u32,
+    /// 终端行高预设：compact / normal（默认）/ relaxed。兼容老 settings.json。
+    #[serde(default = "default_terminal_line_height")]
+    pub(crate) terminal_line_height: String,
     /// 贴纸风格：flat = 扁平（默认），elevated = 立体感。缺省 flat，兼容老 settings.json。
     #[serde(default = "default_sticker_style")]
     pub(crate) sticker_style: String,
@@ -156,6 +171,8 @@ impl Default for Settings {
             session_open_in: default_session_open_in(),
             card_menu_mode: default_card_menu_mode(),
             preview_enabled: true,
+            terminal_font_size: default_terminal_font_size(),
+            terminal_line_height: default_terminal_line_height(),
             sticker_style: default_sticker_style(),
             sticker_color: default_sticker_color(),
             sticker_quota_providers: default_sticker_quota_providers(),
@@ -307,6 +324,8 @@ pub(crate) async fn set_settings(
     // 后端兜底钳值（与前端 appearance.ts 一致），防越界值落盘后被 5s 轮询线程读到。
     settings.opacity = settings.opacity.clamp(25, 100);
     settings.ui_scale = settings.ui_scale.clamp(50, 200);
+    // 前端滑杆范围 10–18，这里放宽到 8–24 兜底（手改 settings.json 也不至于出 0 号字）。
+    settings.terminal_font_size = settings.terminal_font_size.clamp(8, 24);
     // 代理地址落盘前校验。非法值一旦写进去，后台只会静默降级直连，用户对着「用量查不到」
     // 毫无线索——在这里拦下，把具体原因回给设置页。
     // 先清洗再校验：粘贴进来的地址常混入零宽字符（中转还有全角冒号的情况），肉眼看着

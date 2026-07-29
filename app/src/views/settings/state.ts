@@ -16,6 +16,8 @@ export const SETTINGS_DEFAULTS: Settings = {
   session_open_in: "terminal",
   card_menu_mode: "button",
   preview_enabled: true,
+  terminal_font_size: 12,
+  terminal_line_height: "normal",
   // 占位与真实默认（appearance.ts / 后端 settings.rs）保持一致：flat / neutral。
   sticker_style: "flat",
   sticker_color: "neutral",

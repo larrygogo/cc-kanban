@@ -481,6 +481,7 @@ export function getLiveSessionsPage(
 }
 
 export type ThemeMode = "dark" | "light" | "system";
+export type TerminalLineHeight = "compact" | "normal" | "relaxed";
 
 export type Settings = {
   /** 桌面通知总开关（待交互 + 错误）。 */
@@ -512,6 +513,10 @@ export type Settings = {
   card_menu_mode: CardMenuMode;
   /** 是否在卡片显示对话预览（你的提问 + AI 回复两行）。缺省开启。 */
   preview_enabled: boolean;
+  /** 终端（PTY 画面）字号（px，10–18）。缺省 12。 */
+  terminal_font_size: number;
+  /** 终端行高预设：compact / normal（默认，1.22）/ relaxed。 */
+  terminal_line_height: TerminalLineHeight;
   /** 贴纸风格：elevated = 立体感（默认）/ flat = 扁平。 */
   sticker_style: StickerStyle;
   /** 贴纸底色预设 key（neutral/classic/slate/moss/plum/rose/amber）。 */

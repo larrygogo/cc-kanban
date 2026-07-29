@@ -28,6 +28,8 @@ export const store: Store = {
     session_open_in: "terminal",
     card_menu_mode: "button",
     preview_enabled: true,
+    terminal_font_size: 12,
+    terminal_line_height: "normal",
     sticker_style: "flat",
     sticker_color: "neutral",
     sticker_quota_providers: ["claude", "codex"],
