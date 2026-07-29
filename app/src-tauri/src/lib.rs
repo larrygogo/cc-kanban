@@ -471,7 +471,7 @@ fn host_os() -> String {
 }
 
 /// 「打开未连接会话」可选且本机确实可用的终端 key（供设置页过滤下拉项）。
-/// macOS：terminal 必有，iterm 视安装情况；Windows：powershell/cmd 必有，wt/wezterm 视是否在 PATH。
+/// macOS：terminal 必有，iterm/ghostty 视安装情况；Windows：powershell/cmd 必有，wt/wezterm 视是否在 PATH。
 /// async：丢到线程池跑。同步命令内联在主线程，探测一旦变慢（如 macOS 的 mdfind）
 /// 会冻结整个事件循环；设置页每次打开都调它，绝不能赌探测耗时。
 #[tauri::command]
@@ -483,6 +483,9 @@ async fn available_terminals() -> Vec<String> {
             let mut v = vec!["terminal".to_string()];
             if terminal::iterm_installed() {
                 v.push("iterm".to_string());
+            }
+            if terminal::ghostty_installed() {
+                v.push("ghostty".to_string());
             }
             v
         })

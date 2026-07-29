@@ -17,6 +17,7 @@ const IS_WIN = typeof navigator !== "undefined" && /Win/i.test(navigator.userAge
 const RESUME_TERM_OPTIONS_MAC: { value: ResumeTerminal; label: string }[] = [
   { value: "terminal", label: "Terminal" },
   { value: "iterm", label: "iTerm2" },
+  { value: "ghostty", label: "Ghostty" },
 ];
 const resumeTermOptionsWin = (t: Dict): { value: ResumeTerminal; label: string }[] => [
   { value: "wt", label: "Windows Terminal" },

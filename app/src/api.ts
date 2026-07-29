@@ -497,7 +497,7 @@ export type Settings = {
   opacity: number;
   /** 界面密度/字号缩放（百分比，紧凑 90 / 标准 100 / 宽松 112）。 */
   ui_scale: number;
-  /** 打开未连接会话用的终端。macOS：terminal/iterm；Windows：wt/powershell/cmd。 */
+  /** 打开未连接会话用的终端。macOS：terminal/iterm/ghostty；Windows：wt/powershell/cmd。 */
   resume_terminal: ResumeTerminal;
   /** 界面/通知语言：auto（跟随系统）/ zh / en。 */
   language: LangSetting;
@@ -619,7 +619,7 @@ export function installDownloadedUpdate(): Promise<void> {
 }
 
 
-export type ResumeTerminal = "terminal" | "iterm" | "wt" | "wezterm" | "powershell" | "cmd";
+export type ResumeTerminal = "terminal" | "iterm" | "ghostty" | "wt" | "wezterm" | "powershell" | "cmd";
 export type LangSetting = "auto" | "zh" | "en";
 export type TerminalOpenMode = "card" | "button";
 export type SessionOpenIn = "chat" | "terminal";

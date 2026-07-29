@@ -85,7 +85,7 @@ pub(crate) struct Settings {
     /// 界面密度/字号缩放（百分比，紧凑 90 / 标准 100 / 宽松 112）。
     #[serde(default = "default_ui_scale")]
     pub(crate) ui_scale: u32,
-    /// 打开未连接会话用的终端（macOS）：terminal = Terminal.app，iterm = iTerm2。缺省 terminal，兼容老 settings.json。
+    /// 打开未连接会话用的终端（macOS）：terminal = Terminal.app，iterm = iTerm2，ghostty = Ghostty。缺省 terminal，兼容老 settings.json。
     #[serde(default = "default_resume_terminal")]
     pub(crate) resume_terminal: String,
     /// 界面/通知语言：auto（跟随系统）/ zh / en。缺省 auto，兼容老 settings.json。
