@@ -1830,6 +1830,29 @@ impl PtyBroker {
         if request.session_id <= 0 || request.request_id.len() < 8 {
             return Err("审批请求无效".into());
         }
+        // AskUserQuestion 不是权限请求而是提问：「允许提问」这个决定没有信息量（且它属于
+        // 「需用户交互」的工具，连 bypassPermissions 都拦不住触发），弹一张 JSON 审批卡
+        // 纯属摩擦。直接放行让 TUI 表单立即出现；结构化题面转发给对话窗，选择列表卡从
+        // 题面同步渲染，不必等屏幕识别从终端文本反推（识别只做作答就绪信号与兜底）。
+        //
+        // 刻意不走 ensure_approval_window 的消费者等待：放行不需要 GUI 表态，等满一个
+        // 10s 窗口只会把终端表单的出现拖慢同样久。窗口没开/开晚了也无碍——表单在终端里
+        // 本来就能答，事件错过时既有的屏幕识别路径仍会长出可作答的卡。
+        if request.tool_name == "AskUserQuestion" {
+            if let Some(app) = self.attach.app.lock().ok().and_then(|app| app.clone()) {
+                // 与审批同等待遇：把对话窗切到该会话并闪任务栏（理由见 ensure_approval_window
+                // 的取舍注释——宁可切走一次，也不要让提问悄悄漏过）。
+                crate::window::open_chat_window_detached(app.clone(), request.session_id);
+                if let Some(window) = app.get_webview_window("chat") {
+                    let _ =
+                        window.request_user_attention(Some(tauri::UserAttentionType::Critical));
+                }
+            }
+            self.emit_approval("interactive-question", &request);
+            return stream
+                .write_all(format!("{}\n", ApprovalDecision::Allow.as_wire()).as_bytes())
+                .map_err(|e| e.to_string());
+        }
         // 先入表再等窗口：冷启动的 WebView2 完成消费者注册可能晚于任何固定等待窗口。
         // 请求在表里，晚注册的窗口靠 getPendingApproval 轮询就能找回它；反过来（等到了
         // 才入表）则超时瞬间请求人间蒸发，用户面对一扇刚弹出的空窗口。

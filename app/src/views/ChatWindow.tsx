@@ -10,6 +10,7 @@ import { useShowWhenReady } from "../useShowWhenReady";
 import { agentAssets, tintStyle } from "../providers";
 import { reduceChatEvents } from "../chat/reducer";
 import { ApprovalCard } from "./chat/ApprovalCard";
+import { parseAskUserQuestions } from "./chat/askUserQuestion";
 import { ContextMeter } from "./chat/ContextMeter";
 import { TodoPanel } from "./chat/TodoPanel";
 import { Transcript } from "./chat/Transcript";
@@ -338,6 +339,9 @@ export function ChatWindow() {
   if (view === "terminal") terminalEverShownRef.current = true;
   const terminalMounted = terminalEverShownRef.current || terminalMonitorNeeded;
   const [approval, setApproval] = useState<PendingApproval | null>(null);
+  // AskUserQuestion 的结构化题面（broker 自动放行后经 interactive-question 事件直达）。
+  // 只负责「与终端表单同步出现」的展示；作答仍走屏幕识别的交互选择器（就绪后接管）。
+  const [structuredQuestion, setStructuredQuestion] = useState<PendingApproval | null>(null);
   // 非当前会话的待授权请求：侧边栏亮徽标召唤用户自己过去。注意后端 **会** 为 broker 接管的
   // 审批把窗口切到目标会话（见 pty.rs 的 ensure_approval_window，不切的代价是请求 10s 后
   // 回落 TUI），所以这里是兜底：切换竞态期间、以及消费者已注册在别的会话时到达的请求。
@@ -816,6 +820,42 @@ export function ChatWindow() {
     }).then((fn) => { if (cancelled) fn(); else unCleared = fn; }).catch(() => {});
     return () => { cancelled = true; unApproval?.(); unCleared?.(); };
   }, []);
+
+  // AskUserQuestion 题面直达。事件与 chat-session-changed 存在竞态（后端先切窗再发题面，
+  // 前端两个事件到达顺序不保证）：无论当下会话是否匹配都先暂存进 ref，会话切换完成的
+  // effect 里再领养，两种到达顺序都不丢卡。
+  const lastInteractiveQuestionRef = useRef<{ payload: PendingApproval; at: number } | null>(null);
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let cancelled = false;
+    listen<PendingApproval>("interactive-question", (event) => {
+      lastInteractiveQuestionRef.current = { payload: event.payload, at: Date.now() };
+      if (event.payload.sessionId === activeSessionRef.current) {
+        // 题面卡就是处理面：抑制 pendingReview 的「去终端处理」降级卡（与 broker 审批同理）。
+        setBrokerOwnsReview(true);
+        setStructuredQuestion(event.payload);
+        // 与审批一致：用户正在终端视图操作时不抢（表单本来就在那里），否则拉回对话页。
+        if (viewRef.current !== "terminal") setView("chat");
+      }
+    }).then((fn) => { if (cancelled) fn(); else un = fn; }).catch(() => {});
+    return () => { cancelled = true; un?.(); };
+  }, []);
+  // 会话切换：清掉旧会话的题面卡；竞态暂存的题面若属于新会话（事件先于切换抵达）则领养。
+  useEffect(() => {
+    const last = lastInteractiveQuestionRef.current;
+    if (last && last.payload.sessionId === sessionId && Date.now() - last.at < 60_000) {
+      setBrokerOwnsReview(true);
+      setStructuredQuestion(last.payload);
+    } else {
+      setStructuredQuestion(null);
+    }
+  }, [sessionId]);
+  // 兜底过期：识别一直没就绪、用户已在终端答完的情况下，别让展示卡挂一辈子。
+  useEffect(() => {
+    if (!structuredQuestion) return;
+    const timer = window.setTimeout(() => setStructuredQuestion(null), 180_000);
+    return () => window.clearTimeout(timer);
+  }, [structuredQuestion]);
 
   useEffect(() => {
     // transcript 的 pendingReview 比 broker 的实时状态慢一拍。只有历史状态确实清空后，
@@ -1362,6 +1402,14 @@ export function ChatWindow() {
 
   const commandAttention = terminalAttention && (terminalAttention.id === "claude:command-approval" || terminalAttention.id === "kimi:command-approval") ? terminalAttention : null;
   const interactiveAttention = terminalAttention?.id === "interactive:numbered-selector" ? terminalAttention : null;
+  // 屏幕识别就绪 → 可作答的交互选择器接管，结构化题面的展示卡退场（同一份题面不双卡）。
+  useEffect(() => {
+    if (interactiveAttention) setStructuredQuestion(null);
+  }, [interactiveAttention]);
+  const structuredQuestions = useMemo(
+    () => (structuredQuestion ? parseAskUserQuestions(structuredQuestion.input) : []),
+    [structuredQuestion],
+  );
   const commandApproval = commandAttention
     ? commandAttention.id === "kimi:command-approval"
       ? kimiCommandApprovalDetails(commandAttention.text)
@@ -1718,6 +1766,31 @@ export function ChatWindow() {
           />
         </div>
       )}
+      {/* AskUserQuestion 的同步题面卡：broker 自动放行后从结构化参数渲染，与终端表单同步
+          出现（先于屏幕识别）。仅展示——作答按键要等识别确认表单在屏（interactiveAttention
+          接管后此卡退场）；识别不认的形态（多问题 tab 表单）走「去终端作答」。 */}
+      {view === "chat" && structuredQuestions.length > 0 && !terminalAttention && !approval && <ApprovalCard
+        className="chat-screen-approval"
+        title={t.chat.questionTitle}
+        badge={t.chat.approvalPending}
+        sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setStructuredQuestion(null)}>{t.chat.attentionDismiss}</button>}
+        actions={<button type="button" className="is-allow" onClick={() => setView("terminal")}>{t.chat.answerInTerminal}</button>}
+      >
+        {structuredQuestions.map((item, questionIndex) => (
+          <div key={questionIndex}>
+            {item.question && <span className="chat-approval-prewrap">{item.header ? `${item.header} · ${item.question}` : item.question}</span>}
+            <div className="chat-approval-options">
+              {item.options.map((option, optionIndex) => (
+                <button type="button" disabled key={`${optionIndex}:${option.label}`}>
+                  <i aria-hidden="true"></i>
+                  <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+        <span>{t.chat.questionFormLoading}</span>
+      </ApprovalCard>}
       {/* broker 审批卡(claude hook 劫走的请求)与「有 pendingReview 但 GUI 接不了」的降级态。
           注意它**没有**「仅收起」:收起等于让 hook 干等到 300s 超时,只能 allow/deny/持久放行。 */}
       {view === "chat" && !terminalAttention && (approval || (!brokerOwnsReview && history?.pendingReview)) && <ApprovalCard

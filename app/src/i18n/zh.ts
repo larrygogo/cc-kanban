@@ -201,6 +201,8 @@ export const zh = {
     approvalTitle: "Agent 请求权限",
     approvalPending: "待授权",
     questionTitle: "Agent 正在等待你的回答",
+    answerInTerminal: "去终端作答",
+    questionFormLoading: "等待终端表单就绪，就绪后可在此直接点选作答",
     customAnswerPlaceholder: "输入其他回答",
     addCustomAnswer: "添加回答",
     submitAnswer: "提交选择",

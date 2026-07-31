@@ -196,6 +196,8 @@ export const en: Dict = {
     approvalTitle: "Agent requests permission",
     approvalPending: "Pending",
     questionTitle: "Agent is waiting for your answer",
+    answerInTerminal: "Answer in terminal",
+    questionFormLoading: "Waiting for the terminal form; you can pick here once it's ready",
     customAnswerPlaceholder: "Type another answer",
     addCustomAnswer: "Add answer",
     submitAnswer: "Submit choices",
