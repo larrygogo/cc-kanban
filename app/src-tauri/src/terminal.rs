@@ -1716,19 +1716,28 @@ pub(crate) fn attach_in_external_terminal(
 ) -> Result<(), String> {
     broker.ensure_attachable(sid)?;
     let terminal = load_settings().resume_terminal;
+    // 在线判定与激活目标一次取齐（见 ExternalViewer）：拆成两问会被「关窗口同时点卡片」
+    // 的 detach 竞态穿插，把新 reporter 误判成旧 reporter、按设置激活错误应用。
     #[cfg(target_os = "macos")]
-    if broker.has_external_viewer(sid) {
-        // 激活目标从订阅者 pid 反查实际宿主（精确 tab → 宿主 .app），绝不看「恢复终端」
-        // 设置——设置与视图实际所在的应用可能不一致，按设置激活会跳错应用，Ghostty
-        // 未运行时甚至凭空弹一扇空白窗。聚焦失败也不再退回设置路径，宁可无动作。
-        match broker.external_viewer_pid(sid) {
-            Some(pid) => {
-                crate::macos::terminal::focus_attach_viewer(pid as i64);
-            }
-            // 旧 reporter 的订阅没有 pid，才退回应用级兜底。
-            None => activate_resume_terminal_app(&terminal),
+    match broker.external_viewer(sid) {
+        crate::pty::ExternalViewer::Pid(pid) => {
+            // 激活目标从订阅者 pid 反查实际宿主（精确 tab → 宿主级置前），绝不看「恢复
+            // 终端」设置——设置与视图实际所在的应用可能不一致，按设置激活会跳错应用，
+            // Ghostty 未运行时甚至凭空弹一扇空白窗。聚焦失败也不退回设置路径，但必须
+            // 报错让用户看见（同 reveal_session 的原则）：静默返回成功就是「点了没反应」。
+            return if crate::macos::terminal::focus_attach_viewer(pid as i64) {
+                Ok(())
+            } else {
+                Err("外部同步终端已在线，但未能将其带到前台（宿主终端可能无法聚焦，或缺少辅助功能权限）".into())
+            };
         }
-        return Ok(());
+        // 旧 reporter 的订阅没有 pid，才退回应用级兜底。
+        crate::pty::ExternalViewer::Legacy => {
+            activate_resume_terminal_app(&terminal);
+            return Ok(());
+        }
+        // 无在线视图 → 落到下方正常新开一扇。
+        crate::pty::ExternalViewer::None => {}
     }
     let reporter = crate::setup::sibling_reporter().ok_or("找不到 meowo-reporter attach 客户端")?;
     // endpoint/token/protocol 不进 argv：attach 客户端自行读 discovery 文件

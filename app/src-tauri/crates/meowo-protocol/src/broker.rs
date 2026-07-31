@@ -418,8 +418,7 @@ mod tests {
         );
     }
 
-    /// attach 去重要精确聚焦宿主窗口，靠客户端上报自身 pid；字段演进走 serde default：
-    /// 旧 reporter（v2 无 pid 字段 / v1 五段行）→ None，新字段 round-trip 保留。
+    /// 旧握手（v2 无 pid 字段 / v1 五段行）→ None，新字段 round-trip 保留。
     #[test]
     fn attach_pid_defaults_to_none_and_round_trips() {
         let old: BrokerRequest = serde_json::from_value(serde_json::json!({

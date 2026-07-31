@@ -31,6 +31,20 @@ pub fn normalize_tty(raw: &str) -> Option<String> {
     Some(format!("/dev/{t}"))
 }
 
+/// 解析 `ps -axo pid=,ppid=,comm=` 的一行。pid/ppid 右对齐（前导空白），与 comm 之间
+/// 是单个分隔空格。comm 在 macOS 上是可执行文件全路径，可能含连续空白
+/// （如 `/Applications/My  Term.app/...`），必须原样保留——它会被截成 bundle 路径当真实
+/// 文件系统路径传给 `open`，用 split_whitespace 重组会把连续空白折叠成单空格、路径就此失效。
+pub fn parse_ps_line(line: &str) -> Option<(i64, i64, String)> {
+    let rest = line.trim_start();
+    let (pid, rest) = rest.split_once(|c: char| c.is_ascii_whitespace())?;
+    let pid = pid.parse().ok()?;
+    let rest = rest.trim_start();
+    let (ppid, comm) = rest.split_once(|c: char| c.is_ascii_whitespace())?;
+    let ppid = ppid.parse().ok()?;
+    Some((pid, ppid, comm.to_string()))
+}
+
 /// 进程名按「从 claude 自身向祖先」顺序传入，返回最近的已知终端宿主。
 pub fn detect_term_kind(ancestor_names_root_first: &[String]) -> TermKind {
     for name in ancestor_names_root_first {
@@ -47,15 +61,31 @@ pub fn detect_term_kind(ancestor_names_root_first: &[String]) -> TermKind {
 
 /// attach 查重命中但按 tty 精确聚焦失败（Ghostty/WezTerm 等无 AppleScript 聚焦的宿主）时，
 /// 聚焦目标从订阅者 pid 的祖先链推导：取首个 .app 进程的 (pid, bundle 路径)。
-/// pid 供 [`raise_process_script`] 按 unix id 精确置前——`open -na` 的 Ghostty 每窗口
-/// 一个实例，置前该实例即置前该窗口；bundle 路径供置前失败后 `open` 做应用级激活。
-/// 第一项是 attach 客户端自身，必须跳过——生产环境它就在 Meowo.app 里，不跳会把
-/// Meowo 自己带到前台。
-pub fn viewer_host_entry(ancestors_self_first: &[(i64, String)]) -> Option<(i64, String)> {
-    ancestors_self_first.iter().skip(1).find_map(|(pid, comm)| {
-        let end = comm.find(".app/")?;
-        Some((*pid, comm[..end + 4].to_string()))
-    })
+/// pid 供 [`raise_process_script`] 按 unix id 置前，bundle 路径供置前失败后 `open` 做
+/// 应用级激活。客户端自身按 pid 身份跳过而非按位置 skip(1)——生产环境它就在 Meowo.app
+/// 里，不跳会把 Meowo 自己带到前台；而链里未必有它（comm 为空的行会被丢弃），按位置跳
+/// 会在「宿主直接 spawn 客户端」的链上把宿主跳掉。
+pub fn viewer_host_entry(
+    client_pid: i64,
+    ancestors_self_first: &[(i64, String)],
+) -> Option<(i64, String)> {
+    ancestors_self_first
+        .iter()
+        .filter(|(pid, _)| *pid != client_pid)
+        .find_map(|(pid, comm)| Some((*pid, host_bundle_path(comm)?)))
+}
+
+/// 从可执行文件全路径截出宿主 .app bundle：取首个**后随 `Contents`** 的 `.app` 组件。
+/// 真 bundle 的可执行文件必在 `X.app/Contents/` 下；「后随 Contents」把两类干扰都排掉——
+/// 名字恰以 .app 结尾的普通父目录（`/x/Builds.app/Ghostty.app/...` 应取 Ghostty.app），
+/// 以及嵌套 helper bundle（`Foo.app/Contents/.../Foo Helper.app/...` 应取外层 Foo.app，
+/// `open` helper 不会激活宿主应用）。
+fn host_bundle_path(comm: &str) -> Option<String> {
+    let components: Vec<&str> = comm.split('/').collect();
+    components
+        .windows(2)
+        .position(|pair| pair[0].ends_with(".app") && pair[1] == "Contents")
+        .map(|index| components[..=index].join("/"))
 }
 
 /// 把指定 unix id 的进程置前的 AppleScript（pid 经 osascript argv 传入，防注入）。
@@ -247,10 +277,24 @@ mod tests {
         assert_eq!(resume_kind_from_setting("wezterm"), TermKind::Terminal);
     }
 
-    /// 聚焦目标从订阅者 pid 的祖先链推导：跳过第一项（attach 客户端自身——
-    /// 生产环境它就在 Meowo.app 里，不跳会把 Meowo 自己带到前台），取其后首个
-    /// .app 进程的 (pid, bundle 路径)。pid 用于 System Events 按 unix id 精确置前
-    /// （`open -na` 的 Ghostty 每窗口一个实例），bundle 路径用于置前失败后 `open` 激活。
+    /// comm 里的连续空白必须原样保留——它最终会被当真实路径传给 `open`。
+    #[test]
+    fn parse_ps_line_preserves_comm_verbatim() {
+        assert_eq!(
+            parse_ps_line("  123   456 /Applications/My  Term.app/Contents/MacOS/term"),
+            Some((
+                123,
+                456,
+                "/Applications/My  Term.app/Contents/MacOS/term".to_string()
+            ))
+        );
+        assert_eq!(parse_ps_line("77 1 /bin/zsh"), Some((77, 1, "/bin/zsh".into())));
+        assert_eq!(parse_ps_line(""), None);
+        assert_eq!(parse_ps_line("123"), None, "缺 ppid/comm → None");
+        assert_eq!(parse_ps_line("abc def /bin/zsh"), None, "pid 非数字 → None");
+    }
+
+    /// 自身按 pid 身份跳过（不按位置），其后取首个真 bundle 祖先的 (pid, bundle 路径)。
     #[test]
     fn viewer_host_entry_skips_self_and_finds_the_host_bundle() {
         let chain = vec![
@@ -265,7 +309,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            viewer_host_entry(&chain),
+            viewer_host_entry(100, &chain),
             Some((80, "/Applications/Ghostty.app".to_string()))
         );
 
@@ -278,25 +322,70 @@ mod tests {
             ),
         ];
         assert_eq!(
-            viewer_host_entry(&dev),
+            viewer_host_entry(100, &dev),
             Some((80, "/System/Applications/Utilities/Terminal.app".to_string()))
+        );
+
+        // 自身 comm 为空的行被 ancestor_chain 丢弃、链首直接就是宿主（宿主直接 spawn
+        // 客户端，无中间 shell）：按位置 skip(1) 会把宿主跳掉，按身份跳过则不受影响。
+        let headless = vec![(
+            80,
+            "/Applications/Ghostty.app/Contents/MacOS/ghostty".to_string(),
+        )];
+        assert_eq!(
+            viewer_host_entry(100, &headless),
+            Some((80, "/Applications/Ghostty.app".to_string()))
         );
 
         let self_only = vec![(
             100,
             "/Applications/Meowo.app/Contents/MacOS/meowo-reporter".to_string(),
         )];
-        assert_eq!(viewer_host_entry(&self_only), None, "只有自身不算宿主");
-        assert_eq!(viewer_host_entry(&[]), None);
+        assert_eq!(viewer_host_entry(100, &self_only), None, "只有自身不算宿主");
+        assert_eq!(viewer_host_entry(100, &[]), None);
         let no_bundle = vec![
             (100, "meowo-reporter".to_string()),
             (90, "/bin/zsh".to_string()),
         ];
-        assert_eq!(viewer_host_entry(&no_bundle), None, "无 .app 祖先 → None");
+        assert_eq!(viewer_host_entry(100, &no_bundle), None, "无 .app 祖先 → None");
     }
 
-    /// 置前脚本按 unix id 找进程（pid 经 argv 传入，防注入），不依赖进程名——
-    /// `open -na` 起的多个 Ghostty 实例同名，按名寻址只会命中第一个。
+    /// bundle 截取规则：取首个后随 `Contents` 的 `.app` 组件（见 host_bundle_path）。
+    #[test]
+    fn viewer_host_entry_resolves_the_openable_bundle() {
+        // 名字恰以 .app 结尾的普通父目录不是 bundle，应取其下的真 bundle。
+        let nested_dir = vec![(
+            80,
+            "/Users/x/Builds.app/Ghostty.app/Contents/MacOS/ghostty".to_string(),
+        )];
+        assert_eq!(
+            viewer_host_entry(100, &nested_dir),
+            Some((80, "/Users/x/Builds.app/Ghostty.app".to_string()))
+        );
+
+        // 嵌套 helper bundle 应取外层应用——`open` helper 不会激活宿主。
+        let helper = vec![(
+            80,
+            "/Applications/Foo.app/Contents/Frameworks/Foo Helper.app/Contents/MacOS/Foo Helper"
+                .to_string(),
+        )];
+        assert_eq!(
+            viewer_host_entry(100, &helper),
+            Some((80, "/Applications/Foo.app".to_string()))
+        );
+
+        // 路径里的连续空格必须原样保留，否则截出的 bundle 磁盘上不存在。
+        let spaced = vec![(
+            80,
+            "/Applications/My  Term.app/Contents/MacOS/term".to_string(),
+        )];
+        assert_eq!(
+            viewer_host_entry(100, &spaced),
+            Some((80, "/Applications/My  Term.app".to_string()))
+        );
+    }
+
+    /// 断言脚本经 argv 收 pid 且按 unix id 寻址（防注入 + 同名多实例不误中）。
     #[test]
     fn raise_process_script_targets_unix_id_via_argv() {
         let s = raise_process_script();

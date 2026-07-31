@@ -57,6 +57,20 @@ struct AttachSubscriber {
     tx: mpsc::Sender<Vec<u8>>,
 }
 
+/// [`PtyBroker::external_viewer`] 的判定结果。在线判定与激活目标必须在同一次订阅表
+/// 锁内取齐——拆成两次调用（先问在不在、再问 pid）时，detach 的 retain 可以恰好插在
+/// 中间，把新 reporter 的会话误判成「有订阅但没 pid」的旧 reporter，走错兜底路径。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalViewer {
+    /// 无在线外部视图（或会话不存在）。
+    None,
+    /// 有在线视图但都没上报 pid（旧 reporter）。
+    Legacy,
+    /// 最近注册且上报了 pid 的在线视图。
+    Pid(u32),
+}
+
 #[derive(Clone)]
 struct CompletedPty {
     data: Vec<u8>,
@@ -1178,46 +1192,37 @@ impl PtyBroker {
             .and_then(|bindings| bindings.get(&temp_id).copied())
     }
 
-    /// 该会话此刻是否有外部同步终端（attach 客户端）在线。
+    /// 该会话此刻的外部同步终端（attach 客户端）状态，在线判定与激活目标一次锁内取齐
+    /// （拆开取会被 detach 竞态穿插，见 [`ExternalViewer`]）。
     ///
     /// 订阅表只在 handle_attach 里增删：客户端断开（外部终端窗口被关）时 read 循环 EOF、
-    /// 同一函数尾部立即摘除订阅——「非空」与「确有活的外部视图」严格同步，可作
-    /// 「再点卡片该聚焦已有窗口还是新开一个」的判据。对话窗口不经 socket 订阅，不计入。
+    /// 同一函数尾部立即摘除订阅——判定与「确有活的外部视图」严格同步，可作「再点卡片该
+    /// 聚焦已有窗口还是新开一个」的判据。对话窗口不经 socket 订阅，不计入。激活目标取
+    /// 最近一个上报 pid 的订阅者，供反查实际宿主，绝不看「恢复终端」设置——设置与视图
+    /// 实际所在的应用可能不一致。
     ///
     /// 目前仅 macOS 的 attach 查重调用（Windows 刻意不做，见 attach_in_external_terminal）；
     /// 逻辑平台无关，留在 cfg 外全平台编译与单测。
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub(crate) fn has_external_viewer(&self, session_id: i64) -> bool {
-        self.sessions
+    pub(crate) fn external_viewer(&self, session_id: i64) -> ExternalViewer {
+        let Some(session) = self
+            .sessions
             .lock()
             .ok()
-            .and_then(|sessions| {
-                sessions.get(&session_id).map(|session| {
-                    session
-                        .subscribers
-                        .lock()
-                        .map(|subscribers| !subscribers.is_empty())
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false)
-    }
-
-    /// 该会话最近一个上报了自身 pid 的外部订阅者。查重命中后的激活目标从这里反查
-    /// 实际宿主，绝不看「恢复终端」设置——设置与视图实际所在的应用可能不一致。
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub(crate) fn external_viewer_pid(&self, session_id: i64) -> Option<u32> {
-        self.sessions.lock().ok().and_then(|sessions| {
-            sessions.get(&session_id).and_then(|session| {
-                session
-                    .subscribers
-                    .lock()
-                    .ok()
-                    .and_then(|subscribers| {
-                        subscribers.iter().rev().find_map(|subscriber| subscriber.pid)
-                    })
-            })
-        })
+            .and_then(|sessions| sessions.get(&session_id).cloned())
+        else {
+            return ExternalViewer::None;
+        };
+        let Ok(subscribers) = session.subscribers.lock() else {
+            return ExternalViewer::None;
+        };
+        if subscribers.is_empty() {
+            return ExternalViewer::None;
+        }
+        match subscribers.iter().rev().find_map(|subscriber| subscriber.pid) {
+            Some(pid) => ExternalViewer::Pid(pid),
+            None => ExternalViewer::Legacy,
+        }
     }
 
     /// attach 前置校验：会话确实由本进程的 PTY 持有，且 attach 服务已在监听。
@@ -1760,35 +1765,22 @@ mod tests {
         })
     }
 
-    /// has_external_viewer 的口径：订阅表非空才算有外部视图；订阅被摘（窗口关闭）
-    /// 或会话不存在都判 false——判 true 会让「点卡片」只激活应用而不开新视图，误判即失联。
+    /// 三态判定与订阅表严格同步：None 误判会新开重复窗口，Legacy/Pid 误判会不开新视图。
     #[test]
-    fn external_viewer_presence_follows_the_subscriber_table() {
+    fn external_viewer_state_follows_the_subscriber_table() {
         let broker = PtyBroker::default();
-        assert!(!broker.has_external_viewer(7), "无此会话必须判 false");
+        assert_eq!(
+            broker.external_viewer(7),
+            ExternalViewer::None,
+            "无此会话必须判 None"
+        );
         let managed = dummy_managed(7);
         broker.sessions.lock().unwrap().insert(7, managed.clone());
-        assert!(!broker.has_external_viewer(7), "无订阅必须判 false");
-        let (tx, _rx) = mpsc::channel::<Vec<u8>>();
-        managed.subscribers.lock().unwrap().push(AttachSubscriber {
-            id: 1,
-            pid: None,
-            tx,
-        });
-        assert!(broker.has_external_viewer(7));
-        managed.subscribers.lock().unwrap().clear();
-        assert!(!broker.has_external_viewer(7), "订阅摘除后必须回落 false");
-    }
-
-    /// 去重后的激活目标必须指向真实宿主：pid 从订阅表反查，取最近注册且上报了 pid 的
-    /// 订阅者；无订阅或全部未上报（旧 reporter）→ None，调用方退回应用级兜底。
-    #[test]
-    fn external_viewer_pid_follows_the_most_recent_reporting_subscriber() {
-        let broker = PtyBroker::default();
-        assert_eq!(broker.external_viewer_pid(7), None, "无此会话必须判 None");
-        let managed = dummy_managed(7);
-        broker.sessions.lock().unwrap().insert(7, managed.clone());
-        assert_eq!(broker.external_viewer_pid(7), None, "无订阅必须判 None");
+        assert_eq!(
+            broker.external_viewer(7),
+            ExternalViewer::None,
+            "无订阅必须判 None"
+        );
         let (tx1, _rx1) = mpsc::channel::<Vec<u8>>();
         managed.subscribers.lock().unwrap().push(AttachSubscriber {
             id: 1,
@@ -1796,9 +1788,9 @@ mod tests {
             tx: tx1,
         });
         assert_eq!(
-            broker.external_viewer_pid(7),
-            None,
-            "旧 reporter 未上报 pid → None"
+            broker.external_viewer(7),
+            ExternalViewer::Legacy,
+            "在线但未上报 pid（旧 reporter）→ Legacy"
         );
         let (tx2, _rx2) = mpsc::channel::<Vec<u8>>();
         managed.subscribers.lock().unwrap().push(AttachSubscriber {
@@ -1813,9 +1805,15 @@ mod tests {
             tx: tx3,
         });
         assert_eq!(
-            broker.external_viewer_pid(7),
-            Some(5353),
+            broker.external_viewer(7),
+            ExternalViewer::Pid(5353),
             "取最近注册的上报者"
+        );
+        managed.subscribers.lock().unwrap().clear();
+        assert_eq!(
+            broker.external_viewer(7),
+            ExternalViewer::None,
+            "订阅摘除后必须回落 None"
         );
     }
 
