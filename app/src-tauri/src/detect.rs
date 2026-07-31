@@ -83,13 +83,18 @@ pub(crate) const FALLBACK_RULE_ID: &str = "fallback_idle";
 
 /// 该 provider 是否有规则集。ticker 用它在建快照之前提前跳过（无规则的会话零开销）。
 pub(crate) fn provider_supported(provider: &str) -> bool {
-    matches!(provider, "claude" | "claude-code")
+    matches!(provider, "claude" | "claude-code" | "codex" | "kimi" | "kimi-code")
 }
 
 /// 按 provider 求值。None = 该 provider 没有规则集（不做屏幕检测）。
 /// 规则按优先级降序排列，首个命中者胜；一条都没命中回退 idle（blocked 从严）。
 pub(crate) fn evaluate(provider: &str, snap: &ScreenSnapshot) -> Option<Evaluation> {
-    provider_supported(provider).then(|| evaluate_claude(snap))
+    match provider {
+        "claude" | "claude-code" => Some(evaluate_claude(snap)),
+        "codex" => Some(evaluate_codex(snap)),
+        "kimi" | "kimi-code" => Some(evaluate_kimi(snap)),
+        _ => None,
+    }
 }
 
 /// 从 spawn argv[0] 推 provider 标签：取文件名主干、小写。托管 PTY 跑的必是 agent CLI，
@@ -172,6 +177,192 @@ fn evaluate_claude(snap: &ScreenSnapshot) -> Evaluation {
         return publish(ScreenState::Idle, true, "osc_title_idle");
     }
     publish(ScreenState::Idle, false, FALLBACK_RULE_ID)
+}
+
+// ---------------------------------------------------------------------------
+// Codex 规则（herdr codex.toml 2026.07.18.1 的语义移植，优先级降序）
+// ---------------------------------------------------------------------------
+
+/// codex 的标题 spinner 帧集合（盲文十连帧，独立成词出现）。
+const CODEX_SPINNER: &str = "\u{280B}\u{2819}\u{2839}\u{2838}\u{283C}\u{2834}\u{2826}\u{2827}\u{2807}\u{280F}";
+
+fn evaluate_codex(snap: &ScreenSnapshot) -> Evaluation {
+    let lower: Vec<String> = snap.lines.iter().map(|line| line.to_lowercase()).collect();
+    let title = snap.title.as_deref().unwrap_or("");
+    let title_lower = title.to_lowercase();
+
+    // 1100 osc_title_blocked：codex 会把「Action Required」写进标题——唯一由标题直接
+    // 判 blocked 的宿主。
+    if title_lower.contains("action required") {
+        return publish(ScreenState::Blocked, true, "osc_title_blocked");
+    }
+    // 1050 osc_title_working：标题里独立成词的 spinner 帧。
+    if word_bounded_char(title, CODEX_SPINNER) {
+        return publish(ScreenState::Working, true, "osc_title_working");
+    }
+    // 1000 transcript_viewer：全屏 transcript 查看器，不代表状态变化。
+    let region = after_last_prompt_marker(&lower);
+    if ["↑/↓ to scroll", "pgup/pgdn to", "home/end to jump", "q to quit"]
+        .iter()
+        .all(|needle| region_contains(region, needle))
+        && (region_contains(region, "esc to edit prev")
+            || region_contains(region, "esc/← to edit prev"))
+    {
+        return Evaluation::Hold {
+            rule_id: "transcript_viewer",
+        };
+    }
+    // 900 live_strong_blocker：提示符标记之后出现确认/提交/放行文案。
+    if [
+        "press enter to confirm or esc to cancel",
+        "enter to submit answer",
+        "enter to submit all",
+        "allow command?",
+    ]
+    .iter()
+    .any(|needle| region_contains(region, needle))
+    {
+        return publish(ScreenState::Blocked, true, "live_strong_blocker");
+    }
+    // 600 weak_blocker：弱证据，不带可见标志。
+    let yes_or_pointer = region_contains(&lower, "yes") || region_contains(&lower, "\u{276F}");
+    if region_contains(&lower, "[y/n]")
+        || region_contains(&lower, "yes (y)")
+        || (region_contains(&lower, "do you want to") && yes_or_pointer)
+        || (region_contains(&lower, "would you like to") && yes_or_pointer)
+    {
+        return publish(ScreenState::Blocked, false, "weak_blocker");
+    }
+    // 500 screen_working_fallback：底部的 `• Working (…esc to interrupt)` 状态行。
+    let bottom = bottom_non_empty(&lower, 3);
+    let working_line = bottom.iter().any(|line| {
+        let rest = line.trim_start();
+        let rest = rest
+            .strip_prefix('\u{2022}')
+            .or_else(|| rest.strip_prefix('\u{25E6}'));
+        rest.is_some_and(|tail| {
+            tail.trim_start().starts_with("working (") && tail.contains("esc to interrupt")
+        })
+    });
+    if working_line && !region_contains(&bottom, "■ conversation interrupted") {
+        return publish(ScreenState::Working, true, "screen_working_fallback");
+    }
+    // 100 osc_title_idle：有标题但既不转也不告警。
+    if !title.trim().is_empty() {
+        return publish(ScreenState::Idle, true, "osc_title_idle");
+    }
+    publish(ScreenState::Idle, false, FALLBACK_RULE_ID)
+}
+
+// ---------------------------------------------------------------------------
+// Kimi 规则（herdr kimi.toml 2026.06.10.1 的语义移植，优先级降序）。
+// kimi 的 PermissionRequest hook 在 Meowo 里是 observation-only（不接管决策），
+// 屏幕检测是它「等审批/等回答」状态的唯一实时来源。
+// ---------------------------------------------------------------------------
+
+fn evaluate_kimi(snap: &ScreenSnapshot) -> Evaluation {
+    let lower: Vec<String> = snap.lines.iter().map(|line| line.to_lowercase()).collect();
+
+    // 400 current_approval_panel：当前版审批面板。
+    let approval_prompt = [
+        "run this command?",
+        "write this file?",
+        "apply these edits?",
+        "stop this task?",
+        "ready to build with this plan?",
+    ]
+    .iter()
+    .any(|needle| region_contains(&lower, needle))
+        || lower.iter().any(|line| {
+            let rest = line.trim_start();
+            let rest = rest
+                .strip_prefix('\u{25B6}')
+                .map_or(rest, str::trim_start);
+            rest.starts_with("approve ") && rest.trim_end().ends_with('?')
+        });
+    if region_contains(&lower, "↵ confirm")
+        && approval_prompt
+        && region_contains(&lower, " choose")
+        && (region_contains(&lower, "approve")
+            || region_contains(&lower, "reject")
+            || region_contains(&lower, "revise"))
+    {
+        return publish(ScreenState::Blocked, true, "current_approval_panel");
+    }
+    // 390 question_panel：提问面板（↑↓ select · esc cancel + question 标题行 + ? 行）。
+    if region_contains(&lower, "↑↓ select")
+        && region_contains(&lower, "esc cancel")
+        && lower.iter().any(|line| line.trim() == "question")
+        && lower.iter().any(|line| line.trim_start().starts_with("? "))
+        && ["↵ choose", "↵ toggle", "↵ save"]
+            .iter()
+            .any(|needle| region_contains(&lower, needle))
+    {
+        return publish(ScreenState::Blocked, true, "question_panel");
+    }
+    // 300 legacy_approval_panel：旧版审批面板，弱证据。
+    if region_contains(&lower, "requesting approval")
+        && region_contains(&lower, "reject")
+        && (region_contains(&lower, "approve once")
+            || region_contains(&lower, "approve for this session"))
+        && (region_contains(&lower, "1/2/3/4 choose") || region_contains(&lower, "↵ confirm"))
+    {
+        return publish(ScreenState::Blocked, false, "legacy_approval_panel");
+    }
+    // 120 background_agent_status_working：`kimi thinking … [N agents running]` 状态行。
+    let bottom = bottom_non_empty(&lower, 3);
+    if bottom.iter().any(|line| {
+        line.contains("kimi")
+            && line.contains("thinking")
+            && line.contains('[')
+            && line.contains("running]")
+    }) {
+        return publish(ScreenState::Working, true, "background_agent_status_working");
+    }
+    // 100 moon_spinner_working：独立成行的月相 spinner。
+    if lower.iter().any(|line| {
+        let trimmed = line.trim();
+        let mut chars = trimmed.chars();
+        matches!((chars.next(), chars.next()), (Some(moon), None) if "🌕🌖🌗🌘🌑🌒🌓🌔".contains(moon))
+    }) {
+        return publish(ScreenState::Working, true, "moon_spinner_working");
+    }
+    // 90 braille_spinner_working：盲文 spinner + thinking/working/using 前缀。
+    if lower.iter().any(|line| {
+        let rest = line.trim_start();
+        let stripped = rest.trim_start_matches(|ch: char| ('\u{2800}'..='\u{28FF}').contains(&ch));
+        stripped.len() != rest.len()
+            && ["thinking...", "working...", "using "]
+                .iter()
+                .any(|keyword| stripped.trim_start().starts_with(keyword))
+    }) {
+        return publish(ScreenState::Working, true, "braille_spinner_working");
+    }
+    publish(ScreenState::Idle, false, FALLBACK_RULE_ID)
+}
+
+/// codex 的提示符标记行（`›` 独占或 `› ` 开头，行首不 trim——codex 顶格渲染）。
+fn codex_prompt_line(line: &str) -> bool {
+    line == "\u{203A}" || line.starts_with("\u{203A} ")
+}
+
+/// 最后一个提示符标记行之后的区域；没有标记时是整个屏幕。
+fn after_last_prompt_marker(lines: &[String]) -> &[String] {
+    let start = lines
+        .iter()
+        .rposition(|line| codex_prompt_line(line))
+        .map_or(0, |index| index + 1);
+    &lines[start..]
+}
+
+/// 文本里是否有 `set` 中的某个字符**独立成词**出现（两侧是空格或文本边界）。
+fn word_bounded_char(text: &str, set: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    chars.iter().enumerate().any(|(index, ch)| {
+        set.contains(*ch)
+            && index.checked_sub(1).is_none_or(|prev| chars[prev] == ' ')
+            && chars.get(index + 1).is_none_or(|next| *next == ' ')
+    })
 }
 
 fn publish(state: ScreenState, visible: bool, rule_id: &'static str) -> Evaluation {
@@ -608,6 +799,123 @@ mod tests {
         let s = snap(&["  do you want to refactor? yes we discussed it", " \u{276F}"]);
         let got = state_of(evaluate("claude", &s));
         assert_ne!(got.map(|(state, _)| state), Some(ScreenState::Blocked));
+    }
+
+    // -- codex --
+
+    #[test]
+    fn codex_action_required_title_is_blocked() {
+        let s = snap_titled(&["some output"], "Action Required · codex");
+        assert_eq!(
+            state_of(evaluate("codex", &s)),
+            Some((ScreenState::Blocked, "osc_title_blocked"))
+        );
+    }
+
+    #[test]
+    fn codex_spinner_title_is_working() {
+        let s = snap_titled(&["output"], "codex \u{280B} building");
+        assert_eq!(
+            state_of(evaluate("codex", &s)),
+            Some((ScreenState::Working, "osc_title_working"))
+        );
+    }
+
+    /// 强 blocker 只认提示符标记之后的区域：标记之前的历史文本不算数。
+    #[test]
+    fn codex_strong_blocker_after_prompt_marker() {
+        let s = snap(&[
+            "  old scroll: allow command? was answered long ago",
+            "\u{203A} previous prompt",
+            " Allow command?",
+            " press enter to confirm or esc to cancel",
+        ]);
+        assert_eq!(
+            state_of(evaluate("codex", &s)),
+            Some((ScreenState::Blocked, "live_strong_blocker"))
+        );
+    }
+
+    #[test]
+    fn codex_working_status_line_is_working() {
+        let s = snap(&[
+            "  compiling...",
+            " \u{2022} Working (3m 12s · esc to interrupt) · 42 tokens",
+        ]);
+        assert_eq!(
+            state_of(evaluate("codex", &s)),
+            Some((ScreenState::Working, "screen_working_fallback"))
+        );
+    }
+
+    /// 有标题但既不转也不告警 → idle；无标题无命中 → fallback。
+    #[test]
+    fn codex_plain_title_is_idle() {
+        let s = snap_titled(&["  quiet"], "codex — ~/repo");
+        assert_eq!(
+            state_of(evaluate("codex", &s)),
+            Some((ScreenState::Idle, "osc_title_idle"))
+        );
+        let bare = snap(&["  quiet"]);
+        assert_eq!(
+            state_of(evaluate("codex", &bare)),
+            Some((ScreenState::Idle, FALLBACK_RULE_ID))
+        );
+    }
+
+    // -- kimi --
+
+    #[test]
+    fn kimi_approval_panel_is_blocked() {
+        let s = snap(&[
+            " Requesting approval",
+            " Run this command?",
+            "   cargo test --all",
+            " \u{25B6} Approve once   Reject   Revise",
+            " 1/2/3 choose · \u{21B5} confirm · esc cancel",
+        ]);
+        assert_eq!(
+            state_of(evaluate("kimi", &s)),
+            Some((ScreenState::Blocked, "current_approval_panel"))
+        );
+    }
+
+    #[test]
+    fn kimi_question_panel_is_blocked() {
+        let s = snap(&[
+            " Question",
+            " ? 晚饭吃什么",
+            "   火锅",
+            "   寿司",
+            " ↑↓ select · \u{21B5} choose · esc cancel",
+        ]);
+        assert_eq!(
+            state_of(evaluate("kimi", &s)),
+            Some((ScreenState::Blocked, "question_panel"))
+        );
+    }
+
+    #[test]
+    fn kimi_spinners_are_working() {
+        let moon = snap(&["  output", " 🌕 "]);
+        assert_eq!(
+            state_of(evaluate("kimi", &moon)),
+            Some((ScreenState::Working, "moon_spinner_working"))
+        );
+        let braille = snap(&[" \u{280B} Thinking... 3s"]);
+        assert_eq!(
+            state_of(evaluate("kimi", &braille)),
+            Some((ScreenState::Working, "braille_spinner_working"))
+        );
+    }
+
+    #[test]
+    fn kimi_falls_back_to_idle() {
+        let s = snap(&["  plain output", "  nothing pending"]);
+        assert_eq!(
+            state_of(evaluate("kimi", &s)),
+            Some((ScreenState::Idle, FALLBACK_RULE_ID))
+        );
     }
 
     // -- 防抖 --

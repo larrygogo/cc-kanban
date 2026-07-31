@@ -418,6 +418,16 @@ mod tests {
         );
     }
 
+    /// 协议版本绊线（herdr 的 tripwire 实践）：reporter 与 GUI 可能跨版本共存（安装版
+    /// GUI + 新 reporter，或反之），线协议的**不兼容**改动必须 bump 版本号并检查两端的
+    /// 兼容矩阵。这个断言强迫改协议的人停下来想一次：可选字段走 serde default（如
+    /// Attach.pid，不 bump），改语义/删字段/换编码才 bump。改这里的数字前，先确认
+    /// 旧 reporter 打新 GUI、新 reporter 打旧 GUI 两个方向的行为。
+    #[test]
+    fn protocol_version_change_is_deliberate() {
+        assert_eq!(CURRENT_PROTOCOL_VERSION, 2);
+    }
+
     /// 旧握手（v2 无 pid 字段 / v1 五段行）→ None，新字段 round-trip 保留。
     #[test]
     fn attach_pid_defaults_to_none_and_round_trips() {
