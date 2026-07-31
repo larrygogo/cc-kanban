@@ -1186,7 +1186,29 @@ mod tests {
         normalize_tab_title, parse_wt_default_profile, path_has_exe, resume_argv_for,
         shell_join_for_windows, strip_jsonc_comments, tab_match_score,
     };
-    use crate::watch::{pending_fingerprint, should_notify, waiting_fingerprint};
+    use crate::watch::{
+        pending_fingerprint, screen_blocked_fingerprint, should_notify, waiting_fingerprint,
+    };
+
+    /// 屏幕阻塞通知的让位与去重：错误/已有 pending_review 时不发（那两条各自会发），
+    /// 同一次阻塞只发一条，状态离开 blocked 后清空条目、下次阻塞重新通知。
+    #[test]
+    fn screen_blocked_notification_defers_and_dedupes() {
+        // 让位：错误优先、已有 hook 事件驱动的待审批时不重复打扰。
+        assert_eq!(screen_blocked_fingerprint(true, false, Some("blocked")), None);
+        assert_eq!(screen_blocked_fingerprint(false, true, Some("blocked")), None);
+        // 非 blocked 状态不发。
+        assert_eq!(screen_blocked_fingerprint(false, false, Some("working")), None);
+        assert_eq!(screen_blocked_fingerprint(false, false, None), None);
+        // blocked：发，且指纹稳定 —— 同一次阻塞期间不重复弹（agent 不产出、时间戳不动，
+        // 指纹刻意不掺 last_event_at，见函数文档）。
+        let first = screen_blocked_fingerprint(false, false, Some("blocked"));
+        assert!(first.is_some());
+        assert!(!should_notify(first.as_deref(), first.as_deref()));
+        // 阻塞解除 → None（调用方据此清条目），再次阻塞时 prev 为空 → 重新通知。
+        assert_eq!(screen_blocked_fingerprint(false, false, Some("idle")), None);
+        assert!(should_notify(None, first.as_deref()));
+    }
 
     /// DLL 搜索路径收紧必须在 `run()` 的**最前面**（任何 LoadLibrary 之前）——托管 PTY
     /// 的 portable-pty 用相对名 sideload `conpty.dll`，cwd 在搜索顺序里（理由详见

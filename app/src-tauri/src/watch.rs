@@ -300,6 +300,27 @@ pub(crate) fn pending_fingerprint(
     pending_review.map(|kind| format!("{kind}:{last_event_at}"))
 }
 
+/// 屏幕检测「blocked」的通知指纹——托管会话的 agent 在屏幕上挂着审批/提问 UI 等人。
+///
+/// 存在意义是补 hook 的盲区：DB 的 `pending_review` 由 hook 事件驱动，bash 权限弹窗、
+/// AskUserQuestion 之外的 TUI 提问等常常没有对应事件，卡片能靠屏幕检测翻琥珀，通知却
+/// 一直哑着——「agent 停下来等你」正是最该被通知的一件事。
+///
+/// 让位规则与其它指纹一致：errored / 已有 pending_review 时返回 None（那两条各自会发，
+/// 不重复打扰）。指纹只用 sid + 状态本身，**不掺 last_event_at**：blocked 期间 agent
+/// 不产出、时间戳不动，掺进去反而在时间戳因别的原因跳动时重复弹。同一次阻塞只发一条，
+/// 状态离开 blocked 后条目被清掉，下次再阻塞才会重新通知。
+pub(crate) fn screen_blocked_fingerprint(
+    errored: bool,
+    has_pending: bool,
+    screen_state: Option<&str>,
+) -> Option<String> {
+    if errored || has_pending {
+        return None;
+    }
+    (screen_state == Some("blocked")).then(|| "blocked".to_string())
+}
+
 /// 弹一条「点击即跳到该会话」的桌面通知。落点按会话归属分流：GUI 托管会话（PTY 由 Meowo
 /// 持有，进程组里没有可聚焦的外部终端窗口）→ 打开/聚焦对话窗口并切到该会话；外部终端
 /// 会话 → 原来的 focus_session_terminal（它自己 spawn 干净线程做 UIA，不阻塞主线程）。
@@ -444,6 +465,7 @@ pub(crate) fn spawn_liveness_watch(
         let mut notified: HashMap<String, String> = HashMap::new(); // cc_session_id -> 上次错误指纹
         let mut notified_waiting: HashMap<String, String> = HashMap::new(); // cc_session_id -> 上次待交互指纹
         let mut notified_pending: HashMap<String, String> = HashMap::new(); // cc_session_id -> 上次待审批指纹
+        let mut notified_blocked: HashMap<String, String> = HashMap::new(); // cc_session_id -> 上次屏幕阻塞指纹
         let mut seeded = false;
         // 托盘状态摘要只在 (运行,待交互) 变化时刷新，避免每轮无谓重画/重设提示。
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -483,6 +505,12 @@ pub(crate) fn spawn_liveness_watch(
                 let approvals = app
                     .try_state::<crate::AppState>()
                     .map(|state| state.ptys.approval_session_ids())
+                    .unwrap_or_default();
+                // 托管会话的屏幕检测状态（见 pty.rs ScreenProbe）：hook 覆盖不到的阻塞
+                // （bash 权限弹窗等）只能靠它发通知。取不到 AppState 就退回空表 = 不发。
+                let screen_states = app
+                    .try_state::<crate::AppState>()
+                    .map(|state| state.ptys.screen_states())
                     .unwrap_or_default();
                 for mut s in store
                     .live_sessions(Some("all"), None, None, None, 1000)
@@ -532,10 +560,13 @@ pub(crate) fn spawn_liveness_watch(
                         .map(|_| meowo_reporter::tabtitle::short_sid(&s.session.cc_session_id))
                         .filter(|t| !t.is_empty());
 
-                    // 菜单栏摘要计数:出错/待交互/待审批 → 需关注(●),运行中 → ○;在线空闲不计入。
+                    // 菜单栏摘要计数:出错/待交互/待审批/屏幕阻塞 → 需关注(●),运行中 → ○;
+                    // 在线空闲不计入。屏幕阻塞同样计入——它与「待审批」是同一件事的两个
+                    // 信息源（hook 有事件 / 只在屏幕上），托盘不该因为来源不同而漏计。
                     if error.is_some()
                         || s.session.status == "waiting"
                         || s.pending_review.is_some()
+                        || screen_states.get(&s.session.id).copied() == Some("blocked")
                     {
                         tray_waiting += 1;
                     } else if s.session.status == "running" {
@@ -600,6 +631,38 @@ pub(crate) fn spawn_liveness_watch(
                         }
                     }
 
+                    // 屏幕阻塞通知（hook 盲区补位：agent 在屏幕上挂着审批/提问 UI 等人，
+                    // 而 DB 的 pending_review 没有对应事件）。排在待审批之后、待交互之前：
+                    // 有 pending_review 时它返回 None 自动让位，不重复打扰。
+                    match screen_blocked_fingerprint(
+                        error.is_some(),
+                        s.pending_review.is_some(),
+                        screen_states.get(&s.session.id).copied(),
+                    ) {
+                        Some(fp) => {
+                            let prev = notified_blocked.get(&sid).map(|s| s.as_str());
+                            let fired = seeded && should_notify(prev, Some(&fp));
+                            attention_fired |= fired;
+                            if fired && notify_on {
+                                show_session_notification(
+                                    &app,
+                                    tr(lang, "notify.blocked").into(),
+                                    format!("{} · {}", s.project_name, display_title),
+                                    s.session.id,
+                                    pid,
+                                    display_title.clone(),
+                                    s.cwd.clone(),
+                                    tab_token.clone(),
+                                    title_based,
+                                );
+                            }
+                            notified_blocked.insert(sid.clone(), fp);
+                        }
+                        None => {
+                            notified_blocked.remove(&sid);
+                        }
+                    }
+
                     // 待交互通知（errored 时 waiting_fingerprint 返回 None，自动让位给错误）。
                     match waiting_fingerprint(
                         error.is_some(),
@@ -635,6 +698,7 @@ pub(crate) fn spawn_liveness_watch(
                 // 边缘情况：会话彻底消失后又带着完全相同的未解决错误/待交互重新出现，会再弹一次——可接受。
                 notified.retain(|k, _| present.contains_key(k));
                 notified_pending.retain(|k, _| present.contains_key(k));
+                notified_blocked.retain(|k, _| present.contains_key(k));
                 notified_waiting.retain(|k, _| present.contains_key(k));
                 seeded = true;
 
