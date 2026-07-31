@@ -41,9 +41,14 @@ jobs:
       - name: Rust 测试
         working-directory: app/src-tauri
         run: cargo test --workspace
+      # --all-targets 覆盖测试/示例代码：不带它时 #[cfg(test)] 里的 lint 完全不检查，
+      # 而本地开发普遍带（本地比 CI 严 = CI 门禁形同虚设）。matrix 含 macos-latest，
+      # macOS 专属模块（src/macos/**）**只有**在这里才被编译——Windows 开发机无法交叉
+      # 验证它（objc2 要编译 Objective-C，需 macOS SDK；实测不可行），改那些文件后
+      # 必须靠这条 CI 兜底，本地全绿不代表它们能编译。
       - name: Rust clippy
         working-directory: app/src-tauri
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   # 依赖漏洞审计：第三方 crate / npm 包出现已知 CVE 时给出门禁/告警。
   audit:
