@@ -209,6 +209,12 @@ export type LiveSession = {
   /** 本 GUI 进程正托管该会话的 PTY；门控贴纸卡片菜单「结束会话」的可见性。 */
   pty_managed: boolean;
   /**
+   * 托管会话的屏幕检测状态（后端对 PTY 末屏做终端仿真 + 规则匹配，见 pty.rs ScreenProbe）。
+   * 比 DB status 实时：blocked = 屏幕上挂着审批/提问 UI。null/缺省 = 非托管会话、
+   * 无规则集或启动宽限内——此时卡片回退 DB status 口径。
+   */
+  screen_state?: "working" | "idle" | "blocked" | null;
+  /**
    * 由 agent 自己的后台守护进程托管（Claude Code FleetView 的后台会话）。这类卡片是
    * agent 在会话中途自行派生的——用户没开过它，看板却凭空多出一张卡。界面据此标注来历，
    * 并收起接管/结束/定位终端：那几条路对它注定失败（supervisor 会把被杀的进程拉回来，

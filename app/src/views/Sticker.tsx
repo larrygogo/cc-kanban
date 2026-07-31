@@ -623,12 +623,19 @@ export function Sticker({
                 ? (l.last_ai_text ?? l.preview)
                 : null;
               const subTitle = l.errored ? l.error_raw ?? undefined : sub ?? undefined;
+              // 屏幕检测（screen_state，仅托管会话有值）优先于 DB status：DB 的 running 由
+              // hook 事件驱动，agent 在屏幕上弹出审批/提问时它还停在上一个事件；屏幕状态
+              // 300ms 级实时。pending_review（broker 正压着的审批）仍最优先——那是事实源。
               const indicator = !l.connected ? (
                 <span className="ring-stop" data-tip={t.sticker.stopped} />
               ) : l.errored ? (
                 <span className="needs-error" data-tip={l.error_raw ?? t.sticker.sessionError} />
-              ) : l.pending_review ? (
+              ) : l.pending_review || l.screen_state === "blocked" ? (
                 <RunBadge pct={l.context_pct} tone="pending" />
+              ) : l.screen_state === "working" ? (
+                <RunBadge pct={l.context_pct} />
+              ) : l.screen_state === "idle" ? (
+                <RunBadge pct={l.context_pct} tone="waiting" />
               ) : l.session.status === "running" ? (
                 <RunBadge pct={l.context_pct} />
               ) : l.session.status === "waiting" ? (

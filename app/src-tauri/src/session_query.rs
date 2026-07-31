@@ -197,6 +197,10 @@ pub(crate) struct LiveItem {
     /// 所属账号的展示名（None = 默认账号，前端不显示徽章）。由 profile id 经 settings 解析；
     /// profile 已被删除（查不到）时回退 id 本身——宁可显示原始 id 也不丢归属信息。
     profile_name: Option<String>,
+    /// 托管会话的屏幕检测状态（"working"|"idle"|"blocked"），来自 PTY broker 的终端仿真
+    /// （见 pty.rs 的 ScreenProbe）。None = 非托管会话 / 无规则集 / 启动宽限内。
+    /// 在组页尾部统一填充（get_live_sessions），enrich 不经手。
+    screen_state: Option<&'static str>,
 }
 
 /// profile id → 展示名。查不到（profile 已删）回退 id 本身。纯函数便于单测。
@@ -324,11 +328,12 @@ pub(crate) async fn get_live_sessions_page(
     let runtimes = state.session_runtimes.clone();
     let pty_live = state.ptys.active_session_ids();
     let approvals = state.ptys.approval_session_ids();
+    let screen_states = state.ptys.screen_states();
     let filter = normalize_filter(filter);
     tauri::async_runtime::spawn_blocking(move || {
         let alive = snapshots.snapshot();
         let runtimes = runtimes.snapshot();
-        live_sessions_blocking(
+        let mut page = live_sessions_blocking(
             &db_path,
             &tx_cache,
             LiveContext {
@@ -345,7 +350,12 @@ pub(crate) async fn get_live_sessions_page(
                 before_id,
                 limit,
             },
-        )
+        )?;
+        // 屏幕状态与 profile_name 同一套路：组页尾部按 id 回填，不搅进 enrich 的丢弃判定。
+        for item in &mut page.items {
+            item.screen_state = screen_states.get(&item.inner.session.id).copied();
+        }
+        Ok(page)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -658,6 +668,8 @@ fn enrich(
         preview,
         // 展示名在组页阶段统一解析（见 live_sessions_blocking 尾部）。
         profile_name: None,
+        // 屏幕状态在 get_live_sessions 尾部统一填充（broker 状态表不进 LiveContext）。
+        screen_state: None,
     })
 }
 

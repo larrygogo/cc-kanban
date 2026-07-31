@@ -17,6 +17,102 @@ use tauri::{Emitter, Manager};
 
 const BACKLOG_LIMIT: usize = 1024 * 1024;
 
+/// 屏幕检测的启动宽限：spawn 后头几秒是启动 splash / 首帧探测期，扫出来的多半是噪音
+/// （herdr 同款纪律）。宽限内不发布任何状态，前端不显示角标。
+const DETECT_STARTUP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// 屏幕检测节拍（herdr 对已识别 agent 同为 300ms）。防抖的 3 次确认在该节奏下约 600ms
+/// 收敛，落在 700ms 时间上限之内，不需要单独的加密轮询档。
+const DETECT_TICK: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// vt100 标题回调：OSC 0/2 设置的窗口标题是检测证据（claude 用盲文 spinner/✳ 前缀）。
+/// 标题是不受信任的模型输出——过滤控制字符并限长；空 payload 视为清除。
+#[derive(Default)]
+struct ScreenTitle {
+    title: Option<String>,
+}
+
+impl vt100::Callbacks for ScreenTitle {
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        let text: String = String::from_utf8_lossy(title)
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(256)
+            .collect();
+        let text = text.trim().to_string();
+        self.title = (!text.is_empty()).then_some(text);
+    }
+}
+
+/// 托管会话的屏幕检测状态，随 [`ManagedPty`] 生灭。
+///
+/// 检测的输入必须是**终端仿真后的末屏文本**而非 backlog 原始字节——规则匹配会被全屏
+/// 重绘/光标定位序列打穿（herdr 调研的核心教训）。parser 由 reader 线程喂字节（纯内存，
+/// 与 StartupProbeScanner 同量级），判定由独立的检测节拍线程按需读取。
+struct ScreenProbe {
+    parser: Mutex<vt100::Parser<ScreenTitle>>,
+    debounce: Mutex<crate::detect::ScreenDebounce>,
+    /// 上次扫描时的 output_end。无新输出且无待确认降级时整轮跳过——空闲会话零开销。
+    scanned_end: AtomicU64,
+    started_at: std::time::Instant,
+    /// 由 spawn argv[0] 推出的 agent 标签（"claude" 等），决定用哪套规则。
+    provider: String,
+}
+
+impl ScreenProbe {
+    fn new(rows: u16, cols: u16, provider: String) -> Self {
+        Self {
+            parser: Mutex::new(vt100::Parser::new_with_callbacks(
+                rows,
+                cols,
+                0,
+                ScreenTitle::default(),
+            )),
+            debounce: Mutex::new(crate::detect::ScreenDebounce::default()),
+            scanned_end: AtomicU64::new(0),
+            started_at: std::time::Instant::now(),
+            provider,
+        }
+    }
+
+    /// 取末屏快照（行 + 标题）。锁内只做 grid 逐行导出，不跑规则。
+    fn snapshot(&self) -> Option<crate::detect::ScreenSnapshot> {
+        let parser = self.parser.lock().ok()?;
+        let screen = parser.screen();
+        let (_, cols) = screen.size();
+        let lines: Vec<String> = screen.rows(0, cols).collect();
+        let title = parser.callbacks().title.clone();
+        Some(crate::detect::ScreenSnapshot::new(lines, title))
+    }
+
+    /// 跑一轮检测。`current_end` 是会话此刻的累计输出偏移（[`ManagedPty::output_end`]）。
+    /// 返回 Some = 发布状态发生变化。
+    fn tick(
+        &self,
+        current_end: u64,
+        now: std::time::Instant,
+    ) -> Option<crate::detect::ScreenState> {
+        if !crate::detect::provider_supported(&self.provider) {
+            return None;
+        }
+        if now.duration_since(self.started_at) < DETECT_STARTUP_GRACE {
+            return None;
+        }
+        let pending = self
+            .debounce
+            .lock()
+            .map(|debounce| debounce.pending())
+            .unwrap_or(false);
+        if !pending && self.scanned_end.load(Ordering::Acquire) == current_end {
+            return None;
+        }
+        let snapshot = self.snapshot()?;
+        self.scanned_end.store(current_end, Ordering::Release);
+        let eval = crate::detect::evaluate(&self.provider, &snapshot)?;
+        self.debounce.lock().ok()?.observe(&eval, now)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct TerminalSize {
     pub(crate) cols: u16,
@@ -47,6 +143,8 @@ struct ManagedPty {
     /// 自 PTY 启动以来累计输出的字节位置；与 backlog 锁内更新，供快照和实时帧去重排序。
     output_end: AtomicU64,
     subscribers: Mutex<Vec<AttachSubscriber>>,
+    /// 屏幕检测状态（终端仿真 + 防抖）。见 [`ScreenProbe`]。
+    probe: ScreenProbe,
 }
 
 /// 一个在线的外部同步终端（attach 客户端）。pid 是客户端上报的自身进程号，供查重
@@ -118,6 +216,8 @@ pub(crate) struct PtyBroker {
     shutting_down: Arc<AtomicBool>,
     completed: Arc<Mutex<HashMap<i64, CompletedPty>>>,
     attach: Arc<AttachState>,
+    /// 屏幕检测节拍线程只起一次（幂等门）。
+    detect_started: Arc<AtomicBool>,
 }
 
 impl Default for PtyBroker {
@@ -128,6 +228,7 @@ impl Default for PtyBroker {
             starting: Arc::new(Mutex::new(HashSet::new())),
             shutting_down: Arc::new(AtomicBool::new(false)),
             completed: Arc::new(Mutex::new(HashMap::new())),
+            detect_started: Arc::new(AtomicBool::new(false)),
             attach: Arc::new(AttachState {
                 endpoint: Mutex::new(None),
                 token,
@@ -661,8 +762,9 @@ impl PtyBroker {
         env: &[(String, String)],
         terminal_size: TerminalSize,
     ) -> Result<(), String> {
+        let pty_size = size(terminal_size.cols, terminal_size.rows);
         let pair = native_pty_system()
-            .openpty(size(terminal_size.cols, terminal_size.rows))
+            .openpty(pty_size)
             .map_err(|e| e.to_string())?;
         let mut command = CommandBuilder::new(&argv[0]);
         command.args(&argv[1..]);
@@ -711,6 +813,11 @@ impl PtyBroker {
             output_end: AtomicU64::new(0),
             subscribers: Mutex::new(Vec::new()),
             finalized: AtomicBool::new(false),
+            probe: ScreenProbe::new(
+                pty_size.rows,
+                pty_size.cols,
+                crate::detect::provider_from_argv0(&argv[0]),
+            ),
         });
         // writer 线程：唯一直接触碰 ConPTY 输入管道的地方。写失败（管道断）即退出；
         // ManagedPty 被收尾丢弃后 tx 断开，recv 出错线程随之结束。它若卡死在一次
@@ -835,6 +942,11 @@ impl PtyBroker {
                         // 整个 chunk 都被摘除/暂存(如恰好只有一条探测):没有字节要分发。
                         if data.is_empty() {
                             continue;
+                        }
+                        // 喂屏幕状态机（纯内存解析，锁只与低频的检测节拍争用）。放在
+                        // backlog 之外：它不参与偏移/回放语义，坏了也只影响状态角标。
+                        if let Ok(mut parser) = managed.probe.parser.lock() {
+                            parser.process(&data);
                         }
                         // 分发必须发生在追加 backlog 的同一把锁内：handle_attach 在一个
                         // backlog→subscribers 临界区里「回放 + 注册订阅者」，若这里先放掉
@@ -963,14 +1075,21 @@ impl PtyBroker {
             .get(&session_id)
             .cloned()
             .ok_or("PTY 会话未运行")?;
+        let clamped = size(cols, rows);
         let result = session
             .master
             .lock()
             .map_err(|_| "PTY 尺寸锁已损坏")?
             .as_ref()
             .ok_or("PTY 已结束")?
-            .resize(size(cols, rows))
+            .resize(clamped)
             .map_err(|e| e.to_string());
+        // 屏幕状态机与 PTY 同尺寸，否则 TUI 按新宽度重排后 grid 里全是错位文本。
+        if result.is_ok() {
+            if let Ok(mut parser) = session.probe.parser.lock() {
+                parser.screen_mut().set_size(clamped.rows, clamped.cols);
+            }
+        }
         result
     }
 
@@ -1223,6 +1342,73 @@ impl PtyBroker {
             Some(pid) => ExternalViewer::Pid(pid),
             None => ExternalViewer::Legacy,
         }
+    }
+
+    /// 所有托管会话已发布的屏幕状态（sid → "working"|"idle"|"blocked"）。
+    /// 看板列表 DTO 消费；只含仍在运行且已过启动宽限、有规则集的会话。
+    pub(crate) fn screen_states(&self) -> HashMap<i64, &'static str> {
+        self.sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .iter()
+                    .filter_map(|(sid, managed)| {
+                        let state = managed.probe.debounce.lock().ok()?.published()?;
+                        Some((*sid, state.as_str()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 诊断用：某会话的末屏快照与 provider 标签（explain 命令现场重跑规则）。
+    pub(crate) fn screen_probe_snapshot(
+        &self,
+        session_id: i64,
+    ) -> Option<(crate::detect::ScreenSnapshot, String)> {
+        let managed = self
+            .sessions
+            .lock()
+            .ok()?
+            .get(&session_id)
+            .cloned()?;
+        let snapshot = managed.probe.snapshot()?;
+        Some((snapshot, managed.probe.provider.clone()))
+    }
+
+    /// 启动屏幕检测节拍线程（幂等）。每 [`DETECT_TICK`] 过一遍所有托管会话：
+    /// 无新输出且无待确认降级的会话整轮跳过，空闲时近乎零开销。任何会话状态变化
+    /// 都合流成一次看板刷新（emit_board_changed 自带 300ms 合并窗口）。
+    pub(crate) fn start_screen_detect(&self) {
+        if self.detect_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let broker = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(DETECT_TICK);
+            if broker.shutting_down.load(Ordering::Acquire) {
+                return;
+            }
+            let sessions: Vec<Arc<ManagedPty>> = broker
+                .sessions
+                .lock()
+                .map(|sessions| sessions.values().cloned().collect())
+                .unwrap_or_default();
+            let now = std::time::Instant::now();
+            let changed = sessions
+                .iter()
+                .filter(|managed| {
+                    let end = managed.output_end.load(Ordering::Acquire);
+                    managed.probe.tick(end, now).is_some()
+                })
+                .count()
+                > 0;
+            if changed {
+                if let Some(app) = broker.attach.app.lock().ok().and_then(|app| app.clone()) {
+                    crate::watch::emit_board_changed(&app, "screen-state");
+                }
+            }
+        });
     }
 
     /// attach 前置校验：会话确实由本进程的 PTY 持有，且 attach 服务已在监听。
@@ -1762,7 +1948,69 @@ mod tests {
             backlog: Mutex::new(VecDeque::new()),
             output_end: AtomicU64::new(0),
             subscribers: Mutex::new(Vec::new()),
+            probe: ScreenProbe::new(24, 80, "claude".into()),
         })
+    }
+
+    /// 字节流 → 终端仿真 → 规则判定的端到端：真实风格的 ANSI（全屏重绘、光标定位、SGR、
+    /// OSC 标题、跨 chunk 撕裂的多字节字符）必须被仿真层消化，规则拿到的是干净末屏——
+    /// 这正是「不能对原始 backlog 做字符串匹配」的验证。
+    #[test]
+    fn screen_probe_detects_states_from_raw_ansi() {
+        fn feed(probe: &ScreenProbe, bytes: &[u8]) {
+            probe.parser.lock().unwrap().process(bytes);
+        }
+        let probe = ScreenProbe::new(24, 80, "claude".into());
+        // 启动宽限之外的时间基准。
+        let after_grace = probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);
+
+        // working：OSC 0 标题带盲文 spinner 帧 + 带 SGR 的滚动输出，
+        // 其中「构建中」两个多字节字符故意撕裂在两个 chunk 之间。
+        feed(&probe, b"\x1b]0;\xe2\xa0\x8b Reticulating splines\x07");
+        let text = "\u{1b}[1;32m构建中\u{1b}[0m cargo build...\r\n".as_bytes();
+        let (head, tail) = text.split_at(9); // 切在多字节字符中间
+        feed(&probe, head);
+        feed(&probe, tail);
+        assert_eq!(
+            probe.tick(1, after_grace),
+            Some(crate::detect::ScreenState::Working)
+        );
+        // 宽限期内不发布任何状态。
+        let fresh = ScreenProbe::new(24, 80, "claude".into());
+        assert_eq!(fresh.tick(1, fresh.started_at), None);
+
+        // 审批弹窗：spinner 停转、标题换掉（真实 claude 行为——标题规则 1100 优先级
+        // 压过屏幕规则，spinner 挂着时永远判 working），清屏重绘出对话框 → blocked
+        // 立即发布（不等确认期）。
+        feed(&probe, b"\x1b]0;Claude Code\x07");
+        feed(&probe, b"\x1b[2J\x1b[H");
+        feed(&probe, " Bash command\r\n".as_bytes());
+        feed(&probe, "   cargo test --all\r\n".as_bytes());
+        feed(&probe, "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n".as_bytes());
+        feed(&probe, " Do you want to proceed?\r\n".as_bytes());
+        feed(&probe, " \u{276F} 1. Yes\r\n".as_bytes());
+        feed(&probe, "   2. No\r\n".as_bytes());
+        feed(&probe, " Esc to cancel\r\n".as_bytes());
+        assert_eq!(
+            probe.tick(2, after_grace),
+            Some(crate::detect::ScreenState::Blocked)
+        );
+
+        // 放行后回到提示框：标题换 ✳、屏上是 ❯ 提示框 → 可见 idle 直接发布（防抖直通）。
+        feed(&probe, "\x1b]0;\u{2733} claude\x07".as_bytes());
+        feed(&probe, b"\x1b[2J\x1b[H");
+        feed(&probe, "  tool output done\r\n".as_bytes());
+        feed(&probe, "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n".as_bytes());
+        feed(&probe, " \u{276F} \r\n".as_bytes());
+        feed(&probe, "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n".as_bytes());
+        feed(&probe, "  ? for shortcuts\r\n".as_bytes());
+        assert_eq!(
+            probe.tick(3, after_grace),
+            Some(crate::detect::ScreenState::Idle)
+        );
+
+        // 无新输出（序号不变）且无待确认：整轮跳过。
+        assert_eq!(probe.tick(3, after_grace), None);
     }
 
     /// 三态判定与订阅表严格同步：None 误判会新开重复窗口，Legacy/Pid 误判会不开新视图。

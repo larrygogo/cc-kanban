@@ -4,6 +4,7 @@ mod app_bundle;
 mod bgpty;
 mod chat;
 mod confirm;
+mod detect;
 #[cfg(target_os = "windows")]
 mod envpath;
 mod fsutil;
@@ -47,7 +48,7 @@ use install::{
 use managed_terminal::{
     get_pending_approval, managed_terminal_binding, managed_terminal_snapshot,
     attach_background_session, open_attached_terminal, register_approval_consumer,
-    resize_managed_terminal, send_background_prompt,
+    resize_managed_terminal, screen_detect_explain, send_background_prompt,
     resolve_pending_approval, start_managed_terminal, stop_managed_terminal,
     unregister_approval_consumer, write_managed_terminal,
 };
@@ -917,6 +918,7 @@ pub fn run() {
             managed_terminal_binding,
             write_managed_terminal,
             resize_managed_terminal, send_background_prompt,
+            screen_detect_explain,
             stop_managed_terminal,
             get_pending_approval,
             register_approval_consumer,
@@ -1053,6 +1055,9 @@ pub fn run() {
             // attach 服务在线程中接收 hook 审批；拿到 AppHandle 后主动推送给对话窗口，
             // 前端轮询仅作为窗口晚打开时的兜底。
             approval_ptys.set_app_handle(app.handle().clone());
+            // 托管会话的屏幕状态检测（working/idle/blocked 角标）。在 set_app_handle 之后
+            // 启动：状态变化要经 AppHandle 发看板刷新。
+            approval_ptys.start_screen_detect();
             // macOS：纯菜单栏 App（隐藏 Dock 图标），main 窗口转 NSPanel，托盘走 menubar 模块。
             #[cfg(target_os = "macos")]
             {

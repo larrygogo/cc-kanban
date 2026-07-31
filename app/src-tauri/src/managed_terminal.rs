@@ -47,6 +47,51 @@ pub(crate) async fn start_managed_terminal(
     .map_err(|e| e.to_string())?
 }
 
+/// 屏幕检测的诊断输出：末屏文本 + 标题 + 已发布状态 + 现场重跑规则的命中结果。
+/// 「这张卡片为什么显示这个状态」的排障入口（herdr `agent explain` 的最小版）——
+/// 规则失准时先看这里的真实屏幕再改规则，不许凭想象改。
+#[derive(serde::Serialize)]
+pub(crate) struct ScreenDetectExplain {
+    provider: String,
+    /// 防抖后对外发布的状态（卡片显示的那个）。
+    published: Option<&'static str>,
+    /// 现场对当前屏重跑规则的原始判定（未过防抖）。
+    raw_state: Option<&'static str>,
+    matched_rule: &'static str,
+    title: Option<String>,
+    lines: Vec<String>,
+}
+
+#[tauri::command]
+pub(crate) async fn screen_detect_explain(
+    state: State<'_, super::AppState>,
+    session_id: i64,
+) -> Result<ScreenDetectExplain, String> {
+    let ptys = state.ptys.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (snapshot, provider) = ptys
+            .screen_probe_snapshot(session_id)
+            .ok_or("该会话没有托管 PTY 屏幕状态")?;
+        let published = ptys.screen_states().get(&session_id).copied();
+        let eval = crate::detect::evaluate(&provider, &snapshot);
+        let (raw_state, matched_rule) = match &eval {
+            Some(crate::detect::Evaluation::Publish(det)) => (Some(det.state.as_str()), det.rule_id),
+            Some(hold @ crate::detect::Evaluation::Hold { .. }) => (None, hold.rule_id()),
+            None => (None, "provider_unsupported"),
+        };
+        Ok(ScreenDetectExplain {
+            provider,
+            published,
+            raw_state,
+            matched_rule,
+            title: snapshot.title,
+            lines: snapshot.lines,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // snapshot/write/resize/stop 一律 async + spawn_blocking：同步命令跑在主线程，而这几条
 // 都要抢 PTY 状态锁、拷 backlog（最多 1MiB）或触碰 ConPTY——任何一次卡顿都会冻住消息泵。
 #[tauri::command]
