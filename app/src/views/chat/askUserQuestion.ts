@@ -12,6 +12,29 @@ export type StructuredQuestion = {
   options: StructuredQuestionOption[];
 };
 
+/// 排队作答的选项匹配：题面 label（结构化参数）↔ 屏幕识别出的选项文本。识别文本可能
+/// 被终端宽度截断（尾部省略号），按「精确 → 前缀互含（≥4 字符）」两级匹配；
+/// 命中多个即歧义 → null，宁可留给用户手点，也不自动答错题。
+export function matchOptionByLabel<T extends { label: string }>(
+  options: T[],
+  label: string,
+): T | null {
+  const strip = (s: string) => s.trim().replace(/…+$/, "");
+  const wanted = strip(label);
+  if (!wanted) return null;
+  const exact = options.filter((option) => strip(option.label) === wanted);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) return null;
+  const prefixed = options.filter((option) => {
+    const got = strip(option.label);
+    return (
+      (got.length >= 4 && wanted.startsWith(got)) ||
+      (wanted.length >= 4 && got.startsWith(wanted))
+    );
+  });
+  return prefixed.length === 1 ? prefixed[0] : null;
+}
+
 export function parseAskUserQuestions(input: string): StructuredQuestion[] {
   let parsed: unknown;
   try {

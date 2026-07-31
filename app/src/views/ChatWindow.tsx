@@ -10,7 +10,7 @@ import { useShowWhenReady } from "../useShowWhenReady";
 import { agentAssets, tintStyle } from "../providers";
 import { reduceChatEvents } from "../chat/reducer";
 import { ApprovalCard } from "./chat/ApprovalCard";
-import { parseAskUserQuestions } from "./chat/askUserQuestion";
+import { matchOptionByLabel, parseAskUserQuestions } from "./chat/askUserQuestion";
 import { ContextMeter } from "./chat/ContextMeter";
 import { TodoPanel } from "./chat/TodoPanel";
 import { Transcript } from "./chat/Transcript";
@@ -340,8 +340,10 @@ export function ChatWindow() {
   const terminalMounted = terminalEverShownRef.current || terminalMonitorNeeded;
   const [approval, setApproval] = useState<PendingApproval | null>(null);
   // AskUserQuestion 的结构化题面（broker 自动放行后经 interactive-question 事件直达）。
-  // 只负责「与终端表单同步出现」的展示；作答仍走屏幕识别的交互选择器（就绪后接管）。
+  // 负责「与终端表单同步出现」的展示与**排队作答**：点选的答案先记下（queuedAnswer），
+  // 等屏幕识别确认表单在屏后自动落键——绝不向未确认就绪的表单盲写按键。
   const [structuredQuestion, setStructuredQuestion] = useState<PendingApproval | null>(null);
+  const [queuedAnswer, setQueuedAnswer] = useState<string | null>(null);
   // 非当前会话的待授权请求：侧边栏亮徽标召唤用户自己过去。注意后端 **会** 为 broker 接管的
   // 审批把窗口切到目标会话（见 pty.rs 的 ensure_approval_window，不切的代价是请求 10s 后
   // 回落 TUI），所以这里是兜底：切换竞态期间、以及消费者已注册在别的会话时到达的请求。
@@ -851,8 +853,12 @@ export function ChatWindow() {
     }
   }, [sessionId]);
   // 兜底过期：识别一直没就绪、用户已在终端答完的情况下，别让展示卡挂一辈子。
+  // 题面卡消失（过期/收起/会话切换）时排队的答案一并作废——没有卡背书的按键不许落。
   useEffect(() => {
-    if (!structuredQuestion) return;
+    if (!structuredQuestion) {
+      setQueuedAnswer(null);
+      return;
+    }
     const timer = window.setTimeout(() => setStructuredQuestion(null), 180_000);
     return () => window.clearTimeout(timer);
   }, [structuredQuestion]);
@@ -1484,6 +1490,18 @@ export function ChatWindow() {
       .then(() => { if (option.kind === "submit" || option.kind === "chat") setTerminalAttention(null); })
       .catch((error) => setSendError(String(error)));
   };
+  // 排队作答的落键时刻：屏幕识别接管（表单确认在屏）后，把题面卡上点选的答案自动写进
+  // 表单。choice 的 input 是「方向键定位 + 回车」——单选即完成作答，多选是勾选该项、
+  // 提交仍归用户。匹配不上（截断歧义/多问题表单）就保持交互卡让用户手点，绝不猜。
+  useEffect(() => {
+    if (!interactiveAttention || !queuedAnswer) return;
+    setQueuedAnswer(null);
+    const choices = (interactiveAttention.options ?? []).filter((option) => option.kind === "choice");
+    const match = matchOptionByLabel(choices, queuedAnswer);
+    if (match) chooseInteractiveOption(match);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- chooseInteractiveOption 每次渲染新建，按值依赖会空转
+  }, [interactiveAttention, queuedAnswer]);
+
   const submitCustomAnswer = (option: TerminalAttentionOption) => {
     const value = questionCustomText.trim();
     if (!value || !option.input) return;
@@ -1644,7 +1662,7 @@ export function ChatWindow() {
       {view === "chat" && interactiveAttention && <ApprovalCard
         className="chat-screen-approval"
         title={history?.pendingReview === "plan" ? t.chat.planTitle : t.chat.questionTitle}
-        badge={t.chat.approvalPending}
+        badge={history?.pendingReview === "plan" ? t.chat.approvalPending : t.chat.questionPending}
         sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setTerminalAttention(null)}>{t.chat.attentionDismiss}</button>}
         actions={<>
           {interactiveAttention.options?.filter((option) => option.kind === "chat").map((option) => (
@@ -1772,7 +1790,7 @@ export function ChatWindow() {
       {view === "chat" && structuredQuestions.length > 0 && !terminalAttention && !approval && <ApprovalCard
         className="chat-screen-approval"
         title={t.chat.questionTitle}
-        badge={t.chat.approvalPending}
+        badge={t.chat.questionPending}
         sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setStructuredQuestion(null)}>{t.chat.attentionDismiss}</button>}
         actions={<button type="button" className="is-allow" onClick={() => setView("terminal")}>{t.chat.answerInTerminal}</button>}
       >
@@ -1781,15 +1799,20 @@ export function ChatWindow() {
             {item.question && <span className="chat-approval-prewrap">{item.header ? `${item.header} · ${item.question}` : item.question}</span>}
             <div className="chat-approval-options">
               {item.options.map((option, optionIndex) => (
-                <button type="button" disabled key={`${optionIndex}:${option.label}`}>
-                  <i aria-hidden="true"></i>
+                <button
+                  type="button"
+                  className={queuedAnswer === option.label ? "is-selected" : ""}
+                  key={`${optionIndex}:${option.label}`}
+                  onClick={() => setQueuedAnswer((current) => current === option.label ? null : option.label)}
+                >
+                  <i aria-hidden="true">{queuedAnswer === option.label ? "✓" : ""}</i>
                   <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
                 </button>
               ))}
             </div>
           </div>
         ))}
-        <span>{t.chat.questionFormLoading}</span>
+        <span>{queuedAnswer ? t.chat.queuedAnswerHint(queuedAnswer) : t.chat.questionFormLoading}</span>
       </ApprovalCard>}
       {/* broker 审批卡(claude hook 劫走的请求)与「有 pendingReview 但 GUI 接不了」的降级态。
           注意它**没有**「仅收起」:收起等于让 hook 干等到 300s 超时,只能 allow/deny/持久放行。 */}

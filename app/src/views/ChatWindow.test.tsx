@@ -1668,6 +1668,56 @@ describe("ChatWindow", () => {
   });
 
   /**
+   * AskUserQuestion 自动放行后的题面直达：interactive-question 事件携带结构化题面，
+   * 选择列表卡与终端表单同步渲染（问题/选项/描述来自 hook 参数 JSON，不等屏幕识别
+   * 反推），且**不再**出现允许/拒绝的审批按钮——提问不是权限，broker 已经放行了。
+   */
+  it("interactive-question 题面卡从结构化参数同步渲染,不再是审批卡", async () => {
+    window.history.replaceState({}, "", "/?sessionId=31");
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 31, title: "提问会话", status: "running", provider: "claude", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
+      });
+      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "managed_terminal_binding") return Promise.resolve(null);
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 31, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("提问会话")).toBeTruthy());
+
+    const payload = {
+      sessionId: 31, requestId: "request-question", provider: "claude", toolName: "AskUserQuestion",
+      description: null,
+      input: JSON.stringify({
+        questions: [{
+          header: "仓库名", question: "新仓库叫什么名字？", multiSelect: false,
+          options: [{ label: "autopilot-v2", description: "沿用产品名" }, { label: "autopilot-core" }],
+        }],
+      }),
+      permissionSuggestions: [],
+    };
+    act(() => { eventListeners.get("interactive-question")?.({ payload }); });
+    // 题面立即可见：问题、选项与描述。
+    expect(await screen.findByText(/新仓库叫什么名字/)).toBeTruthy();
+    expect(screen.getByText("autopilot-v2")).toBeTruthy();
+    expect(screen.getByText("沿用产品名")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "去终端作答" })).toBeTruthy();
+    // 不是审批卡：没有允许/拒绝，也没有原始 JSON 参数。
+    expect(screen.queryByRole("button", { name: "允许一次" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "拒绝" })).toBeNull();
+    expect(screen.queryByText(/"questions"/)).toBeNull();
+    // 点选即排队：提示切换为「已选…」，等屏幕识别确认表单在屏后才自动落键，
+    // 不在此刻向 PTY 写任何字节。再点一次取消排队。
+    fireEvent.click(screen.getByRole("button", { name: /autopilot-v2/ }));
+    expect(screen.getByText("已选「autopilot-v2」，表单就绪后自动作答")).toBeTruthy();
+    expect(invoke).not.toHaveBeenCalledWith("write_managed_terminal", expect.anything());
+    fireEvent.click(screen.getByRole("button", { name: /autopilot-v2/ }));
+    expect(screen.queryByText(/已选「/)).toBeNull();
+  });
+
+  /**
    * 附件注入按 agent 能力分流:声明了 attachment_mention(claude/gemini,实测 @绝对路径
    * 在提交时被原生附加)就用 `@路径` 提及;图片或含空白的路径退回指令文本——前者经
    * @提及不产生图像块,后者的提及会在空白处截断。

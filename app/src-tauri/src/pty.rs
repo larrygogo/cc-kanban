@@ -1975,6 +1975,44 @@ mod tests {
         })
     }
 
+    /// AskUserQuestion 是提问不是权限：必须立即回 allow（TUI 表单零延迟），且**绝不入
+    /// 审批表**——入了表 GUI 会看到一张没人能消解的幽灵审批卡。对照：普通工具在无 GUI
+    /// 消费者时按既有语义回 pass 交还终端。
+    #[test]
+    fn ask_user_question_is_auto_allowed_without_queueing() {
+        fn approval_request(tool: &str) -> ApprovalRequest {
+            ApprovalRequest {
+                session_id: 7,
+                request_id: "request-7-ask".into(),
+                provider: "claude".into(),
+                tool_name: tool.into(),
+                description: None,
+                input: r#"{"questions":[]}"#.into(),
+                permission_suggestions: vec![],
+            }
+        }
+        fn roundtrip(broker: &PtyBroker, tool: &str) -> String {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_side, _) = listener.accept().unwrap();
+            let token = broker.attach.token.clone();
+            broker
+                .handle_approval(&token, approval_request(tool), server_side)
+                .unwrap();
+            let mut reply = String::new();
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(client), &mut reply).unwrap();
+            reply.trim().to_string()
+        }
+        let broker = PtyBroker::default();
+        assert_eq!(roundtrip(&broker, "AskUserQuestion"), "allow");
+        assert!(
+            broker.attach.approvals.lock().unwrap().is_empty(),
+            "自动放行的提问不得滞留在审批表里"
+        );
+        // 普通工具不受影响：无 GUI 消费者 → 撤回并交还终端（pass）。
+        assert_eq!(roundtrip(&broker, "Bash"), "pass");
+    }
+
     /// 字节流 → 终端仿真 → 规则判定的端到端：真实风格的 ANSI（全屏重绘、光标定位、SGR、
     /// OSC 标题、跨 chunk 撕裂的多字节字符）必须被仿真层消化，规则拿到的是干净末屏——
     /// 这正是「不能对原始 backlog 做字符串匹配」的验证。
