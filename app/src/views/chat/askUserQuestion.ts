@@ -35,28 +35,37 @@ export function matchOptionByLabel<T extends { label: string }>(
   return prefixed.length === 1 ? prefixed[0] : null;
 }
 
-/// 「在终端作答完成」的收卡判定。题面出现后 transcript 一旦增长（agent 拿到答案/拒绝
-/// 才会继续产出）就该收卡，但有一个陷阱：提问自身的 tool_use 与题面几乎同时落盘。
-/// 故分两段——armAt 之前的静置期把一切增长**吸收进基线**；静置期过后首次增长即收卡。
+/// 「问题已了结」的收卡判定，两个信号（实测各自都有盲区，必须并用）：
+///
+/// 1. **回合结束**（status 离开 running）：Esc 取消后 agent 回合直接结束、不再产出——
+///    只靠 transcript 增长会漏掉快速取消（增长发生在静置期内被吸收，其后再无增长，
+///    实测踩过）。Stop hook 把状态翻成 waiting 是确定性的了结信号。
+/// 2. **transcript 增长**：作答后 agent 继续跑，回合可能很长，等回合结束才收卡太慢；
+///    增长即说明答案已送达。陷阱是提问自身的 tool_use 与题面几乎同时落盘，故 armAt
+///    之前的静置期把增长**吸收进基线**（状态信号同样等过静置期：题面刚出现时前端的
+///    history 可能还是上一轮的旧值，立即判会误收）。
+///
 /// 基线在首次调用（题面出现的渲染周期）就记下，绝不能等下一次 transcript 变化才记：
-/// 阻塞等答的会话在作答前零增长，作答后往往只有**一次**增长事件，懒记录会把它消费掉，
-/// 卡就永远收不掉（实测踩过）。
+/// 阻塞等答的会话在作答前零增长，作答后往往只有**一次**增长事件，懒记录会把它消费掉。
 export type QuestionDismissTracker = { armAt: number; count: number | null };
 
 export function observeTranscriptForDismiss(
   tracker: QuestionDismissTracker,
-  count: number,
+  observation: { count: number; running: boolean },
   now: number,
 ): boolean {
   if (now < tracker.armAt) {
-    tracker.count = Math.max(tracker.count ?? count, count);
+    tracker.count = Math.max(tracker.count ?? observation.count, observation.count);
     return false;
+  }
+  if (!observation.running) {
+    return true;
   }
   if (tracker.count == null) {
-    tracker.count = count;
+    tracker.count = observation.count;
     return false;
   }
-  return count > tracker.count;
+  return observation.count > tracker.count;
 }
 
 export function parseAskUserQuestions(input: string): StructuredQuestion[] {

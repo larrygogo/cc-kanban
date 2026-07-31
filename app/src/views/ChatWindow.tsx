@@ -874,8 +874,13 @@ export function ChatWindow() {
   useEffect(() => {
     const baseline = questionTranscriptBaseline.current;
     if (!structuredQuestion || !baseline) return;
-    const count = (history?.offset ?? 0) + (history?.items.length ?? 0);
-    if (observeTranscriptForDismiss(baseline, count, Date.now())) setStructuredQuestion(null);
+    const observation = {
+      count: (history?.offset ?? 0) + (history?.items.length ?? 0),
+      // 提问只可能发生在回合中（UserPromptSubmit 已把状态写成 running，且先于题面事件
+      // 落库）；状态离开 running = 回合已结束 = 问题必已了结（作答或取消）。
+      running: history?.status === "running",
+    };
+    if (observeTranscriptForDismiss(baseline, observation, Date.now())) setStructuredQuestion(null);
   }, [structuredQuestion, history]);
 
   useEffect(() => {

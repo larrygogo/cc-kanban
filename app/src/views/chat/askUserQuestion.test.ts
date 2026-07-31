@@ -8,6 +8,8 @@ import {
 
 describe("observeTranscriptForDismiss", () => {
   const tracker = (armAt: number): QuestionDismissTracker => ({ armAt, count: null });
+  const running = (count: number) => ({ count, running: true });
+  const settled = (count: number) => ({ count, running: false });
 
   /**
    * 回归（实测踩过）：阻塞等答的会话在作答前零增长，作答后往往只有一次增长事件。
@@ -17,20 +19,33 @@ describe("observeTranscriptForDismiss", () => {
   it("静置期内记基线,静置期后唯一一次增长即收卡", () => {
     const state = tracker(3_000);
     // 题面出现当刻（静置期内）：记基线，不收卡。
-    expect(observeTranscriptForDismiss(state, 10, 0)).toBe(false);
+    expect(observeTranscriptForDismiss(state, running(10), 0)).toBe(false);
     // 提问自身的 tool_use 落盘（仍在静置期）：吸收进基线。
-    expect(observeTranscriptForDismiss(state, 11, 1_000)).toBe(false);
+    expect(observeTranscriptForDismiss(state, running(11), 1_000)).toBe(false);
     // 静置期后长时间无变化：不收卡。
-    expect(observeTranscriptForDismiss(state, 11, 60_000)).toBe(false);
-    // 用户作答/取消后 agent 继续产出——唯一一次增长，必须收卡。
-    expect(observeTranscriptForDismiss(state, 12, 61_000)).toBe(true);
+    expect(observeTranscriptForDismiss(state, running(11), 60_000)).toBe(false);
+    // 用户作答后 agent 继续产出——唯一一次增长，必须收卡。
+    expect(observeTranscriptForDismiss(state, running(12), 61_000)).toBe(true);
+  });
+
+  /**
+   * 回归（实测踩过）：快速 Esc 取消——增长发生在静置期内被吸收进基线，其后回合直接
+   * 结束、再无任何增长。回合结束（status 离开 running）必须是独立的收卡信号。
+   */
+  it("快速 Esc:增长被静置期吸收后,回合结束信号收卡", () => {
+    const state = tracker(3_000);
+    expect(observeTranscriptForDismiss(state, running(10), 0)).toBe(false);
+    // Esc 在静置期内落盘：增长被吸收，此刻还不收（前端 history 可能还是旧值）。
+    expect(observeTranscriptForDismiss(state, settled(12), 2_000)).toBe(false);
+    // 静置期后：状态已是回合结束 → 无论有没有新增长都收卡。
+    expect(observeTranscriptForDismiss(state, settled(12), 3_500)).toBe(true);
   });
 
   it("静置期内没有任何观察时,静置期后先补记基线再看增长", () => {
     const state = tracker(3_000);
-    expect(observeTranscriptForDismiss(state, 10, 5_000)).toBe(false); // 补记基线
-    expect(observeTranscriptForDismiss(state, 10, 6_000)).toBe(false);
-    expect(observeTranscriptForDismiss(state, 13, 7_000)).toBe(true);
+    expect(observeTranscriptForDismiss(state, running(10), 5_000)).toBe(false); // 补记基线
+    expect(observeTranscriptForDismiss(state, running(10), 6_000)).toBe(false);
+    expect(observeTranscriptForDismiss(state, running(13), 7_000)).toBe(true);
   });
 });
 
