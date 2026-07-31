@@ -1,5 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { matchOptionByLabel, parseAskUserQuestions } from "./askUserQuestion";
+import {
+  matchOptionByLabel,
+  observeTranscriptForDismiss,
+  parseAskUserQuestions,
+  type QuestionDismissTracker,
+} from "./askUserQuestion";
+
+describe("observeTranscriptForDismiss", () => {
+  const tracker = (armAt: number): QuestionDismissTracker => ({ armAt, count: null });
+
+  /**
+   * 回归（实测踩过）：阻塞等答的会话在作答前零增长，作答后往往只有一次增长事件。
+   * 基线必须在题面出现当刻（首次观察）记下——懒等下一次变化才记，会把唯一的增长
+   * 事件消费成基线，卡永远收不掉。
+   */
+  it("静置期内记基线,静置期后唯一一次增长即收卡", () => {
+    const state = tracker(3_000);
+    // 题面出现当刻（静置期内）：记基线，不收卡。
+    expect(observeTranscriptForDismiss(state, 10, 0)).toBe(false);
+    // 提问自身的 tool_use 落盘（仍在静置期）：吸收进基线。
+    expect(observeTranscriptForDismiss(state, 11, 1_000)).toBe(false);
+    // 静置期后长时间无变化：不收卡。
+    expect(observeTranscriptForDismiss(state, 11, 60_000)).toBe(false);
+    // 用户作答/取消后 agent 继续产出——唯一一次增长，必须收卡。
+    expect(observeTranscriptForDismiss(state, 12, 61_000)).toBe(true);
+  });
+
+  it("静置期内没有任何观察时,静置期后先补记基线再看增长", () => {
+    const state = tracker(3_000);
+    expect(observeTranscriptForDismiss(state, 10, 5_000)).toBe(false); // 补记基线
+    expect(observeTranscriptForDismiss(state, 10, 6_000)).toBe(false);
+    expect(observeTranscriptForDismiss(state, 13, 7_000)).toBe(true);
+  });
+});
 
 describe("matchOptionByLabel", () => {
   const options = [{ label: "autopilot-v2" }, { label: "autopilot-core" }, { label: "全新产品名" }];

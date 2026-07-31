@@ -10,7 +10,7 @@ import { useShowWhenReady } from "../useShowWhenReady";
 import { agentAssets, tintStyle } from "../providers";
 import { reduceChatEvents } from "../chat/reducer";
 import { ApprovalCard } from "./chat/ApprovalCard";
-import { matchOptionByLabel, parseAskUserQuestions } from "./chat/askUserQuestion";
+import { matchOptionByLabel, observeTranscriptForDismiss, parseAskUserQuestions, type QuestionDismissTracker } from "./chat/askUserQuestion";
 import { ContextMeter } from "./chat/ContextMeter";
 import { TodoPanel } from "./chat/TodoPanel";
 import { Transcript } from "./chat/Transcript";
@@ -862,10 +862,10 @@ export function ChatWindow() {
     const timer = window.setTimeout(() => setStructuredQuestion(null), 180_000);
     return () => window.clearTimeout(timer);
   }, [structuredQuestion]);
-  // 「在终端作答完成」的收卡信号：题面出现后 transcript 一旦增长（agent 拿到答案才会
-  // 继续产出），自动收卡。3 秒静置期跳过提问自身的 tool_use 落盘——它与题面几乎同时
-  // 到达，计入基线会把卡当场误收；极端手速（3 秒内答完）由 180s 兜底过期收尾。
-  const questionTranscriptBaseline = useRef<{ armAt: number; count: number | null } | null>(null);
+  // 「在终端作答完成」的收卡信号：判定逻辑见 observeTranscriptForDismiss（含基线为何
+  // 必须在题面出现当刻记下的教训）。3 秒静置期内的增长（提问自身 tool_use 落盘）被
+  // 吸收进基线；3 秒内答完的极端手速由 180s 兜底过期收尾。
+  const questionTranscriptBaseline = useRef<QuestionDismissTracker | null>(null);
   useEffect(() => {
     questionTranscriptBaseline.current = structuredQuestion
       ? { armAt: Date.now() + 3_000, count: null }
@@ -873,13 +873,9 @@ export function ChatWindow() {
   }, [structuredQuestion]);
   useEffect(() => {
     const baseline = questionTranscriptBaseline.current;
-    if (!structuredQuestion || !baseline || Date.now() < baseline.armAt) return;
+    if (!structuredQuestion || !baseline) return;
     const count = (history?.offset ?? 0) + (history?.items.length ?? 0);
-    if (baseline.count == null) {
-      baseline.count = count;
-      return;
-    }
-    if (count > baseline.count) setStructuredQuestion(null);
+    if (observeTranscriptForDismiss(baseline, count, Date.now())) setStructuredQuestion(null);
   }, [structuredQuestion, history]);
 
   useEffect(() => {
