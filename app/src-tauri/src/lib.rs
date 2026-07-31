@@ -831,6 +831,32 @@ mod win_constrain {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// 把 DLL 搜索路径收紧到「应用目录 + System32」，进程一起来就做（任何 LoadLibrary 之前）。
+///
+/// 动机是一条真实的加载链：托管 PTY 走 portable-pty，它在 `load_conpty()` 里用**相对
+/// 文件名** `ConPtyFuncs::open(Path::new("conpty.dll"))` 尝试 sideload（psuedocon.rs，
+/// 上游至 0.9.0 仍如此），相对名会走完整搜索顺序——**当前工作目录也在其中**。而 Meowo
+/// 的 cwd 由启动方式决定：从资源管理器双击某目录里的快捷方式、拖文件到图标、或从某个
+/// 项目目录起的终端里启动，cwd 就是那个目录。目录里只要躺着一个恶意 `conpty.dll`
+/// （压缩包/共享盘/下载目录里被投毒），它就会被加载进本进程——而 ConPTY 句柄等于终端
+/// 完全控制权。herdr 为同一问题给 portable-pty 打了 vendored 补丁（哈希校验 + 绝对
+/// 路径加载，见 microsoft/terminal#17452）；我们不 vendor，用系统级的搜索路径收紧
+/// 达到同一效果：cwd 与 PATH 被整个移出搜索顺序，合法的 sideload（应用目录内）不受影响。
+///
+/// 幂等且无副作用：Win7+ 恒可用（`SetDefaultDllDirectories` 自 KB2533623），失败也只是
+/// 回到默认搜索顺序，不阻断启动——它是纵深防御的一层，不是功能依赖。
+fn harden_dll_search_path() {
+    #[cfg(target_os = "windows")]
+    {
+        // SAFETY: 纯进程级标志设置，无指针参数；失败返回 0，无需回滚。
+        unsafe {
+            windows_sys::Win32::System::LibraryLoader::SetDefaultDllDirectories(
+                windows_sys::Win32::System::LibraryLoader::LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+            );
+        }
+    }
+}
+
 pub fn run() {
     // Tauri 的 macOS updater 原地覆盖当前 `.app`，不会把旧外层目录 `cc-kanban.app` 改成
     // `Meowo.app`。在创建任何插件状态前先迁移并从新路径重启，使 updater / autostart 后续都只
@@ -839,6 +865,7 @@ pub fn run() {
     if app_bundle::migrate_legacy_bundle_and_relaunch() {
         return;
     }
+    harden_dll_search_path();
     migrate_legacy_data();
     let path = db_path();
     let tx_cache: Arc<Mutex<meowo_agent::TranscriptCache>> =
@@ -1160,6 +1187,28 @@ mod tests {
         shell_join_for_windows, strip_jsonc_comments, tab_match_score,
     };
     use crate::watch::{pending_fingerprint, should_notify, waiting_fingerprint};
+
+    /// DLL 搜索路径收紧必须在 `run()` 的**最前面**（任何 LoadLibrary 之前）——托管 PTY
+    /// 的 portable-pty 用相对名 sideload `conpty.dll`，cwd 在搜索顺序里（理由详见
+    /// `harden_dll_search_path` 的文档）。删掉或往后挪这一行会静默恢复劫持面：没有任何
+    /// 功能会因此失败，所以只能靠这条断言守住。
+    #[test]
+    fn dll_search_path_is_hardened_before_anything_loads() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("pub fn run() {")
+            .expect("run() 必须存在")
+            .1;
+        let harden = body
+            .find("harden_dll_search_path()")
+            .expect("run() 必须调用 harden_dll_search_path()");
+        // 允许它前面只有 macOS 的 bundle 迁移（那段在任何 DLL 加载之前 return/no-op）。
+        let migrate_data = body.find("migrate_legacy_data()").expect("migrate_legacy_data");
+        assert!(
+            harden < migrate_data,
+            "DLL 搜索路径收紧必须早于任何会加载 DLL 的初始化"
+        );
+    }
 
     #[test]
     fn waiting_page_skips_disconnected_sql_batches_without_ending_early() {
