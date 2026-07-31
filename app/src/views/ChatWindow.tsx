@@ -862,26 +862,33 @@ export function ChatWindow() {
     const timer = window.setTimeout(() => setStructuredQuestion(null), 180_000);
     return () => window.clearTimeout(timer);
   }, [structuredQuestion]);
-  // 「在终端作答完成」的收卡信号：判定逻辑见 observeTranscriptForDismiss（含基线为何
-  // 必须在题面出现当刻记下的教训）。3 秒静置期内的增长（提问自身 tool_use 落盘）被
-  // 吸收进基线；3 秒内答完的极端手速由 180s 兜底过期收尾。
+  // 「问题已了结」的收卡信号：判定逻辑见 observeTranscriptForDismiss。
+  //
+  // 计数**必须**读独立累积的 items state，不能读 history.offset/history.items——那两个
+  // 字段在 HISTORY_META_EXCLUDED 里，meta 未变时 setHistory 保留旧对象，从它身上读到的
+  // 是冻结值，且增量到达时本效果根本不会重跑（sameHistoryMeta 注释里「数据变了界面
+  // 不动」事故的第四回，实测踩过：卡永远收不掉）。status 在 meta 内，其变化会换新
+  // history 对象，回合结束信号照常送达。
+  //
+  // 静置期 1.5s：提问自身的 tool_use 先于题面事件落盘、至迟一个轮询周期（650ms）进
+  // items，1.5s 足够吸收；真人 Esc 快不过它，快过了还有 180s 兜底过期。
   const questionTranscriptBaseline = useRef<QuestionDismissTracker | null>(null);
   useEffect(() => {
     questionTranscriptBaseline.current = structuredQuestion
-      ? { armAt: Date.now() + 3_000, count: null }
+      ? { armAt: Date.now() + 1_500, count: null }
       : null;
   }, [structuredQuestion]);
   useEffect(() => {
     const baseline = questionTranscriptBaseline.current;
     if (!structuredQuestion || !baseline) return;
     const observation = {
-      count: (history?.offset ?? 0) + (history?.items.length ?? 0),
+      count: items.length,
       // 提问只可能发生在回合中（UserPromptSubmit 已把状态写成 running，且先于题面事件
       // 落库）；状态离开 running = 回合已结束 = 问题必已了结（作答或取消）。
       running: history?.status === "running",
     };
     if (observeTranscriptForDismiss(baseline, observation, Date.now())) setStructuredQuestion(null);
-  }, [structuredQuestion, history]);
+  }, [structuredQuestion, history, items]);
 
   useEffect(() => {
     // transcript 的 pendingReview 比 broker 的实时状态慢一拍。只有历史状态确实清空后，
