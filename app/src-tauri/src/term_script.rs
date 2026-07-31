@@ -45,6 +45,32 @@ pub fn detect_term_kind(ancestor_names_root_first: &[String]) -> TermKind {
     TermKind::Other
 }
 
+/// attach 查重命中但按 tty 精确聚焦失败（Ghostty/WezTerm 等无 AppleScript 聚焦的宿主）时，
+/// 聚焦目标从订阅者 pid 的祖先链推导：取首个 .app 进程的 (pid, bundle 路径)。
+/// pid 供 [`raise_process_script`] 按 unix id 精确置前——`open -na` 的 Ghostty 每窗口
+/// 一个实例，置前该实例即置前该窗口；bundle 路径供置前失败后 `open` 做应用级激活。
+/// 第一项是 attach 客户端自身，必须跳过——生产环境它就在 Meowo.app 里，不跳会把
+/// Meowo 自己带到前台。
+pub fn viewer_host_entry(ancestors_self_first: &[(i64, String)]) -> Option<(i64, String)> {
+    ancestors_self_first.iter().skip(1).find_map(|(pid, comm)| {
+        let end = comm.find(".app/")?;
+        Some((*pid, comm[..end + 4].to_string()))
+    })
+}
+
+/// 把指定 unix id 的进程置前的 AppleScript（pid 经 osascript argv 传入，防注入）。
+/// 按 pid 而非进程名寻址：`open -na` 起的多个 Ghostty 实例同名，按名只会命中第一个。
+/// 进程不存在或无辅助功能权限时 osascript 非零退出，调用方据此走应用级激活兜底。
+pub fn raise_process_script() -> &'static str {
+    r#"on run argv
+	set targetPid to (item 1 of argv) as integer
+	tell application "System Events"
+		set frontmost of (first process whose unix id is targetPid) to true
+	end tell
+	return "FOUND"
+end run"#
+}
+
 /// 设置里的字符串 → 打开未连接会话用的终端宿主：含 "iterm" → iTerm2，其余（含 "terminal"/未知/空）→ Terminal。
 pub fn resume_kind_from_setting(s: &str) -> TermKind {
     if s.to_ascii_lowercase().contains("iterm") {
@@ -219,6 +245,65 @@ mod tests {
         assert_eq!(resume_kind_from_setting("terminal"), TermKind::Terminal);
         assert_eq!(resume_kind_from_setting(""), TermKind::Terminal); // 缺省/未知 → Terminal
         assert_eq!(resume_kind_from_setting("wezterm"), TermKind::Terminal);
+    }
+
+    /// 聚焦目标从订阅者 pid 的祖先链推导：跳过第一项（attach 客户端自身——
+    /// 生产环境它就在 Meowo.app 里，不跳会把 Meowo 自己带到前台），取其后首个
+    /// .app 进程的 (pid, bundle 路径)。pid 用于 System Events 按 unix id 精确置前
+    /// （`open -na` 的 Ghostty 每窗口一个实例），bundle 路径用于置前失败后 `open` 激活。
+    #[test]
+    fn viewer_host_entry_skips_self_and_finds_the_host_bundle() {
+        let chain = vec![
+            (
+                100,
+                "/Applications/Meowo.app/Contents/MacOS/meowo-reporter".to_string(),
+            ),
+            (90, "/bin/zsh".to_string()),
+            (
+                80,
+                "/Applications/Ghostty.app/Contents/MacOS/ghostty".to_string(),
+            ),
+        ];
+        assert_eq!(
+            viewer_host_entry(&chain),
+            Some((80, "/Applications/Ghostty.app".to_string()))
+        );
+
+        let dev = vec![
+            (100, "target/debug/meowo-reporter".to_string()),
+            (90, "/bin/zsh".to_string()),
+            (
+                80,
+                "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal".to_string(),
+            ),
+        ];
+        assert_eq!(
+            viewer_host_entry(&dev),
+            Some((80, "/System/Applications/Utilities/Terminal.app".to_string()))
+        );
+
+        let self_only = vec![(
+            100,
+            "/Applications/Meowo.app/Contents/MacOS/meowo-reporter".to_string(),
+        )];
+        assert_eq!(viewer_host_entry(&self_only), None, "只有自身不算宿主");
+        assert_eq!(viewer_host_entry(&[]), None);
+        let no_bundle = vec![
+            (100, "meowo-reporter".to_string()),
+            (90, "/bin/zsh".to_string()),
+        ];
+        assert_eq!(viewer_host_entry(&no_bundle), None, "无 .app 祖先 → None");
+    }
+
+    /// 置前脚本按 unix id 找进程（pid 经 argv 传入，防注入），不依赖进程名——
+    /// `open -na` 起的多个 Ghostty 实例同名，按名寻址只会命中第一个。
+    #[test]
+    fn raise_process_script_targets_unix_id_via_argv() {
+        let s = raise_process_script();
+        assert!(s.contains("on run argv"));
+        assert!(s.contains("item 1 of argv"));
+        assert!(s.contains("unix id"));
+        assert!(s.contains("frontmost"));
     }
 
     #[test]

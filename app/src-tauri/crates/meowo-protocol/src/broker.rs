@@ -109,6 +109,10 @@ pub enum BrokerRequest {
         cols: u16,
         rows: u16,
         nonce: String,
+        /// attach 客户端自身 pid，GUI 端据此反查宿主终端窗口做精确聚焦。
+        /// 旧 reporter（v2 无此字段 / v1 五段行）不发送 → None，聚焦退回应用级兜底。
+        #[serde(default)]
+        pid: Option<u32>,
     },
     Claim {
         token: String,
@@ -136,6 +140,7 @@ impl From<LegacyHandshake> for BrokerRequest {
                 cols,
                 rows,
                 nonce,
+                pid: None,
             },
             LegacyHandshake::Claim {
                 token,
@@ -411,6 +416,40 @@ mod tests {
             decode_legacy_handshake(&"x".repeat(MAX_HANDSHAKE_BYTES + 1)),
             Err(ProtocolError::TooLarge)
         );
+    }
+
+    /// attach 去重要精确聚焦宿主窗口，靠客户端上报自身 pid；字段演进走 serde default：
+    /// 旧 reporter（v2 无 pid 字段 / v1 五段行）→ None，新字段 round-trip 保留。
+    #[test]
+    fn attach_pid_defaults_to_none_and_round_trips() {
+        let old: BrokerRequest = serde_json::from_value(serde_json::json!({
+            "kind": "attach",
+            "token": "t",
+            "session_id": 1,
+            "cols": 80,
+            "rows": 24,
+            "nonce": "nonce1234"
+        }))
+        .unwrap();
+        assert!(matches!(old, BrokerRequest::Attach { pid: None, .. }));
+
+        let request = BrokerRequest::Attach {
+            token: "t".into(),
+            session_id: 1,
+            cols: 80,
+            rows: 24,
+            nonce: "nonce1234".into(),
+            pid: Some(4242),
+        };
+        let mut framed = Vec::new();
+        write_v2_handshake(&mut framed, &request).unwrap();
+        assert_eq!(read_handshake(&mut framed.as_slice()).unwrap(), request);
+
+        let legacy = encode_legacy_attach("t", "1", 80, 24, "nonce1234");
+        assert!(matches!(
+            read_handshake(&mut legacy.as_bytes()).unwrap(),
+            BrokerRequest::Attach { pid: None, .. }
+        ));
     }
 
     #[test]

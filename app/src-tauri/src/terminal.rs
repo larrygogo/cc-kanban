@@ -1718,7 +1718,16 @@ pub(crate) fn attach_in_external_terminal(
     let terminal = load_settings().resume_terminal;
     #[cfg(target_os = "macos")]
     if broker.has_external_viewer(sid) {
-        activate_resume_terminal_app(&terminal);
+        // 激活目标从订阅者 pid 反查实际宿主（精确 tab → 宿主 .app），绝不看「恢复终端」
+        // 设置——设置与视图实际所在的应用可能不一致，按设置激活会跳错应用，Ghostty
+        // 未运行时甚至凭空弹一扇空白窗。聚焦失败也不再退回设置路径，宁可无动作。
+        match broker.external_viewer_pid(sid) {
+            Some(pid) => {
+                crate::macos::terminal::focus_attach_viewer(pid as i64);
+            }
+            // 旧 reporter 的订阅没有 pid，才退回应用级兜底。
+            None => activate_resume_terminal_app(&terminal),
+        }
         return Ok(());
     }
     let reporter = crate::setup::sibling_reporter().ok_or("找不到 meowo-reporter attach 客户端")?;

@@ -18,6 +18,14 @@ fn tty_for_pid(pid: i64) -> Option<String> {
 /// 单次 ps 快照后在内存里走 ppid —— macOS 上 sysinfo parent() 会过早断链（见 lib::pid_is_claude 注释），
 /// 链一断就到不了 iTerm/Terminal，iTerm 多 tab 会话会被识成 Other 而无法聚焦，只能回退新开 Terminal。
 fn ancestor_names(pid: i64) -> Vec<String> {
+    ancestor_chain(pid)
+        .into_iter()
+        .map(|(_, comm)| comm)
+        .collect()
+}
+
+/// 同上，但保留每级的 pid——attach 查重聚焦要按宿主实例的 unix id 精确置前。
+fn ancestor_chain(pid: i64) -> Vec<(i64, String)> {
     let Ok(out) = Command::new("ps")
         .args(["-axo", "pid=,ppid=,comm="])
         .output()
@@ -37,21 +45,21 @@ fn ancestor_names(pid: i64) -> Vec<String> {
         };
         table.insert(p, (pp, it.collect::<Vec<_>>().join(" ")));
     }
-    let mut names = Vec::new();
+    let mut chain = Vec::new();
     let mut cur = pid;
     for _ in 0..32 {
         let Some((ppid, comm)) = table.get(&cur) else {
             break;
         };
         if !comm.is_empty() {
-            names.push(comm.clone());
+            chain.push((cur, comm.clone()));
         }
         if *ppid <= 1 || *ppid == cur {
             break;
         }
         cur = *ppid;
     }
-    names
+    chain
 }
 
 /// 用 stdin 传脚本、argv 传参数地运行 osascript（防注入）。返回 stdout（trim）。
@@ -97,6 +105,38 @@ fn focus_existing_tab(pid: i64) -> crate::terminal::FocusSessionResult {
         Ok(_) => crate::terminal::FocusSessionResult::AliveButNotFound,
         Err(_) => crate::terminal::FocusSessionResult::PermissionDenied,
     }
+}
+
+/// attach 查重命中：把已有外部视图带到前台。pid 是 attach 客户端自身（订阅时上报），
+/// 逐级降精度尝试：
+/// 1. 按 tty 精确聚焦所在 tab（Terminal.app/iTerm2 有 AppleScript 字典）；
+/// 2. 按宿主实例的 unix id 经 System Events 置前——Ghostty 无 AppleScript 支持，但
+///    `open -na` 起的每扇窗口都是独立进程，置前该实例即置前该窗口（需辅助功能权限）；
+/// 3. `open` 宿主 .app 做应用级激活——宿主必然在运行（视图进程正活在里面），不带
+///    `-n` 只做激活，不会再出「凭空新起一个空白实例」的事故。
+///
+/// 返回是否做出了任何有效动作。
+pub fn focus_attach_viewer(pid: i64) -> bool {
+    if focus_existing_tab(pid) == crate::terminal::FocusSessionResult::Focused {
+        return true;
+    }
+    let Some((host_pid, bundle)) = crate::term_script::viewer_host_entry(&ancestor_chain(pid))
+    else {
+        return false;
+    };
+    if run_osascript(
+        crate::term_script::raise_process_script(),
+        &[&host_pid.to_string()],
+    )
+    .is_ok()
+    {
+        return true;
+    }
+    Command::new("open")
+        .arg(&bundle)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// 点连接中的卡片：切到该 agent 进程所在的终端 tab，并返回可展示的失败原因。

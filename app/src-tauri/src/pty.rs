@@ -46,7 +46,15 @@ struct ManagedPty {
     backlog: Mutex<VecDeque<u8>>,
     /// 自 PTY 启动以来累计输出的字节位置；与 backlog 锁内更新，供快照和实时帧去重排序。
     output_end: AtomicU64,
-    subscribers: Mutex<Vec<(u64, mpsc::Sender<Vec<u8>>)>>,
+    subscribers: Mutex<Vec<AttachSubscriber>>,
+}
+
+/// 一个在线的外部同步终端（attach 客户端）。pid 是客户端上报的自身进程号，供查重
+/// 路径反查宿主终端窗口做精确聚焦；旧 reporter 不上报 → None。
+struct AttachSubscriber {
+    id: u64,
+    pid: Option<u32>,
+    tx: mpsc::Sender<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -823,7 +831,7 @@ impl PtyBroker {
                             if let Ok(mut subscribers) = managed.subscribers.lock() {
                                 let chunk = data.to_vec();
                                 subscribers
-                                    .retain(|(_, sender)| sender.send(chunk.clone()).is_ok());
+                                    .retain(|subscriber| subscriber.tx.send(chunk.clone()).is_ok());
                             }
                         };
                         let offset = if let Ok(mut backlog) = managed.backlog.lock() {
@@ -1195,6 +1203,23 @@ impl PtyBroker {
             .unwrap_or(false)
     }
 
+    /// 该会话最近一个上报了自身 pid 的外部订阅者。查重命中后的激活目标从这里反查
+    /// 实际宿主，绝不看「恢复终端」设置——设置与视图实际所在的应用可能不一致。
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn external_viewer_pid(&self, session_id: i64) -> Option<u32> {
+        self.sessions.lock().ok().and_then(|sessions| {
+            sessions.get(&session_id).and_then(|session| {
+                session
+                    .subscribers
+                    .lock()
+                    .ok()
+                    .and_then(|subscribers| {
+                        subscribers.iter().rev().find_map(|subscriber| subscriber.pid)
+                    })
+            })
+        })
+    }
+
     /// attach 前置校验：会话确实由本进程的 PTY 持有，且 attach 服务已在监听。
     /// 刻意不返回 endpoint/token——它们经 discovery 文件（unix 下 0600）交给客户端，
     /// 不进外部终端的进程参数（argv 对同机其他进程可见，token 等于 PTY 完全接管权）。
@@ -1404,6 +1429,7 @@ impl PtyBroker {
             cols,
             rows,
             nonce,
+            pid: client_pid,
         } = handshake
         else {
             return match handshake {
@@ -1461,7 +1487,11 @@ impl PtyBroker {
                 .subscribers
                 .lock()
                 .map_err(|_| "PTY 订阅锁已损坏")?
-                .push((subscriber_id, tx));
+                .push(AttachSubscriber {
+                    id: subscriber_id,
+                    pid: client_pid,
+                    tx,
+                });
             backlog.iter().copied().collect::<Vec<_>>()
         };
         // 回放给外部终端前滤掉历史查询(理由见 strip_dsr_queries):否则客户端 DsrFilter
@@ -1515,7 +1545,7 @@ impl PtyBroker {
             }
         }
         if let Ok(mut subscribers) = session.subscribers.lock() {
-            subscribers.retain(|(id, _)| *id != subscriber_id);
+            subscribers.retain(|subscriber| subscriber.id != subscriber_id);
         }
         match frame_error {
             Some(error) => Err(error),
@@ -1740,10 +1770,53 @@ mod tests {
         broker.sessions.lock().unwrap().insert(7, managed.clone());
         assert!(!broker.has_external_viewer(7), "无订阅必须判 false");
         let (tx, _rx) = mpsc::channel::<Vec<u8>>();
-        managed.subscribers.lock().unwrap().push((1, tx));
+        managed.subscribers.lock().unwrap().push(AttachSubscriber {
+            id: 1,
+            pid: None,
+            tx,
+        });
         assert!(broker.has_external_viewer(7));
         managed.subscribers.lock().unwrap().clear();
         assert!(!broker.has_external_viewer(7), "订阅摘除后必须回落 false");
+    }
+
+    /// 去重后的激活目标必须指向真实宿主：pid 从订阅表反查，取最近注册且上报了 pid 的
+    /// 订阅者；无订阅或全部未上报（旧 reporter）→ None，调用方退回应用级兜底。
+    #[test]
+    fn external_viewer_pid_follows_the_most_recent_reporting_subscriber() {
+        let broker = PtyBroker::default();
+        assert_eq!(broker.external_viewer_pid(7), None, "无此会话必须判 None");
+        let managed = dummy_managed(7);
+        broker.sessions.lock().unwrap().insert(7, managed.clone());
+        assert_eq!(broker.external_viewer_pid(7), None, "无订阅必须判 None");
+        let (tx1, _rx1) = mpsc::channel::<Vec<u8>>();
+        managed.subscribers.lock().unwrap().push(AttachSubscriber {
+            id: 1,
+            pid: None,
+            tx: tx1,
+        });
+        assert_eq!(
+            broker.external_viewer_pid(7),
+            None,
+            "旧 reporter 未上报 pid → None"
+        );
+        let (tx2, _rx2) = mpsc::channel::<Vec<u8>>();
+        managed.subscribers.lock().unwrap().push(AttachSubscriber {
+            id: 2,
+            pid: Some(4242),
+            tx: tx2,
+        });
+        let (tx3, _rx3) = mpsc::channel::<Vec<u8>>();
+        managed.subscribers.lock().unwrap().push(AttachSubscriber {
+            id: 3,
+            pid: Some(5353),
+            tx: tx3,
+        });
+        assert_eq!(
+            broker.external_viewer_pid(7),
+            Some(5353),
+            "取最近注册的上报者"
+        );
     }
 
     #[test]

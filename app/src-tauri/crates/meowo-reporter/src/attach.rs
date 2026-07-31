@@ -307,6 +307,8 @@ pub(crate) fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 cols,
                 rows,
                 nonce,
+                // 自身 pid 沿祖先链能定位到宿主终端窗口，GUI 查重时据此精确聚焦。
+                pid: Some(std::process::id()),
             },
         )?;
     } else {
