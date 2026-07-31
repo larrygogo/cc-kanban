@@ -205,6 +205,7 @@ export const zh = {
     answerInTerminal: "去终端作答",
     questionFormLoading: "点选答案，终端表单就绪后自动作答",
     queuedAnswerHint: (label: string) => `已选「${label}」，表单就绪后自动作答`,
+    questionExternalHint: "该会话运行在外部终端里，请回到那个终端作答；作答完成后本卡会自动收起",
     customAnswerPlaceholder: "输入其他回答",
     addCustomAnswer: "添加回答",
     submitAnswer: "提交选择",

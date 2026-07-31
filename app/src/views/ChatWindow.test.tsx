@@ -1678,6 +1678,7 @@ describe("ChatWindow", () => {
       if (command === "get_chat_history") return Promise.resolve({
         sessionId: 31, title: "提问会话", status: "running", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
+        ptyManaged: true, // 托管会话才开放点选排队
       });
       if (command === "get_pending_approval") return Promise.resolve(null);
       if (command === "managed_terminal_binding") return Promise.resolve(null);
@@ -1715,6 +1716,40 @@ describe("ChatWindow", () => {
     expect(invoke).not.toHaveBeenCalledWith("write_managed_terminal", expect.anything());
     fireEvent.click(screen.getByRole("button", { name: /autopilot-v2/ }));
     expect(screen.queryByText(/已选「/)).toBeNull();
+  });
+
+  /**
+   * 外部终端会话（GUI 不持有 PTY）：题面纯展示——选项不是按钮（点了也写不进按键，
+   * 不承诺做不到的事），提示改为「回终端作答」，「去终端作答」按钮也不给（终端页
+   * 对外部会话是空的）。
+   */
+  it("外部会话的题面卡纯展示:选项不可点,提示回终端作答", async () => {
+    window.history.replaceState({}, "", "/?sessionId=32");
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 32, title: "外部提问", status: "running", provider: "claude", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
+        ptyManaged: false,
+      });
+      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "managed_terminal_binding") return Promise.resolve(null);
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 32, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("外部提问")).toBeTruthy());
+    const payload = {
+      sessionId: 32, requestId: "request-question-ext", provider: "claude", toolName: "AskUserQuestion",
+      description: null,
+      input: JSON.stringify({ questions: [{ question: "晚饭吃什么？", multiSelect: false, options: [{ label: "火锅" }, { label: "寿司" }] }] }),
+      permissionSuggestions: [],
+    };
+    act(() => { eventListeners.get("interactive-question")?.({ payload }); });
+    expect(await screen.findByText(/晚饭吃什么/)).toBeTruthy();
+    expect(screen.getByText("火锅")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /火锅/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "去终端作答" })).toBeNull();
+    expect(screen.getByText(/请回到那个终端作答/)).toBeTruthy();
   });
 
   /**

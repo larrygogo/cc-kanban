@@ -3653,6 +3653,9 @@ select.ns-input {
 .chat-approval-options span { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-3); }
 .chat-approval-options b { font-size: var(--fs-12); font-weight: 590; }
 .chat-approval-options small { color: var(--cc-text-faint); font-size: var(--fs-10-5); line-height: 1.45; }
+/* 题面卡的只读选项（外部终端会话：GUI 不持有 PTY、写不进作答按键，题面仅供阅读）：
+   与可点选项同一版式，但无按钮态、无 hover、无光标暗示——不承诺点了会发生什么。 */
+.chat-approval-option-static { min-height: 44px; padding: var(--sp-9) var(--sp-11); display: flex; align-items: flex-start; gap: var(--sp-10); border: 1px solid var(--cc-border); border-radius: var(--r-10); background: color-mix(in srgb, var(--cc-text) 2%, transparent); }
 .chat-approval-custom { display: flex; gap: var(--sp-7); }
 .chat-approval-custom input { min-width: 0; flex: 1; height: 32px; padding: 0 var(--sp-11); border: 1px solid var(--cc-border); border-radius: var(--r-9); color: var(--cc-text); background: var(--cc-bg); font: inherit; font-size: var(--fs-11-5); }
 .chat-approval-custom input::placeholder { color: var(--cc-text-faint); }

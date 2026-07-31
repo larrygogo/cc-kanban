@@ -862,6 +862,25 @@ export function ChatWindow() {
     const timer = window.setTimeout(() => setStructuredQuestion(null), 180_000);
     return () => window.clearTimeout(timer);
   }, [structuredQuestion]);
+  // 「在终端作答完成」的收卡信号：题面出现后 transcript 一旦增长（agent 拿到答案才会
+  // 继续产出），自动收卡。3 秒静置期跳过提问自身的 tool_use 落盘——它与题面几乎同时
+  // 到达，计入基线会把卡当场误收；极端手速（3 秒内答完）由 180s 兜底过期收尾。
+  const questionTranscriptBaseline = useRef<{ armAt: number; count: number | null } | null>(null);
+  useEffect(() => {
+    questionTranscriptBaseline.current = structuredQuestion
+      ? { armAt: Date.now() + 3_000, count: null }
+      : null;
+  }, [structuredQuestion]);
+  useEffect(() => {
+    const baseline = questionTranscriptBaseline.current;
+    if (!structuredQuestion || !baseline || Date.now() < baseline.armAt) return;
+    const count = (history?.offset ?? 0) + (history?.items.length ?? 0);
+    if (baseline.count == null) {
+      baseline.count = count;
+      return;
+    }
+    if (count > baseline.count) setStructuredQuestion(null);
+  }, [structuredQuestion, history]);
 
   useEffect(() => {
     // transcript 的 pendingReview 比 broker 的实时状态慢一拍。只有历史状态确实清空后，
@@ -1792,27 +1811,42 @@ export function ChatWindow() {
         title={t.chat.questionTitle}
         badge={t.chat.questionPending}
         sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setStructuredQuestion(null)}>{t.chat.attentionDismiss}</button>}
-        actions={<button type="button" className="is-allow" onClick={() => setView("terminal")}>{t.chat.answerInTerminal}</button>}
+        actions={history?.ptyManaged && <button type="button" className="is-allow" onClick={() => setView("terminal")}>{t.chat.answerInTerminal}</button>}
       >
         {structuredQuestions.map((item, questionIndex) => (
           <div key={questionIndex}>
             {item.question && <span className="chat-approval-prewrap">{item.header ? `${item.header} · ${item.question}` : item.question}</span>}
-            <div className="chat-approval-options">
-              {item.options.map((option, optionIndex) => (
-                <button
-                  type="button"
-                  className={queuedAnswer === option.label ? "is-selected" : ""}
-                  key={`${optionIndex}:${option.label}`}
-                  onClick={() => setQueuedAnswer((current) => current === option.label ? null : option.label)}
-                >
-                  <i aria-hidden="true">{queuedAnswer === option.label ? "✓" : ""}</i>
-                  <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
-                </button>
-              ))}
-            </div>
+            {/* 只有托管会话能点选排队——GUI 持有 PTY 才写得进作答按键。外部终端会话
+                的题面纯展示（省一次切窗看题），作答回其终端。勾选格只在多选题出现：
+                单选题的选中态用边框高亮表达，挂一排空勾选框既丑又误导。 */}
+            {history?.ptyManaged ? (
+              <div className="chat-approval-options">
+                {item.options.map((option, optionIndex) => (
+                  <button
+                    type="button"
+                    className={queuedAnswer === option.label ? "is-selected" : ""}
+                    key={`${optionIndex}:${option.label}`}
+                    onClick={() => setQueuedAnswer((current) => current === option.label ? null : option.label)}
+                  >
+                    {item.multiSelect && <i aria-hidden="true">{queuedAnswer === option.label ? "✓" : ""}</i>}
+                    <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="chat-approval-options is-static">
+                {item.options.map((option, optionIndex) => (
+                  <div className="chat-approval-option-static" key={`${optionIndex}:${option.label}`}>
+                    <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         ))}
-        <span>{queuedAnswer ? t.chat.queuedAnswerHint(queuedAnswer) : t.chat.questionFormLoading}</span>
+        <span>{history?.ptyManaged
+          ? (queuedAnswer ? t.chat.queuedAnswerHint(queuedAnswer) : t.chat.questionFormLoading)
+          : t.chat.questionExternalHint}</span>
       </ApprovalCard>}
       {/* broker 审批卡(claude hook 劫走的请求)与「有 pendingReview 但 GUI 接不了」的降级态。
           注意它**没有**「仅收起」:收起等于让 hook 干等到 300s 超时,只能 allow/deny/持久放行。 */}
