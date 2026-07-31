@@ -863,11 +863,15 @@ pub fn run() {
         // VISIBLE 也不恢复：设置/对话窗口以 visible:false 创建、前端首帧后才显示（消除白框闪烁），
         // 插件若按上次退出时的「可见」在创建当口就 show，隐藏创建被当场抵消，白框闪烁复发。
         // 可见性完全由代码显式控制（main 由 tauri.conf 的 visible:true，其余窗口自管）。
+        // DECORATIONS 也不恢复：装饰由各建窗代码按平台显式设定（macOS 原生 Overlay 标题栏、
+        // 非 macOS 无边框自绘），插件把旧版存下的 decorated:false 在创建当口还原回去，
+        // macOS 的原生红绿灯/圆角会被当场剥掉（表现为设置/更新等窗口方角无按钮）。
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(tauri_plugin_window_state::StateFlags::all().difference(
                     tauri_plugin_window_state::StateFlags::SIZE
-                        | tauri_plugin_window_state::StateFlags::VISIBLE,
+                        | tauri_plugin_window_state::StateFlags::VISIBLE
+                        | tauri_plugin_window_state::StateFlags::DECORATIONS,
                 ))
                 .build(),
         )

@@ -1043,8 +1043,6 @@ button.stab {
   user-select: none;
 }
 :root[data-theme="light"] .updater { background: var(--cc-window-bg); }
-/* macOS：无边框窗口不自动圆角，配合 Rust 端 transparent 由此呈现（同 .settings 的处理）。 */
-:root.platform-macos .updater { border-radius: var(--r-12); }
 
 /* ===== 使用引导窗口（label "onboarding"）：首次启动自动弹，分步介绍核心用法与窗口/设置。
    固定 460×600，顶栏可拖动 + 关闭/跳过，中部每步一张迷你界面示意图 + 要点，底部圆点 + 上一步/下一步。 ===== */
@@ -1059,7 +1057,6 @@ button.stab {
   user-select: none;
 }
 :root[data-theme="light"] .onboarding { background: var(--cc-window-bg); }
-:root.platform-macos .onboarding { border-radius: var(--r-12); }
 .ob-bar {
   flex: none;
   height: 40px;
@@ -1460,11 +1457,6 @@ button.stab {
 @keyframes up-indet { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 .up-status-dl { font-size: var(--fs-11-5); color: var(--cc-text-dim); }
 .up-hint { font-size: var(--fs-10-5); color: var(--cc-text-faint); }
-/* macOS：无边框窗口不会被系统自动圆角（Windows 由 DWM 自动处理）。配合 Rust 端把 about 窗口设为
-   transparent，让窗角透明、由这里的 border-radius 呈现圆角卡片（系统按不透明内容自动绘制阴影）。 */
-:root.platform-macos .settings {
-  border-radius: var(--r-14);
-}
 /* macOS：贴纸面板用更大的圆角，配合原生毛玻璃(NSVisualEffectView)的 radius(见 panel.rs GLASS_RADIUS)，二者须一致。 */
 :root.platform-macos .sticker {
   border-radius: var(--r-16);
@@ -1521,6 +1513,16 @@ button.stab {
   justify-content: flex-end;
   padding: 0 var(--sp-8);
 }
+/* macOS：独立窗口（设置/引导/更新/新建会话/对话）改用原生标题栏 Overlay（见 window.rs），
+   系统红绿灯在左上——自绘的右侧关闭按钮全部隐藏，有左侧内容的标题栏给红绿灯留位。
+   贴纸与确认弹窗仍是无边框窗口，不涉及。 */
+:root.platform-macos .winclose,
+:root.platform-macos .ns-close { display: none; }
+:root.platform-macos .ns-titlebar { padding-left: 76px; }
+:root.platform-macos .chat-sidebar-head { padding-left: 76px; }
+/* 侧栏折叠时 .chat-main 是 .chat-window 的第一个孩子，标题栏顶到窗口左缘才需要让位。 */
+:root.platform-macos .chat-main:first-child .chat-bar { padding-left: 84px; }
+
 .winclose {
   width: 30px;
   height: 30px;
@@ -2364,12 +2366,6 @@ button.stab {
   overflow: hidden;
   font-size: var(--fs-13);
 }
-/* macOS：无边框窗口不自动圆角，配合 Rust 端 transparent 由此呈现（同 .settings/.updater 的处理）。
-   Windows 端该窗口未设 transparent，若圆角仍生效会在四角露出 html/body 透明底的伪影，故仅 macOS 生效。 */
-:root.platform-macos .ns-window {
-  border-radius: var(--r-12);
-}
-
 /* 标题栏：底部一道分隔线拉开与内容的层次；整条可拖动。 */
 .ns-titlebar {
   flex: none;
@@ -2890,10 +2886,6 @@ select.ns-input {
   background: var(--cc-bg);
   border: 0;
   border-radius: 0;
-}
-/* macOS：无边框窗口不自动圆角，配合 Rust 端 transparent 由此呈现（同 .ns-window/.settings/.updater）。 */
-:root.platform-macos .chat-window {
-  border-radius: var(--r-12);
 }
 .chat-bar {
   height: 64px;

@@ -74,8 +74,8 @@ pub(crate) fn round_window_corners(window: &tauri::WebviewWindow) {
 /// 的合成帧仍可能没上屏（rAF 提交 ≠ 已呈现），这一两帧露出的是原生窗口底色——默认白，
 /// 于是还是闪。把原生底色设成与页面主题同色，即便露出来也是同色纯色帧，肉眼不可辨。
 /// theme=system 时借主窗口的 theme()（跟随 OS，本应用不调 set_theme）判定明暗。
-/// 仅用于非 macOS：macOS 这些窗口是 transparent + 前端圆角，设原生底色会破坏透明。
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+/// 全平台的独立窗口都用：macOS 的 Overlay 原生标题栏窗口是不透明的，同样要防闪白；
+/// 唯一例外是贴纸主窗（transparent + 原生毛玻璃，不经此函数）。
 pub(crate) fn window_background_color(app: &tauri::AppHandle) -> tauri::webview::Color {
     let dark = match load_settings().theme.as_str() {
         "light" => false,
@@ -113,17 +113,23 @@ pub(crate) fn open_settings_window(app: &tauri::AppHandle) {
         .inner_size(620.0, 460.0)
         .min_inner_size(620.0, 460.0)
         .resizable(false)
-        .decorations(false)
         // 隐藏创建，前端首帧后自行显示（见 show_after_grace 注释），消除白框闪烁。
         .visible(false)
         .center();
-        // macOS：无边框窗口不会自动圆角，故设为透明，由前端 .settings 的 border-radius 呈现圆角
-        // （系统会按不透明内容自动绘制圆角阴影）。Windows 由 DWM 自动圆角，保持不透明不变。
-        #[cfg(target_os = "macos")]
-        let builder = builder.transparent(true);
-        // 非 macOS：原生底色对齐主题，show 瞬间合成帧未上屏也不露白（见 window_background_color）。
+        // 非 macOS：无边框 + 前端自绘标题栏（Windows 圆角由 DWM 处理，见 round_window_corners）；
+        // 原生底色对齐主题，show 瞬间合成帧未上屏也不露白（见 window_background_color）。
         #[cfg(not(target_os = "macos"))]
-        let builder = builder.background_color(window_background_color(app));
+        let builder = builder
+            .decorations(false)
+            .background_color(window_background_color(app));
+        // macOS：原生标题栏 Overlay——系统红绿灯在左上，符合平台惯例（前端按平台隐藏
+        // 自绘 ✕ 并给红绿灯留位）；hidden_title 不画原生标题文字，标题仍由前端自绘。
+        // 原生窗口自带圆角与阴影，不再需要 transparent + CSS 圆角。
+        #[cfg(target_os = "macos")]
+        let builder = builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .background_color(window_background_color(app));
         match builder.build() {
             Ok(_about_window) => {
                 round_window_corners(&_about_window);
@@ -176,15 +182,19 @@ pub(crate) fn open_onboarding_window(app: &tauri::AppHandle) {
     .resizable(false)
     .maximizable(false)
     .minimizable(false)
-    .decorations(false)
     // 隐藏创建，前端首帧后自行显示（见 show_after_grace 注释），消除白框闪烁。
     .visible(false)
     .center();
-    // macOS：无边框窗口不自动圆角，设透明由前端 .onboarding 的 border-radius 呈现（同设置/更新窗口）。
-    #[cfg(target_os = "macos")]
-    let builder = builder.transparent(true);
+    // 平台分支的理由见 open_settings_window 的同款注释。
     #[cfg(not(target_os = "macos"))]
-    let builder = builder.background_color(window_background_color(app));
+    let builder = builder
+        .decorations(false)
+        .background_color(window_background_color(app));
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .background_color(window_background_color(app));
     match builder.build() {
         Ok(_onboarding_window) => {
             round_window_corners(&_onboarding_window);
@@ -236,15 +246,19 @@ pub(crate) fn open_update_window_impl(app: &tauri::AppHandle) {
     .inner_size(400.0, 252.0)
     .min_inner_size(400.0, 252.0)
     .resizable(false)
-    .decorations(false)
     // 隐藏创建，前端首帧后自行显示（见 show_after_grace 注释），消除白框闪烁。
     .visible(false)
     .center();
-    // macOS：无边框窗口不自动圆角，设透明由前端 .updater 的 border-radius 呈现（同设置窗口）。
-    #[cfg(target_os = "macos")]
-    let builder = builder.transparent(true);
+    // 平台分支的理由见 open_settings_window 的同款注释。
     #[cfg(not(target_os = "macos"))]
-    let builder = builder.background_color(window_background_color(app));
+    let builder = builder
+        .decorations(false)
+        .background_color(window_background_color(app));
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .background_color(window_background_color(app));
     match builder.build() {
         Ok(_update_window) => {
             round_window_corners(&_update_window);
@@ -326,15 +340,19 @@ pub(crate) fn open_new_session_window_impl(
             .inner_size(460.0, 520.0)
             .min_inner_size(460.0, 520.0)
             .resizable(false)
-            .decorations(false)
             // 隐藏创建，前端首帧后自行显示（见 show_after_grace 注释），消除白框闪烁。
             .visible(false)
             .center();
-    // macOS：无边框窗口不自动圆角，设透明由前端 .ns-window 的 border-radius 呈现（同设置窗口）。
-    #[cfg(target_os = "macos")]
-    let builder = builder.transparent(true);
+    // 平台分支的理由见 open_settings_window 的同款注释。
     #[cfg(not(target_os = "macos"))]
-    let builder = builder.background_color(window_background_color(app));
+    let builder = builder
+        .decorations(false)
+        .background_color(window_background_color(app));
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .background_color(window_background_color(app));
     match builder.build() {
         Ok(_win) => {
             round_window_corners(&_win);
@@ -422,14 +440,19 @@ pub(crate) fn open_chat_window_impl(app: &tauri::AppHandle, session_id: i64) -> 
         .inner_size(960.0, 760.0)
         .min_inner_size(620.0, 480.0)
         .resizable(true)
-        .decorations(false)
         // 隐藏创建，前端首帧后自行显示（见 show_after_grace 注释），消除白框闪烁。
         .visible(false)
         .center();
-    #[cfg(target_os = "macos")]
-    let builder = builder.transparent(true);
+    // 平台分支的理由见 open_settings_window 的同款注释。
     #[cfg(not(target_os = "macos"))]
-    let builder = builder.background_color(window_background_color(app));
+    let builder = builder
+        .decorations(false)
+        .background_color(window_background_color(app));
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .background_color(window_background_color(app));
     let win = builder
         .build()
         .map_err(|e| format!("创建对话窗口失败: {e}"))?;
