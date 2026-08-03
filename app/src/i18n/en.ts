@@ -28,6 +28,7 @@ export const en: Dict = {
     searchHint: "Try a different keyword",
   },
   sticker: {
+    openChatWindow: "Open chat window",
     openSettings: "Settings",
     updateAvailable: "Update available — Settings → About",
     search: "Search sessions",

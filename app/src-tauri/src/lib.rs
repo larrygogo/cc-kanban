@@ -68,8 +68,8 @@ use terminal::{
     takeover_managed_terminal,
 };
 use window::{
-    open_chat_window, open_new_session_window, open_onboarding, open_settings, open_update_window,
-    recall_center,
+    open_chat_window, open_latest_chat, open_new_session_window, open_onboarding, open_settings,
+    open_update_window, recall_center,
 };
 // 连接判定的进程事实源统一走 proc::agent_pids_snapshot（按平台分流），
 // 由 session_query 缓存成一份跨命令共享的快照；lib 这一层不再直接碰进程表。
@@ -92,6 +92,9 @@ pub(crate) use window::open_settings_window;
 // macOS 托盘菜单「使用引导」项走 crate::open_onboarding_window。
 #[cfg(target_os = "macos")]
 pub(crate) use window::open_onboarding_window;
+// macOS 托盘菜单「打开对话窗口」项走 crate::open_latest_chat_window。
+#[cfg(target_os = "macos")]
+pub(crate) use window::open_latest_chat_window;
 
 use relay::{get_relay_secret_status, get_relay_secrets, list_relay_models, set_relay_secret};
 use settings::{
@@ -1008,7 +1011,8 @@ pub fn run() {
             check_provider_hooks,
             repair_provider_hooks,
             recent_cwds,
-            open_new_session_window
+            open_new_session_window,
+            open_latest_chat
         ])
         .on_window_event(|window, event| {
             // macOS：面板模式，无出屏约束/吸边；不处理 Moved（避免与 positioner 抢位置、误发 snap-changed）。

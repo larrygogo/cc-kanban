@@ -217,6 +217,13 @@ describe("Sticker", () => {
     await waitFor(() => expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "get_accounts").length).toBe(2));
   });
 
+  it("底栏提供对话窗口入口，点按交给后端打开最近会话的对话窗", async () => {
+    render(<Sticker filter="all" data={[]} />);
+    const btn = await screen.findByRole("button", { name: zh.sticker.openChatWindow });
+    fireEvent.click(btn);
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === "open_latest_chat")).toBe(true);
+  });
+
   it("用量选择在卸载重挂后保留（记住上次选择，找不到才退第一个）", () => {
     const usageMap: Record<string, ProviderUsage> = {
       claude: { lanes: [], note: null } as ProviderUsage,

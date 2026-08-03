@@ -1519,7 +1519,12 @@ button.stab {
 :root.platform-macos .winclose,
 :root.platform-macos .ns-close { display: none; }
 :root.platform-macos .ns-titlebar { padding-left: 76px; }
-:root.platform-macos .chat-sidebar-head { padding-left: 76px; }
+/* macOS：红绿灯占据侧栏头部左侧，「会话」标题不再展示（挤在红绿灯后面反而突兀），
+   头部只剩右侧动作按钮；84px 左留白保住拖拽区不与红绿灯重叠的视觉平衡。 */
+:root.platform-macos .chat-sidebar-head { padding-left: 84px; }
+:root.platform-macos .chat-sidebar-title { display: none; }
+/* 标题隐藏后 space-between 只剩动作组一个子元素，会被顶到左侧——强制推回右缘。 */
+:root.platform-macos .chat-sidebar-head-actions { margin-left: auto; }
 /* 侧栏折叠时 .chat-main 是 .chat-window 的第一个孩子，标题栏顶到窗口左缘才需要让位。 */
 :root.platform-macos .chat-main:first-child .chat-bar { padding-left: 84px; }
 

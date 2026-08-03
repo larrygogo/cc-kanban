@@ -237,6 +237,7 @@ pub fn build_tray_menu(
     app: &AppHandle,
     lang: &str,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let chat = MenuItemBuilder::with_id("chat", crate::tr(lang, "tray.chat")).build(app)?;
     let guide = MenuItemBuilder::with_id("guide", crate::tr(lang, "tray.guide")).build(app)?;
     let settings =
         MenuItemBuilder::with_id("settings", crate::tr(lang, "tray.settings")).build(app)?;
@@ -244,7 +245,7 @@ pub fn build_tray_menu(
         MenuItemBuilder::with_id("website", crate::tr(lang, "tray.website")).build(app)?;
     let quit = MenuItemBuilder::with_id("quit", crate::tr(lang, "tray.quit")).build(app)?;
     MenuBuilder::new(app)
-        .items(&[&guide, &settings, &website, &quit])
+        .items(&[&chat, &guide, &settings, &website, &quit])
         .build()
 }
 
@@ -261,6 +262,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false) // 左键不弹菜单 => 留给右键
         .on_menu_event(|app, event| match event.id().as_ref() {
+            "chat" => crate::open_latest_chat_window(app),
             "guide" => crate::open_onboarding_window(app),
             "settings" => crate::open_settings_window(app),
             "website" => {

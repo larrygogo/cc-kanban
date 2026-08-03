@@ -1009,6 +1009,16 @@ export function Sticker({
               <button
                 type="button"
                 className="stk-act"
+                data-tip={t.sticker.openChatWindow}
+                aria-label={t.sticker.openChatWindow}
+                data-testid="bar-chat"
+                onClick={() => invoke("open_latest_chat").catch(() => {})}
+              >
+                <ChatIcon />
+              </button>
+              <button
+                type="button"
+                className="stk-act"
                 data-tip={t.newSession.newButton}
                 aria-label={t.newSession.newButton}
                 data-testid="bar-new"

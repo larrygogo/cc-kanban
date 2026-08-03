@@ -269,7 +269,8 @@ describe("App", () => {
       Array.from(container.querySelectorAll(".stk-title")).map((el) => el.textContent);
     await waitFor(() => expect(titles()).toEqual(["B", "A"]));
 
-    fireEvent.click(container.querySelector(".stk-bar-actions .stk-act:nth-child(2)")!);
+    // 按 aria-label 定位搜索按钮，不吃底栏按钮增减的位置变化。
+    fireEvent.click(container.querySelector('.stk-bar-actions [aria-label="搜索会话"]')!);
     fireEvent.change(container.querySelector(".stk-search-in")!, { target: { value: "A" } });
     await waitFor(() => expect(getLiveSessionsPage).toHaveBeenCalledWith("all", "A", null, 100));
     await waitFor(() => expect(titles()).toEqual(["A"]));

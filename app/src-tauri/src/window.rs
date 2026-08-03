@@ -377,6 +377,30 @@ pub(crate) fn open_new_session_window_impl(
     }
 }
 
+/// macOS：给 Overlay 标题栏窗口挂一个空 NSToolbar（unified 风格），系统据此把红绿灯
+/// 垂直居中到加高的标题栏区（约 52px），与 64px 的自绘工具栏行对齐。这是 AppKit 的
+/// 官方语义，布局由系统持续维护；逐帧挪按钮 frame 的做法会在窗口重排（show/聚焦/
+/// 全屏往返）时被 AppKit 重置，builder 的 traffic_light_position 正是因此不生效。
+/// toolbar 无任何 item，titlebarAppearsTransparent 下不画任何东西，只改按钮布局。
+#[cfg(target_os = "macos")]
+pub(crate) fn unify_titlebar_toolbar(window: &tauri::WebviewWindow) {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    let w = window.clone();
+    // AppKit 对象只能在主线程操作；build() 可能发生在任意子线程。
+    let _ = window.run_on_main_thread(move || {
+        if let Ok(ns_window) = w.ns_window() {
+            let ns_window = ns_window as *mut AnyObject;
+            unsafe {
+                let toolbar: *mut AnyObject = msg_send![class!(NSToolbar), new];
+                let _: () = msg_send![ns_window, setToolbar: toolbar];
+                // NSWindowToolbarStyleUnified = 3（macOS 11+，本应用最低 14.0）。
+                let _: () = msg_send![ns_window, setToolbarStyle: 3isize];
+            }
+        }
+    });
+}
+
 /// 打开单例会话对话窗口。再次点击另一张卡片时复用窗口并发事件切换会话。
 /// 创建/切换失败必须传播回前端：静默失败时用户「点了没反应」，再点会重复起会话。
 #[tauri::command]
@@ -399,8 +423,7 @@ pub(crate) fn open_chat_window_detached(app: tauri::AppHandle, session_id: i64) 
 /// 托盘点击入口：打开最近活跃会话的对话窗口。托盘没有「当前会话」上下文，
 /// 取 last_event_at 最新的未归档会话最贴近「看看现在在跑什么」。
 /// 一条会话都没有（新装/全归档）时回落到设置窗口，避免点了毫无反应。
-/// 仅非 macOS：macOS 托盘走 `macos::menubar::setup_tray`（面板模式），不经此入口。
-#[cfg(not(target_os = "macos"))]
+/// 入口：非 macOS 托盘左键；macOS 托盘菜单「打开对话窗口」；贴纸底栏按钮（open_latest_chat）。
 pub(crate) fn open_latest_chat_window(app: &tauri::AppHandle) {
     let app = app.clone();
     // 查库放子线程：与 open_settings_window 同理由，主线程同步 IO 会阻塞消息泵。
@@ -418,6 +441,13 @@ pub(crate) fn open_latest_chat_window(app: &tauri::AppHandle) {
             None => open_settings_window(&app),
         }
     });
+}
+
+/// 前端调用（贴纸底栏「打开对话窗口」按钮）：打开最近活跃会话的对话窗口。
+/// 同步 command 仅做 thread::spawn（open_latest_chat_window 内部自带子线程查库），不阻塞主线程。
+#[tauri::command]
+pub(crate) fn open_latest_chat(app: tauri::AppHandle) {
+    open_latest_chat_window(&app);
 }
 
 pub(crate) fn open_chat_window_impl(app: &tauri::AppHandle, session_id: i64) -> Result<(), String> {
@@ -456,6 +486,10 @@ pub(crate) fn open_chat_window_impl(app: &tauri::AppHandle, session_id: i64) -> 
     let win = builder
         .build()
         .map_err(|e| format!("创建对话窗口失败: {e}"))?;
+    // 对话窗标题栏行高 64px（.chat-bar/.chat-sidebar-head），红绿灯默认贴顶会和同行的
+    // 标题/按钮错位；挂空 toolbar 让系统把它垂直居中（备忘录式侧栏惯例）。
+    #[cfg(target_os = "macos")]
+    unify_titlebar_toolbar(&win);
     show_after_grace(&win, true);
     let app_handle = app.clone();
     win.on_window_event(move |e| {

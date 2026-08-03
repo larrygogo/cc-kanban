@@ -28,6 +28,7 @@ export const zh = {
     searchHint: "换个关键词试试",
   },
   sticker: {
+    openChatWindow: "打开对话窗口",
     openSettings: "打开设置",
     updateAvailable: "有新版本，去设置 → 关于更新",
     search: "搜索会话",
