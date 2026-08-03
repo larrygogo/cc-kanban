@@ -3,6 +3,10 @@
 //! opencode 的审批面板有醒目的 `△ Permission required` 标题；没有标题时靠底部快捷键
 //! 组合（dismiss + confirm/submit/toggle + 选择键）识别。运行态有两种信号：中断提示
 //! 与进度条。
+//!
+//! 屏幕检测对 opencode 的价值高于其它几家：它是目前唯一**没有 `telemetry` 能力**的
+//! 插件（不解析 transcript，因而没有对话预览、上下文占用这些遥测信号）。卡片上的
+//! 实时状态几乎只能靠这里的规则给出——规则失准对它的代价相应更大。
 
 use crate::screen::{Matcher, Region, ScreenRule, ScreenState};
 
