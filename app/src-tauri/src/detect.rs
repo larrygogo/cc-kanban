@@ -418,20 +418,14 @@ mod tests {
         }
     }
 
-    /// 引擎不认识任何具体 agent：规则全部来自插件声明，宿主侧不得再出现
-    /// `match provider`（registry.rs 的既定原则：加 agent 只动 `plugins/`）。
-    /// 这条断言钉住「新 agent 声明了规则就自动生效，不必改引擎」。
+    /// 「插件声明了规则，引擎立刻认得」——加 agent 只动 `plugins/` 的正向验证。
+    ///
+    /// 反向约束（引擎源码里不得出现 agent 身份）归 lib.rs 的
+    /// `host_code_does_not_branch_on_agent_identity` 统一管：它的清单已含 detect.rs，
+    /// 且按测试模块**区间**跳过而非首个标记截断。这里曾经自己写过一份 `split("mod tests")`
+    /// 的截断版——正是那种写法在 terminal.rs 上漏掉了 69% 的文件，不再保留第二份。
     #[test]
-    fn rules_come_from_plugins_not_a_host_side_match() {
-        let source = include_str!("detect.rs");
-        let engine = source.split("mod tests").next().expect("引擎段");
-        for id in ["claude", "codex", "kimi", "gemini", "opencode"] {
-            assert!(
-                !engine.contains(&format!("\"{id}\"")),
-                "引擎里不该出现 agent 身份串 {id:?}——规则归插件声明"
-            );
-        }
-        // 反向证明这条约束是活的：注册表里声明了规则的插件，引擎立刻认得。
+    fn declared_rules_take_effect_without_touching_the_engine() {
         let declared: Vec<&str> = meowo_agent::all()
             .iter()
             .filter(|plugin| !plugin.screen_rules().is_empty())
