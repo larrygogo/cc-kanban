@@ -26,6 +26,19 @@ const RELAYS: Record<string, AgentDescriptor["relay"]> = {
 const SUPPORTS_PROXY = new Set(["claude", "codex", "kimi", "gemini", "opencode"]);
 
 /**
+ * 代理能写进自己配置文件（＝不管由谁启动都生效）的那些。与后端 `ProxySpec.config_env`
+ * 同源——**仅 claude**：codex/kimi/gemini 只认进程环境变量，故只覆盖 Meowo 拉起的会话。
+ */
+const PROXY_COVERS_ALL_LAUNCHES = new Set(["claude"]);
+
+/**
+ * 支持 SOCKS 代理的那些。与后端 `ProxySpec.socks` 同源，逐个核对过插件声明：
+ * claude 官方明确不支持、codex 未编译 reqwest 的 socks feature、opencode 亦为 false，
+ * 只有 kimi 与 gemini 认 SOCKS。
+ */
+const PROXY_ACCEPTS_SOCKS = new Set(["kimi", "gemini"]);
+
+/**
  * 有账号概念的那些（＝插件声明了 account 能力槽）。当前**五家都有**，故这里全收。
  *
  * 它仍然是个可选能力槽：为 false 的 agent 不显示登录态、也不给登录入口（它的 `login_argv()`
@@ -203,6 +216,8 @@ export function descriptors(installed: string[]): AgentDescriptor[] {
     display_name: NAMES[id],
     installed: installed.includes(id),
     supports_proxy: SUPPORTS_PROXY.has(id),
+    proxy_covers_all_launches: PROXY_COVERS_ALL_LAUNCHES.has(id),
+    proxy_accepts_socks: PROXY_ACCEPTS_SOCKS.has(id),
     supports_account: SUPPORTS_ACCOUNT.has(id),
     supports_api_key_login: SUPPORTS_API_KEY_LOGIN.has(id),
     supports_profiles: SUPPORTS_PROFILES.has(id),

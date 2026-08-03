@@ -534,6 +534,17 @@ struct AgentDescriptor {
     /// 于是用户会给一个根本读不到代理配置的 agent 认真填上代理，然后对着「连不上」毫无线索地瞎试。
     /// 这正是网络分区最忌讳的失败模式：**静默不生效**。宁可不给入口，也不给一个假的。
     supports_proxy: bool,
+    /// 代理能写进它**自己的配置文件**吗（＝`ProxySpec.config_env`）——从而不管由谁启动
+    /// 都生效；false 则只覆盖 Meowo 拉起的会话，用户自己在终端敲命令时不走代理。
+    ///
+    /// 与 `proxy_accepts_socks` 一起，取代前端此前自己维护的两张 agent 名单。那两张表
+    /// 与后端 `ProxySpec` 是**同一事实的两份拷贝**，注释里也写着「与 Rust 侧同源」——
+    /// 而拷贝迟早不同步：新 agent 接进来时前端名单不会自动更新，用户看到的覆盖面说明
+    /// 就是错的，且没有任何报错。
+    proxy_covers_all_launches: bool,
+    /// 支持 SOCKS 代理吗（＝`ProxySpec.socks`）。填错的后果是静默连不上，故设置页要
+    /// 按它当场拒绝非法代理串，而不是等用户去猜。
+    proxy_accepts_socks: bool,
     /// 这个 agent 有没有**账号概念**（＝插件是否声明了 account 能力槽）。
     ///
     /// 为 false 时，设置页与新建会话面板都不得显示登录态、也不得给出登录入口——它的
@@ -585,6 +596,9 @@ async fn list_agents() -> Vec<AgentDescriptor> {
                     display_name: a.display_name().to_string(),
                     installed: a.is_installed(),
                     supports_proxy: a.proxy().is_some(),
+                    // 没声明 ProxySpec 的 agent 这两项无意义（前端也不会给它代理行）。
+                    proxy_covers_all_launches: a.proxy().is_some_and(|spec| spec.config_env),
+                    proxy_accepts_socks: a.proxy().is_some_and(|spec| spec.socks),
                     supports_account: a.account().is_some(),
                     supports_api_key_login: a.api_key_login().is_some(),
                     supports_profiles: a.profile().is_some(),

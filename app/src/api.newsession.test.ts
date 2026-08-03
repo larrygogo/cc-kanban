@@ -4,6 +4,7 @@ const invokeMock = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invokeMock(...a) }));
 
 import { listAgents, agentName, newSession, recentCwds, checkProviderHooks } from "./api";
+import { descriptors } from "./test/agents";
 
 beforeEach(() => invokeMock.mockReset());
 
@@ -21,9 +22,9 @@ describe("new-session api", () => {
   });
 
   it("agentName 未知 id 回退成 id 本身，不冒名成 claude", () => {
-    const agents = [
-      { id: "claude", display_name: "Claude Code", installed: true, supports_proxy: true, supports_account: true, supports_profiles: true },
-    ];
+    // 用共享固件而不是手写字面量：descriptor 每加一个字段，手写的那份都要跟着改，
+    // 而本用例只关心「按 id 查名字」这一件事。
+    const agents = descriptors(["claude"]);
     expect(agentName(agents, "claude")).toBe("Claude Code");
     // 名单里没有的 id → 回退成 id 本身（显示 "not-an-agent" 好过显示 "Claude Code"）。
     expect(agentName(agents, "not-an-agent")).toBe("not-an-agent");

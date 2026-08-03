@@ -44,12 +44,11 @@ type AgentReport = {
   error: string | null;
 };
 
-/// 能把代理写进自己配置文件的模型 → 全场景生效。与 Rust 侧 ProxySpec.config_env 同源。
-/// 前端只用它来选文案，判定与写入一律以后端为准。
-const FULL_COVERAGE: readonly string[] = ["claude"];
-/// 不支持 SOCKS 的模型（Claude Code 官方明确不支持；Codex 未编译 reqwest 的 socks feature）。
-const NO_SOCKS: readonly string[] = ["claude", "codex"];
-
+/// 「能把代理写进自己配置文件（全场景生效）」与「支持 SOCKS」两项，此前是前端自己
+/// 维护的两张 agent 名单。它们与后端 ProxySpec 是同一事实的两份拷贝——新 agent 接进来
+/// 时前端名单不会自动更新，用户看到的覆盖面说明就是错的，而且不会有任何报错。
+/// 现在两项都由 descriptor 随 agent 一起下发（proxy_covers_all_launches /
+/// proxy_accepts_socks）。判定与写入一如既往以后端为准，这里只用于选文案。
 const isSocks = (u: string) => /^socks[45]?h?:\/\//i.test(u.trim());
 
 /// 代理地址输入框：本地草稿 + 失焦/回车提交。
@@ -221,7 +220,7 @@ export function NetworkSection() {
   // 有模型正走在一个它不支持的 SOCKS 代理上 → 顶部告警。用生效值判断（含 system 模式读到的环境变量），
   // 不能只看用户填的那一栏。
   const socksBroken = agents.some(
-    (a) => NO_SOCKS.includes(a.id) && (effective[a.id] ?? "") !== "" && isSocks(effective[a.id] ?? ""),
+    (a) => !a.proxy_accepts_socks && (effective[a.id] ?? "") !== "" && isSocks(effective[a.id] ?? ""),
   );
 
   return (
@@ -275,7 +274,7 @@ export function NetworkSection() {
           {agents.map((a) => {
             const m = rowMode(a.id);
             const rep = reports[a.id];
-            const full = FULL_COVERAGE.includes(a.id);
+            const full = a.proxy_covers_all_launches;
             const label = effLabel(a.id);
             const proxied = hasEffective(a.id) && (effective[a.id] ?? "") !== "";
             return (

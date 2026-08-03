@@ -29,6 +29,13 @@ export type AgentDescriptor = {
    */
   supports_proxy: boolean;
   /**
+   * 代理能否写进该 agent 自己的配置文件——true 则不管由谁启动都生效，false 只覆盖
+   * Meowo 拉起的会话。仅用于选覆盖面文案。
+   */
+  proxy_covers_all_launches: boolean;
+  /** 是否支持 SOCKS 代理。false 时设置页当场拒绝 socks:// 串（否则静默连不上）。 */
+  proxy_accepts_socks: boolean;
+  /**
    * 有没有账号概念。为 false 时**不得显示登录态、也不得给出登录入口**——该 agent 的
    * `login_argv()` 是 None，按钮点下去只会报「拉起登录失败」。
    *
