@@ -8,8 +8,9 @@ import {
 
 describe("observeTranscriptForDismiss", () => {
   const tracker = (armAt: number): QuestionDismissTracker => ({ armAt, count: null });
-  const running = (count: number) => ({ count, running: true });
-  const settled = (count: number) => ({ count, running: false });
+  const running = (count: number) => ({ count, running: true as const });
+  const settled = (count: number) => ({ count, running: false as const });
+  const unknown = (count: number) => ({ count, running: null });
 
   /**
    * 回归（实测踩过）：阻塞等答的会话在作答前零增长，作答后往往只有一次增长事件。
@@ -39,6 +40,21 @@ describe("observeTranscriptForDismiss", () => {
     expect(observeTranscriptForDismiss(state, settled(12), 2_000)).toBe(false);
     // 静置期后：状态已是回合结束 → 无论有没有新增长都收卡。
     expect(observeTranscriptForDismiss(state, settled(12), 3_500)).toBe(true);
+  });
+
+  /**
+   * 回归（实测踩过）：history 尚未加载时 running 是 **null（未知）**，不能当「已结束」。
+   * 冷启动路径正是如此——broker 切窗触发 resetTo 把 history 置 null，若判成回合结束，
+   * 卡会在静置期一过的任意一次重渲染里闪现 1.5 秒就自己消失。
+   */
+  it("状态未知不等于回合结束,不收卡", () => {
+    const state = tracker(1_500);
+    expect(observeTranscriptForDismiss(state, unknown(0), 0)).toBe(false);
+    expect(observeTranscriptForDismiss(state, unknown(0), 2_000)).toBe(false);
+    expect(observeTranscriptForDismiss(state, unknown(0), 60_000)).toBe(false);
+    // history 加载出来、确证仍在回合中：照常按增长判定。
+    expect(observeTranscriptForDismiss(state, running(0), 61_000)).toBe(false);
+    expect(observeTranscriptForDismiss(state, running(1), 62_000)).toBe(true);
   });
 
   it("静置期内没有任何观察时,静置期后先补记基线再看增长", () => {

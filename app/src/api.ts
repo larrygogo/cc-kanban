@@ -419,6 +419,17 @@ export async function confirmStopSession(
 export function getPendingApproval(sessionId: number): Promise<PendingApproval | null> {
   return invoke("get_pending_approval", { sessionId });
 }
+/**
+ * 该会话待处理的 AskUserQuestion 题面。`interactive-question` 事件在对话窗冷启动时
+ * 会打进虚空（Tauri emit 不排队、不重放），轮询这条是把错过的题面补回来的唯一途径。
+ */
+export function pendingInteractiveQuestion(sessionId: number): Promise<PendingApproval | null> {
+  return invoke("pending_interactive_question", { sessionId });
+}
+/** 收卡时撤下后端的待处理题面，避免轮询把已答过的题重新弹出来。 */
+export function dismissInteractiveQuestion(sessionId: number): Promise<void> {
+  return invoke("dismiss_interactive_question", { sessionId });
+}
 export function registerApprovalConsumer(sessionId: number, consumerId: string): Promise<void> {
   return invoke("register_approval_consumer", { sessionId, consumerId });
 }

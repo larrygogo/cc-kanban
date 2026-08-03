@@ -277,6 +277,25 @@ pub(crate) fn get_pending_approval(
     state.ptys.pending_approval(session_id).map(Into::into)
 }
 
+/// 该会话待处理的 AskUserQuestion 题面。前端在审批轮询里一并取——`interactive-question`
+/// 事件在对话窗冷启动时会打进虚空（emit 不排队），只有轮询能把它补回来。
+#[tauri::command]
+pub(crate) fn pending_interactive_question(
+    state: State<'_, super::AppState>,
+    session_id: i64,
+) -> Option<meowo_protocol::ipc::PendingApprovalDto> {
+    state
+        .ptys
+        .interactive_question(session_id)
+        .map(Into::into)
+}
+
+/// 前端收卡时撤下题面，避免轮询把已答过的题重新弹出来。
+#[tauri::command]
+pub(crate) fn dismiss_interactive_question(state: State<'_, super::AppState>, session_id: i64) {
+    state.ptys.clear_interactive_question(session_id);
+}
+
 #[tauri::command]
 pub(crate) fn register_approval_consumer(
     state: State<'_, super::AppState>,

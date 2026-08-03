@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { appConfirm } from "../confirm";
-import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, getChatHistory, getLiveSessionsPage, getPendingApproval, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, resolvePendingApproval, savePastedAttachment, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
+import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, dismissInteractiveQuestion, getChatHistory, getLiveSessionsPage, getPendingApproval, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, pendingInteractiveQuestion, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, resolvePendingApproval, savePastedAttachment, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
 import { useT } from "../i18n";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { agentAssets, tintStyle } from "../providers";
@@ -826,6 +826,10 @@ export function ChatWindow() {
   // AskUserQuestion 题面直达。事件与 chat-session-changed 存在竞态（后端先切窗再发题面，
   // 前端两个事件到达顺序不保证）：无论当下会话是否匹配都先暂存进 ref，会话切换完成的
   // effect 里再领养，两种到达顺序都不丢卡。
+  //
+  // 领养窗口只有 3 秒且**收卡时立即清空**：这个 ref 存在的唯一理由是覆盖毫秒级的事件
+  // 顺序竞态。窗口留长了就成了幽灵卡的来源——答完收卡后切走再切回来，effect 会把
+  // 早已了结的问题重新弹出来（实测踩过）。
   const lastInteractiveQuestionRef = useRef<{ payload: PendingApproval; at: number } | null>(null);
   useEffect(() => {
     let un: (() => void) | undefined;
@@ -845,23 +849,45 @@ export function ChatWindow() {
   // 会话切换：清掉旧会话的题面卡；竞态暂存的题面若属于新会话（事件先于切换抵达）则领养。
   useEffect(() => {
     const last = lastInteractiveQuestionRef.current;
-    if (last && last.payload.sessionId === sessionId && Date.now() - last.at < 60_000) {
+    if (last && last.payload.sessionId === sessionId && Date.now() - last.at < 3_000) {
       setBrokerOwnsReview(true);
       setStructuredQuestion(last.payload);
     } else {
       setStructuredQuestion(null);
     }
   }, [sessionId]);
+  // 轮询兜底：`interactive-question` 事件在对话窗冷启动时会打进虚空（Tauri emit 不排队，
+  // WebView2 起来要 1~2s），只有轮询能把错过的题面补回来——常规审批本就有这道保险。
+  // 与审批轮询同频（400ms）；已有同一 requestId 的卡时不重复设置，避免打断点选状态。
+  useEffect(() => {
+    if (sessionId <= 0) return;
+    let cancelled = false;
+    const poll = () => pendingInteractiveQuestion(sessionId).then((next) => {
+      if (cancelled || !next) return;
+      setStructuredQuestion((current) => {
+        if (current?.requestId === next.requestId) return current;
+        setBrokerOwnsReview(true);
+        return next;
+      });
+    }).catch(() => {});
+    void poll();
+    const timer = window.setInterval(poll, 400);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [sessionId]);
   // 兜底过期：识别一直没就绪、用户已在终端答完的情况下，别让展示卡挂一辈子。
   // 题面卡消失（过期/收起/会话切换）时排队的答案一并作废——没有卡背书的按键不许落。
   useEffect(() => {
     if (!structuredQuestion) {
       setQueuedAnswer(null);
+      // 卡已消解：清掉领养 ref 与后端待处理表，否则切走再切回、或下一轮轮询会把
+      // 早已了结的问题重新弹成幽灵卡。
+      lastInteractiveQuestionRef.current = null;
+      if (sessionId > 0) void dismissInteractiveQuestion(sessionId).catch(() => {});
       return;
     }
     const timer = window.setTimeout(() => setStructuredQuestion(null), 180_000);
     return () => window.clearTimeout(timer);
-  }, [structuredQuestion]);
+  }, [structuredQuestion, sessionId]);
   // 「问题已了结」的收卡信号：判定逻辑见 observeTranscriptForDismiss。
   //
   // 计数**必须**读独立累积的 items state，不能读 history.offset/history.items——那两个
@@ -884,8 +910,9 @@ export function ChatWindow() {
     const observation = {
       count: items.length,
       // 提问只可能发生在回合中（UserPromptSubmit 已把状态写成 running，且先于题面事件
-      // 落库）；状态离开 running = 回合已结束 = 问题必已了结（作答或取消）。
-      running: history?.status === "running",
+      // 落库）；确证离开 running = 回合已结束 = 问题必已了结（作答或取消）。
+      // history 未加载时是 **null（未知）** 而非 false——见 observeTranscriptForDismiss。
+      running: history ? history.status === "running" : null,
     };
     if (observeTranscriptForDismiss(baseline, observation, Date.now())) setStructuredQuestion(null);
   }, [structuredQuestion, history, items]);
@@ -1443,6 +1470,10 @@ export function ChatWindow() {
     () => (structuredQuestion ? parseAskUserQuestions(structuredQuestion.input) : []),
     [structuredQuestion],
   );
+  // 卡内点选作答的适用形态：单问题 + 单选。理由见卡片渲染处的注释（单值 queuedAnswer
+  // 装不下多选，且跨问题的同名选项会把答案落到错的题上）。
+  const answerableInCard =
+    structuredQuestions.length === 1 && !structuredQuestions[0].multiSelect;
   const commandApproval = commandAttention
     ? commandAttention.id === "kimi:command-approval"
       ? kimiCommandApprovalDetails(commandAttention.text)
@@ -1522,10 +1553,14 @@ export function ChatWindow() {
   // 提交仍归用户。匹配不上（截断歧义/多问题表单）就保持交互卡让用户手点，绝不猜。
   useEffect(() => {
     if (!interactiveAttention || !queuedAnswer) return;
-    setQueuedAnswer(null);
     const choices = (interactiveAttention.options ?? []).filter((option) => option.kind === "choice");
     const match = matchOptionByLabel(choices, queuedAnswer);
-    if (match) chooseInteractiveOption(match);
+    // 匹配不上就**保留**排队状态：清掉的话用户的点击被静默吞掉，提示还从「已选…」
+    // 变回「点选答案…」，什么解释都没有。留着等下一帧识别（表单可能还在渲染中），
+    // 收卡或手动取消时自然清空。
+    if (!match) return;
+    setQueuedAnswer(null);
+    chooseInteractiveOption(match);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- chooseInteractiveOption 每次渲染新建，按值依赖会空转
   }, [interactiveAttention, queuedAnswer]);
 
@@ -1824,10 +1859,12 @@ export function ChatWindow() {
         {structuredQuestions.map((item, questionIndex) => (
           <div key={questionIndex}>
             {item.question && <span className="chat-approval-prewrap">{item.header ? `${item.header} · ${item.question}` : item.question}</span>}
-            {/* 只有托管会话能点选排队——GUI 持有 PTY 才写得进作答按键。外部终端会话
-                的题面纯展示（省一次切窗看题），作答回其终端。勾选格只在多选题出现：
-                单选题的选中态用边框高亮表达，挂一排空勾选框既丑又误导。 */}
-            {history?.ptyManaged ? (
+            {/* 可点选排队的条件很严：托管会话（GUI 持有 PTY 才写得进按键）+ 单问题
+                + 单选。多问题表单绝不可点——queuedAnswer 是单值、且匹配只按 label 不带
+                问题下标，用户为问题 2 点的答案会落到停在前台的问题 1 上（识别出的
+                numbered-selector 认不出这是第几题）；多选题同理装不下第二个选择。
+                这些形态一律纯展示 + 「去终端作答」，不承诺做不到的事。 */}
+            {history?.ptyManaged && answerableInCard ? (
               <div className="chat-approval-options">
                 {item.options.map((option, optionIndex) => (
                   <button
@@ -1836,7 +1873,6 @@ export function ChatWindow() {
                     key={`${optionIndex}:${option.label}`}
                     onClick={() => setQueuedAnswer((current) => current === option.label ? null : option.label)}
                   >
-                    {item.multiSelect && <i aria-hidden="true">{queuedAnswer === option.label ? "✓" : ""}</i>}
                     <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
                   </button>
                 ))}
@@ -1852,9 +1888,13 @@ export function ChatWindow() {
             )}
           </div>
         ))}
-        <span>{history?.ptyManaged
-          ? (queuedAnswer ? t.chat.queuedAnswerHint(queuedAnswer) : t.chat.questionFormLoading)
-          : t.chat.questionExternalHint}</span>
+        <span>{!history?.ptyManaged
+          ? t.chat.questionExternalHint
+          : !answerableInCard
+          ? t.chat.questionMultiHint
+          : queuedAnswer
+          ? t.chat.queuedAnswerHint(queuedAnswer)
+          : t.chat.questionFormLoading}</span>
       </ApprovalCard>}
       {/* broker 审批卡(claude hook 劫走的请求)与「有 pendingReview 但 GUI 接不了」的降级态。
           注意它**没有**「仅收起」:收起等于让 hook 干等到 300s 超时,只能 allow/deny/持久放行。 */}

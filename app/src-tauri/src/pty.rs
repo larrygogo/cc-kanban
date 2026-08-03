@@ -25,6 +25,10 @@ const DETECT_STARTUP_GRACE: std::time::Duration = std::time::Duration::from_secs
 /// 收敛，落在 700ms 时间上限之内，不需要单独的加密轮询档。
 const DETECT_TICK: std::time::Duration = std::time::Duration::from_millis(300);
 
+/// 待处理题面在 broker 侧的存活上限。取 150s：略早于前端题面卡自己的 180s 兜底过期，
+/// 保证「卡还在但表里已空」而不是反过来（表里残留会让轮询把答过的题重新弹出来）。
+const INTERACTIVE_QUESTION_TTL_MS: i64 = 150_000;
+
 /// vt100 标题回调：OSC 0/2 设置的窗口标题是检测证据（claude 用盲文 spinner/✳ 前缀）。
 /// 标题是不受信任的模型输出——过滤控制字符并限长；空 payload 视为清除。
 #[derive(Default)]
@@ -50,24 +54,31 @@ impl vt100::Callbacks for ScreenTitle {
 /// 重绘/光标定位序列打穿（herdr 调研的核心教训）。parser 由 reader 线程喂字节（纯内存，
 /// 与 StartupProbeScanner 同量级），判定由独立的检测节拍线程按需读取。
 struct ScreenProbe {
-    parser: Mutex<vt100::Parser<ScreenTitle>>,
+    /// `None` = 该 provider 没有规则集：**不建 parser**，reader 热路径上一个字节都不解析。
+    /// 门必须设在生产端：只在 tick 里判 provider 的话，无规则的会话照样每 chunk 跑完整
+    /// VT 状态机、常驻一份 grid，产出全部丢弃——开销在 reader，不在 ticker。
+    parser: Option<Mutex<vt100::Parser<ScreenTitle>>>,
     debounce: Mutex<crate::detect::ScreenDebounce>,
     /// 上次扫描时的 output_end。无新输出且无待确认降级时整轮跳过——空闲会话零开销。
     scanned_end: AtomicU64,
     started_at: std::time::Instant,
-    /// 由 spawn argv[0] 推出的 agent 标签（"claude" 等），决定用哪套规则。
+    /// agent 标签（"claude" 等），由调用方从 DB 的 sessions.provider 传入（**不从 argv[0]
+    /// 猜**，见 PtyBroker::start 的文档），决定用哪套规则。
     provider: String,
 }
 
 impl ScreenProbe {
     fn new(rows: u16, cols: u16, provider: String) -> Self {
-        Self {
-            parser: Mutex::new(vt100::Parser::new_with_callbacks(
+        let parser = crate::detect::provider_supported(&provider).then(|| {
+            Mutex::new(vt100::Parser::new_with_callbacks(
                 rows,
                 cols,
                 0,
                 ScreenTitle::default(),
-            )),
+            ))
+        });
+        Self {
+            parser,
             debounce: Mutex::new(crate::detect::ScreenDebounce::default()),
             scanned_end: AtomicU64::new(0),
             started_at: std::time::Instant::now(),
@@ -77,7 +88,7 @@ impl ScreenProbe {
 
     /// 取末屏快照（行 + 标题）。锁内只做 grid 逐行导出，不跑规则。
     fn snapshot(&self) -> Option<crate::detect::ScreenSnapshot> {
-        let parser = self.parser.lock().ok()?;
+        let parser = self.parser.as_ref()?.lock().ok()?;
         let screen = parser.screen();
         let (_, cols) = screen.size();
         let lines: Vec<String> = screen.rows(0, cols).collect();
@@ -92,9 +103,8 @@ impl ScreenProbe {
         current_end: u64,
         now: std::time::Instant,
     ) -> Option<crate::detect::ScreenState> {
-        if !crate::detect::provider_supported(&self.provider) {
-            return None;
-        }
+        // parser 为 None 即无规则集（门在构造时，见字段注释），snapshot() 会返回 None，
+        // 这里不必再判 provider。
         if now.duration_since(self.started_at) < DETECT_STARTUP_GRACE {
             return None;
         }
@@ -194,6 +204,14 @@ struct AttachState {
     approvals: Mutex<HashMap<String, PendingApproval>>,
     /// 显式注册的 GUI 审批消费者。窗口存在/可见不等于已经订阅了目标 session。
     approval_consumers: Mutex<HashMap<String, i64>>,
+    /// 已自动放行、等用户处理的 AskUserQuestion 题面（session_id → (题面, 入表时刻)）。
+    ///
+    /// `interactive-question` 事件是 fire-and-forget：对话窗冷启动要 1~2s，而 emit
+    /// 在切窗后微秒级发出，此刻没有任何监听者，Tauri 的 emit **不排队不重放**——事件
+    /// 就此消失，用户面对一扇没有题面卡的窗口。常规审批靠「入表 + 等消费者注册 + 前端
+    /// 400ms 轮询」两道保险兜住同一问题；这条路径为了让 TUI 表单零延迟出现，刻意不等
+    /// 消费者，那就更不能把入表也一起丢。
+    interactive_questions: Mutex<HashMap<i64, (ApprovalRequest, i64)>>,
     app: Mutex<Option<tauri::AppHandle>>,
 }
 
@@ -239,6 +257,7 @@ impl Default for PtyBroker {
                 bindings: Mutex::new(HashMap::new()),
                 approvals: Mutex::new(HashMap::new()),
                 approval_consumers: Mutex::new(HashMap::new()),
+                interactive_questions: Mutex::new(HashMap::new()),
                 app: Mutex::new(None),
             }),
         }
@@ -949,8 +968,11 @@ impl PtyBroker {
                         }
                         // 喂屏幕状态机（纯内存解析，锁只与低频的检测节拍争用）。放在
                         // backlog 之外：它不参与偏移/回放语义，坏了也只影响状态角标。
-                        if let Ok(mut parser) = managed.probe.parser.lock() {
-                            parser.process(&data);
+                        // parser 为 None（provider 无规则集）时整段跳过，不付解析成本。
+                        if let Some(parser) = managed.probe.parser.as_ref() {
+                            if let Ok(mut parser) = parser.lock() {
+                                parser.process(&data);
+                            }
                         }
                         // 分发必须发生在追加 backlog 的同一把锁内：handle_attach 在一个
                         // backlog→subscribers 临界区里「回放 + 注册订阅者」，若这里先放掉
@@ -1092,9 +1114,14 @@ impl PtyBroker {
             .resize(clamped)
             .map_err(|e| e.to_string());
         // 屏幕状态机与 PTY 同尺寸，否则 TUI 按新宽度重排后 grid 里全是错位文本。
+        // 同时清掉扫描位点：新尺寸下 grid 重排，即便字节数没变也该重判一次
+        //（正常路径上 SIGWINCH 会触发 TUI 重绘、字节数自然会变，这里是兜底）。
         if result.is_ok() {
-            if let Ok(mut parser) = session.probe.parser.lock() {
-                parser.screen_mut().set_size(clamped.rows, clamped.cols);
+            if let Some(parser) = session.probe.parser.as_ref() {
+                if let Ok(mut parser) = parser.lock() {
+                    parser.screen_mut().set_size(clamped.rows, clamped.cols);
+                }
+                session.probe.scanned_end.store(0, Ordering::Release);
             }
         }
         result
@@ -1548,6 +1575,27 @@ impl PtyBroker {
         }
     }
 
+    /// 该会话待处理的 AskUserQuestion 题面（前端轮询用，补 emit 丢失的事件）。
+    ///
+    /// 超过 [`INTERACTIVE_QUESTION_TTL_MS`] 的条目视为过期并顺手清掉：题面卡的去留最终由
+    /// 前端的收卡信号决定（作答/取消后 transcript 增长或回合结束），后端无从得知用户
+    /// 何时答完，只能靠 TTL 兜底——与前端的 180s 兜底同一量级，早于它过期即可。
+    pub(crate) fn interactive_question(&self, session_id: i64) -> Option<ApprovalRequest> {
+        let mut questions = self.attach.interactive_questions.lock().ok()?;
+        let now = crate::now_ms();
+        questions.retain(|_, (_, at)| now.saturating_sub(*at) < INTERACTIVE_QUESTION_TTL_MS);
+        questions
+            .get(&session_id)
+            .map(|(request, _)| request.clone())
+    }
+
+    /// 用户已处理完该题面（前端收卡时调用）：撤下表，避免轮询把答过的题重新弹出来。
+    pub(crate) fn clear_interactive_question(&self, session_id: i64) {
+        if let Ok(mut questions) = self.attach.interactive_questions.lock() {
+            questions.remove(&session_id);
+        }
+    }
+
     /// 对话窗此刻停在哪些会话上。审批消费者租约由对话页的 useEffect 在切到某会话后
     /// 注册、切走时注销，语义正是「这个窗口正显示这条会话」——通知抑制复用它当
     /// 「用户正在看」的信号，不必再造一套上报。
@@ -1857,6 +1905,11 @@ impl PtyBroker {
         // 10s 窗口只会把终端表单的出现拖慢同样久。窗口没开/开晚了也无碍——表单在终端里
         // 本来就能答，事件错过时既有的屏幕识别路径仍会长出可作答的卡。
         if request.tool_name == "AskUserQuestion" {
+            // 先入表再切窗：窗口冷启动期间事件会打进虚空（见 interactive_questions 的
+            // 文档），前端轮询靠这张表把错过的题面补回来。
+            if let Ok(mut questions) = self.attach.interactive_questions.lock() {
+                questions.insert(request.session_id, (request.clone(), crate::now_ms()));
+            }
             if let Some(app) = self.attach.app.lock().ok().and_then(|app| app.clone()) {
                 // 与审批同等待遇：把对话窗切到该会话并闪任务栏（理由见 ensure_approval_window
                 // 的取舍注释——宁可切走一次，也不要让提问悄悄漏过）。
@@ -1993,6 +2046,17 @@ mod tests {
         })
     }
 
+    /// 测试用：往 probe 的屏幕状态机喂字节（parser 必存在，即 provider 有规则集）。
+    fn feed_screen(probe: &ScreenProbe, bytes: &[u8]) {
+        probe
+            .parser
+            .as_ref()
+            .expect("该 provider 应有规则集")
+            .lock()
+            .expect("锁未被毒化")
+            .process(bytes);
+    }
+
     /// 并发实测：PTY reader 高频喂字节的同时检测线程持续扫描。二者共享 parser 锁
     /// （reader 每 chunk 写、ticker 每轮持锁导出整屏），锁序错了会死锁、导出期间
     /// panic 会毒化锁。这里用真实的两线程竞争跑一遍，并断言结束后状态仍正确——
@@ -2007,11 +2071,9 @@ mod tests {
                 let mut written = 0u64;
                 while std::time::Instant::now() < deadline {
                     // 模拟构建日志刷屏：带 SGR 的整行输出 + 偶尔全屏重绘。
-                    if let Ok(mut parser) = probe.parser.lock() {
-                        parser.process(b"\x1b[1;32m  compiling\x1b[0m crate v0.1.0\r\n");
-                        if written % 50 == 0 {
-                            parser.process(b"\x1b[2J\x1b[H");
-                        }
+                    feed_screen(&probe, b"\x1b[1;32m  compiling\x1b[0m crate v0.1.0\r\n");
+                    if written.is_multiple_of(50) {
+                        feed_screen(&probe, b"\x1b[2J\x1b[H");
                     }
                     written += 1;
                 }
@@ -2037,14 +2099,12 @@ mod tests {
         assert!(written > 0 && ticks > 0, "两侧都应真正跑起来");
 
         // 竞争结束后 parser 状态仍健康：喂进一屏审批 UI 应被正确判定。
-        {
-            let mut parser = probe.parser.lock().expect("锁未被毒化");
-            parser.process(b"\x1b[2J\x1b[H");
-            parser.process(
-                " Bash command\r\n Do you want to proceed?\r\n \u{276F} 1. Yes\r\n   2. No\r\n"
-                    .as_bytes(),
-            );
-        }
+        feed_screen(&probe, b"\x1b[2J\x1b[H");
+        feed_screen(
+            &probe,
+            " Bash command\r\n Do you want to proceed?\r\n \u{276F} 1. Yes\r\n   2. No\r\n"
+                .as_bytes(),
+        );
         let after_grace =
             probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);
         assert_eq!(
@@ -2060,26 +2120,24 @@ mod tests {
         let probe = ScreenProbe::new(24, 80, "claude".into());
         let after_grace =
             probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);
-        probe
-            .parser
-            .lock()
-            .unwrap()
-            .process("\x1b]0;\u{2733} claude\x07".as_bytes());
+        feed_screen(&probe, "\x1b]0;\u{2733} claude\x07".as_bytes());
         assert_eq!(
             probe.tick(1, after_grace),
             Some(crate::detect::ScreenState::Idle),
             "provider 正确时规则命中"
         );
-        // 同一屏幕、provider 是包装器名（argv[0] 猜出来的典型错值）→ 无规则集，
-        // 检测整体静默失效。这正是不能从 argv[0] 推导的理由。
+        // provider 是包装器名（argv[0] 猜出来的典型错值）→ 无规则集：连 parser 都不建，
+        // reader 热路径一个字节都不解析（门在生产端，不是消费端）。
         let mistaken = ScreenProbe::new(24, 80, "npx".into());
-        mistaken
-            .parser
-            .lock()
-            .unwrap()
-            .process("\x1b]0;\u{2733} claude\x07".as_bytes());
+        assert!(
+            mistaken.parser.is_none(),
+            "无规则集的 provider 不该建 parser——否则每 chunk 白跑一遍 VT 状态机"
+        );
         assert_eq!(
-            mistaken.tick(1, mistaken.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1)),
+            mistaken.tick(
+                1,
+                mistaken.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1)
+            ),
             None
         );
     }
@@ -2127,9 +2185,7 @@ mod tests {
     /// 这正是「不能对原始 backlog 做字符串匹配」的验证。
     #[test]
     fn screen_probe_detects_states_from_raw_ansi() {
-        fn feed(probe: &ScreenProbe, bytes: &[u8]) {
-            probe.parser.lock().unwrap().process(bytes);
-        }
+        let feed = feed_screen;
         let probe = ScreenProbe::new(24, 80, "claude".into());
         // 启动宽限之外的时间基准。
         let after_grace = probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);

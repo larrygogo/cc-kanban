@@ -51,15 +51,21 @@ export type QuestionDismissTracker = { armAt: number; count: number | null };
 
 export function observeTranscriptForDismiss(
   tracker: QuestionDismissTracker,
-  observation: { count: number; running: boolean },
+  // running 为 null = **状态未知**（history 尚未加载／刚 resetTo 清空），不是「已结束」。
+  // 二者混同会让卡在冷启动路径上闪现 1.5 秒就自己消失：切窗触发 resetTo → history 置
+  // null → 静置期一过，任何一次重渲染都判成回合结束而收卡（实测踩过）。
+  observation: { count: number; running: boolean | null },
   now: number,
 ): boolean {
   if (now < tracker.armAt) {
     tracker.count = Math.max(tracker.count ?? observation.count, observation.count);
     return false;
   }
-  if (!observation.running) {
+  if (observation.running === false) {
     return true;
+  }
+  if (observation.running === null) {
+    return false;
   }
   if (tracker.count == null) {
     tracker.count = observation.count;

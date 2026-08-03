@@ -202,6 +202,7 @@ export const en: Dict = {
     questionFormLoading: "Pick an answer; it will be applied once the terminal form is ready",
     queuedAnswerHint: (label: string) => `Picked "${label}" — it will be applied once the form is ready`,
     questionExternalHint: "This session runs in an external terminal — answer there; this card will dismiss automatically once answered",
+    questionMultiHint: "Multi-question or multi-select forms must be answered in the terminal; this card dismisses automatically once answered",
     customAnswerPlaceholder: "Type another answer",
     addCustomAnswer: "Add answer",
     submitAnswer: "Submit choices",
