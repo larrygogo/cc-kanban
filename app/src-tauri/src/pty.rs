@@ -1993,6 +1993,66 @@ mod tests {
         })
     }
 
+    /// 并发实测：PTY reader 高频喂字节的同时检测线程持续扫描。二者共享 parser 锁
+    /// （reader 每 chunk 写、ticker 每轮持锁导出整屏），锁序错了会死锁、导出期间
+    /// panic 会毒化锁。这里用真实的两线程竞争跑一遍，并断言结束后状态仍正确——
+    /// 静态阅读看不出锁竞争下的活性问题。
+    #[test]
+    fn screen_probe_survives_concurrent_feed_and_tick() {
+        let probe = Arc::new(ScreenProbe::new(24, 80, "claude".into()));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        let feeder = {
+            let probe = probe.clone();
+            std::thread::spawn(move || {
+                let mut written = 0u64;
+                while std::time::Instant::now() < deadline {
+                    // 模拟构建日志刷屏：带 SGR 的整行输出 + 偶尔全屏重绘。
+                    if let Ok(mut parser) = probe.parser.lock() {
+                        parser.process(b"\x1b[1;32m  compiling\x1b[0m crate v0.1.0\r\n");
+                        if written % 50 == 0 {
+                            parser.process(b"\x1b[2J\x1b[H");
+                        }
+                    }
+                    written += 1;
+                }
+                written
+            })
+        };
+        let ticker = {
+            let probe = probe.clone();
+            std::thread::spawn(move || {
+                let after_grace =
+                    probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);
+                let mut ticks = 0u64;
+                while std::time::Instant::now() < deadline {
+                    // 每轮换一个 end 值，强制真正扫描（不走跳扫短路）。
+                    probe.tick(ticks + 1, after_grace);
+                    ticks += 1;
+                }
+                ticks
+            })
+        };
+        let written = feeder.join().expect("feeder 不应 panic（锁未被毒化）");
+        let ticks = ticker.join().expect("ticker 不应 panic");
+        assert!(written > 0 && ticks > 0, "两侧都应真正跑起来");
+
+        // 竞争结束后 parser 状态仍健康：喂进一屏审批 UI 应被正确判定。
+        {
+            let mut parser = probe.parser.lock().expect("锁未被毒化");
+            parser.process(b"\x1b[2J\x1b[H");
+            parser.process(
+                " Bash command\r\n Do you want to proceed?\r\n \u{276F} 1. Yes\r\n   2. No\r\n"
+                    .as_bytes(),
+            );
+        }
+        let after_grace =
+            probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);
+        assert_eq!(
+            probe.tick(u64::MAX, after_grace),
+            Some(crate::detect::ScreenState::Blocked)
+        );
+    }
+
     /// 检测规则按调用方传入的 provider 选，与 argv[0] 无关——包装启动（npx/bunx/fnm
     /// shim/中转脚本）下 argv[0] 不是 agent 名，靠它猜会让整条会话静默失去状态检测。
     #[test]
