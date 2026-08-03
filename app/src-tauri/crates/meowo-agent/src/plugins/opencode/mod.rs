@@ -20,6 +20,7 @@
 //! 因此 opencode 的会话收尾与 codex 一样靠 Stop + 判活，而不是一条可靠的 SessionEnd。
 
 pub mod account;
+mod screen;
 
 use crate::{
     auth::{AuthScheme, CredentialSource},
@@ -159,6 +160,10 @@ static VARIANTS: [Variant; 1] = [Variant {
 pub struct Opencode;
 
 impl AgentPlugin for Opencode {
+    fn screen_rules(&self) -> &'static [crate::screen::ScreenRule] {
+        screen::RULES
+    }
+
     fn id(&self) -> AgentId {
         id::OPENCODE
     }

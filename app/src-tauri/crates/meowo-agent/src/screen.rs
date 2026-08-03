@@ -59,6 +59,11 @@ pub enum Matcher {
     AnyContains(&'static [&'static str]),
     /// 存在某行（trim 前导空白后）以其中任一前缀开头。
     LineStartsWith(&'static [&'static str]),
+    /// 存在某行既以该前缀开头、又包含其中任一子串。比拆成两个谓词强：那样会命中
+    /// 「A 行有前缀、B 行有子串」的假阳性（选项指针 `❯` 与 "yes" 分处两行很常见）。
+    LineStartsWithContaining(&'static str, &'static [&'static str]),
+    /// 存在某行含连续 ≥N 个属于该字符集的字符（进度条：`■■■■`）。
+    CharRunAtLeast(&'static str, usize),
     /// 存在某行去掉前导空白与可选 `❯` 后，以 `<数字>. <词>` 开头（审批菜单的选项行）。
     NumberedOption(char, &'static str),
     /// 存在某行去掉前导空白与可选 `❯` 后直接是 `yes`（无编号的确认项）。

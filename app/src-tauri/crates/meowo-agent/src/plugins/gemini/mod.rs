@@ -24,6 +24,7 @@
 //! | `SessionEnd` | `SessionEnd` | 会话收尾 |
 
 pub mod account;
+mod screen;
 pub mod telemetry;
 
 use crate::{
@@ -157,6 +158,10 @@ static VARIANTS: [Variant; 1] = [Variant {
 pub struct Gemini;
 
 impl AgentPlugin for Gemini {
+    fn screen_rules(&self) -> &'static [crate::screen::ScreenRule] {
+        screen::RULES
+    }
+
     fn id(&self) -> AgentId {
         id::GEMINI
     }

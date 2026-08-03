@@ -145,6 +145,17 @@ fn eval_matcher(matcher: &Matcher, region: &[String], title: &str) -> bool {
             let rest = line.trim_start();
             prefixes.iter().any(|p| rest.starts_with(p))
         }),
+        Matcher::LineStartsWithContaining(prefix, needles) => region.iter().any(|line| {
+            let rest = line.trim_start();
+            rest.starts_with(prefix) && needles.iter().any(|n| rest.contains(n))
+        }),
+        Matcher::CharRunAtLeast(set, min) => region.iter().any(|line| {
+            let mut run = 0usize;
+            line.chars().any(|ch| {
+                run = if set.contains(ch) { run + 1 } else { 0 };
+                run >= *min
+            })
+        }),
         Matcher::NumberedOption(number, word) => region
             .iter()
             .any(|line| numbered_option(line, *number, word)),
@@ -659,6 +670,90 @@ mod tests {
         assert_eq!(
             state_of(evaluate("kimi", &s)),
             Some((ScreenState::Idle, FALLBACK_RULE_ID))
+        );
+    }
+
+    // -- gemini --
+
+    #[test]
+    fn gemini_approval_box_is_blocked() {
+        let s = snap(&[
+            "  │ Apply this change to src/main.rs?",
+            "  │ \u{276F} Yes, apply",
+            "  │   No",
+        ]);
+        assert_eq!(
+            state_of(evaluate("gemini", &s)),
+            Some((ScreenState::Blocked, "apply_or_allow_change"))
+        );
+    }
+
+    /// 选项指针与 yes 必须在**同一行**：拆成两个谓词会把「某处有 ❯、别处有 yes」的
+    /// 普通输出误判成审批（LineStartsWithContaining 存在的理由）。
+    #[test]
+    fn gemini_pointer_and_yes_must_share_a_line() {
+        let same_line = snap(&["  \u{276F} Yes, allow it"]);
+        assert_eq!(
+            state_of(evaluate("gemini", &same_line)),
+            Some((ScreenState::Blocked, "apply_or_allow_change"))
+        );
+        // 指针行与 yes 分处两行、且无任何审批文案 → 不该判阻塞。
+        let split = snap(&["  \u{276F} run the tests", "  the answer is yes"]);
+        assert_ne!(
+            state_of(evaluate("gemini", &split)).map(|(state, _)| state),
+            Some(ScreenState::Blocked)
+        );
+    }
+
+    #[test]
+    fn gemini_esc_to_cancel_is_working() {
+        let s = snap(&["  generating response...", "  (esc to cancel)"]);
+        assert_eq!(
+            state_of(evaluate("gemini", &s)),
+            Some((ScreenState::Working, "esc_cancel_working"))
+        );
+    }
+
+    // -- opencode --
+
+    #[test]
+    fn opencode_permission_panel_is_blocked() {
+        let titled = snap(&["  \u{25B3} Permission required", "  write src/lib.rs"]);
+        assert_eq!(
+            state_of(evaluate("opencode", &titled)),
+            Some((ScreenState::Blocked, "permission_required"))
+        );
+        // 无标题时要三类快捷键同时在场。
+        let by_hints = snap(&["  some panel", "  ↑↓ select · enter confirm · esc dismiss"]);
+        assert_eq!(
+            state_of(evaluate("opencode", &by_hints)),
+            Some((ScreenState::Blocked, "permission_required"))
+        );
+        // 只有 dismiss 提示的普通浮层不算审批。
+        let plain = snap(&["  some overlay", "  esc dismiss"]);
+        assert_ne!(
+            state_of(evaluate("opencode", &plain)).map(|(state, _)| state),
+            Some(ScreenState::Blocked)
+        );
+    }
+
+    #[test]
+    fn opencode_progress_and_interrupt_are_working() {
+        let bar = snap(&["  building", "  \u{25A0}\u{25A0}\u{25A0}\u{25A0}\u{25A0} 62%"]);
+        assert_eq!(
+            state_of(evaluate("opencode", &bar)),
+            Some((ScreenState::Working, "progress_bar_working"))
+        );
+        // 不足 4 连的方块不算进度条（避免命中普通符号）。
+        let short = snap(&["  \u{25A0}\u{25A0} bullet"]);
+        assert_eq!(
+            state_of(evaluate("opencode", &short)),
+            Some((ScreenState::Idle, FALLBACK_RULE_ID))
+        );
+        let hint = snap(&["  thinking (esc to interrupt)"]);
+        assert_eq!(
+            state_of(evaluate("opencode", &hint)),
+            Some((ScreenState::Working, "interrupt_hint_working"))
         );
     }
 
