@@ -1584,7 +1584,7 @@ pub(crate) async fn new_session(
     // PTY 冷启动与杀软扫描可能阻塞数秒，放 blocking 池；首次 SessionStart hook 会把临时 PTY
     // 认领为真实数据库 session。
     let temp_id = tauri::async_runtime::spawn_blocking(move || {
-        broker.start_pending(app, &argv, Some(&dir), &env, 100, 30)
+        broker.start_pending(app, &argv, Some(&dir), &env, 100, 30, &provider)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -1847,6 +1847,7 @@ pub(crate) fn start_managed_resume_sized(
         resolved.as_deref(),
         &env,
         terminal_size,
+        &provider,
     ) {
         if let Some(id) = revived {
             rollback_failed_resume(id);

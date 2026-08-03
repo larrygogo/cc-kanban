@@ -688,6 +688,11 @@ impl PtyBroker {
         false
     }
 
+    /// `provider` 是 agent id（"claude"/"codex"/"kimi"），决定屏幕检测用哪套规则。
+    /// 由调用方从 DB 的 `sessions.provider` 传入——**不从 argv[0] 猜**：包装启动
+    /// （npx/bunx/fnm shim/中转脚本）下 argv[0] 根本不是 agent 名，猜错就整条会话
+    /// 没有状态检测，且失败是静默的。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
         &self,
         app: tauri::AppHandle,
@@ -696,6 +701,7 @@ impl PtyBroker {
         cwd: Option<&str>,
         env: &[(String, String)],
         terminal_size: TerminalSize,
+        provider: &str,
     ) -> Result<(), String> {
         if argv.is_empty() {
             return Err("该 Agent 不支持恢复会话".into());
@@ -708,7 +714,7 @@ impl PtyBroker {
         if !self.begin_start(session_id)? {
             return Ok(());
         }
-        let result = self.start_spawned(app, session_id, argv, cwd, env, terminal_size);
+        let result = self.start_spawned(app, session_id, argv, cwd, env, terminal_size, provider);
         if result.is_err() {
             // 启动失败清占位，重试才进得来；completed 快照已在 begin_start 摘掉，与旧行为一致。
             self.end_start(session_id);
@@ -753,6 +759,7 @@ impl PtyBroker {
 
     /// start 的锁外段：openpty → spawn → 登记 → 起 waiter/reader 线程。
     /// 调用方持有 starting 占位；本函数任一步失败都由调用方清占位。
+    #[allow(clippy::too_many_arguments)]
     fn start_spawned(
         &self,
         app: tauri::AppHandle,
@@ -761,6 +768,7 @@ impl PtyBroker {
         cwd: Option<&str>,
         env: &[(String, String)],
         terminal_size: TerminalSize,
+        provider: &str,
     ) -> Result<(), String> {
         let pty_size = size(terminal_size.cols, terminal_size.rows);
         let pair = native_pty_system()
@@ -813,11 +821,7 @@ impl PtyBroker {
             output_end: AtomicU64::new(0),
             subscribers: Mutex::new(Vec::new()),
             finalized: AtomicBool::new(false),
-            probe: ScreenProbe::new(
-                pty_size.rows,
-                pty_size.cols,
-                crate::detect::provider_from_argv0(&argv[0]),
-            ),
+            probe: ScreenProbe::new(pty_size.rows, pty_size.cols, provider.to_string()),
         });
         // writer 线程：唯一直接触碰 ConPTY 输入管道的地方。写失败（管道断）即退出；
         // ManagedPty 被收尾丢弃后 tx 断开，recv 出错线程随之结束。它若卡死在一次
@@ -991,6 +995,7 @@ impl PtyBroker {
 
     /// 在真实 agent session id 尚未产生前启动 PTY。hook 继承的一次性 token 会在首次落库后
     /// 通过 loopback 服务把这个负数临时 id 原子替换成数据库 id。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start_pending(
         &self,
         app: tauri::AppHandle,
@@ -999,6 +1004,7 @@ impl PtyBroker {
         env: &[(String, String)],
         cols: u16,
         rows: u16,
+        provider: &str,
     ) -> Result<i64, String> {
         let endpoint = self
             .attach
@@ -1030,6 +1036,7 @@ impl PtyBroker {
             cwd,
             &launch_env,
             TerminalSize::new(cols, rows),
+            provider,
         ) {
             if let Ok(mut pending) = self.attach.pending.lock() {
                 pending.remove(&launch_token);
@@ -1973,6 +1980,37 @@ mod tests {
             subscribers: Mutex::new(Vec::new()),
             probe: ScreenProbe::new(24, 80, "claude".into()),
         })
+    }
+
+    /// 检测规则按调用方传入的 provider 选，与 argv[0] 无关——包装启动（npx/bunx/fnm
+    /// shim/中转脚本）下 argv[0] 不是 agent 名，靠它猜会让整条会话静默失去状态检测。
+    #[test]
+    fn screen_probe_takes_provider_from_caller_not_argv() {
+        let probe = ScreenProbe::new(24, 80, "claude".into());
+        let after_grace =
+            probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);
+        probe
+            .parser
+            .lock()
+            .unwrap()
+            .process("\x1b]0;\u{2733} claude\x07".as_bytes());
+        assert_eq!(
+            probe.tick(1, after_grace),
+            Some(crate::detect::ScreenState::Idle),
+            "provider 正确时规则命中"
+        );
+        // 同一屏幕、provider 是包装器名（argv[0] 猜出来的典型错值）→ 无规则集，
+        // 检测整体静默失效。这正是不能从 argv[0] 推导的理由。
+        let mistaken = ScreenProbe::new(24, 80, "npx".into());
+        mistaken
+            .parser
+            .lock()
+            .unwrap()
+            .process("\x1b]0;\u{2733} claude\x07".as_bytes());
+        assert_eq!(
+            mistaken.tick(1, mistaken.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1)),
+            None
+        );
     }
 
     /// AskUserQuestion 是提问不是权限：必须立即回 allow（TUI 表单零延迟），且**绝不入

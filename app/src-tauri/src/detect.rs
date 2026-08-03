@@ -97,22 +97,6 @@ pub(crate) fn evaluate(provider: &str, snap: &ScreenSnapshot) -> Option<Evaluati
     }
 }
 
-/// 从 spawn argv[0] 推 provider 标签：取文件名主干、小写。托管 PTY 跑的必是 agent CLI，
-/// 可执行名即身份（"C:\\...\\claude.exe" / "/usr/local/bin/claude" → "claude"）。
-pub(crate) fn provider_from_argv0(argv0: &str) -> String {
-    let name = argv0
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(argv0)
-        .to_ascii_lowercase();
-    for ext in [".exe", ".cmd", ".bat", ".ps1"] {
-        if let Some(stem) = name.strip_suffix(ext) {
-            return stem.to_string();
-        }
-    }
-    name
-}
-
 // ---------------------------------------------------------------------------
 // Claude Code 规则（herdr claude.toml 2026.07.13.1 的语义移植，优先级降序）
 // ---------------------------------------------------------------------------
@@ -649,14 +633,6 @@ mod tests {
             Evaluation::Publish(det) => Some((det.state, det.rule_id)),
             Evaluation::Hold { rule_id } => Some((ScreenState::Idle, rule_id)),
         }
-    }
-
-    #[test]
-    fn provider_tag_comes_from_argv0_stem() {
-        assert_eq!(provider_from_argv0("claude"), "claude");
-        assert_eq!(provider_from_argv0(r"C:\Users\x\AppData\npm\claude.CMD"), "claude");
-        assert_eq!(provider_from_argv0("/usr/local/bin/claude"), "claude");
-        assert_eq!(provider_from_argv0("kimi.exe"), "kimi");
     }
 
     #[test]
