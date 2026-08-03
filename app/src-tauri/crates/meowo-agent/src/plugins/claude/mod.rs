@@ -87,6 +87,18 @@ static PROFILE: crate::profile::ProfileSpec = crate::profile::ProfileSpec {
     creds_rel: ".credentials.json",
 };
 
+/// Claude 的会话可跨账号继续：`claude --resume <id>` 只认 `CLAUDE_CONFIG_DIR` 下的
+/// 会话数据，把这几处 session 级数据复制到目标账号目录后即可在新账号下接着跑。
+///
+/// 只列 session 级数据——credentials / settings / plugins 一概不搬（那是账号本身，
+/// 搬过去等于把两个账号合并）。
+static CROSS_ACCOUNT: crate::profile::CrossAccountSession = crate::profile::CrossAccountSession {
+    transcript_dir: "projects",
+    transcript_ext: ".jsonl",
+    session_buckets: &["file-history", "session-env", "tasks"],
+    subagents_beside_transcript: true,
+};
+
 static AUTH: AuthScheme = AuthScheme {
     credentials: CredentialSource::KeychainOrFile {
         service: "Claude Code-credentials",
@@ -244,6 +256,9 @@ impl crate::RelayCap for ClaudeRelay {
 impl AgentPlugin for Claude {
     fn screen_rules(&self) -> &'static [crate::screen::ScreenRule] {
         screen::RULES
+    }
+    fn cross_account_session(&self) -> Option<&'static crate::profile::CrossAccountSession> {
+        Some(&CROSS_ACCOUNT)
     }
 
     fn id(&self) -> AgentId {

@@ -283,6 +283,12 @@ pub trait AgentPlugin: Sync {
         false
     }
 
+    /// 跨账号会话迁移规格（见 [`crate::profile::CrossAccountSession`]）。
+    /// `None` = 不支持：恢复该 agent 的会话时沿用它原先所属的账号。
+    fn cross_account_session(&self) -> Option<&'static crate::profile::CrossAccountSession> {
+        None
+    }
+
     /// 该 agent TUI 的屏幕状态规则（见 [`crate::screen`]）。空 = 不做屏幕检测，
     /// 宿主连终端仿真都不会为它建（reader 热路径零开销）。
     ///

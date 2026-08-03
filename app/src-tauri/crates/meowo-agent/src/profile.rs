@@ -33,6 +33,28 @@
 
 use std::path::{Path, PathBuf};
 
+/// **跨账号会话迁移**规格。声明它 = 该 agent 的会话可以搬到当前活跃账号下继续：
+/// 恢复前把 session 级数据同步过去，因此恢复用的是**活跃账号**而非会话原先所属账号。
+///
+/// 不声明（默认）= 不支持，恢复沿用会话记录的原账号。这不是「还没做」而是安全默认：
+/// 迁移要求该 agent 的会话数据可整体复制且换目录后仍能被它自己认出，未取证就搬运
+/// 只会造出一个 agent 读不了的半份副本。
+///
+/// 字段描述的是「会话级数据散落在数据根的哪些地方」，宿主据此复制，不必知道任何
+/// 具体 agent 的目录名。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrossAccountSession {
+    /// 会话正文所在的目录（相对数据根），其下按项目再分子目录，文件名为
+    /// `<session-id>` + [`transcript_ext`](Self::transcript_ext)。
+    pub transcript_dir: &'static str,
+    /// 会话正文的扩展名（含点，如 `.jsonl`）。
+    pub transcript_ext: &'static str,
+    /// 其余按 session id 分目录保存的数据桶（相对数据根）：`<桶>/<session-id>/…`。
+    pub session_buckets: &'static [&'static str],
+    /// 子 agent 数据是否放在「与正文同名的同级目录」（`<项目>/<session-id>/`）。
+    pub subagents_beside_transcript: bool,
+}
+
 /// 某 agent 的 profile 隔离规格。声明式，加/改 agent 只动 `plugins/`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProfileSpec {

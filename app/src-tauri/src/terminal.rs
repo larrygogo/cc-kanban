@@ -490,14 +490,21 @@ pub(crate) fn launch_env_for_session(
     launch_env_for_profile(provider, profile.as_deref())
 }
 
+/// 声明了跨账号迁移的 agent 用**当前活跃账号**恢复（恢复前会把会话资料同步过去）；
+/// 其余沿用该会话原先所属的账号。判据取自插件声明，不认识任何具体 agent。
+fn supports_cross_account_resume(provider: Option<&str>) -> bool {
+    meowo_agent::resolve(provider).is_some_and(|agent| agent.cross_account_session().is_some())
+}
+
 fn resume_profile(
     provider: Option<&str>,
     stored: Option<String>,
     active: Option<String>,
 ) -> Option<String> {
-    match provider {
-        Some("claude") => active,
-        _ => stored,
+    if supports_cross_account_resume(provider) {
+        active
+    } else {
+        stored
     }
 }
 
@@ -509,9 +516,10 @@ fn profile_of_session(session_id: &str) -> Option<String> {
 }
 
 fn ensure_session_profile_available(provider: &str, session_id: &str) -> Result<(), String> {
-    // Claude 恢复使用当前活跃账号；旧账号即使已删除，也不该阻止一个仍能在其他目录找到
-    // transcript 的会话被接管。目标账号由 active_id 保证一定是已注册且目录存在的 profile。
-    if provider == "claude" {
+    // 跨账号迁移的 agent 恢复时用当前活跃账号；旧账号即使已删除，也不该阻止一个仍能在
+    // 其他目录找到 transcript 的会话被接管。目标账号由 active_id 保证一定是已注册且
+    // 目录存在的 profile。
+    if supports_cross_account_resume(Some(provider)) {
         return Ok(());
     }
     let Some(profile) = profile_of_session(session_id) else {
@@ -563,43 +571,50 @@ fn copy_dir_merge(source: &std::path::Path, target: &std::path::Path) -> Result<
     Ok(())
 }
 
+/// 按插件声明的规格，把一个会话的 session 级数据复制到目标账号目录。
+/// 目录名与布局全部来自 `spec`——本函数不认识任何具体 agent。
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn sync_claude_session_files(
+fn sync_session_files(
+    spec: &meowo_agent::profile::CrossAccountSession,
     source: &std::path::Path,
     target_root: &std::path::Path,
     session_id: &str,
 ) -> Result<(), String> {
+    // source 形如 <root>/<transcript_dir>/<项目>/<id><ext>，上溯三级即数据根。
     let source_root = source
         .parent()
         .and_then(std::path::Path::parent)
         .and_then(std::path::Path::parent)
-        .ok_or("Claude 会话路径格式异常")?;
+        .ok_or("会话路径格式异常")?;
     if source_root == target_root {
         return Ok(());
     }
     let project = source
         .parent()
         .and_then(|path| path.file_name())
-        .ok_or("Claude 会话项目路径格式异常")?;
+        .ok_or("会话项目路径格式异常")?;
     let target = target_root
-        .join("projects")
+        .join(spec.transcript_dir)
         .join(project)
-        .join(format!("{session_id}.jsonl"));
+        .join(format!("{session_id}{}", spec.transcript_ext));
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     if !file_unchanged(source, &target) {
-        std::fs::copy(source, &target).map_err(|error| format!("同步 Claude 会话失败：{error}"))?;
+        std::fs::copy(source, &target).map_err(|error| format!("同步会话失败：{error}"))?;
     }
 
-    // Claude 的回滚历史、环境快照与任务也按 session id 分目录保存。
-    for bucket in ["file-history", "session-env", "tasks"] {
+    // 回滚历史、环境快照、任务等按 session id 分目录保存的数据桶。
+    for bucket in spec.session_buckets {
         let from = source_root.join(bucket).join(session_id);
         if from.is_dir() {
             copy_dir_merge(&from, &target_root.join(bucket).join(session_id))?;
         }
     }
-    // subagents 位于 transcript 同级的 `<session-id>/` 目录。
+    if !spec.subagents_beside_transcript {
+        return Ok(());
+    }
+    // 子 agent 数据位于 transcript 同级的 `<session-id>/` 目录。
     let subagents = source.with_extension("");
     if subagents.is_dir() {
         copy_dir_merge(
@@ -610,29 +625,38 @@ fn sync_claude_session_files(
     Ok(())
 }
 
-/// 把一个 Claude session 的资料同步到当前活跃账号目录。只复制 session 级数据，绝不复制
-/// credentials/settings/plugins。源文件保留，因此之后切回任意账号仍可按最新副本继续。
+/// 把一个会话的资料同步到当前活跃账号目录，返回恢复时该用的账号。
+/// 只复制 session 级数据（按插件声明的规格），绝不复制 credentials/settings/plugins。
+/// 源文件保留，因此之后切回任意账号仍可按最新副本继续。
+///
+/// 未声明跨账号迁移的 agent 直接返回会话原账号，不做任何搬运。
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn prepare_claude_session_for_active_profile(
+fn prepare_session_for_active_profile(
     provider: &str,
     session_id: &str,
 ) -> Result<Option<String>, String> {
-    if provider != "claude" {
+    let Some(agent) = meowo_agent::resolve(Some(provider)) else {
         return Ok(profile_of_session(session_id));
-    }
-    // 找不到本地 transcript 时不能硬报错：查找只覆盖 ~/.claude 与托管 profile 目录，
-    // 用户自设 CLAUDE_CONFIG_DIR（插件本就当一等配置支持）或 transcript 被
-    // cleanupPeriodDays 清理时都查不到，而 `claude --resume` 自己找得到会话。
-    // 退回该会话记录的账号原样恢复，只跳过跨账号同步——同步本来也无从做起。
-    let Some(source) =
-        meowo_agent::plugins::claude::transcript::find_transcript_by_session(session_id)
+    };
+    let Some(spec) = agent.cross_account_session() else {
+        return Ok(profile_of_session(session_id));
+    };
+    // 找不到本地 transcript 时不能硬报错：查找只覆盖默认数据目录与托管 profile 目录，
+    // 用户自设该 agent 的 config-home（插件本就当一等配置支持）或 transcript 被清理策略
+    // 删掉时都查不到，而 agent 自己的 resume 找得到会话。退回该会话记录的账号原样恢复，
+    // 只跳过跨账号同步——同步本来也无从做起。
+    let Some(source) = agent
+        .telemetry()
+        .and_then(|cap| cap.transcript())
+        // 只给 session_id：hook 路径与 cwd 都不在手边，交给该 agent 的全局查找。
+        .and_then(|spec| spec.resolve_transcript_path(None, None, session_id))
     else {
         return Ok(profile_of_session(session_id));
     };
-    let target_profile = crate::profile::active_id("claude");
-    let target_root = crate::profile::data_dir("claude", target_profile.as_deref())
-        .ok_or("无法定位当前 Claude 账号目录")?;
-    sync_claude_session_files(&source, &target_root, session_id)?;
+    let target_profile = crate::profile::active_id(provider);
+    let target_root = crate::profile::data_dir(provider, target_profile.as_deref())
+        .ok_or("无法定位当前账号目录")?;
+    sync_session_files(spec, &source, &target_root, session_id)?;
     Ok(target_profile)
 }
 
@@ -649,7 +673,15 @@ fn record_resumed_profile(session_id: &str, profile: Option<&str>) {
 
 #[cfg(all(test, any(target_os = "windows", target_os = "macos")))]
 mod cross_account_resume_tests {
-    use super::sync_claude_session_files;
+    use super::sync_session_files;
+
+    /// 用 **claude 插件声明的真实规格**跑同步：目录名不再写死在宿主里，这条测试
+    /// 因此同时验证了「规格取自插件」与「按规格搬对了东西」。
+    fn claude_spec() -> &'static meowo_agent::profile::CrossAccountSession {
+        meowo_agent::resolve(Some("claude"))
+            .and_then(|agent| agent.cross_account_session())
+            .expect("claude 声明了跨账号会话迁移")
+    }
 
     #[test]
     fn copies_only_session_scoped_claude_data() {
@@ -672,7 +704,7 @@ mod cross_account_resume_tests {
         std::fs::write(subagent.join("agent.jsonl"), "child").unwrap();
         std::fs::write(source_root.join(".credentials.json"), "secret").unwrap();
 
-        sync_claude_session_files(&transcript, &target_root, session).unwrap();
+        sync_session_files(claude_spec(), &transcript, &target_root, session).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(
@@ -1679,7 +1711,7 @@ pub(crate) async fn takeover_managed_terminal(
             }
             // 先做一次可恢复副本再结束外部进程；结束后 start_managed_resume_sized 会再同步
             // 最终增量。这样目标目录不可写/源文件缺失时不会先把用户仍可用的会话杀掉。
-            prepare_claude_session_for_active_profile(&provider, &session.cc_session_id)?;
+            prepare_session_for_active_profile(&provider, &session.cc_session_id)?;
             if let Some(pid) = pid {
                 terminate_agent_for_restart(pid)?;
             }
@@ -1833,7 +1865,7 @@ pub(crate) fn start_managed_resume_sized(
     }
     // takeover 调用本函数前已经结束旧进程；普通 resume 的旧进程本就不在。此刻复制能拿到
     // 完整的最后一帧 transcript，也不会与 Claude 正在追加同一个文件发生竞争。
-    let target_profile = prepare_claude_session_for_active_profile(&provider, &session_id)?;
+    let target_profile = prepare_session_for_active_profile(&provider, &session_id)?;
     let revived = prepare_resume(&app, &session_id);
     let env = if provider == "claude" {
         launch_env_for_resume_target(&provider, target_profile.as_deref())
@@ -2089,13 +2121,13 @@ pub(crate) async fn restart_session_supported(
             return Err("该 Agent 不支持恢复会话".into());
         }
         // 与托管接管一致：跨账号副本先落稳，再结束仍可用的外部进程。
-        prepare_claude_session_for_active_profile(&provider, &session_id)?;
+        prepare_session_for_active_profile(&provider, &session_id)?;
         // 账号目录可能已被删除。必须在终止仍可用的原进程之前拦住，否则恢复失败还会顺手杀掉会话。
         ensure_session_profile_available(&provider, &session_id)?;
         terminate_agent_for_restart(pid)?;
 
         // 原进程确认结束后才复活 DB 状态；恢复计划沿用终止前已验证的结果。
-        let target_profile = prepare_claude_session_for_active_profile(&provider, &session_id)?;
+        let target_profile = prepare_session_for_active_profile(&provider, &session_id)?;
         let revived = prepare_resume(&app, &session_id);
         let env = if provider == "claude" {
             launch_env_for_resume_target(&provider, target_profile.as_deref())
