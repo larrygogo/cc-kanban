@@ -1548,6 +1548,17 @@ impl PtyBroker {
         }
     }
 
+    /// 对话窗此刻停在哪些会话上。审批消费者租约由对话页的 useEffect 在切到某会话后
+    /// 注册、切走时注销，语义正是「这个窗口正显示这条会话」——通知抑制复用它当
+    /// 「用户正在看」的信号，不必再造一套上报。
+    pub(crate) fn viewed_session_ids(&self) -> HashSet<i64> {
+        self.attach
+            .approval_consumers
+            .lock()
+            .map(|consumers| consumers.values().copied().collect())
+            .unwrap_or_default()
+    }
+
     fn has_approval_consumer(&self, session_id: i64) -> bool {
         self.attach
             .approval_consumers

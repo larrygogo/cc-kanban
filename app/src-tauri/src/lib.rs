@@ -1191,8 +1191,32 @@ mod tests {
         shell_join_for_windows, strip_jsonc_comments, tab_match_score,
     };
     use crate::watch::{
-        pending_fingerprint, screen_blocked_fingerprint, should_notify, waiting_fingerprint,
+        is_viewing_session, pending_fingerprint, screen_blocked_fingerprint, should_notify,
+        suppressed_by_viewing, waiting_fingerprint, NotifyKind,
     };
+
+    /// 通知抑制的非对称：用户正看着某会话时不弹它的「等待你回复」（他就在屏幕前），
+    /// 但要人做决定的通知（错误/待审批/屏幕阻塞）**永不抑制**——抑制它等于把需要
+    /// 决策的事悄悄藏起来。窗口没聚焦则一律不算「正在看」。
+    #[test]
+    fn viewing_suppresses_only_the_completion_notification() {
+        let viewed: std::collections::HashSet<i64> = [7].into_iter().collect();
+        // 聚焦 + 停在该会话 = 正在看；换个会话或窗口失焦都不算。
+        assert!(is_viewing_session(true, &viewed, 7));
+        assert!(!is_viewing_session(true, &viewed, 8));
+        assert!(!is_viewing_session(false, &viewed, 7));
+
+        // 正在看：只有「等待你回复」被抑制。
+        assert!(suppressed_by_viewing(NotifyKind::Waiting, true));
+        for kind in [NotifyKind::Error, NotifyKind::Pending, NotifyKind::Blocked] {
+            assert!(
+                !suppressed_by_viewing(kind, true),
+                "{kind:?} 要人做决定，正在看也必须弹"
+            );
+        }
+        // 没在看：什么都不抑制。
+        assert!(!suppressed_by_viewing(NotifyKind::Waiting, false));
+    }
 
     /// 屏幕阻塞通知的让位与去重：错误/已有 pending_review 时不发（那两条各自会发），
     /// 同一次阻塞只发一条，状态离开 blocked 后清空条目、下次阻塞重新通知。

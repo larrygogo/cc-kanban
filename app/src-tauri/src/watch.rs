@@ -300,6 +300,41 @@ pub(crate) fn pending_fingerprint(
     pending_review.map(|kind| format!("{kind}:{last_event_at}"))
 }
 
+/// 用户此刻是否正盯着这个会话：对话窗**聚焦**，且它正停在该会话上。
+/// 两个条件缺一不可——窗口开着但在后台（被别的应用挡住/最小化）时用户看不见，
+/// 那正是通知存在的意义。纯函数，便于单测。
+pub(crate) fn is_viewing_session(
+    chat_focused: bool,
+    viewed: &std::collections::HashSet<i64>,
+    session_id: i64,
+) -> bool {
+    chat_focused && viewed.contains(&session_id)
+}
+
+/// 通知是否该被「正在看」抑制。**非对称**（herdr 同款纪律）：
+///
+/// - 「等待你回复」这类**完成信号**在用户正看着时抑制——他就在屏幕前，弹窗只是噪音；
+/// - 错误 / 待审批 / 屏幕阻塞这类**要人做决定**的通知**永不抑制**：抑制它等于把
+///   需要决策的事悄悄藏起来，而用户可能正看着别的窗口区域、或只是让它开着没在读。
+///
+/// 判据取通知种类而不是「有没有 pending」，让每个调用点的意图显式可读。
+pub(crate) fn suppressed_by_viewing(kind: NotifyKind, viewing: bool) -> bool {
+    viewing && matches!(kind, NotifyKind::Waiting)
+}
+
+/// 通知种类。只用于抑制判定，不参与文案（文案在各调用点按 i18n key 取）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotifyKind {
+    /// 会话出错。
+    Error,
+    /// hook 报的待审批/待回答（pending_review）。
+    Pending,
+    /// 屏幕检测到的阻塞（agent 在终端里等人）。
+    Blocked,
+    /// 回合结束、等你回复。
+    Waiting,
+}
+
 /// 屏幕检测「blocked」的通知指纹——托管会话的 agent 在屏幕上挂着审批/提问 UI 等人。
 ///
 /// 存在意义是补 hook 的盲区：DB 的 `pending_review` 由 hook 事件驱动，bash 权限弹窗、
@@ -512,6 +547,16 @@ pub(crate) fn spawn_liveness_watch(
                     .try_state::<crate::AppState>()
                     .map(|state| state.ptys.screen_states())
                     .unwrap_or_default();
+                // 「用户正在看」的两个分量：对话窗聚焦 + 它停在哪些会话上。
+                // 取不到窗口/状态时按「没在看」处理——宁可多弹一条，不可漏掉需关注。
+                let chat_focused = app
+                    .get_webview_window("chat")
+                    .and_then(|window| window.is_focused().ok())
+                    .unwrap_or(false);
+                let viewed = app
+                    .try_state::<crate::AppState>()
+                    .map(|state| state.ptys.viewed_session_ids())
+                    .unwrap_or_default();
                 for mut s in store
                     .live_sessions(Some("all"), None, None, None, 1000)
                     .unwrap_or_default()
@@ -573,10 +618,17 @@ pub(crate) fn spawn_liveness_watch(
                         tray_running += 1;
                     }
 
+                    // 本轮该会话是否正被用户注视（对话窗聚焦且停在它上面）。四类通知
+                    // 都过同一个 suppressed_by_viewing 判定：种类不同结论不同（只有
+                    // 「等待你回复」会被抑制），但判定收敛在一处——将来加新通知种类时
+                    // 必须显式表态，不会漏考虑。
+                    let viewing = is_viewing_session(chat_focused, &viewed, s.session.id);
+
                     // 错误通知（优先）。
                     if let Some(e) = &error {
                         let prev = notified.get(&sid).map(|s| s.as_str());
-                        let fired = seeded && should_notify(prev, Some(&e.fingerprint));
+                        let suppressed = suppressed_by_viewing(NotifyKind::Error, viewing);
+                        let fired = seeded && should_notify(prev, Some(&e.fingerprint)) && !suppressed;
                         attention_fired |= fired;
                         if fired && notify_on {
                             show_session_notification(
@@ -604,7 +656,8 @@ pub(crate) fn spawn_liveness_watch(
                     ) {
                         Some(fp) => {
                             let prev = notified_pending.get(&sid).map(|s| s.as_str());
-                            let fired = seeded && should_notify(prev, Some(&fp));
+                            let suppressed = suppressed_by_viewing(NotifyKind::Pending, viewing);
+                            let fired = seeded && should_notify(prev, Some(&fp)) && !suppressed;
                             attention_fired |= fired;
                             if fired && notify_on {
                                 let key = match s.pending_review.as_deref() {
@@ -641,7 +694,8 @@ pub(crate) fn spawn_liveness_watch(
                     ) {
                         Some(fp) => {
                             let prev = notified_blocked.get(&sid).map(|s| s.as_str());
-                            let fired = seeded && should_notify(prev, Some(&fp));
+                            let suppressed = suppressed_by_viewing(NotifyKind::Blocked, viewing);
+                            let fired = seeded && should_notify(prev, Some(&fp)) && !suppressed;
                             attention_fired |= fired;
                             if fired && notify_on {
                                 show_session_notification(
@@ -672,7 +726,11 @@ pub(crate) fn spawn_liveness_watch(
                     ) {
                         Some(fp) => {
                             let prev = notified_waiting.get(&sid).map(|s| s.as_str());
-                            let fired = seeded && should_notify(prev, Some(&fp));
+                            // 用户正看着这条会话时不弹「等待你回复」——他就在屏幕前
+                            // （见 suppressed_by_viewing 的非对称说明）。任务栏注意力
+                            // 随 fired 一起跳过：闪一个已在前台的窗口毫无意义。
+                            let suppressed = suppressed_by_viewing(NotifyKind::Waiting, viewing);
+                            let fired = seeded && should_notify(prev, Some(&fp)) && !suppressed;
                             attention_fired |= fired;
                             if fired && notify_on {
                                 show_session_notification(
