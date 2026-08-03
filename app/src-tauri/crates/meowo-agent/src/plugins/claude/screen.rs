@@ -5,8 +5,12 @@
 
 use crate::screen::{Matcher, Region, ScreenRule, ScreenState};
 
-/// claude 的 spinner 帧写在终端标题里：盲文块 + 空格开头。
-const BRAILLE_SPINNER: &str = "\u{2800}\u{2801}\u{2802}\u{2803}\u{2804}\u{2805}\u{2806}\u{2807}\u{2808}\u{2809}\u{280A}\u{280B}\u{280C}\u{280D}\u{280E}\u{280F}\u{2810}\u{2811}\u{2812}\u{2813}\u{2814}\u{2815}\u{2816}\u{2817}\u{2818}\u{2819}\u{281A}\u{281B}\u{281C}\u{281D}\u{281E}\u{281F}";
+/// claude 的 spinner 帧写在终端标题里：盲文字符 + 空格开头。
+///
+/// 用**整个盲文区间**而不是枚举某个十帧序列——原始规则就是 `^[\x{2800}-\x{28FF}] `。
+/// 手工枚举必然漏帧：曾把上界写成 U+281F，于是 ⠹⠸⠼⠴⠦⠧ 六帧转到时状态闪回空闲。
+const BRAILLE_LO: char = '\u{2800}';
+const BRAILLE_HI: char = '\u{28FF}';
 
 /// 审批表单的导航提示，各版本文案不同，任一出现即可。
 const NAV_HINTS: &[&str] = &[
@@ -24,7 +28,7 @@ pub(super) static RULES: &[ScreenRule] = &[
         ScreenState::Working,
         1100,
         Region::Title,
-        Matcher::StartsWithCharIn(BRAILLE_SPINNER),
+        Matcher::StartsWithCharInRange(BRAILLE_LO, BRAILLE_HI),
     )
     .visible(),
     // ctrl+o 的详细 transcript 覆盖层：屏幕全被它占据，不代表状态变化。

@@ -149,6 +149,9 @@ fn eval_matcher(matcher: &Matcher, region: &[String], title: &str) -> bool {
             let rest = line.trim_start();
             rest.starts_with(prefix) && needles.iter().any(|n| rest.contains(n))
         }),
+        Matcher::LineRegex(pattern) => {
+            compiled_regex(pattern).is_some_and(|re| region.iter().any(|line| re.is_match(line)))
+        }
         Matcher::CharRunAtLeast(set, min) => region.iter().any(|line| {
             let mut run = 0usize;
             line.chars().any(|ch| {
@@ -176,6 +179,10 @@ fn eval_matcher(matcher: &Matcher, region: &[String], title: &str) -> bool {
         Matcher::StartsWithCharIn(set) => {
             let mut chars = title.chars();
             matches!((chars.next(), chars.next()), (Some(c), Some(' ')) if set.contains(c))
+        }
+        Matcher::StartsWithCharInRange(lo, hi) => {
+            let mut chars = title.chars();
+            matches!((chars.next(), chars.next()), (Some(c), Some(' ')) if (*lo..=*hi).contains(&c))
         }
         Matcher::WordCharIn(set) => word_bounded_char(title, set),
         Matcher::NonEmpty => region.iter().any(|line| !line.trim().is_empty()),
@@ -274,6 +281,31 @@ fn bottom_non_empty_slice(lines: &[String], n: usize) -> &[String] {
 
 fn region_contains(region: &[String], needle: &str) -> bool {
     region.iter().any(|line| line.contains(needle))
+}
+
+/// 取（并缓存）一条规则正则的编译结果。
+///
+/// 规则来自插件的 `&'static` 声明，条数固定且很少，故编译一次长期复用——检测每 300ms
+/// 跑一轮，每轮重编译几十条正则是纯浪费。缓存键就是模式串本身（同一 `&'static str`）。
+///
+/// 编译失败返回 None（该条规则不命中），**绝不 panic**：规则是数据，写坏一条不该让
+/// 整个状态检测停摆；下面有测试保证内置规则全部可编译。
+fn compiled_regex(pattern: &str) -> Option<regex::Regex> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, Option<regex::Regex>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let mut cache = cache.lock().ok()?;
+    cache
+        .entry(pattern.to_string())
+        .or_insert_with(|| {
+            // 统一大小写不敏感：规则声明侧写小写字面量，与其它谓词的约定一致。
+            regex::RegexBuilder::new(pattern)
+                .case_insensitive(true)
+                .build()
+                .ok()
+        })
+        .clone()
 }
 
 /// `^\s*❯?\s*yes\b`（行已小写）。
@@ -618,6 +650,25 @@ mod tests {
         );
     }
 
+    /// codex 的状态行在不同版本/终端宽度下，`•` 与 `Working` 之间可能不止一个空格
+    /// （herdr 原始规则用 `\s+`）。写死单空格会让这些屏幕**漏判成 idle**——而漏判
+    /// working 的后果是卡片显示空闲、通知也不发，用户以为它停了。
+    #[test]
+    fn codex_working_line_tolerates_extra_spaces() {
+        for line in [
+            " \u{2022} Working (3m 12s \u{00B7} esc to interrupt)",
+            " \u{2022}  Working (3m 12s \u{00B7} esc to interrupt)",
+            " \u{2022}   Working (12s \u{00B7} esc to interrupt) \u{00B7} 42 tokens",
+        ] {
+            let s = snap(&["  compiling", line]);
+            assert_eq!(
+                state_of(evaluate("codex", &s)),
+                Some((ScreenState::Working, "screen_working_fallback")),
+                "应识别为运行中: {line:?}"
+            );
+        }
+    }
+
     // -- kimi --
 
     #[test]
@@ -754,6 +805,70 @@ mod tests {
         assert_eq!(
             state_of(evaluate("opencode", &hint)),
             Some((ScreenState::Working, "interrupt_hint_working"))
+        );
+    }
+
+    /// 所有内置规则的正则必须可编译。求值层遇到坏正则是「整条规则跳过」（不 panic），
+    /// 那对线上是对的容错，但会让写错的规则**静默失效**——只能靠这条测试当场发现。
+    #[test]
+    fn every_declared_regex_compiles() {
+        fn walk(matcher: &meowo_agent::screen::Matcher, out: &mut Vec<&'static str>) {
+            use meowo_agent::screen::Matcher::*;
+            match matcher {
+                LineRegex(pattern) => out.push(pattern),
+                All(inner) | Any(inner) | Not(inner) => {
+                    inner.iter().for_each(|m| walk(m, out));
+                }
+                _ => {}
+            }
+        }
+        let mut checked = 0;
+        for plugin in meowo_agent::all() {
+            for rule in plugin.screen_rules() {
+                let mut patterns = Vec::new();
+                walk(&rule.matcher, &mut patterns);
+                for pattern in patterns {
+                    assert!(
+                        compiled_regex(pattern).is_some(),
+                        "{}／{} 的正则编译失败：{pattern}",
+                        plugin.id().as_str(),
+                        rule.id
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "应至少有一条规则用了正则");
+    }
+
+    /// kimi 的审批标题行必须**以问号结尾**（原始规则 `^\s*▶?\s*approve .*\?$`）。
+    /// 漏掉这个约束会把「approve this plan」这类普通输出误报成等待审批——而 blocked
+    /// 误报是最坏方向：弹通知说 agent 在等你，实际它跑得好好的。
+    #[test]
+    fn kimi_approve_title_requires_a_question_mark() {
+        let panel = |title: &str| {
+            snap(&[
+                title,
+                " \u{25B6} Approve once   Reject",
+                " 1/2/3 choose \u{00B7} \u{21B5} confirm",
+            ])
+        };
+        // 真实审批标题：问号结尾 → blocked。
+        assert_eq!(
+            state_of(evaluate("kimi", &panel(" \u{25B6}  Approve this command?"))),
+            Some((ScreenState::Blocked, "current_approval_panel")),
+            "▶ 与 approve 之间多个空格也应识别"
+        );
+        // 普通输出：无问号 → 不得判 blocked。
+        let plain = snap(&[
+            " I will approve this plan and continue",
+            " \u{25B6} Approve once   Reject",
+            " 1/2/3 choose \u{00B7} \u{21B5} confirm",
+        ]);
+        assert_ne!(
+            state_of(evaluate("kimi", &plain)).map(|(state, _)| state),
+            Some(ScreenState::Blocked),
+            "没有问号的 approve 句子不是审批标题"
         );
     }
 

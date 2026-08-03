@@ -24,7 +24,11 @@ pub(super) static RULES: &[ScreenRule] = &[
                 Matcher::Contains(&["apply these edits?"]),
                 Matcher::Contains(&["stop this task?"]),
                 Matcher::Contains(&["ready to build with this plan?"]),
-                Matcher::LineStartsWith(&["approve ", "\u{25B6} approve "]),
+                // 逐字对齐原始规则 `^\s*▶?\s*approve .*\?$`：▶ 可选、其后空白不定，
+                // 且**必须以 ? 结尾**。此前写成前缀匹配漏掉了问号约束——"approve this
+                // plan" 这类普通输出会被误报成等待审批（blocked 误报是最坏方向：会弹
+                // 通知说 agent 在等你，实际没有）。
+                Matcher::LineRegex(r"^\s*\u{25B6}?\s*approve .*\?\s*$"),
             ]),
             Matcher::Contains(&[" choose"]),
             Matcher::AnyContains(&["approve", "reject", "revise"]),

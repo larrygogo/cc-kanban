@@ -89,6 +89,10 @@ sys-locale = "0.3"
 portable-pty = "0.9.0"
 getrandom = "0.3"
 vt100 = "0.16.2"
+# 屏幕检测规则的行匹配（detect.rs）。手写谓词表达力不够时会被迫放宽或收窄规则——
+# 实测已因此漏判过 codex 的多空格状态行、且漏掉了 kimi 审批行的 `?` 结尾约束。
+# regex 本就在依赖树里（ureq/notify 等的传递依赖），提为直接依赖不增加编译体积。
+regex = "1"
 # codex config.toml 的结构保持编辑（保注释与键序）。kimi 的已迁入 meowo-agent::config。
 # codex hook 预信任的 trusted_hash 计算（SHA-256）。
 

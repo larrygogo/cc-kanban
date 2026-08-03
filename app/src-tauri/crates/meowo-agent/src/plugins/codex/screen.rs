@@ -80,7 +80,10 @@ pub(super) static RULES: &[ScreenRule] = &[
         500,
         Region::BottomNonEmpty(3),
         Matcher::All(&[
-            Matcher::LineStartsWith(&["\u{2022} working (", "\u{25E6} working ("]),
+            // 逐字对齐 herdr 原始规则的 `^[•◦]\s+Working \(`：项目符号与 Working 之间
+            // 是 `\s+` 而非单个空格——状态行的对齐空格随终端宽度变化，写死单空格会让
+            // 那些屏幕漏判成空闲（已由 codex_working_line_tolerates_extra_spaces 钉住）。
+            Matcher::LineRegex(r"^\s*[\u{2022}\u{25E6}]\s+working \("),
             Matcher::Contains(&["esc to interrupt"]),
             Matcher::Not(&[Matcher::Contains(&["■ conversation interrupted"])]),
         ]),

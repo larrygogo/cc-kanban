@@ -62,6 +62,16 @@ pub enum Matcher {
     /// 存在某行既以该前缀开头、又包含其中任一子串。比拆成两个谓词强：那样会命中
     /// 「A 行有前缀、B 行有子串」的假阳性（选项指针 `❯` 与 "yes" 分处两行很常见）。
     LineStartsWithContaining(&'static str, &'static [&'static str]),
+    /// 存在某行匹配该正则（Rust `regex` 语法，宿主按 `(?i)` 大小写不敏感编译）。
+    ///
+    /// 结构化谓词覆盖不了的形态用它。TUI 的行文本常见「可选前缀、不定空白、关键词、
+    /// 必须的结尾符」这类组合，硬拆成前缀/包含谓词只能放宽或收窄：实测已因此漏判过
+    /// codex 的多空格状态行，也漏掉过 kimi 审批行必须以 `?` 结尾的约束（后者会把
+    /// 「approve this plan」这样的普通输出误报成等待审批）。
+    ///
+    /// 正则无法编译时该条规则**整条跳过**（不 panic）：规则是数据，坏一条不该让整个
+    /// 检测停摆。宿主侧有测试确保内置规则全部可编译。
+    LineRegex(&'static str),
     /// 存在某行含连续 ≥N 个属于该字符集的字符（进度条：`■■■■`）。
     CharRunAtLeast(&'static str, usize),
     /// 存在某行去掉前导空白与可选 `❯` 后，以 `<数字>. <词>` 开头（审批菜单的选项行）。
@@ -72,8 +82,14 @@ pub enum Matcher {
     SoleCharLineIn(&'static str),
     /// 存在某行以连续的盲文字符开头，其后紧跟任一关键词（盲文 spinner + 状态字）。
     BraillePrefixed(&'static [&'static str]),
-    /// 文本以「该字符集中的一个字符 + 空格」开头。用于标题：claude 的 `⠋ ` / `✳ `。
+    /// 文本以「该字符集中的一个字符 + 空格」开头。用于标题：claude 的 `✳ `。
     StartsWithCharIn(&'static str),
+    /// 文本以「`lo..=hi` 区间内的一个字符 + 空格」开头。
+    ///
+    /// 用于 spinner：它们是**整块 Unicode 区间**（盲文 U+2800–U+28FF），而不是某个十帧
+    /// 序列。手工枚举字符集必然漏帧——实测漏过 ⠹⠸⠼⠴⠦⠧ 六帧，表现是 spinner 转到那几
+    /// 帧时状态闪回空闲。
+    StartsWithCharInRange(char, char),
     /// 该字符集中的某个字符**独立成词**出现（两侧是空格或边界）。用于 codex 标题 spinner。
     WordCharIn(&'static str),
     /// 区域非空（去空白后有内容）。用于「有标题但既不转也不告警」这类兜底。
