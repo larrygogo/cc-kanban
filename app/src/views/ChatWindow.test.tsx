@@ -1719,6 +1719,36 @@ describe("ChatWindow", () => {
   });
 
   /**
+   * 冷启动路径：`interactive-question` 事件在 WebView2 起来之前发出（emit 不排队、
+   * 不重放），窗口起来时事件早已消失——题面卡必须靠轮询补回来。这里刻意**不**投递
+   * 事件，只让 pending_interactive_question 返回题面。
+   */
+  it("事件错过时,轮询把题面卡补回来", async () => {
+    window.history.replaceState({}, "", "/?sessionId=33");
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 33, title: "冷启动提问", status: "running", provider: "claude", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
+        ptyManaged: true,
+      });
+      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "managed_terminal_binding") return Promise.resolve(null);
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 33, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "pending_interactive_question") return Promise.resolve({
+        sessionId: 33, requestId: "request-cold", provider: "claude", toolName: "AskUserQuestion",
+        description: null,
+        input: JSON.stringify({ questions: [{ question: "冷启动也要能看到题面？", options: [{ label: "必须能" }] }] }),
+        permissionSuggestions: [],
+      });
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    // 没有任何 interactive-question 事件，卡仍然出现。
+    expect(await screen.findByText(/冷启动也要能看到题面/)).toBeTruthy();
+    expect(screen.getByText("必须能")).toBeTruthy();
+  });
+
+  /**
    * 外部终端会话（GUI 不持有 PTY）：题面纯展示——选项不是按钮（点了也写不进按键，
    * 不承诺做不到的事），提示改为「回终端作答」，「去终端作答」按钮也不给（终端页
    * 对外部会话是空的）。

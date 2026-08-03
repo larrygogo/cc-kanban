@@ -742,8 +742,11 @@ impl PtyBroker {
     }
 
     /// 登记「启动中」占位。contains 检查与占位插入在同一锁程内原子完成，两个并发 start
-    /// 只有一个拿得到占位。锁序约定：**starting → sessions → completed**（全代码库唯一
-    /// 嵌套持锁处；其余路径都只单锁，构成不了 ABBA）。
+    /// 只有一个拿得到占位。锁序约定：**starting → sessions → completed**。
+    ///
+    /// 另一处嵌套持锁是 `screen_states`/`external_viewer`（sessions → 会话内部锁），
+    /// 与本处不共享除 sessions 外的任何锁，且都是单向获取（没有「先拿会话内部锁再拿
+    /// sessions」的反向路径），构成不了 ABBA。新增跨表持锁前请先核对这两条锁序。
     /// 不变量：本函数返回后 completed[sid] 必为空，之后出现的条目一定来自本次调用之后的
     /// finalize。判重提前返回的分支同样要摘：start 按 Ok 收敛后调用方照常跑秒退探测（只凭
     /// completed 判断「起没起来」），上一代退出的定格快照会被误读成本次启动秒退——当前
@@ -2139,6 +2142,71 @@ mod tests {
                 mistaken.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1)
             ),
             None
+        );
+    }
+
+    /// 冷启动路径：题面必须能被**轮询**取回。`interactive-question` 事件在对话窗
+    /// 冷启动（WebView2 1~2s）时打进虚空且不重放，入表是唯一的兜底——外部终端会话
+    /// 更没有屏幕识别可退。收卡时撤表，避免轮询把答过的题重新弹成幽灵卡。
+    #[test]
+    fn interactive_question_survives_a_missed_event_and_clears_on_dismiss() {
+        let broker = PtyBroker::default();
+        let request = ApprovalRequest {
+            session_id: 11,
+            request_id: "request-11-ask".into(),
+            provider: "claude".into(),
+            tool_name: "AskUserQuestion".into(),
+            input: r#"{"questions":[{"question":"晚饭吃什么？","options":[{"label":"火锅"}]}]}"#
+                .into(),
+            description: None,
+            permission_suggestions: vec![],
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_side, _) = listener.accept().unwrap();
+        let token = broker.attach.token.clone();
+        broker
+            .handle_approval(&token, request.clone(), server_side)
+            .unwrap();
+        drop(client);
+
+        // 事件即使无人接收，题面仍在表里等轮询来取。
+        assert_eq!(broker.interactive_question(11).as_ref(), Some(&request));
+        // 别的会话取不到别人的题面。
+        assert_eq!(broker.interactive_question(12), None);
+        // 收卡撤表后不再返回——否则下一轮轮询会把答过的题重新弹出来。
+        broker.clear_interactive_question(11);
+        assert_eq!(broker.interactive_question(11), None);
+    }
+
+    /// 表里的题面按 TTL 自净：后端无从得知用户何时在终端答完，卡的去留由前端信号决定，
+    /// 这里只保证不会无限堆积、也不会在前端 180s 兜底之后还残留着把旧题弹回来。
+    #[test]
+    fn stale_interactive_questions_expire() {
+        let broker = PtyBroker::default();
+        let request = ApprovalRequest {
+            session_id: 13,
+            request_id: "request-13-ask".into(),
+            provider: "claude".into(),
+            tool_name: "AskUserQuestion".into(),
+            input: "{}".into(),
+            description: None,
+            permission_suggestions: vec![],
+        };
+        // 直接以「刚好超过 TTL」的时刻入表，模拟一条没人处理的陈旧题面。
+        broker.attach.interactive_questions.lock().unwrap().insert(
+            13,
+            (request, crate::now_ms() - INTERACTIVE_QUESTION_TTL_MS - 1),
+        );
+        assert_eq!(broker.interactive_question(13), None, "过期题面不得返回");
+        assert!(
+            broker
+                .attach
+                .interactive_questions
+                .lock()
+                .unwrap()
+                .is_empty(),
+            "过期条目应被顺手清掉，不留堆积"
         );
     }
 
