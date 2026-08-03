@@ -50,13 +50,15 @@ fn default_sticker_style() -> String {
 fn default_sticker_color() -> String {
     "neutral".to_string()
 }
-/// 在贴纸底栏显示配额的 provider key 列表，默认仅 claude。
+/// 在贴纸底栏显示配额的 provider key 列表，默认只有默认 agent 那一个。
+/// 取 [`meowo_agent::DEFAULT_ID`] 而非字面量：默认 agent 是谁只该有一处定义，
+/// 它与 DB 的 `sessions.provider` 缺省值、建表 SQL 的 DEFAULT 是同一个事实源。
 fn default_sticker_quota_providers() -> Vec<String> {
-    vec!["claude".to_string()]
+    vec![meowo_agent::DEFAULT_ID.as_str().to_string()]
 }
-/// 新建会话默认选中的 agent（provider key）。缺省 claude。
+/// 新建会话默认选中的 agent（provider key）。同上，取唯一的默认 agent 定义。
 fn default_default_agent() -> String {
-    "claude".to_string()
+    meowo_agent::DEFAULT_ID.as_str().to_string()
 }
 /// 终端（PTY 画面）字号，px。缺省 12，与前端 xterm 的历史硬编码一致。
 fn default_terminal_font_size() -> u32 {

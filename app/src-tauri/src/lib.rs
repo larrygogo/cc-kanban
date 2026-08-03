@@ -1243,6 +1243,48 @@ mod tests {
         assert!(should_notify(None, first.as_deref()));
     }
 
+    /// 宿主侧不得按 agent 身份分支：能力差异一律走 `AgentPlugin` 的能力槽，
+    /// 由插件声明（registry.rs 的既定原则「加 agent 只动 plugins/」）。
+    ///
+    /// 这条断言扫的是**宿主自己的源码**，历史上清理过两批：`detect.rs` 的
+    /// `match provider`（改为插件声明屏幕规则）与 `terminal.rs` 的 `== "claude"`
+    /// （改为插件声明跨账号会话迁移）。硬编码回潮不会让任何测试失败、也不会有功能
+    /// 报错——只会让下一个 agent 悄悄少一块能力，所以只能靠这里守。
+    ///
+    /// 注释与测试代码不算（写具体 agent 名是正常的举例与固件）。
+    #[test]
+    fn host_code_does_not_branch_on_agent_identity() {
+        const HOST_SOURCES: &[(&str, &str)] = &[
+            ("detect.rs", include_str!("detect.rs")),
+            ("terminal.rs", include_str!("terminal.rs")),
+            ("settings.rs", include_str!("settings.rs")),
+            ("pty.rs", include_str!("pty.rs")),
+            ("session_query.rs", include_str!("session_query.rs")),
+            ("watch.rs", include_str!("watch.rs")),
+        ];
+        for (name, source) in HOST_SOURCES {
+            // 截到首个测试模块之前——固件里写 agent 名是正常的。
+            let production = source
+                .split("#[cfg(test)]")
+                .next()
+                .and_then(|s| s.split("#[cfg(all(test").next())
+                .unwrap_or(source);
+            for (index, line) in production.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue; // 注释里举例说明是正常的
+                }
+                for id in ["claude", "codex", "kimi", "gemini", "opencode"] {
+                    assert!(
+                        !code.contains(&format!("\"{id}\"")),
+                        "{name}:{} 按 agent 身份分支了（{id}）——该能力应走 AgentPlugin 的能力槽：\n  {code}",
+                        index + 1
+                    );
+                }
+            }
+        }
+    }
+
     /// DLL 搜索路径收紧必须在 `run()` 的**最前面**（任何 LoadLibrary 之前）——托管 PTY
     /// 的 portable-pty 用相对名 sideload `conpty.dll`，cwd 在搜索顺序里（理由详见
     /// `harden_dll_search_path` 的文档）。删掉或往后挪这一行会静默恢复劫持面：没有任何
