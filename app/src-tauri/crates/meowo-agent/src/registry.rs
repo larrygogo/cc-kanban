@@ -283,6 +283,15 @@ pub trait AgentPlugin: Sync {
         false
     }
 
+    /// 该 agent TUI 的屏幕状态规则（见 [`crate::screen`]）。空 = 不做屏幕检测，
+    /// 宿主连终端仿真都不会为它建（reader 热路径零开销）。
+    ///
+    /// 规则是**数据**：加 agent 只在自己的插件里声明一张表，不必碰宿主的检测引擎——
+    /// 与 `canonical_event` 同一条纪律（守住「加 agent 只动 `plugins/`」）。
+    fn screen_rules(&self) -> &'static [crate::screen::ScreenRule] {
+        &[]
+    }
+
     /// 会话遥测（Stop 正文/模型、上下文占用、transcript、重命名回写）。None = 全部降级。
     fn telemetry(&self) -> Option<&'static dyn TelemetryCap> {
         None

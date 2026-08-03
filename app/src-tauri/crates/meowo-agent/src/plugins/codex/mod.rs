@@ -14,6 +14,7 @@
 //! 接线还有一步**副作用**（往 `config.toml` 写 `[hooks.state]` 的 trusted_hash 预信任）——见 `setup.rs`。
 
 pub mod account;
+mod screen;
 pub mod setup;
 pub mod telemetry;
 
@@ -185,6 +186,10 @@ impl crate::RelayCap for CodexRelay {
 }
 
 impl AgentPlugin for Codex {
+    fn screen_rules(&self) -> &'static [crate::screen::ScreenRule] {
+        screen::RULES
+    }
+
     fn id(&self) -> AgentId {
         id::CODEX
     }

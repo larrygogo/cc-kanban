@@ -21,6 +21,7 @@
 //! 故直查包内的 `bin/claude.exe`（该 npm 包分发的是原生二进制，不是 JS 入口）。
 
 pub mod account;
+mod screen;
 pub mod fleet;
 pub mod install;
 pub mod setup;
@@ -241,6 +242,10 @@ impl crate::RelayCap for ClaudeRelay {
 }
 
 impl AgentPlugin for Claude {
+    fn screen_rules(&self) -> &'static [crate::screen::ScreenRule] {
+        screen::RULES
+    }
+
     fn id(&self) -> AgentId {
         id::CLAUDE
     }

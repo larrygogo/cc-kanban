@@ -39,6 +39,7 @@ pub mod profile;
 pub mod proxy;
 pub mod registry;
 pub mod relay;
+pub mod screen;
 pub mod transcript;
 pub mod variant;
 pub mod wiring;

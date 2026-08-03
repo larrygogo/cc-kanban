@@ -9,6 +9,7 @@
 //! 同一份 [`HookSpec`]——差的只是目录与「空内联数组」这一形态，都已在声明里表达。
 
 pub mod account;
+mod screen;
 pub mod telemetry;
 
 use crate::{
@@ -251,6 +252,10 @@ impl crate::RelayCap for KimiRelay {
 }
 
 impl AgentPlugin for Kimi {
+    fn screen_rules(&self) -> &'static [crate::screen::ScreenRule] {
+        screen::RULES
+    }
+
     fn id(&self) -> AgentId {
         id::KIMI
     }
