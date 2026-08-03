@@ -481,6 +481,30 @@ impl AgentPlugin for Claude {
     }
     /// AskUserQuestion 选择器的固有锚点项(真机截屏取证):单选/多问题标签页形态的
     /// 纯编号菜单靠它们与正文编号列表区分。识别层的选择器文法由此声明,不再硬编码。
+    /// 整句可操作提示（真机截屏取证）。此前硬编码在前端并按 `provider === "claude"`
+    /// 门控——门控的理由仍成立且已转移到这里：别家 agent 的输出里**引用**同一句
+    /// （讨论审批流程、cat 一个含该句的脚本）不该误弹 Claude 的审批卡。
+    fn attention_patterns(&self) -> &'static [crate::chat_ui::AttentionPattern] {
+        &[
+            crate::chat_ui::AttentionPattern {
+                id: "claude:long-session-resume",
+                patterns: &[
+                    r"this session is[^\n]{0,120}\bold and[^\n]{0,80}\btokens\b",
+                    "resuming the full session will consume a substantial portion of your usage limits",
+                ],
+                // 该提示每次恢复只出现一次，取首个匹配即可。
+                last: false,
+            },
+            crate::chat_ui::AttentionPattern {
+                id: "claude:command-approval",
+                // `?` 是正则元字符，必须转义——否则 "proceed?" 会变成「d 可选」，
+                // 匹配到 "do you want to procee" 这种根本不存在的前缀语义。
+                patterns: &["this command requires approval", r"do you want to proceed\?"],
+                last: true,
+            },
+        ]
+    }
+
     fn selector_anchors(&self) -> &'static [crate::chat_ui::SelectorAnchor] {
         &[
             crate::chat_ui::SelectorAnchor {

@@ -96,6 +96,53 @@ const MODEL_PRESETS: Record<string, ChatUi["model_presets"]> = {
  * 造一份 `agent_chat_ui()` 的返回：该 agent 的内置命令表 + 模型预设（无自定义命令）。
  * 要测自定义命令，在用例里 `custom` 传发现出来的条目。未知 provider 回 null——与后端同语义。
  */
+/**
+ * 整句可操作提示的识别规格。与后端各插件的 `attention_patterns()` 声明同源——
+ * 那边改了正则，这里也要跟上，否则前端测试测的是一套过期规则。
+ * 未取证的 provider 为空（不做整句识别）。
+ */
+const ATTENTION_PATTERNS: Record<string, { id: string; patterns: string[]; last: boolean }[]> = {
+  claude: [
+    {
+      id: "claude:long-session-resume",
+      patterns: [
+        "this session is[^\\n]{0,120}\\bold and[^\\n]{0,80}\\btokens\\b",
+        "resuming the full session will consume a substantial portion of your usage limits",
+      ],
+      last: false,
+    },
+    {
+      id: "claude:command-approval",
+      patterns: ["this command requires approval", "do you want to proceed\\?"],
+      last: true,
+    },
+  ],
+  kimi: [
+    {
+      id: "kimi:command-approval",
+      patterns: [
+        "↑/↓ select · [\\d/]+ choose · ↵ confirm",
+        "^\\s*▶\\s*(?:run this command|write this file|apply these edits|stop this task|ready to build with this plan|approve [^\\n?]+)\\?",
+      ],
+      last: true,
+    },
+  ],
+};
+
+/**
+ * 识别文法固件：带上该 provider 由插件声明的整句规则。
+ *
+ * 改造前测试可以只写 `{ provider: "kimi", selectorAnchors: [] }`，因为识别层按
+ * `provider ===` 自带规则；现在规则由后端下发，**不传就等于该 agent 没声明规则**。
+ * 用这个构造器而不是手写字面量，测试才与生产路径（chatUi 下发）走同一份数据。
+ */
+export function grammar(
+  provider: string,
+  selectorAnchors: { marker: string; kind: "input" | "chat" }[] = [],
+): { provider: string; selectorAnchors: typeof selectorAnchors; attentionPatterns: typeof ATTENTION_PATTERNS[string] } {
+  return { provider, selectorAnchors, attentionPatterns: ATTENTION_PATTERNS[provider] ?? [] };
+}
+
 export function chatUi(provider: string, custom: SlashCommand[] = []): ChatUi | null {
   const builtins = SLASH_COMMANDS[provider];
   if (!builtins) return null;
@@ -107,6 +154,7 @@ export function chatUi(provider: string, custom: SlashCommand[] = []): ChatUi | 
   ].sort((a, b) => a.name.localeCompare(b.name));
   return {
     slash_commands: commands,
+    attention_patterns: ATTENTION_PATTERNS[provider] ?? [],
     model_presets: MODEL_PRESETS[provider] ?? [],
     // 只有 claude 的 `/model` 接受内联参数；其余几家是交互式菜单，靠这条命令打开。
     // opencode 的命令是 /models(复数)——与后端插件声明同源。

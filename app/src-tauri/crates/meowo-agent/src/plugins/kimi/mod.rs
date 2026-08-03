@@ -256,6 +256,26 @@ impl AgentPlugin for Kimi {
         screen::RULES
     }
 
+    /// 审批面板（ApprovalPanel；形态与按键语义为官方源码取证，见
+    /// `apps/kimi-code/src/tui/components/dialogs/approval-panel.ts @ 0.29）。
+    ///
+    /// kimi 的 `PermissionRequest` hook 是 observation-only（`permission_hook_decides`
+    /// 为 false），broker 审批桥对它关闭——屏幕识别是 GUI 给出**可操作**审批的唯一通道。
+    /// 按键提示行是面板的稳定签名；提示行被裁掉时退回标题行。
+    fn attention_patterns(&self) -> &'static [crate::chat_ui::AttentionPattern] {
+        &[crate::chat_ui::AttentionPattern {
+            id: "kimi:command-approval",
+            patterns: &[
+                r"↑/↓ select · [\d/]+ choose · ↵ confirm",
+                r"^\s*▶\s*(?:run this command|write this file|apply these edits|stop this task|ready to build with this plan|approve [^\n?]+)\?",
+            ],
+            // 必须取最后一次：kimi 重绘也不清屏，上一条命令的面板残留在缓冲上方。
+            // 取首个匹配会把标题/命令锁在残影上，而数字键打给的是屏幕最下方的活动
+            // 面板——用户看着 A 批准了 B。
+            last: true,
+        }]
+    }
+
     fn id(&self) -> AgentId {
         id::KIMI
     }

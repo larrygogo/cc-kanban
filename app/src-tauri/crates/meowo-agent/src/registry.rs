@@ -122,6 +122,12 @@ pub trait AgentPlugin: Sync {
         &[]
     }
 
+    /// 屏幕上可操作提示的识别规格（见 [`crate::chat_ui::AttentionPattern`]）。默认空：
+    /// 未取证的 provider 不做整句识别——误报会凭空弹卡并锁住输入框，比不弹更糟。
+    fn attention_patterns(&self) -> &'static [crate::chat_ui::AttentionPattern] {
+        &[]
+    }
+
     /// 中断当前回合的按键序列。默认 None:未取证的 provider 不出中断按钮。现状是五家
     /// 都覆写成了 Esc,但证据分级不同——claude(官方文档)、codex(状态行自述 "esc to
     /// interrupt",真机 capture 在档,见 docs/research/tui-menu-captures-2026-07.md)、
@@ -188,6 +194,7 @@ pub trait AgentPlugin: Sync {
             menu_slash_commands,
             startup_attention_markers: self.startup_attention_markers().to_vec(),
             selector_anchors: self.selector_anchors().to_vec(),
+            attention_patterns: self.attention_patterns().to_vec(),
             interrupt_input: self.interrupt_input(),
             runtime_commands_pending,
             attachment_mention: self.attachment_mention(ctx.version),

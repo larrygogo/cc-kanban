@@ -107,6 +107,31 @@ pub struct SelectorAnchor {
     pub kind: &'static str,
 }
 
+/// 屏幕上**可操作**提示的识别规格：审批框、长会话确认这类需要用户当场决定的整句提示。
+///
+/// 与 [`crate::screen::ScreenRule`] 的分工：那套只判**状态**（working/idle/blocked，只读）；
+/// 这套要在屏幕上**定位**出一张可点选、会往 PTY 写按键的卡片，故必须给出位置。
+///
+/// 此前这些整句规则硬编码在前端 `terminalAttention.ts` 里、按 `provider ===` 分支，
+/// 循 `selector_anchors` 的先例下放为插件声明——加 agent 只动 `plugins/`。
+///
+/// **声明前必须有该 agent 的真机取证**：误报会凭空弹出一张卡并锁住输入框，
+/// 比不弹更糟。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AttentionPattern {
+    /// 卡片标识（如 `"claude:command-approval"`）。前端按它决定卡片形态与按键语义，
+    /// 取值必须与前端已实现的分支一致，不能随意造新的。
+    pub id: &'static str,
+    /// JS 正则源码（不含分隔符与标志），**任一命中**即算命中该卡片。
+    /// 前端统一以 `im`（+ `last` 时加 `g`）标志编译，故 `^`/`$` 按行匹配。
+    /// 字面量里的正则元字符要自行转义（如 `proceed\\?`）。
+    pub patterns: &'static [&'static str],
+    /// 取**最后一次**匹配而非第一次。审批框必须为 true：TUI 重绘不清屏，上一屏的
+    /// 审批框会残留在缓冲上方，取第一次会把用户看到的下方活动面板与上方残影搞混
+    /// ——真实事故是「用户看着 A 批准了 B」。仅出现一次的提示（长会话确认）用 false。
+    pub last: bool,
+}
+
 /// 屏幕回显标记：TUI 状态栏上代表某个模式值的稳定文案片段（如 claude 的 "plan mode on"）。
 ///
 /// cycle 型控件是**盲切**：写入 cycle_input 后落到哪个值只有 CLI 自己知道，而 transcript
@@ -149,6 +174,9 @@ pub struct ChatUi {
     pub startup_attention_markers: Vec<&'static str>,
     /// 数字选择器锚点(见 [`SelectorAnchor`]),识别层的选择器文法由插件声明。
     pub selector_anchors: Vec<SelectorAnchor>,
+    /// 可操作提示的识别规格(见 [`AttentionPattern`])。整句识别规则由插件声明，
+    /// 前端不再按 provider 分支。
+    pub attention_patterns: Vec<AttentionPattern>,
     /// 中断当前回合的按键序列(如 Esc)。运行中「强制插话」= 先写它停掉当前回合,
     /// CLI 随即处理排队消息/接受新输入。None = 该 agent 的中断键未经取证,GUI 不提供入口。
     pub interrupt_input: Option<&'static str>,

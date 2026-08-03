@@ -118,6 +118,14 @@ export type ChatUi = {
   startup_attention_markers: string[];
   /** 数字选择器锚点(插件声明的识别文法):空 = 该 agent 的纯编号菜单不做卡片化。 */
   selector_anchors: { marker: string; kind: "input" | "chat" }[];
+  /**
+   * 整句可操作提示（审批框、长会话确认）的识别规格，由插件声明。空 = 该 agent 未取证，
+   * 不做整句识别——误报会凭空弹卡并锁住输入框，比不弹更糟。
+   *
+   * 只含该会话自己那家的规则：识别层因此不必再按 provider 分支，也不会拿别家的
+   * 界面原文去匹配本家屏幕（引用同一句话的普通输出不该弹卡）。
+   */
+  attention_patterns: { id: string; patterns: string[]; last: boolean }[];
   /** 中断当前回合的按键序列(如 Esc);null = 未取证,GUI 不提供强制插话入口。 */
   interrupt_input: string | null;
   /** runtime skill 清单尚未落盘；ChatWindow 应随 transcript 增量继续探测。 */

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { modeFromScreen, terminalAttention, terminalNeedsAttention } from "./terminalAttention";
+import { grammar } from "./test/agents";
 
 describe("terminalAttention", () => {
   it("returns the provider-declared trust screen for the GUI", () => {
@@ -174,11 +175,11 @@ describe("terminalAttention", () => {
   /// cat 含该句的脚本)不得误弹 Claude 审批卡片锁住输入框。
   it("claude 专有整句规则只对 claude 会话生效", () => {
     const text = "\x1b[2Jecho test\r\nDo you want to proceed?\r\n> 1. Yes\r\n  2. No";
-    const codex = terminalAttention(text, [], false, false, { provider: "codex", selectorAnchors: [] });
+    const codex = terminalAttention(text, [], false, false, grammar("codex"));
     expect(codex).toBeNull();
     // 缺省文法(存量调用)与显式 claude 都照旧识别。
     expect(terminalAttention(text, [])?.id).toBe("claude:command-approval");
-    expect(terminalAttention(text, [], false, false, { provider: "claude", selectorAnchors: [] })?.id).toBe("claude:command-approval");
+    expect(terminalAttention(text, [], false, false, grammar("claude"))?.id).toBe("claude:command-approval");
   });
 
   /// 锚点由插件声明:声明了别家文案的 provider,其纯编号单选菜单同样能卡片化;
@@ -191,15 +192,12 @@ describe("terminalAttention", () => {
       "  3. 输入其他内容",
       "Enter to select · ↑/↓ to navigate",
     ].join("\r\n");
-    const declared = terminalAttention(prompt, [], true, false, {
-      provider: "someagent",
-      selectorAnchors: [{ marker: "输入其他内容", kind: "input" }],
-    });
+    const declared = terminalAttention(prompt, [], true, false, grammar("someagent", [{ marker: "输入其他内容", kind: "input" }]));
     expect(declared?.id).toBe("interactive:numbered-selector");
     expect(declared?.options?.map((option) => option.label)).toEqual(["继续", "停止", "输入其他内容"]);
     expect(declared?.options?.[2].kind).toBe("input");
     // 同一屏,未声明锚点 → 不出没有任何可点项的空卡。
-    expect(terminalAttention(prompt, [], true, false, { provider: "someagent", selectorAnchors: [] })).toBeNull();
+    expect(terminalAttention(prompt, [], true, false, grammar("someagent"))).toBeNull();
   });
 
   /// gemini `/model` 对话框(真机 PTY 取证,gemini-cli 0.51):框线包裹的编号项 + ● 焦点,
@@ -222,7 +220,7 @@ describe("terminalAttention", () => {
       "│ (Press Esc to close)│",
       "╰──────────────────────────────╯",
     ].join("\r\n");
-    const attention = terminalAttention(menu, [], false, true, { provider: "gemini", selectorAnchors: [] });
+    const attention = terminalAttention(menu, [], false, true, grammar("gemini"));
     expect(attention?.id).toBe("interactive:cursor-menu");
     expect(attention?.text).toBe("Select Model");
     expect(attention?.options?.map((option) => option.label)).toEqual(["Auto", "Manual"]);
@@ -233,7 +231,7 @@ describe("terminalAttention", () => {
     // 对话框尾注(Remember…/Press Esc…)不得折进最后一个选项的描述。
     expect(attention?.options?.[1].description).toBe("Manually select a model");
     // 不在菜单窗口内不认——框线数字形态只在刚发出菜单命令时有意义。
-    expect(terminalAttention(menu, [], false, false, { provider: "gemini", selectorAnchors: [] })).toBeNull();
+    expect(terminalAttention(menu, [], false, false, grammar("gemini"))).toBeNull();
   });
 
   it("turns Claude's long-session token warning into explicit GUI choices", () => {
@@ -386,7 +384,7 @@ describe("terminalAttention", () => {
       "  ↑/↓ select · 1/2/3/4 choose · ↵ confirm",
       "────────────────────────",
     ].join("\r\n");
-    const attention = terminalAttention(prompt, [], false, false, { provider: "kimi", selectorAnchors: [] });
+    const attention = terminalAttention(prompt, [], false, false, grammar("kimi"));
     expect(attention?.id).toBe("kimi:command-approval");
     // 详情保留标题与命令,不含选项、按键提示和框线。
     expect(attention?.text).toContain("Run this command?");
@@ -418,7 +416,7 @@ describe("terminalAttention", () => {
       "    2. Reject",
       "  ↑/↓ select · 1/2 choose · ↵ confirm",
     ].join("\r\n");
-    const attention = terminalAttention(prompt, [], false, false, { provider: "kimi", selectorAnchors: [] });
+    const attention = terminalAttention(prompt, [], false, false, grammar("kimi"));
     expect(attention?.id).toBe("kimi:command-approval");
     expect(attention?.text).toContain("rm -rf build-B");
     expect(attention?.text).not.toContain("old-command-A");
@@ -451,8 +449,8 @@ describe("terminalAttention", () => {
 
   it("kimi 审批面板规则严格按 provider 门控:别家会话引用同一画面不弹卡", () => {
     const prompt = "\x1b[2J  ▶ Run this command?\r\n  ▶ 1. Approve once\r\n    2. Reject\r\n  ↑/↓ select · 1/2 choose · ↵ confirm";
-    expect(terminalAttention(prompt, [], false, false, { provider: "claude", selectorAnchors: [] })).toBeNull();
-    expect(terminalAttention(prompt, [], false, false, { provider: "kimi", selectorAnchors: [] })?.id).toBe("kimi:command-approval");
+    expect(terminalAttention(prompt, [], false, false, grammar("claude"))).toBeNull();
+    expect(terminalAttention(prompt, [], false, false, grammar("kimi"))?.id).toBe("kimi:command-approval");
   });
 });
 

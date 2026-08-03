@@ -483,6 +483,7 @@ export function ChatWindow() {
   const attentionGrammar = useMemo<AttentionGrammar>(() => ({
     provider: history?.provider,
     selectorAnchors: chatUi?.selector_anchors ?? [],
+    attentionPatterns: chatUi?.attention_patterns ?? [],
   }), [history?.provider, chatUi]);
   // runtime 清单未就绪时，探测键随每次 650ms 轮询的 offset 变化而变化——不能每变一次就
   // 打一发 agent_chat_ui（后端要重扫命令目录、探 transcript）。同一会话内限频到 2s 一查；
@@ -1106,7 +1107,7 @@ export function ChatWindow() {
     // 已挂载的后台终端还停在旧进程的输出偏移上，必须归零重拉，否则新 PTY 的输出
     // 会被它当成「已写过」整段丢弃，画面定格、屏幕识别全部失效。
     terminalRearmRef.current?.();
-    const startup = await waitForTerminalReady(sessionId, ui?.startup_attention_markers ?? [], terminalReadyMessages, { provider: history?.provider, selectorAnchors: ui?.selector_anchors ?? [] });
+    const startup = await waitForTerminalReady(sessionId, ui?.startup_attention_markers ?? [], terminalReadyMessages, { provider: history?.provider, selectorAnchors: ui?.selector_anchors ?? [], attentionPatterns: ui?.attention_patterns ?? [] });
     if (startup !== "ready") {
       terminalEverShownRef.current = true;
       setTerminalAttention(startup);

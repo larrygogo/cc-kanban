@@ -80,11 +80,19 @@ export type SelectorAnchor = { marker: string; kind: "input" | "chat" };
 
 /// 识别文法:provider 门控 + 插件声明的锚点。识别规则正逐步从「Claude 截屏硬编码」
 /// 下放为插件声明(循 startup_attention_markers 的先例),这是第一步。
+/// 可操作提示的识别规格，由插件声明、经 chatUi 下发（后端 AttentionPattern）。
+/// patterns 是 JS 正则源码，任一命中即算命中该卡片；last=true 取最后一次匹配
+/// （审批框必须如此：TUI 重绘不清屏，上一屏的残影在缓冲上方）。
+export type AttentionPattern = { id: string; patterns: string[]; last: boolean };
+
 export type AttentionGrammar = {
-  /// 会话的 agent id。claude 专有的整句识别规则(长会话恢复/命令审批)只对 claude 生效
-  /// ——别家 agent 的输出里引用 "Do you want to proceed?" 不该误弹 Claude 审批卡。
+  /// 会话的 agent id。仅用于日志/调试与默认文法的自述——**识别规则不再按它分支**，
+  /// 整句规则全部来自 attentionPatterns（插件声明）。
   provider?: string;
   selectorAnchors: SelectorAnchor[];
+  /// 整句可操作提示的识别规格。空 = 该 agent 未取证，不做整句识别（宁可不弹卡，
+  /// 误报会凭空弹出一张卡并锁住输入框）。
+  attentionPatterns?: AttentionPattern[];
 };
 
 /// 兼容默认:未显式传文法时按 Claude 处理(存量调用与测试的行为不变)。
@@ -95,7 +103,50 @@ const CLAUDE_GRAMMAR: AttentionGrammar = {
     { marker: "type something", kind: "input" },
     { marker: "chat about this", kind: "chat" },
   ],
+  // 与 claude 插件的 attention_patterns 声明保持一致（后端是权威，这里只是默认文法的
+  // 兜底，供未显式传文法的存量调用与单测使用）。
+  attentionPatterns: [
+    {
+      id: "claude:long-session-resume",
+      patterns: [
+        "this session is[^\\n]{0,120}\\bold and[^\\n]{0,80}\\btokens\\b",
+        "resuming the full session will consume a substantial portion of your usage limits",
+      ],
+      last: false,
+    },
+    {
+      id: "claude:command-approval",
+      patterns: ["this command requires approval", "do you want to proceed\\?"],
+      last: true,
+    },
+  ],
 };
+
+/// 按一条规格在屏幕文本里定位命中位置。返回 -1 = 未命中。
+/// 统一以 `im` 编译（`last` 时加 `g`）：`^`/`$` 按行匹配，大小写不敏感。
+/// 非法正则不得让整个识别崩掉——声明来自后端，坏一条只跳过它。
+function matchAttentionPattern(rule: AttentionPattern, visible: string): number {
+  let best = -1;
+  for (const source of rule.patterns) {
+    let index = -1;
+    try {
+      if (rule.last) {
+        const re = new RegExp(source, "gim");
+        for (let m = re.exec(visible); m; m = re.exec(visible)) {
+          index = m.index;
+          if (m[0] === "") re.lastIndex += 1; // 零宽匹配防死循环
+        }
+      } else {
+        index = new RegExp(source, "im").exec(visible)?.index ?? -1;
+      }
+    } catch {
+      continue;
+    }
+    // 同一张卡的多个 pattern 取位置最靠后的那个（与审批框「最后一屏才是当前」同理）。
+    if (index > best) best = index;
+  }
+  return best;
+}
 
 /// 光标菜单：一句导航提示 + 一个 ❯ 标记当前项。返回选项块的行区间。
 ///
@@ -329,38 +380,14 @@ export function terminalAttention(
   const visible = visibleTerminalText(text);
   const lower = visible.toLowerCase();
   let best: { index: number; id: string } | null = null;
-  // claude:* 整句规则只对 claude 会话生效:这些是 Claude 的界面原文,别家 agent 的
-  // 输出里**引用**同一句话(讨论审批流程、cat 含该句的脚本)不该误弹卡片、锁住输入框。
-  if (grammar.provider === "claude") {
-    const longSession = /this session is[^\n]{0,120}\bold and[^\n]{0,80}\btokens\b/i.exec(visible)
-      ?? /resuming the full session will consume a substantial portion of your usage limits/i.exec(visible);
-    if (longSession) best = { index: longSession.index, id: "claude:long-session-resume" };
-    // 取**最后一次**出现,不是第一次:TUI 重绘会把上一屏的审批框留在缓冲里,从第一处
-    // 起截窗口就会把两屏内容(以及夹在中间的工具输出)一起塞进卡片——真实现场见过同一
-    // 句「Do you want to proceed?」在卡上显示两遍,命令区里还混着上一轮的搜索结果。
-    // 审批框永远是屏幕最下面那个,最后一次匹配才是当前这一个。
-    const approvalIndex = Math.max(
-      lower.lastIndexOf("this command requires approval"),
-      lower.lastIndexOf("do you want to proceed?"),
-    );
-    if (approvalIndex >= 0 && (!best || approvalIndex > best.index)) {
-      best = { index: approvalIndex, id: "claude:command-approval" };
-    }
-  }
-  // kimi 审批面板(ApprovalPanel;面板形态与按键语义为官方源码取证,见
-  // apps/kimi-code/src/tui/components/dialogs/approval-panel.ts @ 0.29):
-  // kimi 的 PermissionRequest hook 是 observation-only(官方文档),broker 审批桥对它
-  // 关闭,屏幕识别是 GUI 给出可操作审批的唯一通道。按键提示行是面板的稳定签名;
-  // 提示行被裁掉时退回标题行(▶ Run this command? 等)。
-  if (grammar.provider === "kimi") {
-    // 与上面 claude 的 lastIndexOf 同理:kimi 重绘也不清屏,上一条命令的面板残留在缓冲
-    // 上方。首个匹配会把标题/命令锁在残影上,而数字键打给的是屏幕最下方的活动面板——
-    // 用户看着 A 批准了 B。恒取最后一次匹配。
-    const panelHint = lastMatch(/↑\/↓ select · [\d/]+ choose · ↵ confirm/gi, visible)
-      ?? lastMatch(/^\s*▶\s*(?:run this command|write this file|apply these edits|stop this task|ready to build with this plan|approve [^\n?]+)\?/gim, visible);
-    if (panelHint && (!best || panelHint.index > best.index)) {
-      best = { index: panelHint.index, id: "kimi:command-approval" };
-    }
+  // 整句可操作提示（审批框、长会话确认）由插件声明、经 chatUi 下发——识别层不再
+  // 认识任何具体 agent。规则**天然是 per-agent 的**：这些是各家 TUI 的界面原文，
+  // 别家 agent 的输出里引用同一句（讨论审批流程、cat 一个含该句的脚本）不该误弹卡片、
+  // 锁住输入框；下发的规则只含该会话自己那家，门控因此从 `provider ===` 变成了
+  // 「你只会拿到自己的规则」。
+  for (const rule of grammar.attentionPatterns ?? []) {
+    const index = matchAttentionPattern(rule, visible);
+    if (index >= 0 && (!best || index > best.index)) best = { index, id: rule.id };
   }
   for (const marker of markers) {
     const normalized = marker.toLowerCase();
