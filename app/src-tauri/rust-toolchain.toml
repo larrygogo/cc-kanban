@@ -1,0 +1,11 @@
+# 工具链固定：本地与 CI 必须是同一个 rustc/clippy。
+#
+# 不固定的话两边各自 stable，clippy 的 lint 集随版本漂移——本地全绿推上去 CI 红
+# （新版本新增的 lint），或反过来本地报的问题 CI 看不见。`-D warnings` 之下这直接
+# 变成「在我机器上是好的」。
+#
+# 升级方法：改这里的 channel，本地 `cargo clippy --workspace --all-targets` 跑一遍
+# 修掉新 lint，再连同修复一起提交——升级和修复必须同一个 commit，否则中间那次 CI 必红。
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]

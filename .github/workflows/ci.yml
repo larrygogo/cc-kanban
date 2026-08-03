@@ -11,15 +11,22 @@ jobs:
         platform: [windows-latest, macos-latest]
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v5
+      # 第三方 action 一律 pin 到完整 commit SHA：tag 可被重新指向，等于让别人的仓库
+      # 对我们的 CI 有持续写权限（CI 能读代码、能拿 GITHUB_TOKEN）。release.yml 早已
+      # 这么做，这里补齐——同一仓库两套标准比两边都不 pin 更糟：会让人以为已经防住了。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: 安装 Bun
-        uses: oven-sh/setup-bun@v2
-      - name: 安装 Rust(含 clippy)
-        uses: dtolnay/rust-toolchain@stable
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      # 不带 @stable：rustc/clippy 版本由 app/src-tauri/rust-toolchain.toml 固定，
+      # 本地与 CI 必须同一版本（否则 -D warnings 下的 lint 集漂移 = 「在我机器上是好的」）。
+      # components 也在那个文件里声明，这里不再重复。
+      - name: 安装 Rust(版本见 rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable(仅取 action 实现)
         with:
+          toolchain: "1.97.1"
           components: clippy
       - name: Rust 构建缓存
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # workspace 根在 app/src-tauri（全部 Rust 都住那里），target/ 也在它下面。
           workspaces: app/src-tauri
@@ -54,9 +61,12 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: 安装 cargo-audit
-        uses: taiki-e/install-action@cargo-audit
+        # pin 到 v2 的 SHA，工具名走 `tool` 输入（原先的 @cargo-audit 是可变分支引用）。
+        uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2
+        with:
+          tool: cargo-audit
       - name: Rust 依赖漏洞审计 (cargo audit)
         # 直接调用 cargo audit：仅在出现「漏洞(vulnerabilities)」时失败；unmaintained/unsound
         # 等 informational 告警不阻断（多为无法立即修的传递依赖）。
@@ -66,7 +76,7 @@ jobs:
         working-directory: app/src-tauri
         run: cargo audit
       - name: 安装 Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - name: 前端依赖漏洞审计 (bun audit)
         working-directory: app
         # npm 生态常有无法立即修的传递性低危告警，先告警不阻断（continue-on-error）。

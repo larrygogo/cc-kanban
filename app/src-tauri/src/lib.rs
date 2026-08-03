@@ -49,7 +49,8 @@ use managed_terminal::{
     dismiss_interactive_question, get_pending_approval, managed_terminal_binding,
     managed_terminal_snapshot, attach_background_session, open_attached_terminal,
     pending_interactive_question, register_approval_consumer,
-    resize_managed_terminal, screen_detect_explain, send_background_prompt,
+    resize_managed_terminal, screen_detect_explain, screen_detect_explain_text,
+    send_background_prompt,
     resolve_pending_approval, start_managed_terminal, stop_managed_terminal,
     unregister_approval_consumer, write_managed_terminal,
 };
@@ -950,6 +951,7 @@ pub fn run() {
             write_managed_terminal,
             resize_managed_terminal, send_background_prompt,
             screen_detect_explain,
+            screen_detect_explain_text,
             pending_interactive_question,
             dismiss_interactive_question,
             stop_managed_terminal,

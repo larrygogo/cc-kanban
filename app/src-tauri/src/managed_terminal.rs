@@ -62,6 +62,28 @@ pub(crate) struct ScreenDetectExplain {
     lines: Vec<String>,
 }
 
+/// 对一份快照跑规则并组装诊断结果。在线/离线两个入口共用，保证两者判定完全一致——
+/// 离线复现出的结论若和线上不同，这个工具就没有意义了。
+fn explain_snapshot(
+    provider: String,
+    snapshot: crate::detect::ScreenSnapshot,
+    published: Option<&'static str>,
+) -> ScreenDetectExplain {
+    let (raw_state, matched_rule) = match crate::detect::evaluate(&provider, &snapshot) {
+        Some(crate::detect::Evaluation::Publish(det)) => (Some(det.state.as_str()), det.rule_id),
+        Some(hold @ crate::detect::Evaluation::Hold { .. }) => (None, hold.rule_id()),
+        None => (None, "provider_unsupported"),
+    };
+    ScreenDetectExplain {
+        provider,
+        published,
+        raw_state,
+        matched_rule,
+        title: snapshot.title,
+        lines: snapshot.lines,
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn screen_detect_explain(
     state: State<'_, super::AppState>,
@@ -73,23 +95,67 @@ pub(crate) async fn screen_detect_explain(
             .screen_probe_snapshot(session_id)
             .ok_or("该会话没有托管 PTY 屏幕状态")?;
         let published = ptys.screen_states().get(&session_id).copied();
-        let eval = crate::detect::evaluate(&provider, &snapshot);
-        let (raw_state, matched_rule) = match &eval {
-            Some(crate::detect::Evaluation::Publish(det)) => (Some(det.state.as_str()), det.rule_id),
-            Some(hold @ crate::detect::Evaluation::Hold { .. }) => (None, hold.rule_id()),
-            None => (None, "provider_unsupported"),
-        };
-        Ok(ScreenDetectExplain {
-            provider,
-            published,
-            raw_state,
-            matched_rule,
-            title: snapshot.title,
-            lines: snapshot.lines,
-        })
+        Ok(explain_snapshot(provider, snapshot, published))
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 离线版：直接对一段**末屏文本**跑规则，不需要活会话。
+///
+/// 规则匹配的是各 agent TUI 的界面文案，必然随对方改版腐坏；用户报「状态显示不对」时，
+/// 在线 explain 要求复现现场——而现场往往一次性。有了这个入口，把当时的末屏文本存下来
+/// （在线 explain 的 lines 直接可用，或从终端复制）就能反复验证：改一版规则跑一次，
+/// 修完还能把它固化成 detect.rs 的单测。
+///
+/// `title` 是 OSC 0/2 设置的终端标题——claude 的 spinner/✳ 判定全在标题上，漏传它
+/// 会得出与线上不同的结论，故显式作为参数而不是从文本里猜。
+#[tauri::command]
+pub(crate) fn screen_detect_explain_text(
+    provider: String,
+    text: String,
+    title: Option<String>,
+) -> ScreenDetectExplain {
+    let lines = text.lines().map(str::to_string).collect();
+    let snapshot = crate::detect::ScreenSnapshot::new(lines, title);
+    // 离线快照没有「已发布状态」：那是防抖后的运行时产物，与单帧无关。
+    explain_snapshot(provider, snapshot, None)
+}
+
+#[cfg(test)]
+mod screen_explain_tests {
+    use super::*;
+
+    /// 离线 explain 的价值全在「与线上同一套判定」：结论若与在线不同，拿它复现出的
+    /// 结果就是误导。两个入口共用 explain_snapshot，这里钉住行为——含**标题参与判定**
+    /// （claude 的 spinner/✳ 全在标题上，漏传会得出不同结论）。
+    #[test]
+    fn offline_explain_matches_the_live_rules() {
+        // 审批 UI：与在线路径同样判 blocked，并给出命中的规则名。
+        let blocked = screen_detect_explain_text(
+            "claude".into(),
+            " Bash command\n Do you want to proceed?\n \u{276F} 1. Yes\n   2. No\n".into(),
+            None,
+        );
+        assert_eq!(blocked.raw_state, Some("blocked"));
+        assert_eq!(blocked.matched_rule, "bash_permission_prompt");
+        // 离线快照没有运行时的已发布状态。
+        assert_eq!(blocked.published, None);
+
+        // 同一屏幕，只是标题带了 spinner 帧 → working（标题规则优先级最高）。
+        let working = screen_detect_explain_text(
+            "claude".into(),
+            " Do you want to proceed?\n".into(),
+            Some("\u{280B} building".into()),
+        );
+        assert_eq!(working.raw_state, Some("working"));
+        assert_eq!(working.matched_rule, "osc_title_working");
+
+        // 无规则集的 provider 如实说明，而不是假装判了个 idle。
+        let unsupported = screen_detect_explain_text("gemini".into(), "whatever".into(), None);
+        assert_eq!(unsupported.raw_state, None);
+        assert_eq!(unsupported.matched_rule, "provider_unsupported");
+    }
 }
 
 // snapshot/write/resize/stop 一律 async + spawn_blocking：同步命令跑在主线程，而这几条
