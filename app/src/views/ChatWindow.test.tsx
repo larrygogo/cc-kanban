@@ -1711,9 +1711,17 @@ describe("ChatWindow", () => {
     expect(screen.queryByText(/"questions"/)).toBeNull();
     // 点选即排队：提示切换为「已选…」，等屏幕识别确认表单在屏后才自动落键，
     // 不在此刻向 PTY 写任何字节。再点一次取消排队。
+    //
+    // 断言「**这次点击**没产生写入」而不是「全程零写入」：本用例的 snapshot 返回
+    // active:true，会挂载终端组件，它自身的初始化时序在不同平台上可能产生 IPC——
+    // 全局零调用的写法因此在 macOS runner 上间歇失败（CI 实测），而那与本用例要
+    // 验证的「点选只排队」毫无关系。
+    const writes = () =>
+      invoke.mock.calls.filter((call) => call[0] === "write_managed_terminal").length;
+    const before = writes();
     fireEvent.click(screen.getByRole("button", { name: /autopilot-v2/ }));
     expect(screen.getByText("已选「autopilot-v2」，表单就绪后自动作答")).toBeTruthy();
-    expect(invoke).not.toHaveBeenCalledWith("write_managed_terminal", expect.anything());
+    expect(writes()).toBe(before);
     fireEvent.click(screen.getByRole("button", { name: /autopilot-v2/ }));
     expect(screen.queryByText(/已选「/)).toBeNull();
   });
