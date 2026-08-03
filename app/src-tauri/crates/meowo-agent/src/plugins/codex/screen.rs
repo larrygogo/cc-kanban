@@ -83,8 +83,10 @@ pub(super) static RULES: &[ScreenRule] = &[
             // 逐字对齐 herdr 原始规则的 `^[•◦]\s+Working \(`：项目符号与 Working 之间
             // 是 `\s+` 而非单个空格——状态行的对齐空格随终端宽度变化，写死单空格会让
             // 那些屏幕漏判成空闲（已由 codex_working_line_tolerates_extra_spaces 钉住）。
-            Matcher::LineRegex(r"^\s*[\u{2022}\u{25E6}]\s+working \("),
-            Matcher::Contains(&["esc to interrupt"]),
+            // 状态行是一整行：`• Working (3m · esc to interrupt)`。中断提示必须与
+            // Working 在**同一行**——拆成 region 级 Contains 会把「上一行是 Working、
+            // 另一行提到 esc to interrupt」的残影屏误判成运行中。
+            Matcher::LineRegex(r"^\s*[\u{2022}\u{25E6}]\s+working \(.*esc to interrupt"),
             Matcher::Not(&[Matcher::Contains(&["■ conversation interrupted"])]),
         ]),
     )

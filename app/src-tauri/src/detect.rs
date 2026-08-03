@@ -841,6 +841,52 @@ mod tests {
         assert!(checked > 0, "应至少有一条规则用了正则");
     }
 
+    /// 规则的「同行耦合」与「整行等值」不能退化成 region 级的分散包含——
+    /// 屏幕上别处出现同样的词很常见，退化后会把普通输出误判成需要关注的状态。
+    /// 三条均由代码审查发现，此处用它给出的失败场景钉住。
+    #[test]
+    fn rules_require_same_line_evidence_not_scattered_words() {
+        // claude /btw：`/btw` 后须是空白或行尾，提示须在行尾。
+        let fake_btw = snap(&[
+            "  /btwhatever is this",
+            "  press esc to close this dialog and continue",
+        ]);
+        assert_ne!(
+            state_of(evaluate("claude", &fake_btw)).map(|(state, _)| state),
+            Some(ScreenState::Working),
+            "/btwhatever 与句中的 esc to close 不构成 /btw 覆盖层"
+        );
+
+        // kimi 提问面板：标题行必须整行等于 question。
+        let fake_question = snap(&[
+            " questions about the design",
+            " ? which one",
+            " ↑↓ select \u{00B7} \u{21B5} choose \u{00B7} esc cancel",
+        ]);
+        assert_ne!(
+            state_of(evaluate("kimi", &fake_question)).map(|(state, _)| state),
+            Some(ScreenState::Blocked),
+            "「questions about…」不是提问面板的标题行"
+        );
+
+        // codex 状态行：Working 与 esc to interrupt 必须同行。
+        let split_lines = snap(&[
+            " \u{2022} Working (3m 12s)",
+            "  earlier output mentioning esc to interrupt",
+        ]);
+        assert_ne!(
+            state_of(evaluate("codex", &split_lines)).map(|(state, _)| state),
+            Some(ScreenState::Working),
+            "中断提示在别行时不算当前状态行"
+        );
+        // 同行的真状态行仍然识别。
+        let real = snap(&[" \u{2022}  Working (3m 12s \u{00B7} esc to interrupt)"]);
+        assert_eq!(
+            state_of(evaluate("codex", &real)),
+            Some((ScreenState::Working, "screen_working_fallback"))
+        );
+    }
+
     /// kimi 的审批标题行必须**以问号结尾**（原始规则 `^\s*▶?\s*approve .*\?$`）。
     /// 漏掉这个约束会把「approve this plan」这类普通输出误报成等待审批——而 blocked
     /// 误报是最坏方向：弹通知说 agent 在等你，实际它跑得好好的。

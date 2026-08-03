@@ -43,8 +43,10 @@ pub(super) static RULES: &[ScreenRule] = &[
         Region::WholeScreen,
         Matcher::All(&[
             Matcher::Contains(&["↑↓ select", "esc cancel"]),
-            Matcher::LineStartsWith(&["question"]),
-            Matcher::LineStartsWith(&["? "]),
+            // 标题行是**整行等于** "question"（原始 `^\s*question\s*$`）。写成前缀会让
+            // 「questions about the design」这类正文在其余条件齐备时误判成等待回答。
+            Matcher::LineRegex(r"^\s*question\s*$"),
+            Matcher::LineRegex(r"^\s*\? "),
             Matcher::AnyContains(&["↵ choose", "↵ toggle", "↵ save"]),
         ]),
     )
@@ -67,7 +69,10 @@ pub(super) static RULES: &[ScreenRule] = &[
         ScreenState::Working,
         120,
         Region::BottomNonEmpty(3),
-        Matcher::Contains(&["kimi", "thinking", "running]"]),
+        // 三个词必须在**同一行**且含 `[N agents running]` 计数（原始
+        // `\bkimi[-\w.]*\s+thinking\b.*\[[1-9][0-9]*\s+agents?\s+running\]`）。
+        // 拆成 region 级的分散包含会把「屏幕别处有 kimi、另一处有 thinking」误判成运行中。
+        Matcher::LineRegex(r"\bkimi[-\w.]*\s+thinking\b.*\[[1-9][0-9]*\s+agents?\s+running\]"),
     )
     .visible(),
     ScreenRule::new(

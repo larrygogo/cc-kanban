@@ -46,6 +46,11 @@ use std::path::{Path, PathBuf};
 pub struct CrossAccountSession {
     /// 会话正文所在的目录（相对数据根），其下按项目再分子目录，文件名为
     /// `<session-id>` + [`transcript_ext`](Self::transcript_ext)。
+    ///
+    /// **必须是单层目录名**（如 `"projects"`，不能是 `"data/sessions"`）：宿主从正文
+    /// 路径上溯三级还原数据根（`<root>/<transcript_dir>/<项目>/<id><ext>`）。写成多层
+    /// 会让数据根落在中间目录上——`session_buckets` 从错误位置复制，且「源与目标同根」
+    /// 的短路判断永不成立，同账号内每次恢复都全量重拷一遍。
     pub transcript_dir: &'static str,
     /// 会话正文的扩展名（含点，如 `.jsonl`）。
     pub transcript_ext: &'static str,

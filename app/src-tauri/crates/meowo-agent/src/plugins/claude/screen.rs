@@ -75,9 +75,13 @@ pub(super) static RULES: &[ScreenRule] = &[
         ScreenState::Working,
         975,
         Region::BottomNonEmpty(5),
+        // 逐字对齐原始规则 `^\s*/btw(?:\s|$)` 与 `esc to close\s*$`：
+        // `/btw` 后必须是空白或行尾（否则 `/btwhatever` 也命中），提示必须在**行尾**
+        // （否则「press esc to close this dialog」这类正文会把空闲误判成运行中——
+        // 该规则 975 优先级，会压过提示框的 idle 判定）。
         Matcher::All(&[
-            Matcher::LineStartsWith(&["/btw"]),
-            Matcher::Contains(&["esc to close"]),
+            Matcher::LineRegex(r"^\s*/btw(?:\s|$)"),
+            Matcher::LineRegex(r"esc to close\s*$"),
         ]),
     )
     .visible(),

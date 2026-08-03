@@ -32,13 +32,40 @@ const GUARDED_FILES = [
   "api.ts",
 ];
 
-/** 身份**比较**的形态。数据声明（`x: "claude"` / `["claude"]`）刻意不在内。 */
+/**
+ * 身份**比较**的形态。数据声明（`x: "claude"` / `["claude"]`）刻意不在内。
+ *
+ * `[!=]=+` 而不是 `[!=]==`：松散相等 `p == "kimi"` 同样是分支，只写三等号会漏。
+ * 字符串方法一并覆盖 startsWith/endsWith/indexOf/match/test——它们都能拿来做身份判断。
+ */
 const COMPARISONS = (id: string) => [
-  new RegExp(`[!=]==\\s*["']${id}["']`),
-  new RegExp(`["']${id}["']\\s*[!=]==`),
-  new RegExp(`\\.includes\\(\\s*["']${id}["']\\s*\\)`),
-  new RegExp(`\\.has\\(\\s*["']${id}["']\\s*\\)`),
+  new RegExp(`[!=]=+\\s*["']${id}["']`),
+  new RegExp(`["']${id}["']\\s*[!=]=+`),
+  new RegExp(`\\.(includes|has|startsWith|endsWith|indexOf|match|test)\\(\\s*["']${id}["']`),
   new RegExp(`\\bcase\\s+["']${id}["']`),
+];
+
+/**
+ * 通过**中间变量**做身份判断的形态：`const P = "claude"; p === P`。
+ *
+ * 单看每一行都合法（一行是数据声明、另一行是变量比较），只有连起来看才是身份分支。
+ * 故先收集「值为 agent id 的常量名」，再把它们当作 id 的别名重新扫一遍。
+ */
+function agentIdAliases(source: string): Map<string, string> {
+  const aliases = new Map<string, string>();
+  const declaration = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*["']([^"']+)["']/g;
+  for (let m = declaration.exec(source); m; m = declaration.exec(source)) {
+    if (AGENT_IDS.includes(m[2])) aliases.set(m[1], m[2]);
+  }
+  return aliases;
+}
+
+/** 变量别名的比较形态（`p === P`、`switch` 的 `case P`）。 */
+const ALIAS_COMPARISONS = (name: string) => [
+  new RegExp(`[!=]=+\\s*${name}\\b`),
+  new RegExp(`\\b${name}\\s*[!=]=+`),
+  new RegExp(`\\.(includes|has|startsWith|endsWith|indexOf)\\(\\s*${name}\\s*\\)`),
+  new RegExp(`\\bcase\\s+${name}\\b`),
 ];
 
 describe("架构守卫", () => {
@@ -46,6 +73,7 @@ describe("架构守卫", () => {
     const offences: string[] = [];
     for (const file of GUARDED_FILES) {
       const source = readFileSync(join(SRC, file), "utf8");
+      const aliases = agentIdAliases(source);
       source.split("\n").forEach((line, index) => {
         const code = line.trim();
         // 注释里举例说明是正常的。
@@ -53,6 +81,11 @@ describe("架构守卫", () => {
         for (const id of AGENT_IDS) {
           if (COMPARISONS(id).some((re) => re.test(code))) {
             offences.push(`${file}:${index + 1} 按 ${id} 分支 → ${code}`);
+          }
+        }
+        for (const [name, id] of aliases) {
+          if (ALIAS_COMPARISONS(name).some((re) => re.test(code))) {
+            offences.push(`${file}:${index + 1} 经变量 ${name} 按 ${id} 分支 → ${code}`);
           }
         }
       });

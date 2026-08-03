@@ -480,6 +480,9 @@ pub(crate) fn resume_argv_for(provider: Option<&str>, session_id: Option<&str>) 
 ///
 /// Claude 的会话可跨账号继续：恢复前会把会话资料同步到当前活跃账号，因此这里也必须使用当前
 /// 活跃账号。其余 provider 尚未声明跨账号会话迁移能力，仍沿用该会话原先所属的账号。
+/// 恢复路径改为一律按 `prepare_session_for_active_profile` 算出的实际账号取 env 之后，
+/// 本函数只剩 macOS 的聚焦回退路径在用（它没有 prepare 的结果可依，只能自行推导）。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn launch_env_for_session(
     provider: Option<&str>,
     session_id: &str,
@@ -496,6 +499,8 @@ fn supports_cross_account_resume(provider: Option<&str>) -> bool {
     meowo_agent::resolve(provider).is_some_and(|agent| agent.cross_account_session().is_some())
 }
 
+/// 同 [`launch_env_for_session`]：非 macOS 下只有它的单测在用。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn resume_profile(
     provider: Option<&str>,
     stored: Option<String>,
@@ -1867,11 +1872,11 @@ pub(crate) fn start_managed_resume_sized(
     // 完整的最后一帧 transcript，也不会与 Claude 正在追加同一个文件发生竞争。
     let target_profile = prepare_session_for_active_profile(&provider, &session_id)?;
     let revived = prepare_resume(&app, &session_id);
-    let env = if provider == "claude" {
-        launch_env_for_resume_target(&provider, target_profile.as_deref())
-    } else {
-        launch_env_for_session(Some(&provider), &session_id)
-    };
+    // 一律按 prepare 算出的**实际**账号取 env，不再按 agent 身份分支重新推导。
+    // target_profile 已经涵盖三种情形：跨账号迁移成功 → 活跃账号；声明了迁移但找不到
+    // transcript（用户自设 config-home / 被清理策略删掉）→ 回退该会话原账号；未声明
+    // 迁移 → 原账号。重新推导反而会丢掉中间那种回退，给出一个会话资料并不在那儿的账号。
+    let env = launch_env_for_resume_target(&provider, target_profile.as_deref());
     if let Err(error) = broker.start(
         app.clone(),
         sid,
@@ -1887,7 +1892,9 @@ pub(crate) fn start_managed_resume_sized(
         emit_board_changed(&app, "resume-failed");
         return Err(error);
     }
-    if provider == "claude" {
+    // 只有会跨账号迁移的 agent 需要把账号写回 DB——它的会话账号刚刚可能变了。
+    // 其余 agent 的 target_profile 恒等于原账号，写回是纯粹的冗余 DB 写。
+    if supports_cross_account_resume(Some(&provider)) {
         record_resumed_profile(&session_id, target_profile.as_deref());
     }
     // 秒退探测：CLI 拒绝启动时（典型：resume 一个正被另一进程占用的会话，claude 直接报错
@@ -2129,11 +2136,8 @@ pub(crate) async fn restart_session_supported(
         // 原进程确认结束后才复活 DB 状态；恢复计划沿用终止前已验证的结果。
         let target_profile = prepare_session_for_active_profile(&provider, &session_id)?;
         let revived = prepare_resume(&app, &session_id);
-        let env = if provider == "claude" {
-            launch_env_for_resume_target(&provider, target_profile.as_deref())
-        } else {
-            launch_env_for_session(Some(&provider), &session_id)
-        };
+        // 与托管恢复同一口径：按 prepare 算出的实际账号取 env（理由见 start_managed_resume_sized）。
+        let env = launch_env_for_resume_target(&provider, target_profile.as_deref());
         let ok = spawn_in_terminal(
             &resume,
             resolved.as_deref(),
@@ -2141,7 +2145,7 @@ pub(crate) async fn restart_session_supported(
             &env,
         );
         if ok {
-            if provider == "claude" {
+            if supports_cross_account_resume(Some(&provider)) {
                 record_resumed_profile(&session_id, target_profile.as_deref());
             }
             Ok(())

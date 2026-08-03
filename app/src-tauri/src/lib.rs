@@ -1277,13 +1277,7 @@ mod tests {
             ("watch.rs", include_str!("watch.rs")),
         ];
         for (name, source) in HOST_SOURCES {
-            // 截到首个测试模块之前——固件里写 agent 名是正常的。
-            let production = source
-                .split("#[cfg(test)]")
-                .next()
-                .and_then(|s| s.split("#[cfg(all(test").next())
-                .unwrap_or(source);
-            for (index, line) in production.lines().enumerate() {
+            for (index, line) in production_lines(source) {
                 let code = line.trim_start();
                 if code.starts_with("//") {
                     continue; // 注释里举例说明是正常的
@@ -1297,6 +1291,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 逐行产出源码的**生产段**（跳过 `#[cfg(test)]` 模块的整个花括号区间），
+    /// 附带 1 起始的行号。
+    ///
+    /// 曾经用 `split("#[cfg(test)]").next()` 一刀切到首个测试标记为止——那假设测试都在
+    /// 文件末尾。`terminal.rs` 的内联测试模块在 31% 处，其后还有 43 个顶层定义全部
+    /// 逃过检查（实测：在其后植入 `provider == "claude"`，守卫照样通过）。守卫的盲区
+    /// 比没有守卫更危险：它让人以为已经防住了。
+    fn production_lines(source: &str) -> Vec<(usize, &str)> {
+        let mut out = Vec::new();
+        let mut depth = 0i32; // 测试模块内的花括号深度；0 = 不在测试模块里
+        let mut in_test = false;
+        for (index, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if !in_test && trimmed.starts_with("#[cfg(test)]")
+                || !in_test && trimmed.starts_with("#[cfg(all(test")
+            {
+                in_test = true;
+                depth = 0;
+                continue;
+            }
+            if in_test {
+                // 数花括号找模块结束。字符串/字符字面量里的花括号会干扰计数，但测试
+                // 模块里的括号总体平衡，实践中足够；真出偏差会表现为**多**跳过一段，
+                // 那是安全方向（守卫更严只会误报，不会漏报）。
+                depth += line.matches('{').count() as i32;
+                depth -= line.matches('}').count() as i32;
+                if depth <= 0 && line.contains('}') {
+                    in_test = false;
+                }
+                continue;
+            }
+            out.push((index + 1, line));
+        }
+        out
     }
 
     /// DLL 搜索路径收紧必须在 `run()` 的**最前面**（任何 LoadLibrary 之前）——托管 PTY
