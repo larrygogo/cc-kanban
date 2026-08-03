@@ -30,22 +30,22 @@ export const zh = {
   sticker: {
     openChatWindow: "打开对话窗口",
     openSettings: "打开设置",
-    updateAvailable: "有新版本，去设置 → 关于更新",
+    updateAvailable: "有新版本",
     search: "搜索会话",
     searchPlaceholder: "搜索标题 / 仓库…",
     searchClose: "关闭搜索",
     usage5h: "5小时",
     usage7d: "7天",
     usageOpus: "Opus · 7 天",
-    pinOn: "已置顶：点击取消",
+    pinOn: "取消置顶",
     pinOff: "置顶窗口",
     waitingFirstInput: "等待首次输入",
     stopped: "已断开/已停止",
     sessionError: "会话出错",
     online: "在线",
     // 落点由设置 sessionOpenIn 决定（对话窗口 / 外部终端），故不在文案里写死「终端」。
-    openSession: "点击打开该会话",
-    resumeSession: "点击恢复该会话",
+    openSession: "打开会话",
+    resumeSession: "恢复会话",
     renameTitle: "重命名",
     renamePlaceholder: "输入名称，回车保存",
     renameHint: "运行中：改名后需在该终端 /resume 才生效",
@@ -248,8 +248,8 @@ export const zh = {
     // 对话页标题栏与终端页操作条共用同一段确认文案(confirmStopSession)。
     endSessionConfirm: "结束会话会终止正在运行的 Agent 进程，进行中的任务会被打断。是否继续？",
     // 标题栏归档按钮的提示：说清「只是从看板收起」，别让人以为会关掉/删掉会话。
-    archiveTip: "归档：从看板收起这个会话（不影响本窗对话）",
-    unarchiveTip: "取消归档：让这个会话回到看板",
+    archiveTip: "从看板收起",
+    unarchiveTip: "放回看板",
     terminalAttach: "在外部终端同步打开",
     modelMenuOpen: "终端里已打开模型菜单，点此收起",
     // 交互式斜杠命令（/config、/resume 等）发出后的过渡横幅：识别成功会变成选项卡片；
