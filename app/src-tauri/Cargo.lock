@@ -2387,7 +2387,7 @@ dependencies = [
 
 [[package]]
 name = "meowo-app"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "arboard",
  "base64 0.22.1",
