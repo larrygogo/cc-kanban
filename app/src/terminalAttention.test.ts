@@ -58,6 +58,37 @@ describe("terminalAttention", () => {
     expect(attention?.options?.[4].kind).toBe("submit");
   });
 
+  /**
+   * AskUserQuestion 的单选表单(真机取证,claude 2.1.220 托管 PTY,2026-08):没有复选框、
+   * 每项下方跟一行缩进描述。题面卡的点选靠 label 匹配落键,所以描述行绝不能混进选项——
+   * 混进去会让「火锅」错位到描述上,自动作答按到别的项。
+   */
+  it("认得带描述行的单选 AskUserQuestion 表单,描述不混进选项", () => {
+    const prompt = [
+      "\x1b[2J晚饭吃什么?",
+      "",
+      "❯ 1. 火锅",
+      "     热气腾腾，一群人围着锅边煮边聊，最有气氛",
+      "  2. 寿司",
+      "     清爽不油腻，讲究食材本味，吃完没负担",
+      "  3. 沙拉",
+      "     低卡健康，蔬菜为主，适合想吃得轻一点的时候",
+      "  4. Type something.",
+      "  5. Chat about this",
+      "",
+      "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    ].join("\r\n");
+    const attention = terminalAttention(prompt, [], true);
+    expect(attention?.id).toBe("interactive:numbered-selector");
+    expect(attention?.options?.map((option) => option.label)).toEqual([
+      "火锅", "寿司", "沙拉", "Type something.", "Chat about this",
+    ]);
+    expect(attention?.options?.[0].focused).toBe(true);
+    // 焦点已在第 1 项:直接回车。第 3 项要先下移两格。
+    expect(attention?.options?.[0].input).toBe("\r");
+    expect(attention?.options?.[2].input).toBe("\x1b[B\x1b[B\r");
+  });
+
   it("deduplicates TUI redraws and ignores numbered prose outside checkbox choices", () => {
     const prompt = [
       "\x1b[2J1. <Transcript> 无虚拟化",

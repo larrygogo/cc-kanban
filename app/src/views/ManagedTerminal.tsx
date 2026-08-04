@@ -363,6 +363,9 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     // 会闪烁——而清卡又重置了签名去重,重绘完成后同一屏会再弹一次,循环闪。
     const ATTENTION_CLEAR_STREAK = 3;
     let attentionMissStreak = 0;
+    // 已经因「屏幕上没有提示」发布过一次 null,再 miss 也不重复发,避免每帧刷 null。
+    // 匹配到新提示时复位。
+    let clearPublished = false;
     const reportAttention = (text: string) => {
       if (text) lastScreenRef.current = text;
       const attention = terminalAttention(text, attentionMarkersRef.current, interactivePromptRef.current, expectMenuRef.current, grammarRef.current);
@@ -370,21 +373,30 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
         // 此前这里直接 return——attention 状态只置不清,误报或已在终端里处理过的提示会
         // 永久钉住卡片、锁死对话页输入框。现在:屏幕持续不匹配就发布 null 收卡,并重置
         // 签名去重,让真正的下一个提示(哪怕内容相同)还能再弹。
-        if (attentionReportedRef.current) {
-          attentionMissStreak += 1;
-          if (attentionMissStreak >= ATTENTION_CLEAR_STREAK) {
-            attentionMissStreak = 0;
-            attentionReportedRef.current = null;
-            onAttentionRef.current?.(null);
-          } else {
-            // 扫描由输出事件驱动;最后一次重绘后终端可能归于安静,凑不满连击就永远
-            // 清不掉。miss 期间自我续排,直到清卡或重新匹配。
-            window.setTimeout(() => { if (!cancelled) scheduleAttentionScan(); }, 200);
-          }
+        //
+        // 收卡**不能**以「本组件报告过」为前提:启动提示是 ChatWindow 的
+        // waitForTerminalReady 直接置进去的,本组件的 attentionReportedRef 仍是 null。
+        // 曾据此门控,于是用户在终端里答掉信任提示后,那张卡在对话页永久钉死、把输入框
+        // 一起锁住,后续真正的提问卡(渲染条件含 !terminalAttention)再也没机会出现。
+        if (clearPublished) return;
+        // 首屏尚未画出来时屏幕是空的,此刻的「不匹配」不算证据——照发 null 会把
+        // 启动提示在 attach 重放到达前抹掉。
+        if (!painted) return;
+        attentionMissStreak += 1;
+        if (attentionMissStreak >= ATTENTION_CLEAR_STREAK) {
+          attentionMissStreak = 0;
+          attentionReportedRef.current = null;
+          clearPublished = true;
+          onAttentionRef.current?.(null);
+        } else {
+          // 扫描由输出事件驱动;最后一次重绘后终端可能归于安静,凑不满连击就永远
+          // 清不掉。miss 期间自我续排,直到清卡或重新匹配。
+          window.setTimeout(() => { if (!cancelled) scheduleAttentionScan(); }, 200);
         }
         return;
       }
       attentionMissStreak = 0;
+      clearPublished = false;
       const signature = `${attention.id}\0${attention.text}\0${JSON.stringify(attention.options)}`;
       if (signature === attentionReportedRef.current) return;
       // 信任页本身就是当前需要展示的有效画面，不能继续被“正在初始化”遮罩盖住。

@@ -331,6 +331,39 @@ describe("ManagedTerminal", () => {
     expect(attention.mock.calls[2][0]?.text).toContain("Do you trust");
   });
 
+  /**
+   * 收卡不能以「本组件报告过提示」为前提。启动提示由 ChatWindow 的 waitForTerminalReady
+   * 直接置进去,本组件的签名 ref 仍是空的;老代码把清卡分支门控在那个 ref 上,于是用户
+   * 在终端里答掉信任提示后,卡片在对话页永久钉死、把输入框一起锁住,后续真正的提问卡
+   * (渲染条件含 !terminalAttention)再没机会出现。真机上正是这样卡住的。
+   */
+  it("屏幕上本就没有提示时也发一次 null,替外部置入的卡收场", async () => {
+    const attention = vi.fn();
+    const plain = "\x1b[2Jworking on it...";
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve({ ...noPty, active: true, data: btoa(plain), endOffset: plain.length });
+      }
+      return Promise.resolve();
+    });
+    render(
+      <ManagedTerminal
+        sessionId={163}
+        status="running"
+        attentionMarkers={["do you trust the files in this folder"]}
+        onAttention={attention}
+      />,
+    );
+    // 一次都没匹配过,仍要收到 null——这是老代码进不去的分支。
+    await waitFor(() => expect(attention).toHaveBeenCalledWith(null), { timeout: 3_000 });
+    // 且只发一次:每帧刷 null 会把 ChatWindow 的状态更新拖成噪音。
+    const nullCalls = () => attention.mock.calls.filter((call) => call[0] === null).length;
+    expect(nullCalls()).toBe(1);
+    eventHandlers.get("pty-output")!({ payload: { sessionId: 163, offset: plain.length, data: btoa("still working") } });
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(nullCalls()).toBe(1);
+  });
+
   it("orders and deduplicates live output buffered while the initial snapshot is loading", async () => {
     let resolveSnapshot!: (value: typeof noPty) => void;
     invoke.mockImplementation((command: string) => {
