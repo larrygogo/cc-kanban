@@ -194,4 +194,13 @@ pub(super) static RULES: &[ScreenRule] = &[
         Matcher::StartsWithCharIn("\u{2733}"),
     )
     .visible(),
+    // 进度清零（OSC 9;4;0）= 这一轮结束了。与 osc_title_idle 同级的第二条兜底：
+    // 标题未必总带 ✳（用户自设了终端标题、或 CLI 版本不写标题），而进度序列照发。
+    ScreenRule::new(
+        "osc_progress_idle",
+        ScreenState::Idle,
+        250,
+        Region::Progress,
+        Matcher::LineRegex(r"^4;0"),
+    ),
 ];

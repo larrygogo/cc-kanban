@@ -34,17 +34,40 @@ const INTERACTIVE_QUESTION_TTL_MS: i64 = 150_000;
 #[derive(Default)]
 struct ScreenTitle {
     title: Option<String>,
+    /// OSC 9 的 payload（`ESC ] 9 ; …`）。ConEmu 系的进度序列 `9;4;<state>;<pct>` 走这里，
+    /// agent 用它汇报「跑着 / 完成 / 出错」，是标题之外的第二个状态信号源。
+    progress: Option<String>,
+}
+
+/// 标题与进度都是**不受信任的模型输出**：过滤控制字符并限长，避免它们污染判定
+/// 或在诊断输出里注入转义序列。
+fn sanitize_osc(raw: &[u8]) -> Option<String> {
+    let text: String = String::from_utf8_lossy(raw)
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(256)
+        .collect();
+    let text = text.trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
 impl vt100::Callbacks for ScreenTitle {
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
-        let text: String = String::from_utf8_lossy(title)
-            .chars()
-            .filter(|ch| !ch.is_control())
-            .take(256)
-            .collect();
-        let text = text.trim().to_string();
-        self.title = (!text.is_empty()).then_some(text);
+        self.title = sanitize_osc(title);
+    }
+
+    /// vt100 只内建处理 OSC 0/1/2/52，其余走这里。取 OSC 9 当进度信号；
+    /// 空 payload 视为清除（与标题同一约定）。
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        if let [b"9", rest @ ..] = params {
+            // 参数已按 `;` 切开，重新拼回原始 payload 形态（规则按 `4;0` 这种前缀匹配）。
+            let joined = rest
+                .iter()
+                .map(|part| String::from_utf8_lossy(part).into_owned())
+                .collect::<Vec<_>>()
+                .join(";");
+            self.progress = sanitize_osc(joined.as_bytes());
+        }
     }
 }
 
@@ -92,8 +115,11 @@ impl ScreenProbe {
         let screen = parser.screen();
         let (_, cols) = screen.size();
         let lines: Vec<String> = screen.rows(0, cols).collect();
-        let title = parser.callbacks().title.clone();
-        Some(crate::detect::ScreenSnapshot::new(lines, title))
+        let callbacks = parser.callbacks();
+        Some(
+            crate::detect::ScreenSnapshot::new(lines, callbacks.title.clone())
+                .with_progress(callbacks.progress.clone()),
+        )
     }
 
     /// 跑一轮检测。`current_end` 是会话此刻的累计输出偏移（[`ManagedPty::output_end`]）。
@@ -2113,6 +2139,30 @@ mod tests {
         assert_eq!(
             probe.tick(u64::MAX, after_grace),
             Some(crate::detect::ScreenState::Blocked)
+        );
+    }
+
+    /// OSC 9 进度序列要能从**真实字节流**走到判定：vt100 不内建处理 OSC 9，靠
+    /// `unhandled_osc` 回调取出。漏采它等于让 claude 少一条兜底的 idle 判据
+    /// （标题未必总带 ✳——用户自设终端标题、或 CLI 版本不写标题时就没了）。
+    #[test]
+    fn osc_progress_reaches_the_rules() {
+        let probe = ScreenProbe::new(24, 80, "claude".into());
+        let after_grace =
+            probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);
+        // 屏幕上只有历史输出、标题也不带 ✳：唯一的空闲证据就是进度清零。
+        feed_screen(&probe, b"\x1b]0;my-terminal\x07");
+        feed_screen(&probe, "  cargo build finished\r\n".as_bytes());
+        feed_screen(&probe, b"\x1b]9;4;0\x07");
+        assert_eq!(
+            probe.tick(1, after_grace),
+            Some(crate::detect::ScreenState::Idle)
+        );
+        let snapshot = probe.snapshot().expect("有规则集");
+        assert_eq!(snapshot.progress.as_deref(), Some("4;0"));
+        assert_eq!(
+            crate::detect::evaluate("claude", &snapshot).map(|e| e.rule_id()),
+            Some("osc_progress_idle")
         );
     }
 

@@ -22,6 +22,8 @@ pub(crate) use meowo_agent::screen::ScreenState;
 pub(crate) struct ScreenSnapshot {
     pub(crate) lines: Vec<String>,
     pub(crate) title: Option<String>,
+    /// OSC 9 的 payload（进度序列 `4;<state>;<pct>`）。与标题并列的第二个非屏幕信号源。
+    pub(crate) progress: Option<String>,
 }
 
 impl ScreenSnapshot {
@@ -35,7 +37,16 @@ impl ScreenSnapshot {
         while lines.last().is_some_and(|line| line.is_empty()) {
             lines.pop();
         }
-        Self { lines, title }
+        Self {
+            lines,
+            title,
+            progress: None,
+        }
+    }
+
+    pub(crate) fn with_progress(mut self, progress: Option<String>) -> Self {
+        self.progress = progress;
+        self
     }
 }
 
@@ -90,6 +101,7 @@ pub(crate) fn evaluate(provider: &str, snap: &ScreenSnapshot) -> Option<Evaluati
     // 匹配统一在小写文本上做（声明侧写小写字面量）；标题另走原文，它判的是字符集。
     let lower: Vec<String> = snap.lines.iter().map(|line| line.to_lowercase()).collect();
     let title = snap.title.as_deref().unwrap_or("");
+    let progress = snap.progress.as_deref().unwrap_or("");
 
     let mut best: Option<&ScreenRule> = None;
     for rule in rules {
@@ -97,7 +109,7 @@ pub(crate) fn evaluate(provider: &str, snap: &ScreenSnapshot) -> Option<Evaluati
         if best.is_some_and(|winner| winner.priority >= rule.priority) {
             continue;
         }
-        if matches_rule(rule, &lower, title) {
+        if matches_rule(rule, &lower, title, progress) {
             best = Some(rule);
         }
     }
@@ -116,8 +128,17 @@ pub(crate) fn evaluate(provider: &str, snap: &ScreenSnapshot) -> Option<Evaluati
     })
 }
 
-fn matches_rule(rule: &ScreenRule, lower: &[String], title: &str) -> bool {
+fn matches_rule(rule: &ScreenRule, lower: &[String], title: &str, progress: &str) -> bool {
     match rule.region {
+        // 进度序列同样当单行区域喂进去（小写：`4;0` 这类 payload 本无大小写，转了无害）。
+        Region::Progress => {
+            let lower_progress = progress.to_lowercase();
+            eval_matcher(
+                &rule.matcher,
+                std::slice::from_ref(&lower_progress),
+                title,
+            )
+        }
         // 标题当作单行区域喂进去，同样**小写**——文本类谓词（Contains 等）全按小写约定
         // 比较（codex 的标题是 "Action Required"，不转就匹配不上）。字符集类谓词
         // （StartsWithCharIn / WordCharIn）另走原文 title 参数，它们判的是 spinner 帧
@@ -198,7 +219,8 @@ fn eval_matcher(matcher: &Matcher, region: &[String], title: &str) -> bool {
 
 fn region_of(region: Region, lines: &[String]) -> &[String] {
     match region {
-        Region::WholeScreen | Region::Title => lines,
+        // Title / Progress 不走这里（matches_rule 已单独处理），列出只为穷尽匹配。
+        Region::WholeScreen | Region::Title | Region::Progress => lines,
         Region::BottomNonEmpty(n) => bottom_non_empty_slice(lines, n),
         Region::AfterLastRule => after_last_horizontal_rule(lines),
         Region::PromptBoxBody => prompt_box_body(lines).unwrap_or(&[]),
