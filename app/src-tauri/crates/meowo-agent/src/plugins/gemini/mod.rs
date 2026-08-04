@@ -10,7 +10,8 @@
 //! 这也是「加 agent 只动 `plugins/`」的一次兑现：dispatch 里没有一个 `if provider == "gemini"`。
 //!
 //! **二、它是纯 JS，没有自己的可执行。** npm 全局装出来的 `gemini.cmd` 只是个 shim，真正跑起来的
-//! 进程是 `node`（实测 0.50.0：`bin` 指向 `bundle/gemini.js`）。这逼得 [`process_names`] 必须收
+//! 进程是 `node`（实测 0.50.0：`bin` 指向 `bundle/gemini.js`）。这逼得
+//! [`process_names`](crate::registry::AgentPlugin::process_names) 必须收
 //! `node`——代价见那里的注释。
 //!
 //! 事件表（配置里写左边，dispatch 看到的是右边）：
