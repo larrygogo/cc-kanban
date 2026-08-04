@@ -24,9 +24,14 @@ jobs:
       - name: 安装 Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
-      - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      # toolchain 必须与 rust-toolchain.toml 一致。这个 action 的 toolchain 输入默认是
+      # `stable`(不随 pin 的 SHA 变)，不传就把 target 装到 stable 上；而 cargo 在
+      # app/src-tauri 下跑时 rustup 按 rust-toolchain.toml 切到固定版本，那上面没有这两个
+      # target——0.5.10 首次发布即栽在这里:E0463 can't find crate for `core`。
+      - name: 安装 Rust(版本见 rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable(仅取 action 实现)
         with:
+          toolchain: "1.97.1"
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Rust 构建缓存

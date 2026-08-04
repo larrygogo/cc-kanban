@@ -6,6 +6,11 @@
 #
 # 升级方法：改这里的 channel，本地 `cargo clippy --workspace --all-targets` 跑一遍
 # 修掉新 lint，再连同修复一起提交——升级和修复必须同一个 commit，否则中间那次 CI 必红。
+#
+# 同时改 .github/workflows/ 下 ci.yml 与 release.yml 里的 `toolchain:`。那个 action 不读
+# 本文件(它的 toolchain 输入默认 stable)，两边写不一样时它按 stable 装 target/components，
+# 而 cargo 按本文件切工具链——装的和用的不是同一个。0.5.10 首次发布就这么挂的:
+# release.yml 漏了这一处，macOS 交叉编译报 E0463 can't find crate for `core`。
 [toolchain]
 channel = "1.97.1"
 components = ["clippy", "rustfmt"]
