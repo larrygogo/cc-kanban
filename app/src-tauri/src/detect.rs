@@ -835,6 +835,38 @@ mod tests {
         assert!(checked > 0, "应至少有一条规则用了正则");
     }
 
+    /// 一次求值的开销必须远小于检测节拍（300ms），否则会话一多就会拖住 ticker 线程。
+    ///
+    /// 正则是本模块唯一可能变慢的部分：编译一次就够，但**每轮都重编译**的话，几十条
+    /// 规则 × 每 300ms × 每个会话，很快就会变成可观的持续开销。这条测试跑满屏文本的
+    /// 求值，把单次耗时钉在毫秒级——它验证的与其说是速度，不如说是「缓存确实生效」。
+    #[test]
+    fn evaluating_a_full_screen_stays_cheap() {
+        // 24×80 的满屏文本，且刻意不命中任何高优先级规则（走完全部规则最费）。
+        let lines: Vec<&str> = (0..24)
+            .map(|_| "  compiling some crate with a fairly long line of build output here")
+            .collect();
+        let snap = snap_titled(&lines, "codex - building");
+
+        // 先跑一次让正则进缓存（首次编译不计入——线上也只付一次）。
+        let _ = evaluate("codex", &snap);
+
+        let rounds = 200;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            let _ = evaluate("claude", &snap);
+            let _ = evaluate("codex", &snap);
+            let _ = evaluate("kimi", &snap);
+        }
+        let per_eval = started.elapsed() / (rounds * 3);
+        // 阈值取 1ms：实测在开发机上是微秒级，留足 CI 慢机器的余量，只拦「缓存失效」
+        // 这种量级的退化（重编译正则会让单次跳到几十微秒以上并随规则数线性增长）。
+        assert!(
+            per_eval < std::time::Duration::from_millis(1),
+            "单次求值 {per_eval:?} 过慢——正则缓存可能失效了"
+        );
+    }
+
     /// 规则的「同行耦合」与「整行等值」不能退化成 region 级的分散包含——
     /// 屏幕上别处出现同样的词很常见，退化后会把普通输出误判成需要关注的状态。
     /// 三条均由代码审查发现，此处用它给出的失败场景钉住。
