@@ -9,7 +9,9 @@ import { parseUserText } from "./localCommand";
 // Claude Code 把粘贴/引用的图片在 transcript 里记成一行「[Image: source: <本地路径>]」。
 // 原样渲染就是在气泡里摊一整行 C:\Users\... 路径——对话里最脏的元素。渲染成缩略图
 // （asset 协议已启用，scope 限定在 image-cache 与 meowo-paste 两个图片目录，见
-// tauri.conf.json）；scope 外/文件已删时 onError 回退成文件名徽章，路径永不上屏。
+// tauri.conf.json）；scope 外/文件已删时 onError 回退成文件名徽章。
+// 路径**任何形式都不上屏**——包括 title：hover 提示与读屏都会念出它，而本地路径常含
+// 用户名等身份信息。要看是哪张图，缩略图本身与文件名就够了。
 const IMAGE_REF = /\[Image(?: #\d+)?: source: ([^\]]+?)\]/g;
 
 /** 把用户文本拆成「正文（去掉图片引用行）+ 图片路径列表」。图片不混排在文字里：
@@ -119,7 +121,7 @@ function ImageRef({ path }: { path: string }) {
   const name = path.split(/[\\/]/).pop() || path;
   if (failed) {
     return (
-      <span className="chat-image-chip" title={path}>
+      <span className="chat-image-chip" title={name}>
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="9" cy="10" r="1.6" /><path d="m5 17 4.5-4.5L13 16l3-3 3 4" /></svg>
         <span>{name}</span>
       </span>
@@ -128,7 +130,7 @@ function ImageRef({ path }: { path: string }) {
   const src = convertFileSrc(path);
   return (
     <>
-      <button type="button" className="chat-image-thumb-btn" title={path} onClick={() => setExpanded(true)}>
+      <button type="button" className="chat-image-thumb-btn" title={name} onClick={() => setExpanded(true)}>
         <img className="chat-image-thumb" src={src} alt={name} loading="lazy" onError={() => setFailed(true)} />
       </button>
       {/* 灯箱走 portal（在 Lightbox 内）：消息块开着 content-visibility（paint 包含），
