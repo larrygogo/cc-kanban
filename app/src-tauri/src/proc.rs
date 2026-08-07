@@ -186,13 +186,12 @@ pub(crate) fn claude_pids_snapshot() -> std::collections::HashSet<i64> {
 pub(crate) fn agent_pids_snapshot() -> HashSet<i64> {
     #[cfg(target_os = "windows")]
     {
-        let sys = System::new_with_specifics(
-            sysinfo::RefreshKind::new().with_processes(sysinfo::ProcessRefreshKind::new()),
-        );
-        sys.processes()
-            .iter()
-            .filter(|(_, p)| meowo_agent::is_agent_process(&p.name().to_string_lossy()))
-            .map(|(pid, _)| pid.as_u32() as i64)
+        // Toolhelp 快照（1-3ms）而非 sysinfo 全进程刷新（30-120ms，理由见 snapshot_processes）。
+        // 快照里的可执行名已是小写 basename，与 is_agent_process 的精确匹配口径一致。
+        snapshot_processes()
+            .into_iter()
+            .filter(|(_, (_, name))| meowo_agent::is_agent_process(name))
+            .map(|(pid, _)| pid as i64)
             .collect()
     }
     #[cfg(not(target_os = "windows"))]
