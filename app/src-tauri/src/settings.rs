@@ -385,35 +385,43 @@ pub(crate) async fn get_effective_proxy(agent: Option<String>) -> Result<Option<
 }
 
 /// 设置窗口用：读取/切换开机自启（原来只在托盘，托盘精简后搬到设置页）。
+/// autolaunch 的读写都碰注册表（Windows）或 LaunchAgents plist 文件（macOS），
+/// 且 auto-launch 内部有 `home_dir().unwrap()`——照本文件的纪律走 blocking 池。
 #[tauri::command]
-pub(crate) fn get_autostart(app: tauri::AppHandle) -> Result<bool, String> {
+pub(crate) async fn get_autostart(app: tauri::AppHandle) -> Result<bool, String> {
     // dev 下自启会注册 dev 二进制(开机连不上 dev server → 白屏)，一律视为关闭，避免误导。
     if tauri::is_dev() {
         return Ok(false);
     }
-    Ok(app.autolaunch().is_enabled().unwrap_or(false))
+    tauri::async_runtime::spawn_blocking(move || app.autolaunch().is_enabled().unwrap_or(false))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub(crate) fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+pub(crate) async fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     // dev 下拒绝写入：否则会把 target/debug 的调试二进制注册进开机自启，开机白屏。仅安装版可用。
     if tauri::is_dev() {
         return Err(
             "开机自启仅在安装版可用（dev 下会注册调试二进制，开机连不上 dev server）".into(),
         );
     }
-    let mgr = app.autolaunch();
-    if enabled {
-        mgr.enable().map_err(|e| e.to_string())?;
-        // auto-launch 写 Run 项用 format!("{} {}", path, args)——路径不加引号。路径含空格(如用户名
-        // "First Last" → C:\Users\First Last\...)会被 Windows 拆成「程序+参数」，开机自启直接失败。
-        // enable 成功后把该 Run 值重写为带引号的可执行路径修正（值名与插件一致 = package_info().name）。
-        #[cfg(target_os = "windows")]
-        quote_autostart_run_value(&app);
-        Ok(())
-    } else {
-        mgr.disable().map_err(|e| e.to_string())
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mgr = app.autolaunch();
+        if enabled {
+            mgr.enable().map_err(|e| e.to_string())?;
+            // auto-launch 写 Run 项用 format!("{} {}", path, args)——路径不加引号。路径含空格(如用户名
+            // "First Last" → C:\Users\First Last\...)会被 Windows 拆成「程序+参数」，开机自启直接失败。
+            // enable 成功后把该 Run 值重写为带引号的可执行路径修正（值名与插件一致 = package_info().name）。
+            #[cfg(target_os = "windows")]
+            quote_autostart_run_value(&app);
+            Ok(())
+        } else {
+            mgr.disable().map_err(|e| e.to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 把 HKCU\...\Run 下本应用的自启项值重写为带引号的可执行路径，修正 auto-launch 不加引号、
@@ -472,11 +480,13 @@ fn is_allowed_url(raw: &str) -> bool {
 /// 在默认浏览器打开 `url`。Windows 用 explorer、macOS 用 open（均不经 shell）。
 /// 只做「打开」这一件事——放行哪些链接由两个命令各自的校验负责。
 fn spawn_browser(url: String) -> Result<(), String> {
+    // Windows：CreateProcess 在杀软实时扫描下 100ms+ 是常态，且本函数会被托盘菜单回调
+    // 在主线程直接调用（0.2.0 曾因主线程 spawn 子进程卡死设置页）——放后台线程。
+    // status() 同 macOS 分支的理由：已在后台线程，阻塞等待无害。
     #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer")
-        .arg(&url)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("explorer").arg(&url).status();
+    });
     // macOS：open 偶发慢（默认浏览器冷启动），放后台线程不挡主线程。
     // status() 而非 spawn()：spawn 后不 wait，Unix 上 Child 被 drop 不会 reap，
     // 常驻托盘的本进程会积累 <defunct> 僵尸；已在后台线程，阻塞等待无害。

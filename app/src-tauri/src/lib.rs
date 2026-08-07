@@ -46,9 +46,9 @@ use install::{
     install_agent, login_agent, logout_agent, repair_provider_hooks,
 };
 use managed_terminal::{
-    dismiss_interactive_question, get_pending_approval, managed_terminal_binding,
+    dismiss_interactive_question, managed_terminal_binding,
     managed_terminal_snapshot, attach_background_session, open_attached_terminal,
-    pending_interactive_question, register_approval_consumer,
+    pending_interaction, register_approval_consumer,
     resize_managed_terminal, screen_detect_explain, screen_detect_explain_text,
     send_background_prompt,
     resolve_pending_approval, start_managed_terminal, stop_managed_terminal,
@@ -621,9 +621,11 @@ fn probe_cli_version(plugin: &'static dyn meowo_agent::AgentPlugin) -> Option<St
     static CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
 
     let id = plugin.id().as_str().to_string();
+    // 中毒恢复而非 unwrap：缓存只是探测结果的备忘录，读到写一半的旧值无害；
+    // panic 则让之后每次开对话窗都失败（本函数跑在 blocking 池，用户只会看到「打不开」）。
     if let Some(hit) = CACHE
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get_or_insert_with(HashMap::new)
         .get(&id)
     {
@@ -668,10 +670,91 @@ fn probe_cli_version(plugin: &'static dyn meowo_agent::AgentPlugin) -> Option<St
     });
     CACHE
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get_or_insert_with(HashMap::new)
         .insert(id, version.clone());
     version
+}
+
+/// 该 agent 支持的模型清单，**问 CLI 自己要**（非交互子命令，见插件的 `model_list_command`）。
+///
+/// 存在的理由：模型清单必随 CLI 改版漂移，宿主维护一份必然过时；而唯一的替代方案——往会话
+/// PTY 里发 `/model`、把弹出的 TUI 菜单靠屏幕识别读回来——要求菜单形态经过取证，opencode
+/// 的 TUI 输入在 ConPTY 下至今不通（见 docs/research/tui-menu-captures-2026-07.md）。
+/// 这条路只要 CLI 有列举子命令就成立，而且完全不打扰正在跑的会话。
+///
+/// 进程级缓存：清单只随重装/升级变化，而 CLI 冷启动要一秒上下，不能每次开菜单都付一次。
+/// 未声明该能力的 agent 返回空表——调用方据此回落到菜单识别通道。
+#[tauri::command]
+async fn agent_models(provider: String) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::collections::HashMap;
+        use std::sync::{LazyLock, Mutex};
+        static CACHE: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
+
+        let Some(plugin) = meowo_agent::resolve(Some(&provider)) else {
+            return Vec::new();
+        };
+        let key = plugin.id().as_str().to_string();
+        // 中毒恢复而非 unwrap：缓存只是备忘录，读到写一半的旧值无害（同 probe_cli_version）。
+        if let Some(hit) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return hit.clone();
+        }
+        let Some(args) = plugin.model_list_command() else {
+            return Vec::new();
+        };
+        let argv = plugin.launch_argv();
+        let mut cmd = std::process::Command::new(&argv[0]);
+        cmd.args(&argv[1..])
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        // 有界等待：正常亚秒返回，但一个挂死的 CLI 不该把 blocking 线程一起挂死。
+        let models = cmd
+            .spawn()
+            .ok()
+            .and_then(|mut child| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) if std::time::Instant::now() < deadline => {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        _ => {
+                            let _ = child.kill();
+                            break;
+                        }
+                    }
+                }
+                let out = child.wait_with_output().ok()?;
+                Some(
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .unwrap_or_default();
+        // 空结果同样入缓存：CLI 没这个子命令/跑失败时不该每次开菜单都重试一遍。
+        CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, models.clone());
+        models
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// 对话页能力：按会话查询（provider + cwd），由**安装实况**组装——插件的内置表 ∪ 用户/项目
@@ -966,10 +1049,9 @@ pub fn run() {
             resize_managed_terminal, send_background_prompt,
             screen_detect_explain,
             screen_detect_explain_text,
-            pending_interactive_question,
+            pending_interaction,
             dismiss_interactive_question,
             stop_managed_terminal,
-            get_pending_approval,
             register_approval_consumer,
             unregister_approval_consumer,
             resolve_pending_approval,
@@ -1013,6 +1095,7 @@ pub fn run() {
             available_terminals,
             list_agents,
             agent_chat_ui,
+            agent_models,
             profile::list_profiles,
             profile::create_profile,
             profile::rename_profile,
