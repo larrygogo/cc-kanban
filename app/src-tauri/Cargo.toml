@@ -57,7 +57,8 @@ meowo-agent = { path = "crates/meowo-agent" }
 meowo-protocol = { path = "crates/meowo-protocol" }
 meowo-store = { path = "crates/meowo-store" }
 meowo-reporter = { path = "crates/meowo-reporter" }
-tauri = { workspace = true, features = ["tray-icon", "macos-private-api"] }
+# protocol-asset：对话页图片附件缩略图经 asset 协议加载本地图（scope 见 tauri.conf.json）。
+tauri = { workspace = true, features = ["tray-icon", "macos-private-api", "protocol-asset"] }
 tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
 tauri-plugin-window-state = { workspace = true }
 tauri-plugin-autostart = { workspace = true }
