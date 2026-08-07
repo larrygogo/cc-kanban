@@ -25,6 +25,12 @@ Website: **[meowo.io](https://meowo.io)** — it hands you the installer for you
 
 Download the installer for your platform and double-click to install. The app supports in-app update checks.
 
+> **Windows shows "Windows protected your PC" on first run**: Meowo isn't code-signed yet.
+> Choose **"More info" → "Run anyway"** to continue. Installers are built by GitHub Actions
+> from public source ([release.yml](.github/workflows/release.yml)), and auto-updates carry a
+> separate minisign signature. We're applying for free open-source code signing; a future
+> release will drop this prompt.
+
 ## What it does
 
 ### Live session board

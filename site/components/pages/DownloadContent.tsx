@@ -19,6 +19,7 @@ type Content = {
   reqsTitle: string;
   reqs: { k: string; v: string }[];
   macNote: string;
+  winNote: string;
 };
 
 const CONTENT: Record<Lang, Content> = {
@@ -47,6 +48,7 @@ const CONTENT: Record<Lang, Content> = {
       { k: "磁盘占用", v: "几十 MB。数据存在 ~/.meowo，本地 SQLite。" },
     ],
     macNote: "macOS 上首次点「跳转 / 恢复终端」会触发系统的「自动化」授权，允许 Meowo 控制 Terminal / iTerm2 即可。",
+    winNote: "Windows 首次运行安装包会提示「Windows 已保护你的电脑」——Meowo 暂未做代码签名，点「更多信息 → 仍要运行」即可继续。我们正在申请开源项目的免费代码签名，后续版本会去掉这个提示。",
   },
   en: {
     eyebrow: "Download",
@@ -73,6 +75,7 @@ const CONTENT: Record<Lang, Content> = {
       { k: "Disk", v: "Tens of MB. Data lives in ~/.meowo, a local SQLite database." },
     ],
     macNote: "On macOS, the first “jump / resume terminal” triggers the system Automation permission — just allow Meowo to control Terminal / iTerm2.",
+    winNote: "On Windows the installer shows “Windows protected your PC” — Meowo isn't code-signed yet. Choose “More info → Run anyway” to continue. We're applying for free open-source code signing; a future release will drop this prompt.",
   },
 };
 
@@ -171,6 +174,7 @@ export default async function DownloadContent({ lang }: { lang: Lang }) {
               </div>
             ))}
           </div>
+          <p className="faint note-center">{c.winNote}</p>
           <p className="faint note-center">{c.macNote}</p>
         </div>
       </section>
