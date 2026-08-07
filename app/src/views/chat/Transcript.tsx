@@ -1,7 +1,7 @@
 import { memo } from "react";
 import { type ChatItem } from "../../api";
 import { useT } from "../../i18n";
-import { Message } from "./Message";
+import { imageOnlyPaths, Message, UserImageGroup } from "./Message";
 import { SubagentBlock } from "./SubagentBlock";
 import { friendlyToolName, ToolActivity } from "./ToolActivity";
 import { type ToolResultItem, type ToolUseItem } from "./shared";
@@ -25,6 +25,26 @@ export const Transcript = memo(function Transcript({ sessionId, items }: { sessi
   const blocks: JSX.Element[] = [];
   for (let index = 0; index < items.length;) {
     const item = items[index];
+    // 连续的纯图片用户消息合成一行：Claude Code 把一次多图粘贴记成连续多条独立消息，
+    // 逐条渲染是竖着摞一列大图；用户视角那是「一次发的几张图」，该排在一起。
+    if (item.type === "user_text") {
+      const paths = imageOnlyPaths(item.text);
+      if (paths) {
+        const merged = [...paths];
+        let next = index + 1;
+        while (next < items.length) {
+          const candidate = items[next];
+          if (candidate.type !== "user_text") break;
+          const more = imageOnlyPaths(candidate.text);
+          if (!more) break;
+          merged.push(...more);
+          next += 1;
+        }
+        blocks.push(<UserImageGroup key={item.id} paths={merged} />);
+        index = next;
+        continue;
+      }
+    }
     // 子任务委派不并进「N 次工具操作」那一坨：它代表一整段独立工作，值得单独一行，
     // 且展开的是子任务时间线而不是一段参数文本。
     if (item.type === "tool_use" && item.subagent) {
@@ -55,14 +75,22 @@ export const Transcript = memo(function Transcript({ sessionId, items }: { sessi
       const consumed = new Set<string>();
       const callCount = tools.filter((tool) => tool.type === "tool_use").length;
       const failureCount = tools.filter((tool) => tool.type === "tool_result" && tool.is_error).length;
-      const names = [...new Set(tools
-        .filter((tool): tool is ToolUseItem => tool.type === "tool_use")
-        .map((tool) => friendlyToolName(tool.name, t)))].slice(0, 3);
+      // 摘要直接说做了什么（「运行终端 ×2 · 读取文件」，Claude Code 的
+      // 「Ran 2 commands, read a file」同款），不再是「执行了 N 次工具调用」+
+      // 重复的种类列表——同一行两段文字说的是同一件事。种类只列前 3 个。
+      const kindCounts = new Map<string, number>();
+      for (const tool of tools) {
+        if (tool.type !== "tool_use") continue;
+        const name = friendlyToolName(tool.name, t);
+        kindCounts.set(name, (kindCounts.get(name) ?? 0) + 1);
+      }
+      const kinds = [...kindCounts.entries()];
+      const label = kinds.slice(0, 3).map(([name, count]) => (count > 1 ? `${name} ×${count}` : name)).join(" · ")
+        + (kinds.length > 3 ? " …" : "");
       blocks.push(<details className={"chat-activity-group" + (failureCount ? " is-error" : "")} key={`tools-${tools[0].id}`}>
         <summary className="chat-activity-summary">
           <span className="chat-tool-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 17l6-6-6-6M12 19h8" /></svg></span>
-          <span className="chat-activity-count">{t.chat.toolActivities(callCount || tools.length)}</span>
-          <span className="chat-activity-kinds">{names.join(" · ")}</span>
+          <span className="chat-activity-kinds">{label || t.chat.toolActivities(callCount || tools.length)}</span>
           {failureCount > 0 && <span className="chat-activity-errors">{t.chat.toolFailures(failureCount)}</span>}
           <span className="chat-tool-chevron">›</span>
         </summary>

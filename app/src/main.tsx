@@ -2,12 +2,6 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { App } from "./App";
-import { About } from "./views/About";
-import { Updater } from "./views/Updater";
-import { NewSessionPanel } from "./views/NewSessionPanel";
-import { Onboarding } from "./views/Onboarding";
-import { ChatWindow } from "./views/ChatWindow";
-import { ConfirmWindow } from "./views/ConfirmWindow";
 import { TooltipLayer } from "./Tooltip";
 import { lockdownInProduction } from "./devtools-guard";
 import { installInputModality } from "./input-modality";
@@ -15,8 +9,26 @@ import { bootAppearance } from "./appearance";
 import { detectHostOs } from "./platform";
 import { I18nProvider } from "./i18n";
 import "./fonts"; // 内置字体集的唯一入口(取舍理由见 fonts.ts;demo/poster 也走它,不再各自 import)
-import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
+
+// 除常驻的贴纸窗(App)外,其余窗口全部懒加载:此前 7 个窗口共享一个 963KB 的静态 chunk,
+// 贴纸窗启动要解析它根本用不到的 xterm(~250KB)与 react-markdown(~150KB)——它们只从
+// ChatWindow 可达,拆开后各窗口只付自己那份。窗口本就 visible:false、由前端量好再 show
+// (useShowWhenReady),懒加载多的一拍不产生可见闪烁。
+const About = React.lazy(() => import("./views/About").then((m) => ({ default: m.About })));
+const Updater = React.lazy(() => import("./views/Updater").then((m) => ({ default: m.Updater })));
+const NewSessionPanel = React.lazy(() =>
+  import("./views/NewSessionPanel").then((m) => ({ default: m.NewSessionPanel })),
+);
+const Onboarding = React.lazy(() =>
+  import("./views/Onboarding").then((m) => ({ default: m.Onboarding })),
+);
+const ChatWindow = React.lazy(() =>
+  import("./views/ChatWindow").then((m) => ({ default: m.ChatWindow })),
+);
+const ConfirmWindow = React.lazy(() =>
+  import("./views/ConfirmWindow").then((m) => ({ default: m.ConfirmWindow })),
+);
 
 // E2E 构建（VITE_E2E=1）才注入 @wdio/tauri-plugin 前端桥（console 转发 / invoke 拦截 /
 // window.wdioTauri）。生产构建下 VITE_E2E 未定义，该动态 import 被 vite 死代码消除，
@@ -55,21 +67,23 @@ void detectHostOs().then(() => {
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
       <I18nProvider>
-        {label === "about" ? (
-          <About />
-        ) : label === "updater" ? (
-          <Updater />
-        ) : label === "new-session" ? (
-          <NewSessionPanel />
-        ) : label === "onboarding" ? (
-          <Onboarding />
-        ) : label === "chat" ? (
-          <ChatWindow />
-        ) : label.startsWith("confirm-") ? (
-          <ConfirmWindow />
-        ) : (
-          <App />
-        )}
+        <React.Suspense fallback={null}>
+          {label === "about" ? (
+            <About />
+          ) : label === "updater" ? (
+            <Updater />
+          ) : label === "new-session" ? (
+            <NewSessionPanel />
+          ) : label === "onboarding" ? (
+            <Onboarding />
+          ) : label === "chat" ? (
+            <ChatWindow />
+          ) : label.startsWith("confirm-") ? (
+            <ConfirmWindow />
+          ) : (
+            <App />
+          )}
+        </React.Suspense>
         <TooltipLayer />
       </I18nProvider>
     </React.StrictMode>,

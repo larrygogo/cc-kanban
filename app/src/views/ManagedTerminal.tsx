@@ -4,6 +4,8 @@ import { appConfirm } from "../confirm";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+// xterm 的样式跟着唯一使用者走(此前在 main.tsx 全局引入,贴纸窗也要付这份 CSS)。
+import "@xterm/xterm/css/xterm.css";
 import {
   attachBackgroundSession,
   confirmStopSession,
