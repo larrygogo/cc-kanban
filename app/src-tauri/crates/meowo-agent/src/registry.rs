@@ -280,6 +280,19 @@ pub trait AgentPlugin: Sync {
         None
     }
 
+    /// **非交互**列举模型清单的子命令（如 opencode 的 `opencode models`，每行一个模型 id）。
+    ///
+    /// 优先级高于 [`Self::model_menu_command`]：能直接问出来就不必往会话的 PTY 里发命令、
+    /// 弹 TUI 菜单、再靠屏幕识别把它读回来——那条路要求菜单形态经过取证（codex 被自更新器
+    /// 拦住、opencode 的 TUI 输入在 ConPTY 下不通，两家至今取不到，见
+    /// docs/research/tui-menu-captures-2026-07.md），而这条只要 CLI 有这个子命令就成立，
+    /// 且完全不打扰正在跑的会话。
+    ///
+    /// 返回的是**追加在启动 argv 之后**的参数（不含可执行本身）。输出按行解析，空行忽略。
+    fn model_list_command(&self) -> Option<&'static [&'static str]> {
+        None
+    }
+
     /// PermissionRequest hook 的决策输出会被该 agent **采纳**（阻塞式审批，如 claude/codex 的
     /// 310s hook）。GUI 审批桥只对声明它的 agent 生效：observation-only 的 PermissionRequest
     /// （kimi，5s 超时、忽略 hookSpecificOutput）若也弹 GUI 审批卡，卡片既控制不了真实审批，

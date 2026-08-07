@@ -189,6 +189,13 @@ impl AgentPlugin for Opencode {
     fn model_menu_command(&self) -> Option<&'static str> {
         Some("/models")
     }
+    /// `opencode models` 直接把完整清单打到 stdout（每行一个 `provider/model`，实测
+    /// 2026-08-06 / 1.18.14）。有它就不必走 TUI 菜单那条路——opencode 的 TUI 输入在
+    /// ConPTY 下至今不通（`/models` 发不进去，两轮取证均如此），而这条命令一问就有，
+    /// 还不打扰正在跑的会话。
+    fn model_list_command(&self) -> Option<&'static [&'static str]> {
+        Some(&["models"])
+    }
     /// Esc 中断当前回合。**约定推断**且**可用性存疑**:opencode 的全屏 Go TUI 在 ConPTY
     /// 探针下输入通道整条不通(`/models` 都发不进去),故连 Esc 能不能被它收到都未验证——
     /// 声明它只是让「打断并发送」按钮出现,实际是否奏效取决于 opencode 的输入路径是否可用
