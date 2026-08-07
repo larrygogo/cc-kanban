@@ -4,6 +4,7 @@
   "version": "0.5.10",
   "type": "module",
   "scripts": {
+    "preinstall": "node ../scripts/ensure-bun.mjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
