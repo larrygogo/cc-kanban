@@ -1,6 +1,19 @@
 <!doctype html>
-<html lang="zh">
-  <head><meta charset="UTF-8" /><title>Meowo</title></head>
+<!-- lang 不写死：I18nProvider 挂载后按设置写入（i18n/index.tsx），下面的内联脚本用
+     localStorage 缓存把它前置到首帧,避免英文界面在挂载前顶着 lang="zh"(影响读屏发音)。 -->
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Meowo</title>
+    <script>
+      // 与 src/i18n/index.tsx 的 readCache/resolveLang 同一判定，改一处要同步另一处。
+      try {
+        var l = localStorage.getItem("meowo-lang");
+        if (l !== "zh" && l !== "en") l = /^zh\b|^zh-/i.test(navigator.language) ? "zh" : "en";
+        document.documentElement.lang = l;
+      } catch (e) { /* 拿不到缓存就等 I18nProvider 挂载后写入 */ }
+    </script>
+  </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
