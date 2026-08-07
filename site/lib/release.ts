@@ -2,11 +2,28 @@ import { cache } from "react";
 import { marked } from "marked";
 import sanitizeHtml from "sanitize-html";
 import { get } from "node:https";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { REPO_SLUG } from "./site";
 
 // 应用版本兜底：GitHub API 不可用（如本地匿名限流）时用于版本徽章。
-// 与应用解耦，构建期可用环境变量 MEOWO_VERSION 覆盖；发新版时记得同步这里的默认值。
-const APP_VERSION = process.env.MEOWO_VERSION ?? "0.5.5";
+// 优先环境变量 MEOWO_VERSION；否则构建期直接读 app/src-tauri/Cargo.toml——它是版本唯一真源
+// （tauri.conf.json 无 version 字段，Tauri 即以它为准）。此前这里手抄版本号，实际漂移过
+// 5 个版本（停在 0.5.5）而无人发觉，不再手抄。
+const readAppVersion = (): string => {
+  if (process.env.MEOWO_VERSION) return process.env.MEOWO_VERSION;
+  try {
+    // next build 的 cwd 是 site/（package.json scripts 与 deploy-pages.yml 均如此）。
+    const toml = readFileSync(join(process.cwd(), "..", "app", "src-tauri", "Cargo.toml"), "utf8");
+    const version = toml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+    if (version) return version;
+  } catch {
+    // site 被单独 checkout 之类的场景读不到仓库文件，走最终兜底。
+  }
+  console.warn("[release] 读不到 Cargo.toml 的版本号，版本徽章将显示 unknown 兜底");
+  return "unknown";
+};
+const APP_VERSION = readAppVersion();
 
 export type Asset = { name: string; url: string; size: number };
 export type Release = {

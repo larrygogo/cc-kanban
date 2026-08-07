@@ -2,9 +2,17 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+// tauri CLI 驱动的构建会带 TAURI_ENV_PLATFORM；据此把产物目标钉到实际 WebView
+// (Windows=WebView2/Chromium、macOS=WKWebView)，省掉 vite 默认 'modules' 目标的降级转译。
+// 直接 `bun run build`(如 CI 的前端构建步骤)时无此变量，保持 vite 默认。
+const tauriPlatform = process.env.TAURI_ENV_PLATFORM;
+
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
+  build: {
+    target: tauriPlatform === "windows" ? "chrome105" : tauriPlatform ? "safari13" : "modules",
+  },
   server: {
     port: 1268,
     strictPort: true,

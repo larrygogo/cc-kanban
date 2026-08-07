@@ -3,7 +3,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 
 const invoke = vi.hoisted(() => vi.fn());
 const openDialog = vi.hoisted(() => vi.fn());
-vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke,
+  convertFileSrc: (path: string) => `asset://localhost/${encodeURIComponent(path)}`,
+}));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: openDialog }));
 // 捕获事件回调：审批类用例需要手动投递 pending-approval，验证「别的会话要授权时不切窗」。
 const eventListeners = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
@@ -54,7 +57,7 @@ function respondWithHistory(history: unknown, approval: unknown = null) {
       }
       return Promise.resolve(h);
     }
-    if (command === "get_pending_approval") return Promise.resolve(approval);
+    if (command === "pending_interaction") return Promise.resolve({ approval, question: null });
     if (command === "managed_terminal_binding") return Promise.resolve(null);
     if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 1, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
     return Promise.resolve();
@@ -106,9 +109,10 @@ describe("ChatWindow", () => {
     const reasoning = screen.getByText("先检查现有协议").closest("details");
     expect(reasoning?.hasAttribute("open")).toBe(true);
     expect(reasoning?.className).not.toContain("is-long");
-    const activity = screen.getByText("执行了 1 次工具调用").closest("details");
+    // 摘要直接写种类（「运行终端」），不再有「执行了 N 次工具调用」的计数短语。
+    const activity = screen.getAllByText("运行终端")[0].closest("details");
+    expect(activity?.className).toContain("chat-activity-group");
     expect(activity?.hasAttribute("open")).toBe(false);
-    expect(screen.getAllByText("运行终端").length).toBeGreaterThan(0);
     expect(screen.queryByText("工具结果")).toBeNull();
     expect(invoke).toHaveBeenCalledWith("get_chat_history", { sessionId: 7, offset: 0 });
     fireEvent.change(screen.getByRole("textbox", { name: "发送消息给 Agent" }), { target: { value: "继续实现" } });
@@ -154,7 +158,7 @@ describe("ChatWindow", () => {
           },
         ],
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 9, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "get_subagent_transcript") {
@@ -169,7 +173,7 @@ describe("ChatWindow", () => {
     const summary = await screen.findByText("验证审批双轨");
     expect(screen.getByText("子任务")).toBeTruthy();
     expect(screen.getByText("general-purpose")).toBeTruthy();
-    expect(screen.queryByText("执行了 1 次工具调用")).toBeNull();
+    expect(document.querySelector(".chat-activity-group")).toBeNull();
     // 未展开前绝不请求：一个会话可能有几十个子任务。
     expect(invoke).not.toHaveBeenCalledWith("get_subagent_transcript", expect.anything());
 
@@ -181,7 +185,7 @@ describe("ChatWindow", () => {
     toggle(true);
     expect(await screen.findByText("子任务的结论")).toBeTruthy();
     // 嵌套时间线沿用同一套渲染：里面的工具调用照样分组。
-    expect(screen.getByText("执行了 1 次工具调用")).toBeTruthy();
+    expect(document.querySelector(".chat-subagent .chat-activity-group")).toBeTruthy();
 
     // 折叠再展开不该重复请求（结果缓存在组件里）。
     const calls = invoke.mock.calls.filter(([command]) => command === "get_subagent_transcript").length;
@@ -210,7 +214,7 @@ describe("ChatWindow", () => {
           // 一批 fan-out 的结局要等整批跑完才写进主链——跑着的时候主链上没有回执。
           : [swarm],
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 17, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("kimi"));
       return Promise.resolve();
@@ -243,7 +247,7 @@ describe("ChatWindow", () => {
         sessionId: 18, title: "换模型", status: "running", provider: "kimi", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], model: "K3",
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("kimi"));
       if (command === "write_managed_terminal" && args.data === "/model") sentMenuCommand = true;
       if (command === "managed_terminal_snapshot") {
@@ -286,7 +290,7 @@ describe("ChatWindow", () => {
         sessionId: 53, title: "粘贴", status: "running", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], model: null,
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 53, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       if (command === "save_pasted_attachment") {
@@ -311,7 +315,7 @@ describe("ChatWindow", () => {
         sessionId: 52, title: "交互命令", status: "running", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], model: "Opus",
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") {
         return Promise.resolve({ sessionId: 52, active: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null });
@@ -341,7 +345,7 @@ describe("ChatWindow", () => {
         sessionId: 19, title: "换模型", status: "running", provider: "kimi", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], model: "K3",
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("kimi"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
         sessionId: 19, active: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null,
@@ -502,7 +506,7 @@ describe("ChatWindow", () => {
     let started = false;
     invoke.mockImplementation((command: string) => {
       if (command === "get_chat_history") return Promise.resolve(history);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "start_managed_terminal") { started = true; return Promise.resolve(); }
       if (command === "managed_terminal_snapshot") {
         // endOffset 是「已产生多少输出」的判据（data 现在是 base64 增量，可能为空）；
@@ -533,7 +537,7 @@ describe("ChatWindow", () => {
     let started = false;
     invoke.mockImplementation((command: string) => {
       if (command === "get_chat_history") return Promise.resolve(history);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("codex"));
       if (command === "start_managed_terminal") { started = true; return Promise.resolve(); }
@@ -583,7 +587,7 @@ describe("ChatWindow", () => {
     const prompt = "\x1b[2JDo you trust the files in this folder?\r\n> 1. Yes, I trust this folder\r\n  2. No, exit";
     invoke.mockImplementation((command: string) => {
       if (command === "get_chat_history") return Promise.resolve(history);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") {
         return Promise.resolve({ sessionId: 44, active: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length, exited: false, exitCode: null });
@@ -638,7 +642,7 @@ describe("ChatWindow", () => {
     };
     invoke.mockImplementation((command: string) => {
       if (command === "get_chat_history") return Promise.resolve(history);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       // 斜杠补全与模型预设不是前端硬编码表：按会话查 agent_chat_ui（内置表 ∪ 自定义命令）。
       if (command === "agent_chat_ui") {
         return Promise.resolve(chatUi("claude", [
@@ -683,7 +687,7 @@ describe("ChatWindow", () => {
         sessionId: 32, title: "技能发现", status: "running", provider: "claude", cwd: "C:/repo",
         supported: true, offset, reset: false, pendingReview: null, items: [],
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_snapshot") {
         return Promise.resolve({ sessionId: 32, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
@@ -726,7 +730,7 @@ describe("ChatWindow", () => {
     let current: Record<string, unknown> = { ...base };
     invoke.mockImplementation((command: string) => {
       if (command === "get_chat_history") return Promise.resolve(current);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") {
         return Promise.resolve({ sessionId: 21, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
@@ -739,7 +743,9 @@ describe("ChatWindow", () => {
     expect(screen.getByText("10")).toBeTruthy();
     expect(screen.getByText("权限模式: 默认")).toBeTruthy();
 
+    // 权限模式现在是下拉（选项由屏幕回显标记派生）：点按钮开菜单、点某项才发 cycle 键。
     fireEvent.click(screen.getByRole("button", { name: "切换模式: 权限模式" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /计划/ }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 21, data: "\u001b[Z" }));
 
     // 逐字段单独改：若合并成一次改动，任一字段触发的重渲染都会把其它字段的漏判一并掩盖，
@@ -791,7 +797,7 @@ describe("ChatWindow", () => {
     };
     invoke.mockImplementation((command: string) => {
       if (command === "get_chat_history") return Promise.resolve(history);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_snapshot") {
         return Promise.resolve({ sessionId: 41, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
@@ -848,7 +854,7 @@ describe("ChatWindow", () => {
     let out = "accept edits on (shift+tab to cycle)\r\n";
     invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_chat_history") return Promise.resolve(current);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "write_managed_terminal" && (args as { data?: string } | undefined)?.data === "[Z") {
         // CLI 收到 Shift+Tab 后重绘出新指示。
@@ -864,7 +870,9 @@ describe("ChatWindow", () => {
     await screen.findByText("权限模式: 默认");
     // 空闲期：后续轮询不再带模式增量（真实后端普通增量的 agent_modes 就是空）。
     current = { ...base, agentModes: [] };
+    // 只有 cycle 键的维度也给下拉：选项由屏幕回显标记派生，选中后循环按到位（cycleToMode）。
     fireEvent.click(screen.getByRole("button", { name: "切换模式: 权限模式" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /计划/ }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 51, data: "\u001b[Z" }));
     // transcript 静默，但屏幕是 CLI 自己画的权威状态——标签应据它回显为「计划」。
     expect(await screen.findByText("权限模式: 计划")).toBeTruthy();
@@ -896,7 +904,7 @@ describe("ChatWindow", () => {
         if (firstRead) { firstRead = false; return Promise.resolve(truncated); }
         return Promise.resolve(incremental);
       }
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -945,7 +953,7 @@ describe("ChatWindow", () => {
           pendingReview: null, items: [],
         });
       }
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 7, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       if (command === "get_live_sessions_page") {
@@ -978,7 +986,7 @@ describe("ChatWindow", () => {
     let archiveFails = false;
     invoke.mockImplementation((command: string) => {
       if (command === "get_chat_history") return Promise.resolve(base);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "set_archived") return archiveFails ? Promise.reject(new Error("db busy")) : Promise.resolve();
       // 归档后要切走：这里只有它自己一条，没有可切的下一条，窗口留在原地。
       if (command === "get_live_sessions_page") return Promise.resolve([]);
@@ -1007,7 +1015,7 @@ describe("ChatWindow", () => {
     };
     invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_chat_history") return Promise.resolve(histories[args?.sessionId as number]);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "get_live_sessions_page") {
         return Promise.resolve([{ session: { id: 9, cc_session_id: "cc-9", status: "ended" }, task_title: "下一条", connected: false, provider: "claude", cwd: null }]);
       }
@@ -1049,7 +1057,7 @@ describe("ChatWindow", () => {
     invoke.mockImplementation((command: string) => {
       if (command === "confirm_dialog") return Promise.resolve(confirmAnswers.shift() ?? false);
       if (command === "get_chat_history") return Promise.resolve(history);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_snapshot") {
         // 接管前没有托管 PTY；接管后有，且已画出可见内容。
         return Promise.resolve(takenOver
@@ -1095,7 +1103,7 @@ describe("ChatWindow", () => {
         // 有对话内容 → 停在对话页（transcript 空的后台会话会被自动切到终端页，另有用例覆盖）。
         items: [{ type: "user_text", id: "u0", timestamp: null, text: "之前的" }],
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -1124,7 +1132,7 @@ describe("ChatWindow", () => {
         sessionId: 18, title: "没落盘", status: "running", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], background: true,
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_snapshot") return Promise.resolve({
         sessionId: 18, active: true, data: btoa("screen"), startOffset: 0, endOffset: 6,
         exited: false, exitCode: null,
@@ -1148,7 +1156,7 @@ describe("ChatWindow", () => {
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], background: true,
         lastUserText: "hi", lastAiText: "你好",
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -1165,7 +1173,7 @@ describe("ChatWindow", () => {
         supported: true, offset: 0, reset: false, pendingReview: null, background: true,
         items: [{ type: "user_text", id: "u1", timestamp: null, text: "在吗" }],
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -1183,7 +1191,7 @@ describe("ChatWindow", () => {
     let started = false;
     invoke.mockImplementation((command: string) => {
       if (command === "get_chat_history") return Promise.resolve(history);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "start_managed_terminal") { started = true; return Promise.resolve(); }
       if (command === "managed_terminal_snapshot") {
         return Promise.resolve(started
@@ -1213,7 +1221,7 @@ describe("ChatWindow", () => {
     let snapshotCalls = 0;
     invoke.mockImplementation((command: string) => {
       if (command === "get_chat_history") return Promise.resolve(history);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_snapshot") {
         snapshotCalls += 1;
         return Promise.resolve(snapshotCalls === 1
@@ -1248,7 +1256,7 @@ describe("ChatWindow", () => {
         sessionId: 45, title: "托管命令审批", status: "waiting", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: "approval", items: [],
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
         sessionId: 45, active: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length,
@@ -1287,7 +1295,7 @@ describe("ChatWindow", () => {
         sessionId: 49, title: "长文案拒绝", status: "waiting", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: "approval", items: [],
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
         sessionId: 49, active: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length,
@@ -1333,7 +1341,7 @@ describe("ChatWindow", () => {
         sessionId: 46, title: "重绘残留", status: "waiting", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: "approval", items: [],
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
         sessionId: 46, active: true, data: btoa(unescape(encodeURIComponent(prompt))), startOffset: 0, endOffset: prompt.length,
@@ -1370,7 +1378,7 @@ describe("ChatWindow", () => {
         sessionId: 47, title: "kimi 审批", status: "waiting", provider: "kimi", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: "approval", items: [],
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("kimi"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
         sessionId: 47, active: true,
@@ -1411,7 +1419,7 @@ describe("ChatWindow", () => {
         sessionId: 46, title: "托管问答", status: "waiting", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: "question", items: [],
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
         sessionId: 46, active: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length,
@@ -1454,7 +1462,7 @@ describe("ChatWindow", () => {
         sessionId: 47, title: "误报收起", status: "waiting", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: "question", items: [],
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
         sessionId: 47, active: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length,
@@ -1491,7 +1499,7 @@ describe("ChatWindow", () => {
         sessionId: 48, title: "未识别提示", status: "waiting", provider: "codex", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: "question", items: [],
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("codex"));
       if (command === "confirm_dialog") return Promise.resolve(confirmAnswers.shift() ?? false);
       if (command === "managed_terminal_snapshot") return Promise.resolve({
@@ -1539,7 +1547,7 @@ describe("ChatWindow", () => {
     };
     invoke.mockImplementation((command: string) => {
       if (command === "get_chat_history") return Promise.resolve(history);
-      if (command === "get_pending_approval") return Promise.resolve(pending);
+      if (command === "pending_interaction") return Promise.resolve({ approval: pending, question: null });
       if (command === "resolve_pending_approval") { pending = null; return Promise.resolve(); }
       return Promise.resolve();
     });
@@ -1571,7 +1579,7 @@ describe("ChatWindow", () => {
         sessionId: 13, title: "Esc 拒绝", status: "running", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: "approval", items: [], connected: true,
       });
-      if (command === "get_pending_approval") return Promise.resolve(pending);
+      if (command === "pending_interaction") return Promise.resolve({ approval: pending, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "resolve_pending_approval") { pending = null; return Promise.resolve(); }
       return Promise.resolve();
@@ -1609,10 +1617,13 @@ describe("ChatWindow", () => {
         sessionId: 12, title: "审批", status: "running", provider: "codex", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: "approval", items: [],
       });
-      if (command === "get_pending_approval") return Promise.resolve({
-        sessionId: 12, requestId: "request-lean", provider: "codex", toolName: "Bash",
-        description: "运行测试", input: "{\"command\":\"cargo test\"}",
-        // 刻意没有 permissionSuggestions —— 模拟被 skip 掉字段的瘦负载。
+      if (command === "pending_interaction") return Promise.resolve({
+        question: null,
+        approval: {
+          sessionId: 12, requestId: "request-lean", provider: "codex", toolName: "Bash",
+          description: "运行测试", input: "{\"command\":\"cargo test\"}",
+          // 刻意没有 permissionSuggestions —— 模拟被 skip 掉字段的瘦负载。
+        },
       });
       return Promise.resolve();
     });
@@ -1640,7 +1651,7 @@ describe("ChatWindow", () => {
         sessionId: 12, title: "当前会话", status: "running", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 12, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       if (command === "get_live_sessions_page") return Promise.resolve({
@@ -1680,7 +1691,7 @@ describe("ChatWindow", () => {
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
         ptyManaged: true, // 托管会话才开放点选排队
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 31, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
@@ -1727,6 +1738,88 @@ describe("ChatWindow", () => {
   });
 
   /**
+   * 用户消息里的图片引用（Claude Code 记成「[Image: source: 本地路径]」）渲染为缩略图，
+   * 原始路径绝不上屏——它是对话里最脏的元素（asset 加载失败时降级为文件名徽章）。
+   */
+  it("图片引用渲染为缩略图,原始路径不上屏", async () => {
+    window.history.replaceState({}, "", "/?sessionId=41");
+    respondWithHistory({
+      sessionId: 41, title: "贴图", status: "running", provider: "claude", cwd: "C:/repo",
+      supported: true, offset: 1, reset: false, pendingReview: null,
+      items: [
+        { type: "user_text", id: "u1", timestamp: null, text: "看这张图 [Image: source: C:\\Users\\me\\.claude\\image-cache\\abc\\1.png]" },
+      ],
+    });
+    render(<ChatWindow />);
+    const img = await screen.findByAltText("1.png");
+    expect((img as HTMLImageElement).src).toContain("1.png");
+    expect(screen.queryByText(/image-cache/)).toBeNull();
+    expect(screen.getByText(/看这张图/)).toBeTruthy();
+    // 点击缩略图开灯箱看大图，Esc 关闭。
+    fireEvent.click(img.closest("button")!);
+    const lightbox = screen.getByRole("dialog", { name: "1.png" });
+    expect(lightbox.querySelector("img")).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "1.png" })).toBeNull();
+    // 再开一次，走明显的关闭按钮；缩放按钮存在且百分比随点击变化。
+    fireEvent.click(img.closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "放大" }));
+    expect(screen.getByText("125%")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "关闭大图" }));
+    expect(screen.queryByRole("dialog", { name: "1.png" })).toBeNull();
+  });
+
+  /** Claude Code 把一次多图粘贴记成连续多条独立的纯图片消息——必须合并成一行缩略图，
+   *  否则竖着摞一列大图（用户实拍反馈过）。 */
+  it("连续多条纯图片消息合并成一行缩略图", async () => {
+    window.history.replaceState({}, "", "/?sessionId=42");
+    respondWithHistory({
+      sessionId: 42, title: "多图", status: "running", provider: "claude", cwd: "C:/repo",
+      supported: true, offset: 2, reset: false, pendingReview: null,
+      items: [
+        { type: "user_text", id: "u1", timestamp: null, text: "[Image: source: C:\\cache\\a.png]" },
+        { type: "user_text", id: "u2", timestamp: null, text: "[Image: source: C:\\cache\\b.png]" },
+      ],
+    });
+    render(<ChatWindow />);
+    await screen.findByAltText("a.png");
+    const rows = document.querySelectorAll(".chat-image-row");
+    expect(rows.length).toBe(1);
+    expect(rows[0].querySelectorAll("img").length).toBe(2);
+  });
+
+  /** 多问题题面用 tab 切换：全部竖排会把卡片堆得比对话区还高、把输入框挤出可视区。 */
+  it("多问题题面渲染成 tab,一次只显示一题", async () => {
+    window.history.replaceState({}, "", "/?sessionId=43");
+    respondWithHistory({
+      sessionId: 43, title: "多题", status: "running", provider: "claude", cwd: "C:/repo",
+      supported: true, offset: 0, reset: false, pendingReview: null, items: [], ptyManaged: true,
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("多题")).toBeTruthy());
+    const payload = {
+      sessionId: 43, requestId: "request-multi", provider: "claude", toolName: "AskUserQuestion",
+      description: null,
+      input: JSON.stringify({
+        questions: [
+          { header: "日志方案", question: "日志怎么处理？", multiSelect: false, options: [{ label: "自建本地日志" }] },
+          { header: "auth 迁移", question: "现在做吗？", multiSelect: false, options: [{ label: "现在做" }] },
+        ],
+      }),
+      permissionSuggestions: [],
+    };
+    act(() => { eventListeners.get("interactive-question")?.({ payload }); });
+    // tab 条出现，默认停在第一题：第二题的内容不可见。
+    expect(await screen.findByText(/日志怎么处理/)).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "日志方案" })).toBeTruthy();
+    expect(screen.queryByText(/现在做吗/)).toBeNull();
+    // 切到第二题：内容互换。
+    fireEvent.click(screen.getByRole("tab", { name: "auth 迁移" }));
+    expect(screen.getByText(/现在做吗/)).toBeTruthy();
+    expect(screen.queryByText(/日志怎么处理/)).toBeNull();
+  });
+
+  /**
    * 冷启动路径：`interactive-question` 事件在 WebView2 起来之前发出（emit 不排队、
    * 不重放），窗口起来时事件早已消失——题面卡必须靠轮询补回来。这里刻意**不**投递
    * 事件，只让 pending_interactive_question 返回题面。
@@ -1739,14 +1832,16 @@ describe("ChatWindow", () => {
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
         ptyManaged: true,
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
       if (command === "managed_terminal_binding") return Promise.resolve(null);
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 33, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
-      if (command === "pending_interactive_question") return Promise.resolve({
-        sessionId: 33, requestId: "request-cold", provider: "claude", toolName: "AskUserQuestion",
-        description: null,
-        input: JSON.stringify({ questions: [{ question: "冷启动也要能看到题面？", options: [{ label: "必须能" }] }] }),
-        permissionSuggestions: [],
+      if (command === "pending_interaction") return Promise.resolve({
+        approval: null,
+        question: {
+          sessionId: 33, requestId: "request-cold", provider: "claude", toolName: "AskUserQuestion",
+          description: null,
+          input: JSON.stringify({ questions: [{ question: "冷启动也要能看到题面？", options: [{ label: "必须能" }] }] }),
+          permissionSuggestions: [],
+        },
       });
       return Promise.resolve();
     });
@@ -1769,7 +1864,7 @@ describe("ChatWindow", () => {
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
         ptyManaged: false,
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 32, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
@@ -1803,7 +1898,7 @@ describe("ChatWindow", () => {
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
       });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 21, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
@@ -1848,7 +1943,7 @@ describe("ChatWindow", () => {
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
       });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
       if (command === "save_pasted_attachment") return Promise.resolve("C:\\Temp\\meowo-paste\\1-0\\image.png");
       if (command === "clipboard_image_fingerprint") return Promise.resolve("fp-1");
@@ -1889,7 +1984,7 @@ describe("ChatWindow", () => {
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
       });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
       if (command === "save_pasted_attachment") return Promise.resolve("C:\\Temp\\meowo-paste\\2-0\\image.png");
       if (command === "clipboard_image_fingerprint") return Promise.resolve(fingerprint);
@@ -1923,7 +2018,7 @@ describe("ChatWindow", () => {
         sessionId: 90, title: "假运行", status: "running", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: false,
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 90, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
@@ -1969,7 +2064,7 @@ describe("ChatWindow", () => {
     };
     invoke.mockImplementation((command: string) => {
       if (command === "get_chat_history") return Promise.resolve(current);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 93, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
@@ -2001,7 +2096,7 @@ describe("ChatWindow", () => {
     };
     invoke.mockImplementation((command: string) => {
       if (command === "get_chat_history") return Promise.resolve(current);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 95, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
@@ -2038,7 +2133,7 @@ describe("ChatWindow", () => {
     };
     invoke.mockImplementation((command: string) => {
       if (command === "get_chat_history") return Promise.resolve(current);
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 97, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
@@ -2070,7 +2165,7 @@ describe("ChatWindow", () => {
         sessionId: 94, title: "强制插话", status: "running", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 94, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
@@ -2098,7 +2193,7 @@ describe("ChatWindow", () => {
         sessionId: 96, title: "裸中断", status: "running", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 96, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
@@ -2135,7 +2230,7 @@ describe("ChatWindow", () => {
         sessionId: 97, title: "移除回执", status: "running", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 97, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
@@ -2170,7 +2265,7 @@ describe("ChatWindow", () => {
         sessionId: 95, title: "无中断键", status: "running", provider: "kimi", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve({ ...chatUi("kimi")!, interrupt_input: null });
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 95, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
@@ -2207,7 +2302,7 @@ describe("ChatWindow", () => {
         supported: true, offset: 0, reset: false, pendingReview: null, items: [],
         connected: true, ptyManaged: true,
       });
-      if (command === "get_pending_approval") return Promise.resolve(null);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "confirm_dialog") return Promise.resolve(confirmAnswers.shift() ?? false);
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 92, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });

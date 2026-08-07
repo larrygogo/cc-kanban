@@ -31,11 +31,16 @@ jobs:
       run:
         working-directory: site
     steps:
-      - uses: actions/checkout@v4
+      # 本 workflow 持有 pages:write + id-token:write，第三方 action 一律 pin 完整 SHA（同 ci.yml）。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Bun 包缓存
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          bun-version: latest
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-site-${{ hashFiles('site/bun.lock') }}
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -47,13 +52,13 @@ jobs:
           # 构建时要读 releases/latest 拿安装包直链，带 token 避开匿名 API 限额。
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
         # 尝试自动为仓库启用 Pages（源=GitHub Actions），省去手动去 Settings 开启。
         # 若因权限无法自动启用，则需手动：Settings → Pages → Source 选 GitHub Actions。
         with:
           enablement: true
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: site/out
 
@@ -65,4 +70,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

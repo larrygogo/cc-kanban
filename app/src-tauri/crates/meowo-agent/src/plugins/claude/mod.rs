@@ -313,24 +313,28 @@ impl AgentPlugin for Claude {
                         label: "Default",
                         args: &[],
                     },
+                    // 别名是 CLI 文档化的稳定契约（不带版本，由 CLI 解析到当期型号）；
+                    // 这里的 label 只是**学到真实菜单之前的兜底**——GUI 会从 CLI 自己弹出的
+                    // /model 菜单学真实标签并按 CLI 版本缓存（见前端 chat/modelLabels.ts），
+                    // 所以这份文案过时也不会显示给用户，不必追着 CLI 改版同步。
                     LaunchChoice {
                         id: "fable",
-                        label: "Fable",
+                        label: "Fable 5",
                         args: &["--model", "fable"],
                     },
                     LaunchChoice {
                         id: "opus",
-                        label: "Opus",
+                        label: "Opus 5",
                         args: &["--model", "opus"],
                     },
                     LaunchChoice {
                         id: "sonnet",
-                        label: "Sonnet",
+                        label: "Sonnet 5",
                         args: &["--model", "sonnet"],
                     },
                     LaunchChoice {
                         id: "haiku",
-                        label: "Haiku",
+                        label: "Haiku 4.5",
                         args: &["--model", "haiku"],
                     },
                     LaunchChoice {
@@ -401,22 +405,23 @@ impl AgentPlugin for Claude {
     /// claude 的 `/model` 接受内联参数（`/model sonnet`），可以在对话页静默切换；
     /// 别名与官方 CLI 一致（`opusplan`：规划用 Opus、执行用 Sonnet）。
     fn model_presets(&self) -> &'static [crate::ModelPreset] {
+        // label 是学到真实菜单前的兜底，维护约定见 launch_options 里的注释。
         &[
             crate::ModelPreset {
                 id: "fable",
-                label: "Fable",
+                label: "Fable 5",
             },
             crate::ModelPreset {
                 id: "opus",
-                label: "Opus",
+                label: "Opus 5",
             },
             crate::ModelPreset {
                 id: "sonnet",
-                label: "Sonnet",
+                label: "Sonnet 5",
             },
             crate::ModelPreset {
                 id: "haiku",
-                label: "Haiku",
+                label: "Haiku 4.5",
             },
             crate::ModelPreset {
                 id: "opusplan",

@@ -8,9 +8,10 @@ import {
   LiveSession,
   LiveSessionCounts,
   PageCursor,
-  StickerFilter,
+
 } from "./api";
 import { Sticker } from "./views/Sticker";
+import type { Tab } from "./views/sticker/types";
 import { CollapsedStrip } from "./views/CollapsedStrip";
 import { useUpdate } from "./useUpdate";
 import { useShowWhenReady } from "./useShowWhenReady";
@@ -31,9 +32,25 @@ const REFRESH_THROTTLE_MS = 400; // board-changed 刷新的冷却窗口，见 re
 // board-changed 常是「空转」：命令写库后 db-watcher 又为同一次写入报一次、liveness 轮询重发、
 // 甚至 app 自身读库触碰 board.db-wal/-shm 的 mtime 也会被 watcher 当成变更而回声。这些刷新拉回的
 // 数据与当前完全一致，若照旧整表替换成新对象引用，会让整个虚拟列表无谓重渲染（视觉上「一直在更新」）。
-// 结构相等时保持原数组引用、跳过 setState，是消除该抖动的关键。列表至多几百条小对象，序列化开销可忽略。
-const sameList = (a: Item[], b: Item[]): boolean =>
-  a.length === b.length && JSON.stringify(a) === JSON.stringify(b);
+//
+// 行级 JSON 缓存 + 结构共享：每行 stringify 一次、与上次的缓存比对，没变的行**复用旧对象引用**。
+// 于是（1）空转刷新整表引用不变（sameRefs 命中，跳过 setState）；（2）只有一行变化时，其余行
+// 引用稳定，配合卡片层的 memo 只重渲染那一张。全字段 JSON 比较是刻意的**排除法**——按字段挑
+// 白名单的签名方案会在漏字段时让 UI 静默不更新（sameHistoryMeta 的注释记过三回同类事故）。
+// 缓存只增不清：键是 session.id，量级为窗口生命周期内见过的会话数，几百条小对象，不值得管理。
+type RowCache = Map<number, { json: string; item: Item }>;
+const reconcileRows = (cache: RowCache, rows: Item[]): Item[] =>
+  rows.map((row) => {
+    const id = row.session.id;
+    const json = JSON.stringify(row);
+    const hit = cache.get(id);
+    if (hit && hit.json === json) return hit.item;
+    cache.set(id, { json, item: row });
+    return row;
+  });
+// 行已结构共享，引用比较即语义比较。
+const sameRefs = (a: Item[], b: Item[]): boolean =>
+  a.length === b.length && a.every((x, i) => x === b[i]);
 
 // 缩略条主轴逻辑长度：按 connected 点数贴合内容（点 10px + 间距 7px = 17，两端留白 26），最小 48。
 // 仅作折叠初值，CollapsedStrip 挂载后会按真实 DOM 尺寸精确校正。
@@ -84,10 +101,8 @@ function isPinned(): boolean {
 }
 
 /** 当前 tab 对应的总会话数（用于 hasMore 与加载守卫，必须与后端 filter 语义一致）。 */
-function totalFor(filter: StickerFilter, counts: LiveSessionCounts): number {
+function totalFor(filter: Tab, counts: LiveSessionCounts): number {
   switch (filter) {
-    case "archived":
-      return counts.archived;
     case "running":
       return counts.running;
     case "waiting":
@@ -120,15 +135,16 @@ export function App() {
   // 重试：递增 nonce 重新触发下方的 filter/search 首页加载 effect。
   const [retryNonce, setRetryNonce] = useState(0);
   const retryLoad = useCallback(() => setRetryNonce((n) => n + 1), []);
-  const [filter, setFilter] = useState<StickerFilter>(() => {
+  // 「已归档」不再是看板 tab（管理入口在设置 → 会话）；持久化里存过它的自动退回「全部」。
+  const [filter, setFilter] = useState<Tab>(() => {
     const s = localStorage.getItem(TAB_KEY);
-    return s === "waiting" || s === "running" || s === "archived" ? s : "all";
+    return s === "waiting" || s === "running" ? s : "all";
   });
   const [search, setSearch] = useState("");
   // 搜索结果是临时视图，不能覆盖用户搜索前已经加载好的普通列表（包括它的服务端顺序）。
   // 按 tab 分开缓存，避免搜索中切 tab/清空时拿另一个 tab 的列表来恢复。
-  const unsearchedItemsRef = useRef<Partial<Record<StickerFilter, Item[]>>>({});
-  const pickFilter = useCallback((f: StickerFilter) => {
+  const unsearchedItemsRef = useRef<Partial<Record<Tab, Item[]>>>({});
+  const pickFilter = useCallback((f: Tab) => {
     setFilter(f);
     localStorage.setItem(TAB_KEY, f);
   }, []);
@@ -155,6 +171,7 @@ export function App() {
   // 折叠条恒显示全部「连接中」会话（running + waiting），与当前选中 tab 无关——
   // 故独立于分页 items 单独加载（按状态查，覆盖旧但仍连接的会话，不受 tab/分页窗口影响）。
   const [stripSessions, setStripSessions] = useState<Item[]>([]);
+  const stripRowCacheRef = useRef<RowCache>(new Map());
   const loadStrip = useCallback(() => {
     Promise.all([
       getLiveSessionsPage("running", null, null, 200),
@@ -163,12 +180,14 @@ export function App() {
       .then(([r, w]) => {
         const map = new Map<number, Item>();
         [...r.items, ...w.items].forEach((s) => map.set(s.session.id, s as Item));
-        const next = [...map.values()];
-        setStripSessions((prev) => (sameList(prev, next) ? prev : next));
+        const next = reconcileRows(stripRowCacheRef.current, [...map.values()]);
+        setStripSessions((prev) => (sameRefs(prev, next) ? prev : next));
       })
       .catch(() => {});
   }, []);
   useEffect(() => {
+    // macOS 面板模式没有吸边/折叠，缩略条永不渲染，这 2×200 条的查询是纯浪费。
+    if (isMacPanel()) return;
     loadStrip();
   }, [loadStrip]);
 
@@ -190,12 +209,14 @@ export function App() {
 
   // 请求序号守卫：并发刷新时旧响应可能晚于新响应返回，仅当自己仍是最新一次请求才写入。
   const refreshSeqRef = useRef(0);
+  // 列表行的结构共享缓存（与折叠条的各自独立，两边行对象不混用）。
+  const itemsRowCacheRef = useRef<RowCache>(new Map());
   // 下一页游标：**只认后端响应里带回的扫描位置**。列表做过 connected-first 排序，
   // 末项不是本页时间上最旧的一条，从 items 里自己推游标会重复/漏页。
   const nextCursorRef = useRef<PageCursor | null>(null);
   const loadPage = useCallback(
     async (
-      filter: StickerFilter,
+      filter: Tab,
       search: string,
       cursor: PageCursor | null,
       limit: number = PAGE_SIZE
@@ -231,15 +252,17 @@ export function App() {
             // 若只按 prev 数组旧位置合并、仅将全新会话插到最前，已存在会话（如恢复的旧会话）
             // 排序键变化后不会移动，得等用户手动切 tab 才会跳到正确位置（回归 bug）。
             // 不在 page 里的会话（状态迁移出当前 filter/归档/删除）也随整体替换自然被移除。
-            const next = (page as Item[]).slice();
+            const next = reconcileRows(itemsRowCacheRef.current, page as Item[]);
             if (!search.trim()) unsearchedItemsRef.current[filter] = next;
-            // 空转刷新（数据未变）保持原引用，跳过整表重渲染，消除视觉抖动（见 sameList）。
-            return sameList(prev, next) ? prev : next;
+            // 空转刷新（数据未变）保持原引用，跳过整表重渲染，消除视觉抖动（见 reconcileRows）。
+            return sameRefs(prev, next) ? prev : next;
           }
           // loadMore（cursor 非空）：按 id 合并，保留已加载会话原有顺序，新条目追加到末尾。
+          // 先过结构共享：新页里与已加载行内容相同的，合并后保持旧引用。
+          const reconciled = reconcileRows(itemsRowCacheRef.current, page as Item[]);
           const map = new Map(prev.map((l) => [l.session.id, l]));
           const append: Item[] = [];
-          for (const l of page as Item[]) {
+          for (const l of reconciled) {
             if (!map.has(l.session.id)) append.push(l);
             map.set(l.session.id, l);
           }
@@ -285,7 +308,10 @@ export function App() {
           resettingPageRef.current = false;
         }
       });
-    loadStrip(); // 折叠条数据独立刷新（不随 tab）
+    // 折叠条数据独立刷新（不随 tab）——但只在非 normal 态：正常态下缩略条不渲染，
+    // 每次 board-changed 都跟着拉 2×200 条只为一个折叠时才用的计数，不值。挂载时和
+    // 折叠动作发起时（doCollapse）各拉一次，保证真折叠的那一刻数据是新的。
+    if (modeRef.current !== "normal") loadStrip();
   }, [filter, search, loadPage, loadStrip]);
 
   // trailing 刷新必须用「触发那一刻」的 filter/search，而非排队那一刻捕获的值：否则排队期间切了 tab，
@@ -391,12 +417,10 @@ export function App() {
   const onArchiveOptimistic = useCallback(
     (sessionId: number) => {
       setItems((prev) => prev.filter((l) => l.session.id !== sessionId));
-      setCounts((prev) => ({
-        ...prev,
-        archived: Math.max(0, prev.archived + (filter === "archived" ? -1 : 1)),
-      }));
+      // 看板上只可能发生「归档」（已归档的不再上板），archived 计数恒 +1。
+      setCounts((prev) => ({ ...prev, archived: prev.archived + 1 }));
     },
-    [filter]
+    []
   );
 
   // 归档失败：乐观移除的卡片必须回来，否则用户以为归档成功了。此刻后端未改动，refresh 拉到的就是真实态。
@@ -469,9 +493,14 @@ export function App() {
   }, []);
 
   // 折叠成缩略条：厚度固定，主轴长度贴合当前点数。
+  // 顺带刷一次折叠条数据：normal 态下它不随 board-changed 刷新（见 doRefresh），
+  // 折叠发起的这一刻把它补新——初值尺寸用当前 countRef，落地后 CollapsedStrip 会精确校正。
   const doCollapse = useCallback(
-    (d: Edge) => invoke("snap_collapse", { edge: d, extent: stripExtent(countRef.current) }),
-    []
+    (d: Edge) => {
+      loadStrip();
+      return invoke("snap_collapse", { edge: d, extent: stripExtent(countRef.current) });
+    },
+    [loadStrip]
   );
 
   // 拖拽松手处理：靠边→折叠（从 normal 先存正常尺寸）；离边→若在吸附态则还原普通窗口。

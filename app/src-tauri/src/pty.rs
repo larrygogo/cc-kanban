@@ -1010,6 +1010,11 @@ impl PtyBroker {
                         // send 是无界通道的非阻塞投递，双锁临界区不会久持。
                         let send_chunk = |data: &[u8]| {
                             if let Ok(mut subscribers) = managed.subscribers.lock() {
+                                // 绝大多数会话没有外部 attach 客户端：先判空再拷贝，
+                                // 否则构建刷屏时每个 chunk 都白付一次 to_vec。
+                                if subscribers.is_empty() {
+                                    return;
+                                }
                                 let chunk = data.to_vec();
                                 subscribers
                                     .retain(|subscriber| subscriber.tx.send(chunk.clone()).is_ok());
@@ -1018,8 +1023,11 @@ impl PtyBroker {
                         let offset = if let Ok(mut backlog) = managed.backlog.lock() {
                             let offset = managed.output_end.load(Ordering::Relaxed);
                             backlog.extend(data.iter().copied());
-                            while backlog.len() > BACKLOG_LIMIT {
-                                backlog.pop_front();
+                            // drain 一次成段移除：逐字节 pop_front 在缓冲满后每个 16KB chunk
+                            // 要做上万次，且发生在与 snapshot() 相争的同一把锁内。
+                            let excess = backlog.len().saturating_sub(BACKLOG_LIMIT);
+                            if excess > 0 {
+                                backlog.drain(..excess);
                             }
                             managed
                                 .output_end
@@ -1173,11 +1181,20 @@ impl PtyBroker {
             s.backlog.lock().ok().map(|b| {
                 let end = s.output_end.load(Ordering::Acquire);
                 let start = end.saturating_sub(b.len() as u64);
-                let skip = since.saturating_sub(start).min(b.len() as u64);
+                let skip = since.saturating_sub(start).min(b.len() as u64) as usize;
                 // since 超前于 end（会话被重置）时 skip 会被夹到 len，退化为空增量；
                 // 此时 start_offset == end_offset，前端据此识别并重新对齐。
-                let data: Vec<u8> = b.iter().skip(skip as usize).copied().collect();
-                (data, start + skip, end)
+                // as_slices + extend_from_slice 确定走 memcpy——iter().skip().collect()
+                // 是否被特化成块拷贝取决于 std 版本，不赌。
+                let (front, back) = b.as_slices();
+                let mut data: Vec<u8> = Vec::with_capacity(b.len() - skip);
+                if skip < front.len() {
+                    data.extend_from_slice(&front[skip..]);
+                    data.extend_from_slice(back);
+                } else {
+                    data.extend_from_slice(&back[skip - front.len()..]);
+                }
+                (data, start + skip as u64, end)
             })
         });
         let completed = if session.is_none() {

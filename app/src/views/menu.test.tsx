@@ -96,10 +96,12 @@ describe("Dropdown（统一菜单 primitive）", () => {
     expect(fireEvent.keyDown(document, { key: "Escape" })).toBe(false);
     expect(screen.queryByRole("option")).toBeNull();
     expect(document.activeElement).toBe(btn);
-    // 重新打开后点外部（mousedown 落在容器之外）关闭
+    // 重新打开后点外部（pointerdown 落在容器之外）关闭。用 pointerdown 而非 mousedown：
+    // 实现挂在捕获段的 pointerdown 上，拖拽区（data-tauri-drag-region）消费 mousedown
+    // 也拦不住它（见 useMenuPopup 内注释）。
     fireEvent.click(btn);
     expect(screen.getByRole("option", { name: "方案 A" })).toBeTruthy();
-    fireEvent.mouseDown(document.body);
+    fireEvent.pointerDown(document.body);
     expect(screen.queryByRole("option")).toBeNull();
   });
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { getSubagentTranscript, type ChatItem, type SubagentRun } from "../../api";
 import { useT } from "../../i18n";
 import { reduceChatEvents } from "../../chat/reducer";
@@ -56,7 +56,9 @@ function outcomeBadge(
   return { tone: outcome.running ? "running" : "failed", text: parts.join(" · ") };
 }
 
-export function SubagentBlock({ sessionId, item, outcome, settled }: {
+/// memo 理由同 Message；它还持有局部状态与展开时的 3s 轮询，白重渲染的代价更高。
+/// outcome 是 tool_result 条目上的对象，条目不变则引用不变，浅比较可命中。
+export const SubagentBlock = memo(function SubagentBlock({ sessionId, item, outcome, settled }: {
   sessionId: number;
   item: ToolUseItem;
   /// 主链回执带来的结局统计——**不必展开**就有，展开才拉的是时间线本身。
@@ -153,4 +155,4 @@ export function SubagentBlock({ sessionId, item, outcome, settled }: {
       </div>
     </details>
   );
-}
+});

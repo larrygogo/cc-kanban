@@ -334,27 +334,20 @@ pub(crate) async fn stop_managed_terminal(
     .map_err(|e| e.to_string())?
 }
 
+/// 该会话待处理的审批 + AskUserQuestion 题面，一次取回（合并自两条独立轮询）。
+/// push 事件是主路径；这条轮询兜底「事件在对话窗冷启动时打进虚空」（emit 不排队）。
+/// 出口走 DTO 而非原始 ApprovalRequest：后者空 suggestions 会被 skip 掉字段，
+/// 与 ts-rs 生成的前端类型（字段恒在）不符。缘由见 pty.rs 的 emit_approval。
+/// 纯内存读（两次 map 查询），同步命令合规。
 #[tauri::command]
-pub(crate) fn get_pending_approval(
+pub(crate) fn pending_interaction(
     state: State<'_, super::AppState>,
     session_id: i64,
-) -> Option<meowo_protocol::ipc::PendingApprovalDto> {
-    // 出口走 DTO 而非原始 ApprovalRequest：后者空 suggestions 会被 skip 掉字段，
-    // 与 ts-rs 生成的前端类型（字段恒在）不符。缘由见 pty.rs 的 emit_approval。
-    state.ptys.pending_approval(session_id).map(Into::into)
-}
-
-/// 该会话待处理的 AskUserQuestion 题面。前端在审批轮询里一并取——`interactive-question`
-/// 事件在对话窗冷启动时会打进虚空（emit 不排队），只有轮询能把它补回来。
-#[tauri::command]
-pub(crate) fn pending_interactive_question(
-    state: State<'_, super::AppState>,
-    session_id: i64,
-) -> Option<meowo_protocol::ipc::PendingApprovalDto> {
-    state
-        .ptys
-        .interactive_question(session_id)
-        .map(Into::into)
+) -> meowo_protocol::ipc::PendingInteractionDto {
+    meowo_protocol::ipc::PendingInteractionDto {
+        approval: state.ptys.pending_approval(session_id).map(Into::into),
+        question: state.ptys.interactive_question(session_id).map(Into::into),
+    }
 }
 
 /// 前端收卡时撤下题面，避免轮询把已答过的题重新弹出来。

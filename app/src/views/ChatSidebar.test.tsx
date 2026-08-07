@@ -298,7 +298,9 @@ describe("ChatSidebar", () => {
     // 默认关：一个像素都不改，没有组头。
     expect(screen.queryByRole("button", { name: /^scratch/ })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "按目录分组" }));
+    // 分组方式换成了 Group by 菜单：先开下拉（按钮显示当前档「不分组」），再选「按目录」。
+    fireEvent.click(screen.getByRole("button", { name: "不分组" }));
+    fireEvent.click(screen.getByRole("option", { name: "按目录" }));
     const list = screen.getByRole("navigation");
     const heads = within(list).getAllByRole("button").filter((b) => b.className.includes("group-head"));
     expect(heads.map((h) => h.textContent)).toEqual(["scratch1", "meowo2"]);
@@ -316,6 +318,26 @@ describe("ChatSidebar", () => {
     render(<ChatSidebar activeId={2} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
     expect(await screen.findByRole("button", { name: /临时活儿/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /改侧栏/ })).toBeNull();
+  });
+
+  /** 按状态分组：组序按召唤强度（出错 > 运行中 > 已结束），不派生原排序——
+   *  状态视图的意义就是「先看要处理的」。 */
+  it("按状态分组:组序按召唤强度", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "recent_cwds") return Promise.resolve([]);
+      if (command !== "get_live_sessions_page") return Promise.resolve();
+      return Promise.resolve([
+        session(1, "在跑的", { connected: true, session: { id: 1, cc_session_id: "cc-1", status: "running" } } as Partial<LiveSession>),
+        session(2, "出错的", { connected: true, errored: true, session: { id: 2, cc_session_id: "cc-2", status: "running" } } as Partial<LiveSession>),
+        session(3, "结束的"),
+      ]);
+    });
+    localStorage.setItem("meowo-chat-sidebar-group-mode", "state");
+    render(<ChatSidebar activeId={1} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
+    await screen.findByRole("button", { name: /在跑的/ });
+    const list = screen.getByRole("navigation");
+    const heads = within(list).getAllByRole("button").filter((b) => b.className.includes("group-head"));
+    expect(heads.map((h) => h.textContent)).toEqual(["出错了1", "运行中1", "已结束1"]);
   });
 
   /**

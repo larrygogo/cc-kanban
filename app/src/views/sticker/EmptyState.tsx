@@ -9,7 +9,6 @@ function emptyCopy(tab: Tab, t: Dict): { title: string; hint: string | null } {
     case "all": return { title: t.empty.allTitle, hint: t.empty.allHint };
     case "waiting": return { title: t.empty.waitingTitle, hint: t.empty.waitingHint };
     case "running": return { title: t.empty.runningTitle, hint: null };
-    case "archived": return { title: t.empty.archivedTitle, hint: t.empty.archivedHint };
   }
 }
 

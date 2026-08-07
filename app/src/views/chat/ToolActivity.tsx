@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { useT } from "../../i18n";
 import { type ToolResultItem, type ToolUseItem } from "./shared";
 
@@ -29,7 +30,8 @@ function ToolIcon({ name }: { name: string }) {
   );
 }
 
-export function ToolActivity({ item, result }: { item: ToolUseItem; result?: ToolResultItem }) {
+/// memo 理由同 Message：item/result 都来自 reducer，未变化时引用稳定。
+export const ToolActivity = memo(function ToolActivity({ item, result }: { item: ToolUseItem; result?: ToolResultItem }) {
   const t = useT();
   return (
     <details className={"chat-tool" + (result?.is_error ? " is-error" : "")}>
@@ -46,4 +48,4 @@ export function ToolActivity({ item, result }: { item: ToolUseItem; result?: Too
       <pre>{result ? (result.text || t.chat.toolNoOutput) : t.chat.toolRunning}</pre>
     </details>
   );
-}
+});

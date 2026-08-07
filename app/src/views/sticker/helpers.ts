@@ -32,8 +32,7 @@ export function loadStarred(): Set<string> {
 }
 
 export function match(tab: Tab, l: Item): boolean {
-  if (tab === "archived") return l.archived;
-  if (l.archived) return false; // 已归档的不在其它分类显示
+  if (l.archived) return false; // 已归档的不上看板（管理入口在设置 → 会话）
   if (tab === "all") return true;
   // running = AI 自主运行且无需用户介入；waiting = 等用户交互（status=waiting 或 pending_review）。
   // 与后端 live_sessions / tab_class 语义保持一致。

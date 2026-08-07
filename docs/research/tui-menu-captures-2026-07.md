@@ -101,3 +101,29 @@ xterm)里 opencode 的输入是否可用——若同样不可用,这是比菜单
 - kimi 的 PermissionRequest hook 是 observation-only(官方文档,5s 超时),broker
   审批桥对它保持关闭;已据此实现 `kimi:command-approval`(terminalAttention.ts)
   屏幕识别兜底,provider 门控,ChatWindow 复用命令审批卡渲染。
+
+
+## 复测（2026-08-06，codex 0.146.0 / opencode 1.18.14）
+
+上一轮的两个 ❌ 均**未解除**，复跑 `capture_model_menu` 探针的结果：
+
+**codex 0.146.0——仍被自动更新器拦在门口**：首屏即更新提示菜单
+（`✨ Update available! 0.146.0 -> 0.146.1` + `1. Update now / 2. Skip / 3. Skip until
+next version` + `Press enter to continue`），此后进程不收任何输入（探针的 CR/LF/CRLF/
+keypad Enter/kitty Enter 五种提交键全部报「进程不收输入」），`/model` 之后屏幕为空。
+与 2026-07 记录的拦路方式完全一致，只是版本号变了。
+
+**opencode 1.18.14——TUI 渲染正常，输入通道仍不通**：这次能正常启动并画出完整首屏
+（logo + `Ask anything...` 输入框 + 状态栏），比上一轮的「输出正常」更进一步，但发出
+`/models` 后屏幕**无任何变化**，仍停在首屏——输入依旧没被 TUI 接收。
+注意探针调用方式：npm 装的 `opencode` 是无扩展名 shim（Windows 上 `CreateProcessW`
+报 os error 193），必须直接指向
+`%APPDATA%/npm/node_modules/opencode-ai/bin/opencode.exe`。
+
+**顺带取到的一条真信息**：opencode 把当前模型画在状态栏里
+（`Build · Claude Sonnet 4.6 GitHub Copilot`）——将来若要给它做「显示当前模型」，
+这条屏幕文本是现成的证据；但「切换模型」仍缺菜单形态与交互证据。
+
+**结论**：两家的模型清单**目前无法动态获取**，GUI 侧按此如实降级——探测超时后明确
+告知并给出「去终端页切换」的直达入口（见 ChatWindow 的 modelProbeFailed），
+不再让用户对着一个转完就没反应的按钮猜。

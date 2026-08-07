@@ -60,10 +60,20 @@ export function useMenuPopup({
   useEffect(() => {
     if (!open) return;
     const setOpen = setOpenRef.current;
+    // pointerdown + 捕获段，而不是 mousedown 冒泡：窗口拖拽区（data-tauri-drag-region，
+    // 如侧栏头部/标题栏）的 mousedown 会被拖拽逻辑消费、到不了 document 冒泡段——
+    // 用户点那里想关菜单却毫无反应（实拍反馈）。pointerdown 先于 mousedown 派发，
+    // 捕获段先于任何元素级监听执行，拖拽区也拦不住它。
     const onDoc = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
     const close = () => setOpen(false);
+    // 滚动关闭只针对**菜单外**的滚动（fixed 定位下页面滚走会错位）；菜单自身限高内滚
+    // （.dd-menu overflow-y:auto），在长清单里滚菜单不是「页面滚走了」，不能一滚就收起。
+    const closeOnOutsideScroll = (e: Event) => {
+      if (ref.current && e.target instanceof Node && ref.current.contains(e.target)) return;
+      setOpen(false);
+    };
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       // 这次 Esc 被菜单消费掉了,必须标记 preventDefault:document 冒泡在 window 之前,
@@ -75,18 +85,18 @@ export function useMenuPopup({
       // 鼠标开着菜单、焦点在输入框时按 Esc 不能把焦点抢回按钮。
       if (ref.current?.contains(document.activeElement)) btnRef.current?.focus();
     };
-    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("pointerdown", onDoc, true);
     document.addEventListener("keydown", onKey);
     if (!cssPositioned) {
       window.addEventListener("resize", close);
-      window.addEventListener("scroll", close, true);
+      window.addEventListener("scroll", closeOnOutsideScroll, true);
     }
     return () => {
-      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("pointerdown", onDoc, true);
       document.removeEventListener("keydown", onKey);
       if (!cssPositioned) {
         window.removeEventListener("resize", close);
-        window.removeEventListener("scroll", close, true);
+        window.removeEventListener("scroll", closeOnOutsideScroll, true);
       }
     };
   }, [open, cssPositioned]);

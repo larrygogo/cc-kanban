@@ -4,6 +4,7 @@
   "private": true,
   "description": "Meowo / 喵呜 官网",
   "scripts": {
+    "preinstall": "bun ../scripts/ensure-bun.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "bun x serve out"

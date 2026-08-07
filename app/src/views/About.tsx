@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAgentListRefresh } from "../useAgents";
-import { availableTerminals, listAgents, agentName, type AgentId, type AgentDescriptor, type ThemeMode, type ResumeTerminal, type TerminalOpenMode, type SessionOpenIn, type CardMenuMode, type StickerStyle, type TerminalLineHeight } from "../api";
+import { availableTerminals, getLiveSessionsPage, listAgents, agentName, type AgentId, type AgentDescriptor, type LiveSession, type PageCursor, type ThemeMode, type ResumeTerminal, type TerminalOpenMode, type SessionOpenIn, type CardMenuMode, type StickerStyle, type TerminalLineHeight } from "../api";
+import { folderName } from "../paths";
+import { fmtAgo } from "./sticker/helpers";
 import { useUpdate, type UpdateStatus } from "../useUpdate";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { useT } from "../i18n";
@@ -252,13 +254,8 @@ function SessionsSection() {
         )}
       </div>
 
+      <div className="sec-caption">{t.settings.cardsGroup}</div>
       <div className="row-card">
-        <div className="row">
-          <div className="row-text">
-            <div className="row-label">{t.settings.cardsGroup}</div>
-            <div className="row-desc">{t.settings.cardsGroupDesc}</div>
-          </div>
-        </div>
         <div className="row">
           <div className="row-text">
             <div className="row-label">{t.settings.preview}</div>
@@ -293,6 +290,78 @@ function SessionsSection() {
             ]}
             onChange={(v: CardMenuMode) => patch({ card_menu_mode: v })}
           />
+        </div>
+      </div>
+      <ArchivedSessions />
+    </>
+  );
+}
+
+/** 已归档会话每页条数。设置页是普通滚动列，用「加载更多」按钮翻页而不是滚动加载——
+ *  归档区只是设置页的一段，滚动到底不代表用户想看更多归档。 */
+const ARCHIVED_PAGE = 30;
+
+/** 已归档会话管理。看板不再有「已归档」tab（归档 = 从看板彻底收纳走），这里是唯一入口：
+ *  游标分页动态加载，唯一操作是放回看板。 */
+function ArchivedSessions() {
+  const t = useT();
+  // null = 尚未加载完成，与「真空」区分。
+  const [items, setItems] = useState<LiveSession[] | null>(null);
+  const [cursor, setCursor] = useState<PageCursor | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const loadPage = useCallback((after: PageCursor | null) => {
+    setLoadingMore(true);
+    getLiveSessionsPage("archived", null, after, ARCHIVED_PAGE)
+      .then((page) => {
+        setCursor(page.next_cursor);
+        setItems((prev) => {
+          // 首页替换、翻页按 id 去重追加（翻页间归档集可能被并发改动）。
+          if (after === null || prev === null) return page.items;
+          const seen = new Set(prev.map((s) => s.session.id));
+          return [...prev, ...page.items.filter((s) => !seen.has(s.session.id))];
+        });
+      })
+      .catch(() => setItems((prev) => prev ?? []))
+      .finally(() => setLoadingMore(false));
+  }, []);
+  useEffect(() => loadPage(null), [loadPage]);
+  const unarchive = (id: number) => {
+    // 乐观移除；失败重取首页拉回（与看板同款语义）。看板经 board-changed 自行刷新。
+    setItems((prev) => prev?.filter((s) => s.session.id !== id) ?? prev);
+    void invoke("set_archived", { sessionId: id, archived: false }).catch(() => loadPage(null));
+  };
+  return (
+    <>
+      {/* 标题在卡片外——放卡片里像一个可交互的设置项（用户实拍反馈），这里是列表的分组标题。 */}
+      <div className="sec-caption">{t.settings.archivedSessions}</div>
+      <div className="row-card">
+        {items !== null && items.length === 0 && (
+          <div className="archived-empty">{t.settings.archivedEmpty}</div>
+        )}
+        {/* 限高内滚：归档可能积上百条，撑满整个设置页会把后面的设置项挤没。 */}
+        <div className="archived-scroll">
+          {(items ?? []).map((item) => (
+            <div className="row archived-row" key={item.session.id}>
+              <div className="row-text">
+                <div className="row-label archived-title">{item.task_title || t.sticker.waitingFirstInput}</div>
+                <div className="row-desc">
+                  {[folderName(item.cwd), fmtAgo(item.session.last_event_at, t)].filter(Boolean).join(" · ")}
+                </div>
+              </div>
+              <div className="archived-actions">
+                <button type="button" className="sbtn" onClick={() => unarchive(item.session.id)}>
+                  {t.sticker.unarchive}
+                </button>
+              </div>
+            </div>
+          ))}
+          {cursor !== null && (
+            <div className="row archived-more-row">
+              <button type="button" className="sbtn" disabled={loadingMore} onClick={() => loadPage(cursor)}>
+                {loadingMore ? t.chat.sidebarLoading : t.settings.archivedLoadMore}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </>
@@ -391,13 +460,8 @@ function AppearanceSection() {
         </div>
       </div>
 
+      <div className="sec-caption">{t.settings.terminalGroup}</div>
       <div className="row-card">
-        <div className="row">
-          <div className="row-text">
-            <div className="row-label">{t.settings.terminalGroup}</div>
-            <div className="row-desc">{t.settings.terminalGroupDesc}</div>
-          </div>
-        </div>
         <div className="row row-col">
           <div className="row-head">
             <div className="row-text">

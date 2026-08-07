@@ -4,13 +4,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { appConfirm } from "../confirm";
-import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, dismissInteractiveQuestion, getChatHistory, getLiveSessionsPage, getPendingApproval, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, pendingInteractiveQuestion, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, resolvePendingApproval, savePastedAttachment, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
+import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, dismissInteractiveQuestion, agentModels, getChatHistory, getLiveSessionsPage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, pendingInteraction, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, resolvePendingApproval, savePastedAttachment, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
 import { useT } from "../i18n";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { agentAssets, tintStyle } from "../providers";
 import { reduceChatEvents } from "../chat/reducer";
 import { ApprovalCard } from "./chat/ApprovalCard";
-import { matchOptionByLabel, observeTranscriptForDismiss, parseAskUserQuestions, type QuestionDismissTracker } from "./chat/askUserQuestion";
+import { matchOptionByLabel, observeTranscriptForDismiss, parseAskUserQuestions, type QuestionDismissTracker, type StructuredQuestion } from "./chat/askUserQuestion";
+import { applyLearnedLabels, loadLearnedLabels, saveLearnedLabels } from "./chat/modelLabels";
 import { ContextMeter } from "./chat/ContextMeter";
 import { TodoPanel } from "./chat/TodoPanel";
 import { Transcript } from "./chat/Transcript";
@@ -194,6 +195,73 @@ function terminalInput(content: string): string {
 /// 吃掉（当成选中候选）而不是提交 composer，正文就留在框里只换了行；
 /// 150ms / 400ms 稳定成功。取 250ms：在 150ms 的成功线之上留足余量，人也感知不到。
 const SUBMIT_GAP_MS = 250;
+// 稳定的空数组：`?? []` 每次渲染都是新引用，作为 props/依赖会让下游 memo/effect 空转
+// （chatUi 未就绪时每 650ms 轮询渲染一次，ManagedTerminal 的标记 key 就白算一次）。
+const EMPTY_MARKERS: string[] = [];
+// 运行条活动文本的展示清洗：剥掉「cd <目录> && 」前缀（保留可能的 ›/> 提示符）。
+// 状态条截断成单行后，冗长的项目路径会把真正在跑的命令挤出可视区；完整原文在 title 里。
+const trimActivityCdPrefix = (activity: string): string =>
+  activity.replace(/^([›>]\s*)?cd\s+("[^"]*"|'[^']*'|[^\s&]+)\s+&&\s*/, "$1");
+
+/** AskUserQuestion 的题面。多问题用 tab 切换——全部竖排会把卡片堆得比对话区还高，
+ *  把输入框挤出可视区（用户实拍反馈）；单问题不渲染 tab 条。可点选排队只存在于
+ *  单问题形态（约束见调用处注释），多问题恒为纯展示，tab 不与点选状态相互作用。 */
+function QuestionPanels({ items, interactive, queuedAnswer, onToggle }: {
+  items: StructuredQuestion[];
+  interactive: boolean;
+  queuedAnswer: string | null;
+  onToggle: (label: string) => void;
+}) {
+  const [active, setActive] = useState(0);
+  // 新一轮提问（题面数组换了）回到第一题。
+  useEffect(() => { setActive(0); }, [items]);
+  const index = Math.min(active, items.length - 1);
+  const item = items[index];
+  if (!item) return null;
+  return (
+    <>
+      {items.length > 1 && (
+        <div className="chat-question-tabs" role="tablist">
+          {items.map((question, tabIndex) => (
+            <button
+              key={tabIndex}
+              type="button"
+              role="tab"
+              aria-selected={tabIndex === index}
+              className={tabIndex === index ? "is-active" : ""}
+              onClick={() => setActive(tabIndex)}
+            >{question.header || `#${tabIndex + 1}`}</button>
+          ))}
+        </div>
+      )}
+      <div className="chat-question-panel">
+        {item.question && <span className="chat-approval-prewrap">{item.header ? `${item.header} · ${item.question}` : item.question}</span>}
+        {interactive ? (
+          <div className="chat-approval-options">
+            {item.options.map((option, optionIndex) => (
+              <button
+                type="button"
+                className={queuedAnswer === option.label ? "is-selected" : ""}
+                key={`${optionIndex}:${option.label}`}
+                onClick={() => onToggle(option.label)}
+              >
+                <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="chat-approval-options is-static">
+            {item.options.map((option, optionIndex) => (
+              <div className="chat-approval-option-static" key={`${optionIndex}:${option.label}`}>
+                <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
 
 /// 把 content 写进 composer 并提交：正文与回车**必须分两次写**。
 ///
@@ -321,9 +389,22 @@ export function ChatWindow() {
     failed: t.chat.terminalStartFailed,
     timeout: t.chat.terminalReadyTimeout,
   };
+  // 这次终端菜单是我们为「选模型」发起的吗——识别到选项时据此学习真实清单（见 modelLabels）。
+  const modelMenuPendingRef = useRef(false);
+  // 静默探测：CLI 菜单只用来「问清单」，识别到就立刻 Esc 收掉，全程不上屏——用户看到的
+  // 始终是 GUI 下拉，不是终端里闪一下的 TUI 菜单加一条「正在识别」的等待条。
+  const silentProbeRef = useRef(false);
+  const learnModelLabelsRef = useRef<(options: TerminalAttentionOption[]) => void>(() => {});
+  const finishSilentProbeRef = useRef<() => void>(() => {});
   const revealTerminalAttention = useCallback((attention: TerminalAttention | null) => {
     if (!attention) { setTerminalAttention(null); return; }
     terminalEverShownRef.current = true;
+    // CLI 弹出的模型菜单被识别成选项了：把清单学下来，之后直接渲染 GUI 下拉。
+    if (modelMenuPendingRef.current && attention.options && attention.options.length > 0) {
+      modelMenuPendingRef.current = false;
+      learnModelLabelsRef.current(attention.options);
+      if (silentProbeRef.current) { finishSilentProbeRef.current(); return; }
+    }
     setTerminalAttention((current) => current?.id === attention.id
       && current.text === attention.text
       && JSON.stringify(current.options) === JSON.stringify(attention.options)
@@ -558,9 +639,14 @@ export function ChatWindow() {
   // transcript 之外的兜底时间线：hook 落库的最近一问一答（UserPromptSubmit / Stop）。
   // transcript 尚未落盘/尚未定位到、或该 agent 不提供结构化 transcript 时用它渲染，
   // 让「会话已在工作」有真实内容可看。transcript 一旦就位（items 非空）即被完整记录取代。
-  const provisional: ChatItem[] = [];
-  if (history?.lastUserText) provisional.push({ type: "user_text", id: "hook:last-user", timestamp: null, text: history.lastUserText });
-  if (history?.lastAiText) provisional.push({ type: "assistant_text", id: "hook:last-ai", timestamp: null, text: history.lastAiText });
+  // useMemo：它作为 items 传给 Transcript（memo 按引用比较），每次渲染新建数组会让
+  // 650ms 轮询期间整棵消息树白白重建一遍。
+  const provisional = useMemo<ChatItem[]>(() => {
+    const out: ChatItem[] = [];
+    if (history?.lastUserText) out.push({ type: "user_text", id: "hook:last-user", timestamp: null, text: history.lastUserText });
+    if (history?.lastAiText) out.push({ type: "assistant_text", id: "hook:last-ai", timestamp: null, text: history.lastAiText });
+    return out;
+  }, [history?.lastUserText, history?.lastAiText]);
   const slashMatches = prompt.startsWith("/") && !prompt.includes(" ") && !slashDismissed
     ? (chatUi?.slash_commands ?? []).filter((c) => c.name.startsWith(prompt) && c.name !== prompt)
     : [];
@@ -571,8 +657,45 @@ export function ChatWindow() {
     const selected = slashMenuRef.current?.querySelector('[aria-selected="true"]');
     if (typeof selected?.scrollIntoView === "function") selected.scrollIntoView({ block: "nearest" });
   }, [slashActive]);
-  const modelPresets = chatUi?.model_presets ?? [];
+  // 模型清单：别名来自插件（CLI 文档化的稳定契约），**标签**优先用从 CLI 菜单学到的真实
+  // 文案（见 modelLabels）——插件里的内置标签只是没学到之前的兜底，它必随 CLI 改版漂移。
+  const [learnedModelLabels, setLearnedModelLabels] = useState<string[] | null>(null);
+  useEffect(() => {
+    setLearnedModelLabels(loadLearnedLabels(history?.provider ?? null, chatUi?.version ?? null));
+  }, [history?.provider, chatUi?.version]);
+  learnModelLabelsRef.current = (options) => {
+    const labels = options.map((option) => option.label).filter(Boolean);
+    saveLearnedLabels(history?.provider ?? null, chatUi?.version ?? null, labels);
+    setLearnedModelLabels(labels);
+  };
+  // CLI 能自己列举模型时优先用它（`opencode models` 这类非交互子命令）：一问就有，
+  // 不必往会话 PTY 发命令弹 TUI 菜单、也不依赖屏幕识别取证。id 即 CLI 接受的模型串，
+  // 标签直接用它（这些 CLI 的清单本就是 `provider/model` 形式的标识，没有另一套展示名）。
+  const [listedModels, setListedModels] = useState<string[]>([]);
+  useEffect(() => {
+    const provider = history?.provider;
+    if (!provider) { setListedModels([]); return; }
+    let cancelled = false;
+    agentModels(provider)
+      .then((models) => { if (!cancelled) setListedModels(models); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [history?.provider]);
+  const modelPresets = useMemo(() => {
+    if (listedModels.length > 0) return listedModels.map((id) => ({ id, label: id }));
+    return applyLearnedLabels(chatUi?.model_presets ?? [], learnedModelLabels);
+  }, [listedModels, chatUi?.model_presets, learnedModelLabels]);
   const modelMenuCommand = chatUi?.model_menu_command ?? null;
+  // 能直接下拉 = 清单已知（内置别名或学到的真实清单），且标签已是真的/该 CLI 无菜单可学。
+  const modelDropdownReady = modelPresets.length > 0
+    && (listedModels.length > 0 || learnedModelLabels !== null || !modelMenuCommand);
+  // 静默探测进行中：按钮显示为忙，不弹任何终端界面。
+  const [modelProbing, setModelProbing] = useState(false);
+  const modelProbeTimerRef = useRef<number | undefined>(undefined);
+  // 这个会话的模型菜单读不到（该 CLI 的菜单形态未取证/输入通道不通）：不再反复空转，
+  // 按钮改为「去终端页切」的直达入口。换会话时复位——换个 agent 可能就能读到。
+  const [modelProbeFailed, setModelProbeFailed] = useState(false);
+  useEffect(() => setModelProbeFailed(false), [sessionId, history?.provider]);
   // 识别窗口是个时间点，不是布尔——过期后要真的停下来，故用一个到点自灭的计时器驱动重渲染。
   const [menuWatching, setMenuWatching] = useState(false);
   useEffect(() => {
@@ -760,18 +883,39 @@ export function ChatWindow() {
     void refreshSessionTodos(sessionId).catch(() => {});
   }, [sessionId]);
 
+  // push 通道健康证明：本窗口收到过 pending-approval / interactive-question 系事件
+  // ⇒ emit 能到达本窗口，轮询只需低频保险。ref 而非 state：翻转不需要重渲染，
+  // 下一拍轮询自然读到新值。
+  const pushProvenRef = useRef(false);
+  // 审批 + 题面的轮询兜底，一次 IPC 取两样（此前是两条 400ms 的独立轮询）。push 事件
+  // 是主路径：通道一旦证明可用，轮询退避到 2.5s 只做保险——空闲对话窗的 IPC 频次从
+  // ~5 次/秒降到 ~1 次/秒。事件从未到达过（冷启动 1~2s 窗口、通道故障）时保持 400ms，
+  // 错过的卡片补回延迟与从前一致。
   useEffect(() => {
     if (sessionId <= 0) return;
     let cancelled = false;
-    const poll = () => getPendingApproval(sessionId).then((next) => {
-      if (!cancelled) {
-        if (next) setBrokerOwnsReview(true);
-        setApproval(next);
+    let timer: number | undefined;
+    const poll = () => pendingInteraction(sessionId).then(({ approval: nextApproval, question }) => {
+      if (cancelled) return;
+      if (nextApproval) setBrokerOwnsReview(true);
+      setApproval(nextApproval);
+      // 已有同一 requestId 的题面卡时不重复设置，避免打断点选状态。
+      if (question) {
+        setStructuredQuestion((current) => {
+          if (current?.requestId === question.requestId) return current;
+          setBrokerOwnsReview(true);
+          return question;
+        });
       }
     }).catch(() => {});
-    void poll();
-    const timer = window.setInterval(() => void poll(), 400);
-    return () => { cancelled = true; window.clearInterval(timer); };
+    const tick = () => {
+      void poll().then(() => {
+        if (cancelled) return;
+        timer = window.setTimeout(tick, pushProvenRef.current ? 2_500 : 400);
+      });
+    };
+    tick();
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [sessionId]);
 
   useEffect(() => {
@@ -788,6 +932,7 @@ export function ChatWindow() {
     let unCleared: (() => void) | undefined;
     let cancelled = false;
     listen<PendingApproval>("pending-approval", (event) => {
+      pushProvenRef.current = true;
       if (event.payload.sessionId === activeSessionRef.current) {
         setApprovalAwaitingIds((prev) => {
           if (!prev.has(event.payload.sessionId)) return prev;
@@ -811,6 +956,7 @@ export function ChatWindow() {
       }
     }).then((fn) => { if (cancelled) fn(); else unApproval = fn; }).catch(() => {});
     listen<PendingApproval>("pending-approval-cleared", (event) => {
+      pushProvenRef.current = true;
       setApprovalAwaitingIds((prev) => {
         if (!prev.has(event.payload.sessionId)) return prev;
         const next = new Set(prev);
@@ -836,6 +982,7 @@ export function ChatWindow() {
     let un: (() => void) | undefined;
     let cancelled = false;
     listen<PendingApproval>("interactive-question", (event) => {
+      pushProvenRef.current = true;
       lastInteractiveQuestionRef.current = { payload: event.payload, at: Date.now() };
       if (event.payload.sessionId === activeSessionRef.current) {
         // 题面卡就是处理面：抑制 pendingReview 的「去终端处理」降级卡（与 broker 审批同理）。
@@ -857,24 +1004,7 @@ export function ChatWindow() {
       setStructuredQuestion(null);
     }
   }, [sessionId]);
-  // 轮询兜底：`interactive-question` 事件在对话窗冷启动时会打进虚空（Tauri emit 不排队，
-  // WebView2 起来要 1~2s），只有轮询能把错过的题面补回来——常规审批本就有这道保险。
-  // 与审批轮询同频（400ms）；已有同一 requestId 的卡时不重复设置，避免打断点选状态。
-  useEffect(() => {
-    if (sessionId <= 0) return;
-    let cancelled = false;
-    const poll = () => pendingInteractiveQuestion(sessionId).then((next) => {
-      if (cancelled || !next) return;
-      setStructuredQuestion((current) => {
-        if (current?.requestId === next.requestId) return current;
-        setBrokerOwnsReview(true);
-        return next;
-      });
-    }).catch(() => {});
-    void poll();
-    const timer = window.setInterval(poll, 400);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [sessionId]);
+  // 题面的轮询兜底并入上面 pendingInteraction 的合并轮询（同一次 IPC 取审批 + 题面）。
   // 兜底过期：识别一直没就绪、用户已在终端答完的情况下，别让展示卡挂一辈子。
   // 题面卡消失（过期/收起/会话切换）时排队的答案一并作废——没有卡背书的按键不许落。
   useEffect(() => {
@@ -1294,7 +1424,8 @@ export function ChatWindow() {
   /// 为什么不直接下发 `/model <id>`：除 claude 外几家的 `/model` 都是交互式菜单，内联参数
   /// 无效（实测 kimi 的命令描述就是 `/model: switch model`）。发命令再把 CLI 弹出的菜单
   /// 转成 GUI 按钮，模型清单由 CLI 现给——宿主不必维护一份会随用户配置过时的清单。
-  const openTerminalMenu = async (command: string) => {
+  const openTerminalMenu = async (command: string, forModelMenu = false) => {
+    modelMenuPendingRef.current = forModelMenu;
     // `sending` 在写完就落回 false，而 TUI 的菜单要过一会儿才画出来。只看它的话，用户
     // 觉得「没反应」再点一次，第二遍命令就直接打进已经打开的菜单搜索框里——实测会变成
     // `Search: /model/model`、`No matches`，三个模型全被过滤掉，反而彻底选不了。
@@ -1307,6 +1438,40 @@ export function ChatWindow() {
     const sent = await sendText(command);
     if (!sent) setMenuWatchUntil(0);
     return sent;
+  };
+  /// 静默探测模型清单：让 CLI 弹一次 `/model` 菜单，识别到清单就立刻 Esc 收掉并打开 GUI 下拉。
+  /// 整个过程不上屏——终端页不弹卡、compose 上方不出「正在识别」等待条。
+  const probeModelMenu = async () => {
+    if (!modelMenuCommand || modelProbing || sending) return;
+    silentProbeRef.current = true;
+    setModelProbing(true);
+    setTerminalMonitorNeeded(true); // 识别跑在 ManagedTerminal 里，它可能还没挂载
+    setMenuWatchUntil(Date.now() + 12_000); // 驱动识别扫描；提示条已按静默标记隐藏
+    const sent = await sendText(modelMenuCommand);
+    if (!sent) { endSilentProbe(); return; }
+    // 超时兜底：识别不到就收掉菜单并**说清楚**——有些 CLI 的菜单形态尚未取证（见
+    // docs/research/tui-menu-captures-2026-07.md 的结论表），读不到时不能只是悄悄
+    // 转完 12 秒了事，那用户只会以为按钮坏了。给出真正能用的出路：去终端页自己切。
+    window.clearTimeout(modelProbeTimerRef.current);
+    modelProbeTimerRef.current = window.setTimeout(() => {
+      endSilentProbe();
+      setModelProbeFailed(true);
+      setSendError(t.chat.modelListUnavailable(modelMenuCommand));
+    }, 12_000);
+  };
+  /// 结束静默探测：收掉 CLI 菜单、关识别窗口、清忙态。
+  const endSilentProbe = () => {
+    window.clearTimeout(modelProbeTimerRef.current);
+    silentProbeRef.current = false;
+    modelMenuPendingRef.current = false;
+    setModelProbing(false);
+    setMenuWatchUntil(0);
+    void writeManagedTerminal(sessionId, "\x1b").catch(() => {});
+  };
+  finishSilentProbeRef.current = () => {
+    endSilentProbe();
+    setModeMenu(null);
+    setModelMenu(true); // 清单到手，直接把 GUI 下拉打开——用户点的那一下就是为了看它
   };
   /// 放弃这次菜单交互：给 TUI 一个 Esc 收起菜单，并关掉识别窗口。
   const cancelTerminalMenu = () => {
@@ -1336,6 +1501,48 @@ export function ChatWindow() {
   /// 补救：写入后短暂轮询 PTY 屏幕，用插件声明的指示文案（provider 文档承诺的稳定文本）
   /// 识别落点。屏幕就是 CLI 自己画的权威状态，识别到什么就显示什么；识别不到则保持现状，
   /// 等 transcript 下一条记录兜底。
+  /// 读一次屏幕回显：在 `budgetMs` 内轮询 PTY，识别到模式值就立刻返回（识别不到返回 null）。
+  /// 供 echoModeFromScreen（观察）与 cycleToMode（逐步逼近目标）共用同一套识别口径。
+  const readModeEcho = async (markers: ModeScreenMarker[], baseline: number, budgetMs: number): Promise<string | null> => {
+    if (markers.length === 0) return null;
+    const decoder = new TextDecoder();
+    let tail = "";
+    let since = baseline;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < budgetMs) {
+      let snapshot;
+      try { snapshot = await managedTerminalSnapshot(sessionId, since); } catch { return null; }
+      if (!snapshot?.active) return null;
+      if (snapshot.endOffset < since) { since = 0; tail = ""; continue; }
+      since = snapshot.endOffset;
+      tail = appendTerminalText(tail, snapshot.data, decoder);
+      const value = modeFromScreen(visibleTerminalText(tail), markers);
+      if (value) return value;
+      await new Promise((resolve) => window.setTimeout(resolve, 120));
+    }
+    return null;
+  };
+  /// 循环按 cycle 键直到落到目标模式：claude 的权限模式只有「切下一个」的快捷键，没有
+  /// 直达某个值的办法，但用户要的是「选那个模式」而不是「按 N 次」。每按一次读一次屏幕
+  /// 回显确认落点，最多绕一圈（模式数）——转满一圈还没到说明该模式在当前账号/启动参数下
+  /// 不可用（插件注释已声明模式集合会变），此时停手并说明，不再空转。
+  const cycleToMode = async (dimension: string, target: string, cycleInput: string, markers: ModeScreenMarker[]) => {
+    if (sending) return;
+    await withSendGuard(async () => {
+      const seq = ++modeEchoSeqRef.current;
+      for (let step = 0; step < Math.max(1, markers.length); step += 1) {
+        if (modeEchoSeqRef.current !== seq) return true; // 换会话/新操作作废本轮
+        let base = 0;
+        try { base = (await managedTerminalSnapshot(sessionId, 0))?.endOffset ?? 0; } catch { /* 从 0 起扫 */ }
+        await writeManagedTerminal(sessionId, cycleInput);
+        const value = await readModeEcho(markers, base, 1_500);
+        if (value) applyModeValue(dimension, value);
+        if (value === target) return true;
+      }
+      setSendError(t.chat.modeUnreachable);
+      return true;
+    });
+  };
   const echoModeFromScreen = async (dimension: string, markers: ModeScreenMarker[], baseline: number) => {
     if (markers.length === 0) return;
     const seq = ++modeEchoSeqRef.current;
@@ -1688,7 +1895,11 @@ export function ChatWindow() {
           compose 之间常驻:滚到哪里都看得见,有具体活动（最近命令）就显示出来。 */}
       {view === "chat" && !loading && tone === "running" && (
         <div className="chat-running" role="status">
-          <i /><span>{history?.currentActivity || t.chat.running}</span>
+          {/* 长命令被 CSS 截断成单行，全文放原生 title——data-tip 的浮层对一个高频变化的
+              状态条太吵，原生悬停提示刚好。展示文本剥掉 cd 前缀（见 trimActivityCdPrefix）。 */}
+          <i /><span title={history?.currentActivity || undefined}>
+            {history?.currentActivity ? trimActivityCdPrefix(history.currentActivity) : t.chat.running}
+          </span>
         </div>
       )}
       {/* 排队回执:运行中发出的插话被 CLI 排队到回合结束,期间 transcript 不显示——
@@ -1838,7 +2049,7 @@ export function ChatWindow() {
               setView("chat");
               setSendError(t.chat.sendBackgroundKeysMovedYou);
             }}
-            attentionMarkers={chatUi?.startup_attention_markers ?? []}
+            attentionMarkers={chatUi?.startup_attention_markers ?? EMPTY_MARKERS}
             interactivePrompt={terminalInteractivePrompt}
             expectMenu={menuWatching}
             grammar={attentionGrammar}
@@ -1857,38 +2068,17 @@ export function ChatWindow() {
         sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setStructuredQuestion(null)}>{t.chat.attentionDismiss}</button>}
         actions={history?.ptyManaged && <button type="button" className="is-allow" onClick={() => setView("terminal")}>{t.chat.answerInTerminal}</button>}
       >
-        {structuredQuestions.map((item, questionIndex) => (
-          <div key={questionIndex}>
-            {item.question && <span className="chat-approval-prewrap">{item.header ? `${item.header} · ${item.question}` : item.question}</span>}
-            {/* 可点选排队的条件很严：托管会话（GUI 持有 PTY 才写得进按键）+ 单问题
-                + 单选。多问题表单绝不可点——queuedAnswer 是单值、且匹配只按 label 不带
-                问题下标，用户为问题 2 点的答案会落到停在前台的问题 1 上（识别出的
-                numbered-selector 认不出这是第几题）；多选题同理装不下第二个选择。
-                这些形态一律纯展示 + 「去终端作答」，不承诺做不到的事。 */}
-            {history?.ptyManaged && answerableInCard ? (
-              <div className="chat-approval-options">
-                {item.options.map((option, optionIndex) => (
-                  <button
-                    type="button"
-                    className={queuedAnswer === option.label ? "is-selected" : ""}
-                    key={`${optionIndex}:${option.label}`}
-                    onClick={() => setQueuedAnswer((current) => current === option.label ? null : option.label)}
-                  >
-                    <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <div className="chat-approval-options is-static">
-                {item.options.map((option, optionIndex) => (
-                  <div className="chat-approval-option-static" key={`${optionIndex}:${option.label}`}>
-                    <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        ))}
+        {/* 可点选排队的条件很严：托管会话（GUI 持有 PTY 才写得进按键）+ 单问题
+            + 单选。多问题表单绝不可点——queuedAnswer 是单值、且匹配只按 label 不带
+            问题下标，用户为问题 2 点的答案会落到停在前台的问题 1 上（识别出的
+            numbered-selector 认不出这是第几题）；多选题同理装不下第二个选择。
+            这些形态一律纯展示 + 「去终端作答」，不承诺做不到的事。 */}
+        <QuestionPanels
+          items={structuredQuestions}
+          interactive={!!history?.ptyManaged && answerableInCard}
+          queuedAnswer={queuedAnswer}
+          onToggle={(label) => setQueuedAnswer((current) => current === label ? null : label)}
+        />
         <span>{!history?.ptyManaged
           ? t.chat.questionExternalHint
           : !answerableInCard
@@ -2030,23 +2220,29 @@ export function ChatWindow() {
               className="chat-model-button"
               disabled={modelPresets.length === 0 && !modelMenuCommand}
               aria-label={t.chat.switchModel}
-              aria-expanded={modelPresets.length > 0 ? modelMenu : undefined}
-              data-tip={menuWatching ? t.chat.modelMenuOpen : modelPresets.length > 0 || modelMenuCommand ? t.chat.switchModel : undefined}
-              // 有静态预设（只有 claude，其 `/model <id>` 接受内联参数）就直接下拉；
-              // 其余 CLI 的 `/model` 是交互式菜单，改为把命令发过去，再由屏幕识别把
-              // CLI 自己弹出的菜单转成 GUI 按钮——模型清单由 CLI 现给，不必我们维护。
+              aria-expanded={modelDropdownReady ? modelMenu : undefined}
+              data-tip={modelProbing ? t.chat.modelProbing : modelProbeFailed ? t.chat.modelGoTerminal : menuWatching ? t.chat.modelMenuOpen : modelPresets.length > 0 || modelMenuCommand ? t.chat.switchModel : undefined}
+              // 标签学过了就直接下拉（切换走 `/model <别名>` 内联，静默、不打扰会话）；
+              // 没学过（首次/CLI 刚升级）先让 CLI 自己弹一次菜单，屏幕识别把它转成 GUI
+              // 按钮，同时把真实标签学下来——清单始终是 CLI 现给的，宿主不维护会过时的那份。
+              // 无内联能力的 CLI（无静态预设）恒走菜单通道。
               onClick={() => {
                 // 与模式菜单互斥：同时只开一个。
-                if (modelPresets.length > 0) { setModeMenu(null); setModelMenu((open) => !open); return; }
-                // 菜单已在终端里开着：再点是「收起」而不是重发（重发会打进搜索框）。
-                if (menuWatching) { cancelTerminalMenu(); return; }
-                if (modelMenuCommand) void openTerminalMenu(modelMenuCommand);
+                if (modelDropdownReady) { setModeMenu(null); setModelMenu((open) => !open); return; }
+                // 探测进行中：再点是「取消」。
+                if (modelProbing) { endSilentProbe(); return; }
+                // 这个 CLI 读不到清单：直接把用户送到能切的地方，别再空转一次。
+                if (modelProbeFailed) { setView("terminal"); return; }
+                void probeModelMenu();
               }}
             >
               {history?.model || t.chat.model}
-              {(modelPresets.length > 0 || modelMenuCommand) && <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"><path d="M6 9l6 6 6-6" /></svg>}
+              {/* 静默探测时把箭头换成转圈：这一下点击确实在做事，但做的事不在屏幕上。 */}
+              {modelProbing
+                ? <span className="chat-model-spinner" aria-hidden="true" />
+                : (modelPresets.length > 0 || modelMenuCommand) && <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"><path d="M6 9l6 6 6-6" /></svg>}
             </button>
-            {modelMenu && modelPresets.length > 0 && <div className="dd-menu chat-model-menu" role="menu">
+            {modelMenu && modelDropdownReady && <div className="dd-menu chat-model-menu" role="menu">
               {modelPresets.map((preset) => {
                 const active = history?.model === preset.label;
                 return (
@@ -2075,7 +2271,15 @@ export function ChatWindow() {
             return dimensions.map((dimension) => {
               const control = controls.get(dimension);
               const state = states.find((mode) => mode.dimension === dimension);
-              const options = control?.options ?? [];
+              // 只有 cycle 键的维度（claude 权限模式）用**屏幕回显标记**派生下拉：那些标记
+              // 是 provider 文档承诺的稳定文本，每条对应一个可达模式值——用户要选的是模式，
+              // 不是按几次快捷键。选中后由 cycleToMode 循环按到位（见它的注释）。
+              const derived = (control?.screen_markers ?? []).map((marker) => ({
+                value: marker.value,
+                label: t.chat.modeNames[marker.value] ?? marker.value,
+                inputs: [],
+              }));
+              const options = control?.options?.length ? control.options : control?.cycle_input ? derived : [];
               const canCycle = Boolean(control?.cycle_input);
               const interactive = options.length > 0 || canCycle;
               const label = t.chat.modeDimensions[dimension] ?? dimension;
@@ -2096,6 +2300,7 @@ export function ChatWindow() {
                   onClick={() => {
                     // 与模型菜单互斥：同时只开一个。
                     if (options.length > 0) { setModelMenu(false); setModeMenu((open) => open === dimension ? null : dimension); }
+                    // 无 options 也无回显标记（纯盲切）时才退回「按一次跳下一个」。
                     else if (control?.cycle_input) void changeMode(dimension, [{ data: control.cycle_input, submit: false }], undefined, control.screen_markers);
                   }}
                 >
@@ -2116,7 +2321,13 @@ export function ChatWindow() {
                       className={"chat-model-item" + (active ? " is-active" : "")}
                       onClick={() => {
                         setModeMenu(null);
-                        void changeMode(dimension, option.inputs, option.value, control?.screen_markers ?? []);
+                        if (active) return; // 已经是这个模式，别白按一圈
+                        // 有直达输入的走它；只有 cycle 键的（派生项 inputs 为空）循环按到位。
+                        if (option.inputs.length > 0) {
+                          void changeMode(dimension, option.inputs, option.value, control?.screen_markers ?? []);
+                        } else if (control?.cycle_input) {
+                          void cycleToMode(dimension, option.value, control.cycle_input, control.screen_markers ?? []);
+                        }
                       }}
                     >
                       <span className="chat-model-item-name">{t.chat.modeNames[option.value] ?? option.value}</span>
@@ -2152,7 +2363,7 @@ export function ChatWindow() {
             disabled={stopMode ? false : (!prompt.trim() && attachments.length === 0) || sending}
           >
             {stopMode || sending
-              ? <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+              ? <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="4.5" /></svg>
               : <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5" /></svg>}
           </button>
         </div>
@@ -2169,7 +2380,9 @@ export function ChatWindow() {
         </div>}
         {/* 交互式命令的过渡横幅：识别成功后 terminalAttention 卡片会替掉它；识别不出的
             面板形态（识别器只认光标菜单/编号选择器）也至少给「切到终端 / 收起」的出口。 */}
-        {menuWatching && !terminalAttention && <div className="chat-send-error" role="status">
+        {/* 静默探测（问模型清单）期间不出这条等待条：那次交互对用户是不可见的，
+            忙态只体现在模型按钮上。用户主动发的斜杠菜单命令照旧显示。 */}
+        {menuWatching && !modelProbing && !terminalAttention && <div className="chat-send-error" role="status">
           <span>{t.chat.slashMenuOpened}</span>
           <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>
           <button type="button" className="chat-send-takeover" onClick={cancelTerminalMenu}>{t.chat.slashMenuDismiss}</button>

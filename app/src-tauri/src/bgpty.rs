@@ -297,8 +297,16 @@ impl BgPtyRegistry {
             .unwrap_or_else(|error| error.into_inner());
         let end = session.output_end.load(Ordering::Acquire);
         let start = end.saturating_sub(backlog.len() as u64);
-        let skip = since.saturating_sub(start).min(backlog.len() as u64);
-        let data: Vec<u8> = backlog.iter().skip(skip as usize).copied().collect();
+        let skip = since.saturating_sub(start).min(backlog.len() as u64) as usize;
+        // as_slices + extend_from_slice 确定走 memcpy（与 pty.rs snapshot 同款理由）。
+        let (front, back) = backlog.as_slices();
+        let mut data: Vec<u8> = Vec::with_capacity(backlog.len() - skip);
+        if skip < front.len() {
+            data.extend_from_slice(&front[skip..]);
+            data.extend_from_slice(back);
+        } else {
+            data.extend_from_slice(&back[skip - front.len()..]);
+        }
         drop(backlog);
         let closed = session.closed.load(Ordering::Acquire);
         let exit_code = *session
@@ -309,7 +317,7 @@ impl BgPtyRegistry {
             session_id,
             active: !closed,
             data: base64::engine::general_purpose::STANDARD.encode(data),
-            start_offset: start + skip,
+            start_offset: start + skip as u64,
             end_offset: end,
             exited: closed,
             exit_code,
@@ -462,8 +470,10 @@ fn append(session: &BgSession, bytes: &[u8]) {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     backlog.extend(bytes.iter().copied());
-    while backlog.len() > BACKLOG_LIMIT {
-        backlog.pop_front();
+    // drain 一次成段移除，不逐字节 pop_front（缓冲满后那是每 chunk 上万次，还在锁内）。
+    let excess = backlog.len().saturating_sub(BACKLOG_LIMIT);
+    if excess > 0 {
+        backlog.drain(..excess);
     }
     // 偏移记的是**累计产出**，不是缓冲里还剩多少——前端按它对齐增量，不能因为
     // 老字节被挤掉就倒退。

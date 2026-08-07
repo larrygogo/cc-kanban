@@ -102,6 +102,10 @@ pub(crate) fn evaluate(provider: &str, snap: &ScreenSnapshot) -> Option<Evaluati
     let lower: Vec<String> = snap.lines.iter().map(|line| line.to_lowercase()).collect();
     let title = snap.title.as_deref().unwrap_or("");
     let progress = snap.progress.as_deref().unwrap_or("");
+    // Title/Progress 的小写化与正文的 `lower` 一样提到规则循环外：标题类规则有多条时，
+    // 此前同一标题每条规则都重算一遍 to_lowercase（检测每 300ms 一轮）。
+    let lower_title = [title.to_lowercase()];
+    let lower_progress = [progress.to_lowercase()];
 
     let mut best: Option<&ScreenRule> = None;
     for rule in rules {
@@ -109,7 +113,7 @@ pub(crate) fn evaluate(provider: &str, snap: &ScreenSnapshot) -> Option<Evaluati
         if best.is_some_and(|winner| winner.priority >= rule.priority) {
             continue;
         }
-        if matches_rule(rule, &lower, title, progress) {
+        if matches_rule(rule, &lower, title, &lower_title, &lower_progress) {
             best = Some(rule);
         }
     }
@@ -128,29 +132,21 @@ pub(crate) fn evaluate(provider: &str, snap: &ScreenSnapshot) -> Option<Evaluati
     })
 }
 
-fn matches_rule(rule: &ScreenRule, lower: &[String], title: &str, progress: &str) -> bool {
+fn matches_rule(
+    rule: &ScreenRule,
+    lower: &[String],
+    title: &str,
+    lower_title: &[String],
+    lower_progress: &[String],
+) -> bool {
     match rule.region {
         // 进度序列同样当单行区域喂进去（小写：`4;0` 这类 payload 本无大小写，转了无害）。
-        Region::Progress => {
-            let lower_progress = progress.to_lowercase();
-            eval_matcher(
-                &rule.matcher,
-                std::slice::from_ref(&lower_progress),
-                title,
-            )
-        }
+        Region::Progress => eval_matcher(&rule.matcher, lower_progress, title),
         // 标题当作单行区域喂进去，同样**小写**——文本类谓词（Contains 等）全按小写约定
         // 比较（codex 的标题是 "Action Required"，不转就匹配不上）。字符集类谓词
         // （StartsWithCharIn / WordCharIn）另走原文 title 参数，它们判的是 spinner 帧
         // 这类无大小写的符号，不受影响。
-        Region::Title => {
-            let lower_title = title.to_lowercase();
-            eval_matcher(
-                &rule.matcher,
-                std::slice::from_ref(&lower_title),
-                title,
-            )
-        }
+        Region::Title => eval_matcher(&rule.matcher, lower_title, title),
         _ => {
             let region = region_of(rule.region, lower);
             eval_matcher(&rule.matcher, region, title)
@@ -312,14 +308,17 @@ fn region_contains(region: &[String], needle: &str) -> bool {
 ///
 /// 编译失败返回 None（该条规则不命中），**绝不 panic**：规则是数据，写坏一条不该让
 /// 整个状态检测停摆；下面有测试保证内置规则全部可编译。
-fn compiled_regex(pattern: &str) -> Option<regex::Regex> {
+fn compiled_regex(pattern: &'static str) -> Option<regex::Regex> {
     use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, Option<regex::Regex>>>> =
+    // 键收 `&'static str`（规则声明本就是静态的）：此前键是 String，缓存**命中**也要为
+    // entry() 分配一次——这条路径每 300ms × 每条正则规则跑一遍，还与主线程的
+    // screen_detect_explain 争同一把锁，持锁时间应压到最短。
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<&'static str, Option<regex::Regex>>>> =
         OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     let mut cache = cache.lock().ok()?;
     cache
-        .entry(pattern.to_string())
+        .entry(pattern)
         .or_insert_with(|| {
             // 统一大小写不敏感：规则声明侧写小写字面量，与其它谓词的约定一致。
             regex::RegexBuilder::new(pattern)

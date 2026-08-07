@@ -95,10 +95,12 @@ pub(crate) async fn confirm_dialog(
     let confirms = state.confirms.clone();
     let id = confirms.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = tauri::async_runtime::channel::<bool>(1);
+    // 中毒恢复（与本文件其余取锁处及全仓策略一致）：确认框是删除/结束会话等破坏性操作的
+    // 最后一道闸，一次别处 panic 不该让它从此永久失效。
     confirms
         .pending
         .lock()
-        .map_err(|_| "确认状态锁已损坏")?
+        .unwrap_or_else(|e| e.into_inner())
         .insert(
             id,
             (
@@ -201,7 +203,7 @@ pub(crate) fn confirm_dialog_payload(
         .confirms
         .pending
         .lock()
-        .map_err(|_| "确认状态锁已损坏")?
+        .unwrap_or_else(|e| e.into_inner())
         .get(&id)
         .map(|(payload, _)| payload.clone())
         .ok_or_else(|| "确认请求不存在".into())

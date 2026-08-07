@@ -10,6 +10,7 @@ import { editorKeyDown, loadStarred } from "./sticker/helpers";
 import { MoreIcon, NoteIcon, TopIcon } from "./sticker/icons";
 import { STAR_KEY } from "./sticker/types";
 import { useT } from "../i18n";
+import type { Dict } from "../i18n/zh";
 
 /** 每翻一页新增的会话数。滚到底自动加载下一页，直到后端带回 next_cursor = null 为止。 */
 const PAGE_LIMIT = 60;
@@ -21,8 +22,13 @@ const DIR_LIMIT = 24;
  *  liveness 轮询），与 App.tsx 看板刷新的 leading+trailing 节流同参数、同行为。 */
 const REFRESH_THROTTLE_MS = 400;
 
+/** 旧的布尔分组开关键（只有「按目录」一档时代的遗产）。只读不写：迁移到 GROUP_MODE_KEY。 */
 const GROUPED_KEY = "meowo-chat-sidebar-grouped";
+const GROUP_MODE_KEY = "meowo-chat-sidebar-group-mode";
 const FOLDED_KEY = "meowo-chat-sidebar-folded-dirs";
+
+/** 分组方式（Claude Code 侧栏 Group by 同款）：不分组 / 按目录 / 按日期 / 按状态。 */
+type GroupMode = "none" | "dir" | "date" | "state";
 
 /** 无 cwd 的会话归到同一组（后端 cwd 可空:ping 型/早期数据）。用不可能与路径撞车的键。 */
 const NO_DIR = "\\u0000no-dir";
@@ -34,6 +40,30 @@ const TONE_RANK: Record<SessionTone, number> = {
 };
 
 type DirGroup = { key: string; cwd: string | null; label: string; items: LiveSession[] };
+
+/** 就地编辑输入框。草稿是**本组件的**局部状态：此前草稿放在 ChatSidebar 里，每次按键
+ *  setState 都让整个侧栏（无虚拟化，几百条全在 DOM）重渲染一遍——重命名逐字卡顿的根因。
+ *  提交/取消语义与原实现一致：Enter/失焦提交、Esc 取消（Esc 卸载组件，React 不再发 blur）。 */
+function EditorInput({ initial, placeholder, onSubmit, onCancel }: {
+  initial: string;
+  placeholder: string;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  return (
+    <input
+      className="chat-sidebar-edit"
+      autoFocus
+      value={value}
+      placeholder={placeholder}
+      onClick={(event) => event.stopPropagation()}
+      onChange={(event) => setValue(event.target.value)}
+      onKeyDown={editorKeyDown(() => onSubmit(value), onCancel)}
+      onBlur={() => onSubmit(value)}
+    />
+  );
+}
 
 /**
  * 按 cwd 分组,**组序由已有排序派生**:组按「组内第一条会话的位置」排,组内保持原顺序。
@@ -54,6 +84,45 @@ function groupByDir(items: LiveSession[]): DirGroup[] {
     group.items.push(item);
   }
   return groups;
+}
+
+/** 按最后活跃时间分桶：今天 / 昨天 / 近 7 天 / 更早。桶序固定（新→旧）——
+ *  connected-first 排序会把「老但还连着」的会话排最前，按首条位置派生组序会乱。 */
+function groupByDate(items: LiveSession[], t: Dict): DirGroup[] {
+  const dayStart = new Date();
+  dayStart.setHours(0, 0, 0, 0);
+  const today = dayStart.getTime();
+  const buckets = [
+    { key: "date:today", label: t.chat.dateToday, min: today },
+    { key: "date:yesterday", label: t.chat.dateYesterday, min: today - 86_400_000 },
+    { key: "date:week", label: t.chat.dateThisWeek, min: today - 6 * 86_400_000 },
+    { key: "date:earlier", label: t.chat.dateEarlier, min: Number.NEGATIVE_INFINITY },
+  ];
+  const groups: DirGroup[] = buckets.map((bucket) => ({ key: bucket.key, cwd: null, label: bucket.label, items: [] }));
+  for (const item of items) {
+    const index = buckets.findIndex((bucket) => item.session.last_event_at >= bucket.min);
+    groups[index === -1 ? buckets.length - 1 : index].items.push(item);
+  }
+  return groups.filter((group) => group.items.length > 0);
+}
+
+/** 按状态分桶，组序按召唤强度（出错 > 待处理 > 等待 > 运行中 > 离线 > 已结束）——
+ *  状态视图的意义就是「先看要处理的」，此处不派生原有排序。组内保持原顺序。 */
+const STATE_GROUP_ORDER: SessionTone[] = ["error", "pending", "waiting", "running", "offline", "ended"];
+function groupByState(items: LiveSession[], t: Dict): DirGroup[] {
+  const map = new Map<SessionTone, LiveSession[]>();
+  for (const item of items) {
+    const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored);
+    const bucket = map.get(tone);
+    if (bucket) bucket.push(item);
+    else map.set(tone, [item]);
+  }
+  return STATE_GROUP_ORDER.filter((tone) => map.has(tone)).map((tone) => ({
+    key: `state:${tone}`,
+    cwd: null,
+    label: t.chat.status[tone],
+    items: map.get(tone)!,
+  }));
 }
 
 function readFolded(): Set<string> {
@@ -101,8 +170,28 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   const dirFilterRef = useRef(dirFilter);
   dirFilterRef.current = dirFilter;
   const [dirs, setDirs] = useState<string[]>([]);
-  // 分组开关默认关:不开的人一个像素都感知不到这次改动。
-  const [grouped, setGrouped] = useState(() => localStorage.getItem(GROUPED_KEY) === "1");
+  // 目录筛选下拉的显示名：同名目录（路径不同）带上上一级目录消歧——不消歧时用户面对
+  // 一排「codebase」无从分辨（实拍反馈）。上一级仍同名的（祖父级才不同）极罕见，不再加深。
+  const dirOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const cwd of dirs) {
+      const name = folderName(cwd);
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    return dirs.map((cwd) => {
+      const name = folderName(cwd);
+      if ((counts.get(name) ?? 0) <= 1) return { value: cwd, label: name };
+      const parts = cwd.split(/[\\/]+/).filter(Boolean);
+      const parent = parts.length >= 2 ? parts[parts.length - 2] : "";
+      return { value: cwd, label: parent ? `${parent}/${name}` : name };
+    });
+  }, [dirs]);
+  // 分组方式默认不分组:不用的人一个像素都感知不到。旧布尔开关(只有按目录一档)自动迁移。
+  const [groupMode, setGroupMode] = useState<GroupMode>(() => {
+    const stored = localStorage.getItem(GROUP_MODE_KEY);
+    if (stored === "none" || stored === "dir" || stored === "date" || stored === "state") return stored;
+    return localStorage.getItem(GROUPED_KEY) === "1" ? "dir" : "none";
+  });
   // 折叠的组(按 pathKey)。侧栏收起时本组件整个卸载,不落盘的话回来全展开了。
   const [folded, setFolded] = useState<Set<string>>(readFolded);
 
@@ -275,10 +364,9 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
     return next;
   });
   // 重命名 / 便签:与看板一样就地编辑(同一条会话上只开一个编辑器)。
+  // 草稿文本不在这里——住在 EditorInput 的局部状态里,按键不触发侧栏整表重渲染。
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [draft, setDraft] = useState("");
   const [notingId, setNotingId] = useState<number | null>(null);
-  const [noteDraft, setNoteDraft] = useState("");
   // 动作失败必须可见:静默吞掉的话,用户点了「重命名」只会看到名字没变,以为是自己没点上。
   const [actionError, setActionError] = useState<string | null>(null);
   useEffect(() => {
@@ -289,10 +377,9 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
 
   const startRename = (item: LiveSession) => {
     setNotingId(null);
-    setDraft(item.task_title && item.task_title !== "(未命名会话)" ? item.task_title : "");
     setEditingId(item.session.id);
   };
-  const submitRename = (item: LiveSession) => {
+  const submitRename = (item: LiveSession, draft: string) => {
     const title = draft.trim();
     if (title && title !== item.task_title) {
       invoke("rename_session", { cwd: item.cwd, sessionId: item.session.cc_session_id, title, provider: item.provider })
@@ -302,10 +389,9 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   };
   const startNote = (item: LiveSession) => {
     setEditingId(null);
-    setNoteDraft(item.note ?? "");
     setNotingId(item.session.id);
   };
-  const submitNote = (item: LiveSession) => {
+  const submitNote = (item: LiveSession, noteDraft: string) => {
     if (noteDraft !== (item.note ?? "")) {
       invoke("set_session_note", { sessionId: item.session.cc_session_id, note: noteDraft })
         .catch(() => setActionError(t.sticker.noteFailed));
@@ -335,11 +421,10 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   };
   const openMenuAt = (item: LiveSession, x: number, y: number) => setCtxMenu({ sid: item.session.id, x, y });
 
-  const toggleGrouped = () => setGrouped((prev) => {
-    const next = !prev;
-    localStorage.setItem(GROUPED_KEY, next ? "1" : "0");
-    return next;
-  });
+  const changeGroupMode = (mode: GroupMode) => {
+    setGroupMode(mode);
+    localStorage.setItem(GROUP_MODE_KEY, mode);
+  };
   const toggleFolded = (key: string) => setFolded((prev) => {
     const next = new Set(prev);
     if (!next.delete(key)) next.add(key);
@@ -369,10 +454,12 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
     return [...sessions].sort((a, b) => rank(a) - rank(b));
   }, [sessions, starred]);
 
-  const groups = useMemo(
-    () => (grouped && ordered ? groupByDir(ordered) : null),
-    [grouped, ordered],
-  );
+  const groups = useMemo(() => {
+    if (!ordered || groupMode === "none") return null;
+    if (groupMode === "dir") return groupByDir(ordered);
+    if (groupMode === "date") return groupByDate(ordered, t);
+    return groupByState(ordered, t);
+  }, [groupMode, ordered, t]);
 
   // 滚到底前 120px 就预取下一页。
   const onScroll = (event: UIEvent<HTMLElement>) => {
@@ -441,15 +528,11 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
         </span>
         <span className="chat-sidebar-text">
           {editing ? (
-            <input
-              className="chat-sidebar-edit"
-              autoFocus
-              value={draft}
+            <EditorInput
+              initial={item.task_title && item.task_title !== "(未命名会话)" ? item.task_title : ""}
               placeholder={t.sticker.renamePlaceholder}
-              onClick={(event) => event.stopPropagation()}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={editorKeyDown(() => submitRename(item), () => setEditingId(null))}
-              onBlur={() => submitRename(item)}
+              onSubmit={(value) => submitRename(item, value)}
+              onCancel={() => setEditingId(null)}
             />
           ) : (
             <span className="chat-sidebar-name">
@@ -459,22 +542,18 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
               {item.task_title || t.sticker.waitingFirstInput}
             </span>
           )}
-          {/* 分组视图里每条再重复一遍目录名是噪声——组头已经写着了。 */}
-          {dir && !grouped && !noting && <span className="chat-sidebar-meta" title={item.cwd ?? undefined}>{dir}</span>}
+          {/* 按目录分组时每条再重复一遍目录名是噪声——组头已经写着了（按日期/状态分组时目录仍有用）。 */}
+          {dir && groupMode !== "dir" && !noting && <span className="chat-sidebar-meta" title={item.cwd ?? undefined}>{dir}</span>}
           {/* 便签写完要看得见，否则「添加便签」等于写进黑洞。编辑中的那条让位给输入框。 */}
           {!noting && item.note && (
             <span className="chat-sidebar-note" title={item.note}><NoteIcon />{item.note}</span>
           )}
           {noting && (
-            <input
-              className="chat-sidebar-edit"
-              autoFocus
-              value={noteDraft}
+            <EditorInput
+              initial={item.note ?? ""}
               placeholder={t.sticker.notePlaceholder}
-              onClick={(event) => event.stopPropagation()}
-              onChange={(event) => setNoteDraft(event.target.value)}
-              onKeyDown={editorKeyDown(() => submitNote(item), () => setNotingId(null))}
-              onBlur={() => submitNote(item)}
+              onSubmit={(value) => submitNote(item, value)}
+              onCancel={() => setNotingId(null)}
             />
           )}
         </span>
@@ -524,30 +603,25 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
           </button>
         </div>
       </div>
-      {/* 目录工具条:左侧筛选(收窄到一个目录,后端做,清单完整),右侧分组开关(只重排
-          已加载的这一页)。两者独立——筛选后再分组等于给唯一一组加了个头,也无妨。 */}
+      {/* 目录工具条:左侧筛选(收窄到一个目录,后端做,清单完整),右侧分组方式菜单
+          (只重排已加载的这一页)。两者独立——筛选后再分组等于给唯一一组加了个头,也无妨。 */}
       <div className="chat-sidebar-tools">
         <Dropdown
           align="left"
           value={dirFilter ?? ""}
-          options={[
-            { value: "", label: t.chat.sidebarDirAll },
-            ...dirs.map((cwd) => ({ value: cwd, label: folderName(cwd) })),
-          ]}
+          options={[{ value: "", label: t.chat.sidebarDirAll }, ...dirOptions]}
           onChange={(value) => setDirFilter(value ? String(value) : null)}
         />
-        <button
-          type="button"
-          className={"chat-sidebar-toggle" + (grouped ? " is-on" : "")}
-          aria-pressed={grouped}
-          aria-label={t.chat.sidebarGroup}
-          data-tip={grouped ? t.chat.sidebarGroupOffTip : t.chat.sidebarGroupTip}
-          onClick={toggleGrouped}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <path d="M3 5h8M3 12h14M3 19h10" />
-          </svg>
-        </button>
+        <Dropdown
+          value={groupMode}
+          options={[
+            { value: "none", label: t.chat.groupNone },
+            { value: "dir", label: t.chat.groupByDir },
+            { value: "date", label: t.chat.groupByDate },
+            { value: "state", label: t.chat.groupByState },
+          ]}
+          onChange={(mode) => changeGroupMode(mode)}
+        />
       </div>
       <nav className="chat-sidebar-list" aria-label={t.chat.sidebarTitle} onScroll={onScroll}>
         {sessions === null && <div className="chat-sidebar-empty">{t.chat.sidebarLoading}</div>}

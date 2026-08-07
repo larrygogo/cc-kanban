@@ -363,12 +363,13 @@ describe("Sticker", () => {
     expect(screen.queryByText(zh.chat.endSession)).toBeNull();
   });
 
-  it("已置顶/有便签/已归档的会话,菜单项显示反向文案", () => {
+  it("已置顶/有便签的会话,菜单项显示反向文案", () => {
+    // 已归档的会话不再上看板（管理入口在设置 → 会话），板上的菜单只会出现「归档」正向文案。
     localStorage.setItem("meowo-starred", JSON.stringify(["s"]));
-    const { container } = render(<Sticker filter="archived" data={[mk({ archived: true, note: "有便签" })]} />);
+    const { container } = render(<Sticker filter="all" data={[mk({ note: "有便签", connected: true })]} />);
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     const labels = Array.from(document.querySelectorAll(".ctx-item")).map((el) => el.textContent);
-    expect(labels).toEqual([zh.sticker.unstar, zh.sticker.noteEdit, zh.sticker.renameTitle, zh.sticker.unarchive, zh.sticker.newSession]);
+    expect(labels).toEqual([zh.sticker.unstar, zh.sticker.noteEdit, zh.sticker.renameTitle, zh.sticker.archive, zh.sticker.newSession]);
     localStorage.removeItem("meowo-starred");
   });
 
@@ -584,7 +585,6 @@ describe("Sticker", () => {
     ["all", zh.empty.allTitle, zh.empty.allHint],
     ["waiting", zh.empty.waitingTitle, zh.empty.waitingHint],
     ["running", zh.empty.runningTitle, null],
-    ["archived", zh.empty.archivedTitle, zh.empty.archivedHint],
   ] as const)("EmptyState[%s] 渲染主文案与提示", (tab, title, hint) => {
     render(<EmptyState tab={tab} />);
     expect(screen.getByText(title)).toBeTruthy();
@@ -808,7 +808,7 @@ describe("Sticker", () => {
     const tablist = container.querySelector("[role='tablist']")!;
     expect(tablist).toBeTruthy();
     const tabs = tablist.querySelectorAll("button[role='tab']");
-    expect(tabs.length).toBe(4);
+    expect(tabs.length).toBe(3);
     expect(tabs[0].getAttribute("aria-selected")).toBe("true"); // 当前 tab=all
     expect(tabs[1].getAttribute("aria-selected")).toBe("false");
     fireEvent.click(tabs[1]);
