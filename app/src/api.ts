@@ -5,6 +5,7 @@ import type { ChatItem as GeneratedChatItem } from "./generated/contracts/ChatIt
 import type { SubagentRun as GeneratedSubagentRun } from "./generated/contracts/SubagentRun";
 import type { ManagedTerminalSnapshotDto } from "./generated/contracts/ManagedTerminalSnapshotDto";
 import type { PendingApprovalDto } from "./generated/contracts/PendingApprovalDto";
+import type { PendingInteractionDto } from "./generated/contracts/PendingInteractionDto";
 import type { LoginDoneEvent } from "./generated/contracts/LoginDoneEvent";
 
 /**
@@ -431,15 +432,13 @@ export async function confirmStopSession(
   await stopManagedTerminal(sessionId);
   return true;
 }
-export function getPendingApproval(sessionId: number): Promise<PendingApproval | null> {
-  return invoke("get_pending_approval", { sessionId });
-}
 /**
- * 该会话待处理的 AskUserQuestion 题面。`interactive-question` 事件在对话窗冷启动时
- * 会打进虚空（Tauri emit 不排队、不重放），轮询这条是把错过的题面补回来的唯一途径。
+ * 该会话待处理的审批 + AskUserQuestion 题面，一次取回（合并自两条 400ms 轮询）。
+ * push 事件（pending-approval / interactive-question）是主路径；事件在对话窗冷启动时
+ * 会打进虚空（Tauri emit 不排队、不重放），轮询这条是把错过的卡补回来的唯一途径。
  */
-export function pendingInteractiveQuestion(sessionId: number): Promise<PendingApproval | null> {
-  return invoke("pending_interactive_question", { sessionId });
+export function pendingInteraction(sessionId: number): Promise<PendingInteractionDto> {
+  return invoke("pending_interaction", { sessionId });
 }
 /** 收卡时撤下后端的待处理题面，避免轮询把已答过的题重新弹出来。 */
 export function dismissInteractiveQuestion(sessionId: number): Promise<void> {
@@ -677,6 +676,14 @@ export function listAgents(): Promise<AgentDescriptor[]> {
  */
 export function agentChatUi(provider: AgentId, cwd: string | null, sessionId?: number): Promise<ChatUi | null> {
   return invoke("agent_chat_ui", { provider, cwd, sessionId });
+}
+/**
+ * 该 agent 的模型清单，**由 CLI 自己列举**（非交互子命令，后端带进程级缓存）。
+ * 空表 = 该 CLI 没有列举子命令，调用方回落到「弹 TUI 菜单 + 屏幕识别」那条路。
+ */
+export function agentModels(provider: string): Promise<string[]> {
+  // 旧后端/demo 对未知命令返回 undefined——统一兜成空表，调用方不必各自判空。
+  return invoke<string[] | null>("agent_models", { provider }).then((models) => models ?? []);
 }
 
 /**

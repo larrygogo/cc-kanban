@@ -230,6 +230,18 @@ pub struct PendingApprovalDto {
     pub permission_suggestions: Vec<serde_json::Value>,
 }
 
+/// 一次轮询同时取回审批与 AskUserQuestion 题面。此前是两条独立的 400ms 轮询——
+/// 目标高度相关（都是「会话在等用户吗」），拆开只是白付一倍 IPC。push 事件仍是
+/// 主路径，这条轮询是冷启动兜底（emit 不排队，对话窗晚开时只有轮询能补回题面）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct PendingInteractionDto {
+    pub approval: Option<PendingApprovalDto>,
+    pub question: Option<PendingApprovalDto>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
