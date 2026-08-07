@@ -8,7 +8,7 @@ import { installMocks, store } from "../demo/mock";
 import { makeSession } from "../demo/data";
 import { Sticker } from "../views/Sticker";
 import { CollapsedStrip } from "../views/CollapsedStrip";
-import type { StickerFilter } from "../api";
+import type { Tab } from "../views/sticker/types";
 import logoUrl from "../../src-tauri/icons/128x128@2x.png";
 import "../fonts";
 import "../styles.css";
@@ -74,7 +74,7 @@ store.sessions = [s1, s2, s5, s3, s4];
 const noted = { ...s1, note: "记得先确认 API key" };
 
 function Shot({ filter = "all", items = store.sessions, width = 620, height = 740 }: {
-  filter?: StickerFilter;
+  filter?: Tab;
   items?: typeof store.sessions;
   width?: number;
   height?: number;

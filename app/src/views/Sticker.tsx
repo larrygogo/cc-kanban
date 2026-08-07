@@ -12,7 +12,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   LiveSessionCounts,
   Settings,
-  StickerFilter,
+
   TerminalOpenMode,
   confirmStopSession,
   getSettings,
@@ -55,6 +55,54 @@ type FocusSessionResult =
 
 type FocusNoticeKind = FocusSessionResult | "connecting" | "failed" | "background";
 
+/** 卡片就地编辑框（重命名/便签共用）。草稿住在本组件的局部状态：放在 Sticker 里时
+ *  每次按键 setState 都让整个看板重渲染（虚拟化把代价压到可见行，但可见行的整卡重建
+ *  仍是白付；侧栏同款问题见 ChatSidebar 的 EditorInput）。提交/取消语义与原实现一致：
+ *  Enter/✓ 提交、Esc/✗ 取消；无失焦提交（有显式按钮，失焦提交会和点 ✗ 打架）。 */
+function EditBox({ initial, placeholder, inputClass, extraClass, icon, saveLabel, cancelLabel, onSubmit, onCancel }: {
+  initial: string;
+  placeholder: string;
+  inputClass: string;
+  extraClass?: string;
+  icon?: JSX.Element;
+  saveLabel: string;
+  cancelLabel: string;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  return (
+    <div className={"stk-editbox" + (extraClass ? ` ${extraClass}` : "")} onClick={(e) => e.stopPropagation()}>
+      {icon}
+      <input
+        className={inputClass}
+        autoFocus
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={editorKeyDown(() => onSubmit(value), onCancel)}
+      />
+      {/* mousedown preventDefault：点按钮不抢走输入框焦点，避免触发其它失焦逻辑 */}
+      <button
+        type="button"
+        className="stk-ebtn stk-ebtn-ok"
+        aria-label={saveLabel}
+        data-tip={saveLabel}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => onSubmit(value)}
+      ><CheckIcon /></button>
+      <button
+        type="button"
+        className="stk-ebtn"
+        aria-label={cancelLabel}
+        data-tip={cancelLabel}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={onCancel}
+      ><XIcon /></button>
+    </div>
+  );
+}
+
 export function relayEnabledSignature(settings: Settings): string {
   return Object.entries(settings.relay?.per_agent ?? {})
     .filter(([, rule]) => rule?.enabled)
@@ -81,8 +129,8 @@ export function Sticker({
   loadError,
   onRetry,
 }: {
-  filter: StickerFilter;
-  onFilterChange?: (f: StickerFilter) => void;
+  filter: Tab;
+  onFilterChange?: (f: Tab) => void;
   data: Item[];
   counts?: LiveSessionCounts;
   total?: number;
@@ -237,16 +285,14 @@ export function Sticker({
     });
   };
 
-  // 重命名：editingId 为正在编辑的会话 id，draft 为输入内容。
+  // 重命名：editingId 为正在编辑的会话 id。草稿文本住在 EditBox 的局部状态里，
+  // 按键不触发看板整表重渲染。
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [draft, setDraft] = useState("");
   const startRename = (l: Item) => {
     setNotingId(null); // 与便签编辑互斥，同卡只开一个编辑器
-    const cur = l.task_title && l.task_title !== "(未命名会话)" ? l.task_title : "";
-    setDraft(cur);
     setEditingId(l.session.id);
   };
-  const submitRename = (l: Item) => {
+  const submitRename = (l: Item, draft: string) => {
     // 局部变量原名 t 与 i18n 字典 t 冲突，改名 title 以便失败提示取字典文案。
     const title = draft.trim();
     if (title && title !== l.task_title) {
@@ -262,9 +308,8 @@ export function Sticker({
   const [ctxMenu, setCtxMenu] = useState<{ sid: number; x: number; y: number } | null>(null);
   const ctxItem = ctxMenu ? data.find((l) => l.session.id === ctxMenu.sid) ?? null : null;
 
-  // 便签编辑：notingId 为正在编辑便签的会话 id，noteDraft 为输入内容。与重命名互斥（同卡只开一个）。
+  // 便签编辑：notingId 为正在编辑便签的会话 id。与重命名互斥（同卡只开一个）。
   const [notingId, setNotingId] = useState<number | null>(null);
-  const [noteDraft, setNoteDraft] = useState("");
   const [focusNotice, setFocusNotice] = useState<{
     kind: FocusNoticeKind;
     item: Item;
@@ -280,10 +325,9 @@ export function Sticker({
   }, [focusNotice]);
   const startNote = (l: Item) => {
     setEditingId(null);
-    setNoteDraft(l.note ?? "");
     setNotingId(l.session.id);
   };
-  const submitNote = (l: Item) => {
+  const submitNote = (l: Item, noteDraft: string) => {
     if (noteDraft !== (l.note ?? "")) {
       // 失败不能静默：与重命名共用 focusNotice 提示通道。
       invoke("set_session_note", { sessionId: l.session.cc_session_id, note: noteDraft })
@@ -428,7 +472,6 @@ export function Sticker({
         all: countsProp.total - countsProp.archived,
         running: countsProp.running,
         waiting: countsProp.waiting,
-        archived: countsProp.archived,
       };
     }
     const c = {} as Record<Tab, number>;
@@ -573,7 +616,7 @@ export function Sticker({
                 onClick={() => pick(k)}
               >
                 {t.tabs[k]}
-                {k !== "all" && k !== "archived" && <span className="stab-n">{n > 99 ? "99+" : n}</span>}
+                {k !== "all" && <span className="stab-n">{n > 99 ? "99+" : n}</span>}
               </button>
             );
           })}
@@ -702,33 +745,15 @@ export function Sticker({
                       <div className="stk-top-body">
                         <div className="stk-line1">
                           {editingId === l.session.id ? (
-                            <div className="stk-editbox" onClick={(e) => e.stopPropagation()}>
-                              <input
-                                className="stk-edit"
-                                autoFocus
-                                value={draft}
-                                placeholder={t.sticker.renamePlaceholder}
-                                onChange={(e) => setDraft(e.target.value)}
-                                onKeyDown={editorKeyDown(() => submitRename(l), () => setEditingId(null))}
-                              />
-                              {/* mousedown preventDefault：点按钮不抢走输入框焦点，避免触发其它失焦逻辑 */}
-                              <button
-                                type="button"
-                                className="stk-ebtn stk-ebtn-ok"
-                                aria-label={t.sticker.noteSave}
-                                data-tip={t.sticker.noteSave}
-                                onMouseDown={(e) => e.preventDefault()}
-                                onClick={() => submitRename(l)}
-                              ><CheckIcon /></button>
-                              <button
-                                type="button"
-                                className="stk-ebtn"
-                                aria-label={t.sticker.noteCancel}
-                                data-tip={t.sticker.noteCancel}
-                                onMouseDown={(e) => e.preventDefault()}
-                                onClick={() => setEditingId(null)}
-                              ><XIcon /></button>
-                            </div>
+                            <EditBox
+                              initial={l.task_title && l.task_title !== "(未命名会话)" ? l.task_title : ""}
+                              placeholder={t.sticker.renamePlaceholder}
+                              inputClass="stk-edit"
+                              saveLabel={t.sticker.noteSave}
+                              cancelLabel={t.sticker.noteCancel}
+                              onSubmit={(value) => submitRename(l, value)}
+                              onCancel={() => setEditingId(null)}
+                            />
                           ) : (
                             <>
                               <span className="stk-title">{title}</span>
@@ -807,34 +832,17 @@ export function Sticker({
                       </div>
                     </div>
                     {notingId === l.session.id ? (
-                      <div className="stk-editbox stk-editbox-note" onClick={(e) => e.stopPropagation()}>
-                        <span className="stk-editbox-ico"><NoteIcon /></span>
-                        <input
-                          className="stk-note-edit"
-                          autoFocus
-                          value={noteDraft}
-                          placeholder={t.sticker.notePlaceholder}
-                          onChange={(e) => setNoteDraft(e.target.value)}
-                          onKeyDown={editorKeyDown(() => submitNote(l), () => setNotingId(null))}
-                        />
-                        {/* mousedown preventDefault：点按钮不抢走输入框焦点，避免触发其它失焦逻辑 */}
-                        <button
-                          type="button"
-                          className="stk-ebtn stk-ebtn-ok"
-                          aria-label={t.sticker.noteSave}
-                          data-tip={t.sticker.noteSave}
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => submitNote(l)}
-                        ><CheckIcon /></button>
-                        <button
-                          type="button"
-                          className="stk-ebtn"
-                          aria-label={t.sticker.noteCancel}
-                          data-tip={t.sticker.noteCancel}
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => setNotingId(null)}
-                        ><XIcon /></button>
-                      </div>
+                      <EditBox
+                        initial={l.note ?? ""}
+                        placeholder={t.sticker.notePlaceholder}
+                        inputClass="stk-note-edit"
+                        extraClass="stk-editbox-note"
+                        icon={<span className="stk-editbox-ico"><NoteIcon /></span>}
+                        saveLabel={t.sticker.noteSave}
+                        cancelLabel={t.sticker.noteCancel}
+                        onSubmit={(value) => submitNote(l, value)}
+                        onCancel={() => setNotingId(null)}
+                      />
                     ) : l.note ? (
                       <div
                         className="stk-note"

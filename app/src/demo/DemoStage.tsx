@@ -7,14 +7,14 @@ import { useEffect, useReducer, useState } from "react";
 import { Sticker } from "../views/Sticker";
 import { CollapsedStrip } from "../views/CollapsedStrip";
 import { store, subscribe } from "./mock";
-import type { StickerFilter } from "../api";
+import type { Tab } from "../views/sticker/types";
 import { DEMO_STRINGS, type DemoLang } from "./strings";
 import logoUrl from "../../src-tauri/icons/128x128@2x.png";
 
 export function DemoStage({ lang = "zh" }: { lang?: DemoLang }) {
   const [, force] = useReducer((x: number) => x + 1, 0);
   useEffect(() => subscribe(force), []);
-  const [filter, setFilter] = useState<StickerFilter>("all");
+  const [filter, setFilter] = useState<Tab>("all");
   const [search, setSearch] = useState("");
   const { mode, caption, finale, glow } = store.stage;
   const strip = mode === "strip";
