@@ -1,0 +1,5 @@
+# LICENSE 必须以 LF 存进仓库：CRLF 会让 GitHub 的许可证识别失败（仓库页面显示无
+# 许可证），而开源代码签名等资格审核要看那个标识。Windows 上 core.autocrlf=true
+# 会在提交时把工作区的 CRLF 转成 LF，但没有这条声明时并不保证——实测提交后仓库里
+# 仍是 CRLF。这里显式钉死，不依赖各人的 git 配置。
+LICENSE text eol=lf
