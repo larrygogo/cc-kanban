@@ -1908,6 +1908,7 @@ fn start_managed_resume(
 /// （start_managed_terminal / takeover）窗口已经在了，再调 open_chat_window 会触发
 /// chat-session-changed，把用户正在编辑的输入连同 history 一起重置。
 #[cfg(any(target_os = "windows", target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn start_managed_resume_sized(
     app: tauri::AppHandle,
     broker: crate::pty::PtyBroker,

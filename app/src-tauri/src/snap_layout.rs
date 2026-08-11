@@ -20,6 +20,11 @@
 //! 矩形（客户区坐标系）；卸载时上报 `None` 销毁全部覆盖窗。
 
 /// 单颗按钮的覆盖矩形，物理像素、相对窗口客户区左上角。
+///
+/// 字段的唯一读者在 Windows 专属的 `imp` 模块里；macOS/Linux 上模块整个被 cfg 掉，
+/// clippy 的 `-D warnings` 会按 never-read 报死（CI macOS 矩阵实翻过车）。
+/// 结构体本身必须留在 cfg 外——它是跨平台命令 `set_caption_overlay_rects` 的参数类型。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(serde::Deserialize, Clone)]
 pub(crate) struct CaptionRect {
     /// "min" | "max" | "close"（未知值忽略）。
