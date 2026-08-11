@@ -81,6 +81,12 @@ pub trait AgentPlugin: Sync {
 `false` 这些「我没有这个能力」的表达,现在统一成能力查询返回 `None`。codex 不支持 rename,就不实现
 `TelemetryCap::write_rename`;kimi 不需要 amend,就不提供 `WiringCap`。
 
+> **勘误(2026-08-11)**:上面代码块是设计时点的形态。落地后槽位持续生长,`launch()`/`terminal()`
+> 两个名字已不存在,现有 `direct_install`/`launch_options`/`chat_ui`/`profile`/`screen_rules`/
+> `telemetry`/`runtime`/`account`/`api_key_login`/`wiring`/`proxy`/`relay`/`custom_commands`/
+> `cross_account_session` 等 14+ 个槽。**权威清单以 `crates/meowo-agent/src/registry.rs` 的
+> trait 定义与 `plugins/mod.rs` 的接入指南 rustdoc 为准**,本文档不再逐槽追认。
+
 ### 端口
 
 ```rust
@@ -99,6 +105,10 @@ pub trait KeychainPort: Sync {
 ```
 
 端口以 `&dyn` 传入能力方法,不做全局单例 —— 测试可注入假实现,插件层的单测不再需要真网络。
+
+> **勘误(2026-08-11)**:`FsPort` 最终**没有实现**——Phase 3 落地时认定 `fsutil::write_atomic`
+> 是纯 `std`、临时目录即可测,做成端口只会平添间接层(见下文 Phase 3 落地记录)。现存端口只有
+> `HttpPort` 与 `KeychainPort`。
 
 ### 前端零 agent 知识
 

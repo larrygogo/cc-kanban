@@ -1,7 +1,12 @@
 # 会话对话窗口（Chat Window）— 设计
 
 > 日期：2026-07-03
-> 状态：**草稿——待用户批准**（设计呈现两轮，用户离席期间按调研与实测结论整理成文，未 commit）
+> 状态：**已废弃——未按本设计实施**（2026-08-11 标注）。本文选定的第一期方案
+> （每轮 spawn `claude -p --resume` headless 子进程 + 分状态混合）**从未落地**；
+> 实际实现走的是本文列为"二期备选"的 **PTY 托管路线**（`pty.rs` + `managed_terminal.rs` +
+> xterm.js，五家 agent 均进对话窗）。理解对话窗架构请读
+> `docs/architecture/overview.md` 的「对话窗架构」一节。本文仅存档其调研结论（§关键技术事实）。
+> 原状态：草稿——待用户批准（设计呈现两轮，用户离席期间按调研与实测结论整理成文，未 commit）
 > 前置：无硬依赖。与多 provider 接口化路线（`2026-06-30-provider-key-consolidation.md`）方向一致：本特性第一期 claude-only，经 `TranscriptSpec`/`Agent` 既有接口留 codex/kimi 入口。
 
 ## 背景与目标

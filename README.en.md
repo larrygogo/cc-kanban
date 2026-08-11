@@ -46,8 +46,16 @@ Download the installer for your platform and double-click to install. The app su
 ### Jump straight to the terminal
 
 - Click a **connected** session to jump to its terminal tab. On Windows it switches to the matching Windows Terminal tab; on macOS it focuses the matching Terminal or iTerm2 tab.
-- Click a **disconnected** session to open a new terminal in its project directory and run `claude --resume` to continue the conversation.
+- Click a **disconnected** session to open a new terminal in its project directory and resume it the way that CLI expects (claude `--resume`, kimi `-r`, codex `resume`, etc. — declared by each agent plugin).
 - The open behavior is configurable: by default clicking the card jumps; you can switch it to jump only via a dedicated "Open" button on the card.
+
+### Built-in chat window & managed terminal
+
+- Continue a session right inside Meowo's native chat window: the full conversation (user messages, AI text, tool calls and results) renders in real time, with a composer to send messages and completion menus for slash commands and model switching.
+- The session is owned by a Meowo-managed PTY; the chat window and an external terminal are just two views of the same session, switchable at any time.
+- Permission approvals, AskUserQuestion prompts, and plan confirmations become clickable cards; terminal popups like trust confirmations and model menus are recognized as buttons.
+- Create **new sessions** straight from the board: pick the agent, working directory, and launch options (model, permission mode, etc., offered per CLI support).
+- Managed sessions carry a screen-state badge (working / idle / blocked), detected live from the terminal screen.
 
 ### Waiting & error alerts
 
@@ -95,7 +103,7 @@ The first time you click "jump to / resume terminal", macOS asks for "Automation
 ### Account & usage
 
 - The bottom bar always shows your 5-hour / 7-day quota utilization.
-- The settings page shows the current Claude Code account, per-model usage, and quota reset times.
+- The settings page shows accounts, usage, and quota reset times for each CLI; agents can be installed with one click, logged in, and switched between multiple accounts (profiles).
 - Usage shows cached values first, then refreshes in the background; expired tokens auto-renew.
 
 ### Connecting to Claude Code
@@ -133,17 +141,19 @@ The name comes from the sound a cat makes — **meow** — rendered in Chinese a
 ```
 meowo/
 ├── app/
-│   ├── src/                # React frontend (sticker view, edge-snap state machine, settings)
-│   └── src-tauri/          # Tauri desktop shell (window, tray, edge-snap, account usage); Rust workspace root
+│   ├── src/                # React frontend (sticker board, chat window, edge-snap state machine, settings)
+│   └── src-tauri/          # Tauri desktop shell (window, tray, PTY hosting, approvals, account usage); Rust workspace root
 │       └── crates/
-│           ├── meowo-store/     # SQLite read/write + transcript title parsing
+│           ├── meowo-protocol/  # cross-process contracts (IPC DTOs generating TypeScript + broker wire protocol)
+│           ├── meowo-store/     # SQLite read/write
+│           ├── meowo-agent/     # agent plugin layer (identity, variants, transcript parsing, screen rules)
 │           └── meowo-reporter/  # AI CLI hooks reporter + statusline + first-run import
 ├── scripts/
 │   └── install-hooks.mjs   # wires meowo-reporter into Claude Code's settings.json
-└── docs/                   # design docs & implementation plans
+└── docs/                   # architecture docs (architecture/) & archived designs (archive/)
 ```
 
-**Stack**: Rust (Tauri v2 + rusqlite), React 18 + TypeScript + Vite, Bun.
+**Stack**: Rust (Tauri v2 + rusqlite), React 18 + TypeScript + Vite (xterm.js, react-markdown, TanStack Virtual), Bun.
 
 ## Requirements
 
@@ -188,7 +198,7 @@ cd app/src-tauri && cargo build --release -p meowo-reporter
 bun scripts/install-hooks.mjs "<absolute-repo-path>/app/src-tauri/target/release/meowo-reporter.exe"
 ```
 
-The script wires meowo-reporter into the required hook events (SessionStart / UserPromptSubmit / PostToolUse / Stop / SessionEnd / PermissionRequest, plus PreToolUse's AskUserQuestion / ExitPlanMode, each with a 5s timeout cap). Running it again with the same path won't duplicate entries or break your other hooks. If you change the reporter path (e.g. debug → release, or a new install location), just run the script again — it claims its existing entries by executable name and updates them to the new path in place, leaving no duplicates.
+The script wires meowo-reporter into the required hook events (SessionStart / UserPromptSubmit / PostToolUse / Stop / SessionEnd / PermissionRequest, plus PreToolUse's AskUserQuestion / ExitPlanMode; normal hooks get a 5s timeout cap, PermissionRequest 310s so it can wait for your approval). Running it again with the same path won't duplicate entries or break your other hooks. If you change the reporter path (e.g. debug → release, or a new install location), just run the script again — it claims its existing entries by executable name and updates them to the new path in place, leaving no duplicates.
 
 > This script is for Claude Code only (it writes to `~/.claude/settings.json`). The others don't go through it — the app wires them on startup: Codex / Kimi / Gemini get entries in their own CLIs' native hook config (hook commands carry `--provider <id>`); OpenCode has no hook mechanism, so a bridge plugin is generated under `~/.config/opencode/plugin/` to forward events to meowo-reporter.
 
@@ -204,7 +214,7 @@ Once wired up, new Claude Code sessions show up in the sticker in real time.
 <summary>Data & config file locations</summary>
 
 - **Database**: `~/.meowo/board.db` (SQLite, WAL mode). Override the path with the `MEOWO_DB` environment variable.
-- **App settings**: `~/.meowo/settings.json` (notification toggle, theme, opacity, UI density, archive auto-hide days, resume terminal, terminal open mode, latest-AI-message display toggle).
+- **App settings**: `~/.meowo/settings.json` (notifications, theme, opacity, UI density, language, terminal font size / line height, open behavior, and every other setting).
 - **Usage cache**: `~/.meowo/usage-cache.json`.
 - **statusLine wrapper script**: `~/.meowo/statusline.sh` (generated and maintained by the app; no manual edits needed).
 - **First-import marker**: `~/.meowo/imported.json` (skips re-importing if present). Delete it to re-import recent history on the next launch.
@@ -217,7 +227,7 @@ Once wired up, new Claude Code sessions show up in the sticker in real time.
 ```bash
 # Rust (whole workspace)
 cargo test --workspace
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 
 # Frontend
 cd app
@@ -229,12 +239,12 @@ bunx vitest run
 
 ## Roadmap
 
-- [x] CI (GitHub Actions: cargo test/clippy + frontend tsc/vitest, windows-latest + macos-latest)
+- [x] CI (GitHub Actions: cargo test/clippy + IPC contract generation check + frontend tsc/vitest + cargo/bun audit, windows-latest + macos-latest)
 - [x] Online updates (`tauri-plugin-updater` + tag-triggered GitHub Releases)
 - [x] macOS packaging (universal dmg, signed & notarized + auto-update)
 - [ ] Linux packaging
 
-See [`docs/superpowers/`](docs/superpowers/) for design and implementation details.
+See [`docs/architecture/`](docs/architecture/) for the current architecture; historical designs and implementation plans are archived under [`docs/archive/superpowers/`](docs/archive/superpowers/).
 
 ## License
 

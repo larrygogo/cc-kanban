@@ -59,9 +59,11 @@ site/
 │   └── globals.css           # 设计系统（浅色高级风：白底 + 翡翠绿点缀）
 ├── assets/                   # 从 app/ 复制的代理 logo（kimi.png、gemini.svg），避免跨目录引用
 ├── components/
-│   ├── Nav.tsx · Footer.tsx        # 全站导航与页脚（按路径识别语言）
-│   ├── ProductShowcase.tsx         # 深色贴纸产品图（窗口壳）
-│   ├── FeatureGrid.tsx · CtaBand.tsx
+│   ├── Nav.tsx · Footer.tsx · LangHint.tsx   # 全站导航、页脚与语言提示（按路径识别语言）
+│   ├── pages/                      # 六个页面的正文组件（HomeContent / FeaturesContent / DownloadContent / DocsContent / ChangelogContent / FaqContent）
+│   ├── screenshots/                # CSS 还原的产品示意（StickerWindow / ChatWindowMock / MenuButtonsMock）
+│   ├── FeatureGrid.tsx · CtaBand.tsx · DemoFrame.tsx · DownloadButton.tsx
+│   ├── AccountCard.tsx · CheckItem.tsx · SupportedAgents.tsx · ThemeShowcase.tsx
 │   ├── Reveal.tsx                  # 滚动进场动画
 │   └── icons.tsx                   # 内联 SVG 图标
 ├── lib/

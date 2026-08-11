@@ -45,8 +45,16 @@
 ### 点击直达终端
 
 - 点**连接中**的会话，直接跳到它所在的终端标签页。Windows 精确切到 Windows Terminal 对应标签；macOS 聚焦 Terminal 或 iTerm2 对应标签。
-- 点**已断开**的会话，在原项目目录新开终端并执行 `claude --resume` 续上对话。
+- 点**已断开**的会话，在原项目目录新开终端并按对应 CLI 的方式续接会话（claude `--resume`、kimi `-r`、codex `resume` 等，由各 agent 插件声明）。
 - 打开方式可以在设置里改：默认点卡片跳转，也可以改成只通过卡片上的「打开」按钮跳转。
+
+### 内置对话窗与托管终端
+
+- 会话可以直接在 Meowo 的原生对话窗里继续：完整对话流（用户消息、AI 正文、工具调用与结果）实时渲染，输入框直接发消息，斜杠命令与模型切换有补全菜单。
+- 会话由 Meowo 托管的 PTY 持有，对话窗与外部终端只是同一会话的两种视图，可随时互切。
+- 权限审批、AskUserQuestion 提问、计划确认渲染成可点的卡片；终端里的信任确认、模型菜单等弹窗也被识别成按钮。
+- 从看板可直接**新建会话**：选 agent、工作目录与启动选项（模型、权限模式等，按各 CLI 支持情况下发）。
+- 托管会话带屏幕状态角标（运行中 / 空闲 / 等待输入），来自终端画面的实时检测。
 
 ### 待交互与出错提醒
 
@@ -94,7 +102,7 @@ macOS 上是状态栏应用：无独立浮窗，不显示在 Dock。
 ### 账号与用量
 
 - 底栏常显 5 小时 / 7 天配额利用率。
-- 设置页显示当前 Claude Code 账号、各模型用量与配额重置时间。
+- 设置页显示各家 CLI 的账号、用量与配额重置时间；支持 agent 一键安装、登录与多账号（profile）切换。
 - 用量先显示缓存，再后台刷新；token 过期会自动续期。
 
 ### 接入 Claude Code
@@ -132,17 +140,19 @@ macOS 上是状态栏应用：无独立浮窗，不显示在 Dock。
 ```
 meowo/
 ├── app/
-│   ├── src/                # React 前端（贴纸视图、吸边状态机、设置页）
-│   └── src-tauri/          # Tauri 桌面壳（窗口、托盘、吸边、账号用量）；Rust workspace 根
+│   ├── src/                # React 前端（贴纸看板、对话窗、吸边状态机、设置页）
+│   └── src-tauri/          # Tauri 桌面壳（窗口、托盘、PTY 托管、审批、账号用量）；Rust workspace 根
 │       └── crates/
-│           ├── meowo-store/     # SQLite 读写 + transcript 标题解析
+│           ├── meowo-protocol/  # 跨进程契约（IPC DTO 生成 TypeScript + broker 线协议）
+│           ├── meowo-store/     # SQLite 读写
+│           ├── meowo-agent/     # Agent 插件层（身份、变体、transcript 解析、屏幕规则）
 │           └── meowo-reporter/  # AI CLI hooks 上报器 + statusline + 首次导入
 ├── scripts/
 │   └── install-hooks.mjs   # 把 meowo-reporter 接入 Claude Code settings.json
-└── docs/                   # 设计文档与实现计划
+└── docs/                   # 架构文档（architecture/）与历史设计存档（archive/）
 ```
 
-**技术栈**：Rust（Tauri v2 + rusqlite）、React 18 + TypeScript + Vite、Bun。
+**技术栈**：Rust（Tauri v2 + rusqlite）、React 18 + TypeScript + Vite（xterm.js、react-markdown、TanStack Virtual）、Bun。
 
 ## 环境要求
 
@@ -187,7 +197,7 @@ cd app/src-tauri && cargo build --release -p meowo-reporter
 bun scripts/install-hooks.mjs "<仓库绝对路径>/app/src-tauri/target/release/meowo-reporter.exe"
 ```
 
-脚本会把 meowo-reporter 挂到所需的 hook 事件上（SessionStart / UserPromptSubmit / PostToolUse / Stop / SessionEnd / PermissionRequest，以及 PreToolUse 的 AskUserQuestion / ExitPlanMode，均带 5s 超时上限）。用同一路径重复运行不会重复追加，也不会破坏你已有的其它 hooks。若更换了 reporter 路径（如 debug 换 release、换了安装目录），再跑一次脚本即可——它按可执行文件名认领旧条目并原地更新为新路径，不会留下重复条目。
+脚本会把 meowo-reporter 挂到所需的 hook 事件上（SessionStart / UserPromptSubmit / PostToolUse / Stop / SessionEnd / PermissionRequest，以及 PreToolUse 的 AskUserQuestion / ExitPlanMode；普通 hook 带 5s 超时上限，PermissionRequest 为 310s——要等你审批）。用同一路径重复运行不会重复追加，也不会破坏你已有的其它 hooks。若更换了 reporter 路径（如 debug 换 release、换了安装目录），再跑一次脚本即可——它按可执行文件名认领旧条目并原地更新为新路径，不会留下重复条目。
 
 > 此脚本仅用于 Claude Code（写入 `~/.claude/settings.json`）。其余几家不经本脚本，由 app 启动时自动接线：codex / kimi / gemini 写各自 CLI 的原生 hook 配置（hook 命令带 `--provider <id>`）；opencode 没有 hook 机制，改为在 `~/.config/opencode/plugin/` 下生成一份桥接插件，由它把事件转发给 meowo-reporter。
 
@@ -203,7 +213,7 @@ bun scripts/install-hooks.mjs "<仓库绝对路径>/app/src-tauri/target/release
 <summary>数据与配置文件位置</summary>
 
 - **数据库**：`~/.meowo/board.db`（SQLite，WAL 模式）。可用环境变量 `MEOWO_DB` 覆盖路径。
-- **应用设置**：`~/.meowo/settings.json`（通知开关、主题、不透明度、界面密度、归档自动隐藏天数、恢复终端、打开终端方式、最近 AI 正文显示开关）。
+- **应用设置**：`~/.meowo/settings.json`（通知、主题、不透明度、界面密度、语言、终端字号/行高、打开方式等全部设置项）。
 - **用量缓存**：`~/.meowo/usage-cache.json`。
 - **statusLine 包装脚本**：`~/.meowo/statusline.sh`（由 app 自动生成与维护，无需手改）。
 - **首次导入标记**：`~/.meowo/imported.json`（存在即跳过再次导入）。删掉它可让下次启动重新导入近期历史会话。
@@ -216,7 +226,7 @@ bun scripts/install-hooks.mjs "<仓库绝对路径>/app/src-tauri/target/release
 ```bash
 # Rust（全 workspace）
 cargo test --workspace
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 
 # 前端
 cd app
@@ -228,12 +238,12 @@ bunx vitest run
 
 ## 路线
 
-- [x] CI（GitHub Actions：cargo test/clippy + 前端 tsc/vitest，windows-latest + macos-latest）
+- [x] CI（GitHub Actions：cargo test/clippy + IPC 契约生成校验 + 前端 tsc/vitest + cargo/bun audit，windows-latest + macos-latest）
 - [x] 在线更新（`tauri-plugin-updater` + tag 触发的 GitHub Releases）
 - [x] macOS 打包（universal dmg，签名公证 + 自动更新）
 - [ ] Linux 打包
 
-设计与实现细节见 [`docs/superpowers/`](docs/superpowers/)。
+现行架构见 [`docs/architecture/`](docs/architecture/)；历史设计与实现计划存档在 [`docs/archive/superpowers/`](docs/archive/superpowers/)。
 
 ## License
 

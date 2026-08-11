@@ -30,6 +30,18 @@
 - 已完成：审批 broker 保留 Agent 原生 `permission_suggestions`；GUI 直接展示完整工具参数，并可回传“一次允许”或 Agent 提供的持久权限更新。
 - `config.rs` 保持现状：它虽体量较大，但已是无 I/O 的纯格式转换层；暂不为缩短文件而机械拆分。
 
+## 复核（2026-08-11）
+
+- 阶段 1–5 完成状态复核属实。阶段 6（按职责拆分）**部分完成**：`session_query.rs` /
+  `session_command.rs` / `chat.rs` / `managed_terminal.rs` 已从 `lib.rs` 拆出；`lib.rs` 仍余
+  约 1300 行非装配代码（`win_constrain`、CLI 版本探测、DB 路径迁移），`pty.rs` 长成 3000+ 行
+  god module（审批 broker 与 PTY 混住），`terminal.rs` 混入多账号文件同步与纯 DB 命令。
+  后续拆分项与全部已知不一致，统一记录在 [consistency-backlog.md](consistency-backlog.md)，
+  本文件不再滚动维护进度。
+- 「不做」清单里的「不重写 `AgentPlugin` 能力槽」指不推翻既有槽位的形状；07-19 之后**新增**
+  槽位（screen_rules / proxy / relay / profile 等）不违反此条——加槽是这套架构的正常生长方式。
+- 现行架构的总览描述见 [overview.md](overview.md)。
+
 ## 不做
 
 - 不引入 Redux/Zustand。
