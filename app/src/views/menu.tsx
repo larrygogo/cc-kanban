@@ -8,6 +8,7 @@
 // - 对话窗模型/模式菜单：CSS 绝对定位 + 互斥状态在父组件，受控复用 `useMenuPopup`；
 // - RelayAccess 的 ModelPicker 是 combobox（输入过滤 + aria-activedescendant），模式不同，不并入。
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from "react";
+import { CheckIcon, ChevronDownIcon } from "./sticker/icons";
 
 /** 菜单定位坐标（仅 fixed 模式；`cssPositioned` 时恒为空对象，定位交给 CSS）。
     maxHeight 不在这里：它由 relayout 直接写 DOM（imperative 全权管理）——曾放进 pos，
@@ -206,9 +207,7 @@ export function Dropdown<T extends string | number>({
           {cur?.icon && <span className="dd-ico">{cur.icon}</span>}
           <span className="dd-label">{cur?.label ?? ""}</span>
         </span>
-        <svg className="dd-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
+        <ChevronDownIcon className="dd-chev" />
       </button>
       {open && (
         <div className="dd-menu" role="listbox" ref={menuRef} style={{ position: "fixed", top: pos.top, bottom: pos.bottom, left: pos.left, right: pos.right, width: pos.width }}>
@@ -229,11 +228,7 @@ export function Dropdown<T extends string | number>({
                 {o.icon && <span className="dd-ico">{o.icon}</span>}
                 <span className="dd-label">{o.label}</span>
               </span>
-              {o.value === value && (
-                <svg className="dd-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              )}
+              {o.value === value && <CheckIcon className="dd-check" />}
             </button>
           ))}
         </div>

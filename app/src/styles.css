@@ -225,15 +225,9 @@ html, body {
    导致贴纸底部(含圆角)被窗口裁掉。逐级 100% 精确等于客户区高度。 */
 #root { height: 100%; }
 /* 旧看板样式块已随实现移除（.app/.back/.proj-*/.board/.task-*/.live-*/.tab/.nav/
-   .density/.checklist 等全库无 TSX 引用）；仅留仍有引用的三个：
-   .h1/.chip 小红书海报页（poster/main.tsx），.dot 关于页分隔点（About.tsx）。 */
-.h1 { font-size: 18px; font-weight: 600; margin: 0 0 var(--sp-14); }
+   .density/.checklist 等全库无 TSX 引用）；.h1/.chip 亦已删——海报页在 poster.css
+   里全量重定义它们，这里的旧值全被覆盖。仅留 .dot（关于页分隔点，About.tsx）。 */
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.chip {
-  cursor: pointer; font-size: var(--fs-12); padding: var(--sp-4) var(--sp-12); border-radius: var(--r-pill);
-  background: rgba(255,255,255,0.05); color: #8a8a92; border: 1px solid rgba(255,255,255,0.06);
-}
-.chip:hover { color: #e8e8ea; }
 
 .sticker {
   position: relative; /* 自绘 overlay 滚动条 .stk-sb 的定位父 */
@@ -3458,9 +3452,11 @@ select.ns-input {
 /* 工具行按钮统一 28px 高 + 常规小圆角（用户不要药丸/纯圆）：附件、模型、模式一排等高。 */
 .chat-compose .chat-attach-button { width: 28px; height: 28px; padding: 0; display: grid; place-items: center; border: 0; border-radius: var(--r-7); color: var(--cc-text-dim); background: transparent; }
 .chat-compose textarea { order: 1; width: 100%; min-height: 62px; max-height: 150px; flex: 0 0 100%; padding: var(--sp-3) var(--sp-8); resize: none; border: 0; border-radius: 0; outline: none; color: var(--cc-text); background: transparent; font-family: inherit; font-size: var(--fs-13); line-height: 1.6; }
-/* 发送按钮的 accent 皮肤基座：compose 里的菜单类控件（模型/斜杠/模式）都用更高特异性
-   重置回中性（见下方各 .chat-compose .chat-* 规则前的注释）。 */
-.chat-compose button { height: 38px; flex: 0 0 auto; padding: 0 var(--sp-14); border: 1px solid color-mix(in srgb, var(--cc-accent) 48%, var(--cc-border)); border-radius: var(--r-9); color: var(--cc-text); background: color-mix(in srgb, var(--cc-accent) 16%, var(--cc-bg)); cursor: pointer; }
+/* compose 内按钮的中性基座：只放全员共用的交互位（布局弹性/手型/禁用态）。
+   此前这里是发送按钮的 accent 皮（38px 绿底绿描边），而受益者早已全部自带完整样式，
+   皮只剩被逐个用更高特异性「解毒」的份（两次用户实拍撞色都由它引起）。新按钮从此
+   不再需要先中性化再上样式；既有的解毒规则同值保留（属冗余，视觉验证轮可清）。 */
+.chat-compose button { flex: 0 0 auto; cursor: pointer; }
 .chat-compose button:disabled { opacity: .45; cursor: default; }
 /* 发送错误/接管提示/斜杠菜单等待条：中性信息卡片，不再整句刷红——此前红字 + 权限下拉
    吃到的 accent 绿皮 + 红描边按钮三色打架（用户实拍反馈「太丑」）。红色只留给真正的

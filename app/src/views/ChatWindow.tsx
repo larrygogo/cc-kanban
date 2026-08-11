@@ -16,7 +16,7 @@ import { ImageRef } from "./chat/Message";
 import { TodoPanel } from "./chat/TodoPanel";
 import { Transcript } from "./chat/Transcript";
 import { ChatSidebar } from "./ChatSidebar";
-import { ArchiveIcon, TopIcon } from "./sticker/icons";
+import { ArchiveIcon, ChevronDownIcon, TopIcon } from "./sticker/icons";
 import { useStarred } from "./sticker/helpers";
 import { ManagedTerminal } from "./ManagedTerminal";
 import { WindowControls } from "./WindowControls";
@@ -245,7 +245,7 @@ function ChatTitleMenu({ title, cwd, archived, archiving, starred, onToggleStar,
     <div className="dd chat-title-menu" ref={ref} onKeyDown={onKeyDown}>
       <button ref={btnRef} type="button" className="chat-title-btn" aria-haspopup="menu" aria-expanded={open} onClick={toggle}>
         <span className="chat-title">{title}</span>
-        <svg className="chat-title-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
+        <ChevronDownIcon className="chat-title-chev" />
       </button>
       {open && (
         /* 不铺 pos.width：菜单宽随内容（.dd .dd-menu 的 min-width: max-content），
@@ -256,6 +256,7 @@ function ChatTitleMenu({ title, cwd, archived, archiving, starred, onToggleStar,
             <span className="dd-label">{starred ? t.sticker.unstar : t.sticker.star}</span>
           </button>
           {cwd && (
+            // 菜单内刻意用原生 title：TooltipLayer 对 .dd-menu 区域静默（自绘提示会糊在菜单上）。
             <button type="button" role="menuitem" className="dd-item" title={cwd} onClick={() => pick(() => void openProjectDir(cwd).catch(() => {}))}>
               <span className="chat-title-action-ico">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg>
@@ -2138,7 +2139,7 @@ export function ChatWindow() {
         <div className="chat-running" role="status">
           {/* 长命令被 CSS 截断成单行，全文放原生 title——data-tip 的浮层对一个高频变化的
               状态条太吵，原生悬停提示刚好。展示文本剥掉 cd 前缀（见 trimActivityCdPrefix）。 */}
-          <i /><span title={history?.currentActivity || undefined}>
+          <i /><span data-tip={history?.currentActivity || undefined}>
             {history?.currentActivity ? trimActivityCdPrefix(history.currentActivity) : t.chat.running}
           </span>
         </div>

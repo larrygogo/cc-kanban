@@ -9,7 +9,7 @@ import { useMenuPopup } from "./menu";
 import { CardContextMenu } from "./sticker/CardContextMenu";
 import { editorKeyDown, useStarred } from "./sticker/helpers";
 import { UNNAMED_SESSION_SENTINEL } from "./sticker/types";
-import { MoreIcon, NoteIcon, TopIcon } from "./sticker/icons";
+import { CheckIcon, ChevronDownIcon, MoreIcon, NoteIcon, TopIcon } from "./sticker/icons";
 import { useT } from "../i18n";
 import { isMac } from "../platform";
 import type { Dict } from "../i18n/zh";
@@ -168,9 +168,7 @@ function SidebarFilterMenu({ dirValue, dirOptions, groupMode, groupLabels, sortM
   const back = (
     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="15 6 9 12 15 18" /></svg>
   );
-  const check = (
-    <svg className="dd-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12" /></svg>
-  );
+  const check = <CheckIcon className="dd-check" />;
   // 选中即应用并收起：筛选是「一次性的快速动作」，留着面板反而多一步关闭。
   const pick = (apply: () => void) => { apply(); setOpen(false); btnRef.current?.focus(); };
   return (
@@ -227,6 +225,8 @@ function SidebarFilterMenu({ dirValue, dirOptions, groupMode, groupLabels, sortM
                         role="option"
                         aria-selected={selected}
                         className={"dd-item" + (selected ? " sel" : "")}
+                        // 菜单内刻意用原生 title：TooltipLayer 对 .dd-menu 区域静默
+                        // （自绘提示会糊在菜单上，见 Tooltip.tsx tipEl 的注释）。
                         title={option.value || undefined}
                         onClick={() => pick(() => onDir(option.value || null))}
                       >
@@ -632,7 +632,7 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
         tabIndex={0}
         className={"chat-sidebar-item" + (item.session.id === activeId ? " is-active" : "")}
         aria-current={item.session.id === activeId ? "true" : undefined}
-        title={item.task_title}
+        data-tip={item.task_title}
         onClick={() => {
           // 编辑态下点条目只用于收起编辑器，不切会话（输入框自身已 stopPropagation）。
           if (editing || noting) { setEditingId(null); setNotingId(null); return; }
@@ -683,10 +683,10 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
             </span>
           )}
           {/* 按目录分组时每条再重复一遍目录名是噪声——组头已经写着了（按日期/状态分组时目录仍有用）。 */}
-          {dir && groupMode !== "dir" && !noting && <span className="chat-sidebar-meta" title={item.cwd ?? undefined}>{dir}</span>}
+          {dir && groupMode !== "dir" && !noting && <span className="chat-sidebar-meta" data-tip={item.cwd ?? undefined}>{dir}</span>}
           {/* 便签写完要看得见，否则「添加便签」等于写进黑洞。编辑中的那条让位给输入框。 */}
           {!noting && item.note && (
-            <span className="chat-sidebar-note" title={item.note}><NoteIcon />{item.note}</span>
+            <span className="chat-sidebar-note" data-tip={item.note}><NoteIcon />{item.note}</span>
           )}
           {noting && (
             <EditorInput
@@ -785,12 +785,10 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
                     type="button"
                     className="chat-sidebar-group-head"
                     aria-expanded={!isFolded}
-                    title={group.cwd ?? undefined}
+                    data-tip={group.cwd ?? undefined}
                     onClick={() => toggleFolded(group.key)}
                   >
-                    <svg className={"chat-sidebar-caret" + (isFolded ? " is-folded" : "")} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="6 9 12 15 18 9" />
-                    </svg>
+                    <ChevronDownIcon className={"chat-sidebar-caret" + (isFolded ? " is-folded" : "")} size={10} strokeWidth={2.6} />
                     <span className="chat-sidebar-group-name">{group.label || t.chat.sidebarNoDir}</span>
                     {approval
                       ? <i className="chat-sidebar-dot is-approval" role="status" aria-label={t.chat.sidebarApproval} data-tip={t.chat.sidebarApproval} />

@@ -54,12 +54,22 @@ export function MoreIcon() {
   );
 }
 
-export function CheckIcon() {
-  // lucide check：行内编辑器确认钮
+// lucide check：行内编辑器确认钮、下拉菜单选中标记共用一份形状（此前抄了 3 份，粗细 2.4/2.5 混用）。
+export function CheckIcon({ size = 13, strokeWidth = 2.4, className }: { size?: number; strokeWidth?: number; className?: string } = {}) {
   return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+
+// lucide chevron-down：下拉触发钮的展开箭头（菜单/侧栏分组头/对话窗标题共用，此前抄了 3 份）。
+export function ChevronDownIcon({ size = 12, strokeWidth = 2.2, className }: { size?: number; strokeWidth?: number; className?: string } = {}) {
+  return (
+    <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="6 9 12 15 18 9" />
     </svg>
   );
 }
