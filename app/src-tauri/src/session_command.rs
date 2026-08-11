@@ -1,8 +1,8 @@
-//! Session mutation commands and their shared input validation.
+//! 会话写命令与它们共享的输入校验。
 
 use tauri::State;
 
-/// Safe for agent resume arguments and provider-owned session paths.
+/// 可安全用于 agent 的 resume 参数与 provider 自有的会话路径。
 pub(crate) fn is_safe_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128

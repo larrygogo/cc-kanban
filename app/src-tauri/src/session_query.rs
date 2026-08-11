@@ -1,4 +1,4 @@
-//! Live-session query service and Tauri adapters.
+//! 活跃会话查询服务与 Tauri 适配层。
 
 use meowo_agent::SessionRuntime;
 use meowo_store::LiveSession;

@@ -39,7 +39,7 @@
 | P2-6 | 行内编辑器两份；roving 键盘导航两份；点外关闭两种策略；board-changed 节流两份 | `ChatSidebar.tsx` vs `Sticker.tsx`；`menu.tsx` vs `widgets.tsx`/`CardContextMenu.tsx` | 节流已收敛（`hooks/useBoardRefresh.ts`）。行内编辑器**评估后不合并**：失焦提交与 ✓/✕ 按钮是刻意不同的交互（各自注释写明理由），共享实质仅 3 行草稿状态 + 已共用的 `editorKeyDown`，合并是形式统一、实质加间接层。roving/点外关闭待收敛 | 部分已修（编辑器记录不做） |
 | P2-7 | 图标：`sticker/icons.tsx` 图标库与 ~30 处内联 SVG 并存；无 Button 组件，按钮类名 5 套族群 | 见前端调研 | 首批已收敛：`ChevronDownIcon` 新增、`CheckIcon` 参数化（size/strokeWidth/className），down-chevron ×3 与 check ×3 的拷贝全部替换（粗细 2.4/2.5 统一为 2.4）。其余内联 SVG 与 Button 组件抽取待视觉验证轮 | 部分已修 |
 | P2-8 | 「置顶」语义两个（会话星标与窗口置顶）中英文均共用词（zh「置顶」、en「Unpin」撞车） | `zh.ts`、`en.ts` | 已修：会话星标改「星标置顶/取消星标」（与 README 一致）、en 改「Star to top/Unstar」；窗口置顶文案不变。存储键/变量名保持（改键丢用户数据） | 已修 |
-| P2-9 | 注释语言：4 个模块英文头（`chat.rs`/`managed_terminal.rs`/`session_command.rs`/`session_query.rs`），全仓其余中文；api.ts 混用 `///` 与 `/** */` | 各文件头 | 顺手统一为中文/`/** */` | 修复中（api.ts） |
+| P2-9 | 注释语言：4 个模块英文头，全仓其余中文；api.ts 混用 `///` 与 `/** */` | 各文件头 | 已修：4 个文件头译为中文、api.ts 注释风格统一。`chat.rs`/`session_query.rs` 内部尚有零星英文 doc（`ChatMtimes` 等），顺手清即可 | 大部分已修 |
 | P2-10 | CSS：`.chat-compose button` 全局 accent 皮致 8 处「解毒」规则；白色叠层 7 种 alpha 裸值；`.chip` 不吃主题变量；flat 主题逐条覆盖而非 token | `styles.css` | 皮已中性化：核实受益者为零（全部按钮自带完整样式）后基座只留 flex/cursor/禁用态，新按钮不再被染色；解毒规则同值保留（冗余，视觉验证轮可清）。`.h1`/`.chip` 确认被 poster.css 全量覆盖后删除。叠层 token 与 flat 主题 token 化待做 | 大部分已修 |
 | P2-11 | Tooltip 与原生 `title` 混用（同一侧栏条目两种气泡） | `ChatSidebar.tsx`、`ChatWindow.tsx` | 已修：5 处换 `data-tip`（TooltipLayer 全窗口挂载，核实过）；`.dd-menu` 内的 2 处**刻意保留**原生 title——TooltipLayer 对菜单区域静默（自绘提示会糊在菜单上），已加注释 | 已修 |
 | P2-12 | i18n 7 个 `as Record<string,string>` 逃逸区绕过编译期 key 检查，漏翻静默降级为 id | `zh.ts:130-479`、`en.ts` 对应 | 运行时比对已覆盖 key 对齐；给逃逸区补一条「消费处 fallback 必须可读」的约定即可，不强改类型 | 已记录约定 |
@@ -54,8 +54,8 @@
 | P3-1 | `agent-plugin.md` 能力槽清单停在 5 槽（实际 14+），`FsPort` 前后自相矛盾 | 已修 |
 | P3-2 | `refactor-roadmap.md` 进度停在 2026-07-19 | 已修 |
 | P3-3 | `2026-07-03-chat-window-design.md` 描述与实现相反且无标注 | 已修（归档+横幅） |
-| P3-4 | README 遗漏对话窗/新建会话/多账号/屏幕检测等 0.4-0.5 功能；crates 列表缺 2 个；resume 描述 claude-only；技术栈/CI 描述过时 | 待修 |
-| P3-5 | `site/README.md` 结构章节列了不存在的组件 | 待修 |
+| P3-4 | README 遗漏对话窗/新建会话/多账号/屏幕检测等功能；crates 列表缺 2 个；resume 描述 claude-only；技术栈/CI 描述过时 | 已修 |
+| P3-5 | `site/README.md` 结构章节列了不存在的组件 | 已修 |
 | P3-6 | 49 份历史 specs/plans 与 2 份 0.1.x release notes 混在活文档里 | 已修（归档） |
 
 ## 刻意不做（与 roadmap「不做」对齐）

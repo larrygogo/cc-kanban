@@ -1,4 +1,4 @@
-//! Thin Tauri command adapters for the managed PTY and approval broker.
+//! 托管 PTY 与审批 broker 的薄 Tauri command 适配层。
 
 use tauri::State;
 

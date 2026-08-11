@@ -1,8 +1,7 @@
-//! Chat history application service and its thin Tauri adapter.
+//! 对话历史应用服务与它的薄 Tauri 适配层。
 //!
-//! The command only schedules blocking work. Database reads, transcript resolution,
-//! incremental file parsing, paging, and mtime concurrency control live here so the
-//! crate root no longer owns a second chat state machine.
+//! command 只负责调度 blocking 工作。DB 读取、transcript 路径解析、文件增量解析、
+//! 分页与 mtime 并发控制都住在这里——crate 根不再持有第二台对话状态机。
 
 use meowo_protocol::ipc::{AgentModeDto, ChatHistoryDto as ChatHistory, PendingReviewKind};
 use std::path::Path;
