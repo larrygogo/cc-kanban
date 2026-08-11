@@ -452,9 +452,8 @@ pub(crate) async fn get_chat_history(
     .map_err(|e| e.to_string())?
 }
 
-/// 粘贴附件的单文件上限。覆盖截图与常规文档；防的是把整包安装镜像塞进剪贴板粘过来——
-/// 内容要过 base64 + IPC，一份超大 payload 会把主进程内存与序列化都拖住。
-const PASTED_ATTACHMENT_MAX_BYTES: usize = 32 * 1024 * 1024;
+// 粘贴附件的单文件上限与目录约定统一取自 fsutil（与排队插话图片同源，勿再各写一份）。
+use meowo_agent::fsutil::{paste_root, PASTE_MAX_BYTES};
 
 /// 把粘贴进对话输入框的图片/文件落成临时文件，返回绝对路径接入现有附件流程。
 ///
@@ -483,7 +482,7 @@ fn save_pasted_attachment_blocking(
 ) -> Result<String, String> {
     use base64::Engine;
     // 编码后长度 ≈ 4/3 原始大小：先按编码长度挡住超大 payload，再解码。
-    if data_base64.len() > PASTED_ATTACHMENT_MAX_BYTES / 3 * 4 + 4 {
+    if data_base64.len() > PASTE_MAX_BYTES / 3 * 4 + 4 {
         return Err("附件过大（上限 32MB）".into());
     }
     let bytes = base64::engine::general_purpose::STANDARD
@@ -492,7 +491,7 @@ fn save_pasted_attachment_blocking(
     if bytes.is_empty() {
         return Err("空附件".into());
     }
-    if bytes.len() > PASTED_ATTACHMENT_MAX_BYTES {
+    if bytes.len() > PASTE_MAX_BYTES {
         return Err("附件过大（上限 32MB）".into());
     }
     let safe: String = Path::new(&file_name)
@@ -510,9 +509,7 @@ fn save_pasted_attachment_blocking(
     };
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir()
-        .join("meowo-paste")
-        .join(format!("{}-{seq}", super::now_ms()));
+    let dir = paste_root().join(format!("{}-{seq}", super::now_ms()));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(safe);
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
@@ -573,7 +570,7 @@ mod tests {
     #[test]
     fn pasted_attachment_rejects_oversize_and_empty() {
         // 编码长度粗筛：超过上限的 payload 不必真造 32MB，长度骗过第一道即可验证拒绝。
-        let oversized = "A".repeat(PASTED_ATTACHMENT_MAX_BYTES / 3 * 4 + 8);
+        let oversized = "A".repeat(PASTE_MAX_BYTES / 3 * 4 + 8);
         assert!(save_pasted_attachment_blocking("big.bin".into(), oversized).is_err());
         assert!(save_pasted_attachment_blocking("empty.bin".into(), String::new()).is_err());
     }

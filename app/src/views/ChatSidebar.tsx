@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { confirmStopSession, getLiveSessionsPage, getSettings, recentCwds, sessionTone, type CardMenuMode, type LiveSession, type SessionTone, type Settings } from "../api";
+import { confirmStopSession, getLiveSessionsPage, getSettings, openNewSessionWindow, openProjectDir, recentCwds, renameSession, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LiveSession, type SessionTone, type Settings } from "../api";
 import { agentAssets, tintStyle } from "../providers";
 import { folderName, pathKey } from "../paths";
 import { useMenuPopup } from "./menu";
 import { CardContextMenu } from "./sticker/CardContextMenu";
 import { editorKeyDown, useStarred } from "./sticker/helpers";
+import { UNNAMED_SESSION_SENTINEL } from "./sticker/types";
 import { MoreIcon, NoteIcon, TopIcon } from "./sticker/icons";
 import { useT } from "../i18n";
 import { isMac } from "../platform";
@@ -25,13 +26,19 @@ const REFRESH_THROTTLE_MS = 400;
 /** 旧的布尔分组开关键（只有「按目录」一档时代的遗产）。只读不写：迁移到 GROUP_MODE_KEY。 */
 const GROUPED_KEY = "meowo-chat-sidebar-grouped";
 const GROUP_MODE_KEY = "meowo-chat-sidebar-group-mode";
+const SORT_MODE_KEY = "meowo-chat-sidebar-sort-mode";
 const FOLDED_KEY = "meowo-chat-sidebar-folded-dirs";
 
 /** 分组方式（Claude Code 侧栏 Group by 同款）：不分组 / 按目录 / 按日期 / 按状态。 */
 type GroupMode = "none" | "dir" | "date" | "state";
 
-/** 无 cwd 的会话归到同一组（后端 cwd 可空:ping 型/早期数据）。用不可能与路径撞车的键。 */
-const NO_DIR = "\\u0000no-dir";
+/** 排序方式：最近活跃（默认 = 后端 connected-first + 时间倒序原样透传）/ 创建时间 / 名称。
+ *  非默认档在前端排**已加载的这一页**：排序不同于筛选，翻页不完整只影响顺序的全局性，
+ *  不会让会话消失；改后端排序则要连 SQL 游标一起换口径，不值当。 */
+type SortMode = "recent" | "created" | "name";
+
+/** 无 cwd 的会话归到同一组（后端 cwd 可空:ping 型/早期数据）。以 NUL 开头，不可能与路径撞车。 */
+const NO_DIR = String.fromCharCode(0) + "no-dir";
 
 /** 组头汇总点的召唤强度序:出错必须先被看见 > 有明确动作要做 > 在等 > 在跑。
  *  组折起来时用户只剩这一个点可看,取组内最强的那个,否则「折叠即失明」。 */
@@ -127,17 +134,20 @@ function groupByState(items: LiveSession[], t: Dict): DirGroup[] {
 
 /** 侧栏的筛选/分组弹层（Linear 式）：头部一个图标钮，面板每行「标签 · 当前值 ›」，
  *  点行进入对应选项列表，选中即应用并收起。取代先前并排撑满一行的两个下拉。 */
-function SidebarFilterMenu({ dirValue, dirOptions, groupMode, groupLabels, onDir, onGroup, t }: {
+function SidebarFilterMenu({ dirValue, dirOptions, groupMode, groupLabels, sortMode, sortLabels, onDir, onGroup, onSort, t }: {
   dirValue: string | null;
   dirOptions: { value: string; label: string }[];
   groupMode: GroupMode;
   groupLabels: Record<GroupMode, string>;
+  sortMode: SortMode;
+  sortLabels: Record<SortMode, string>;
   onDir: (value: string | null) => void;
   onGroup: (mode: GroupMode) => void;
+  onSort: (mode: SortMode) => void;
   t: Dict;
 }) {
   const { open, setOpen, pos, ref, btnRef, menuRef, toggle, onKeyDown, relayout } = useMenuPopup({});
-  const [view, setView] = useState<"root" | "dir" | "group">("root");
+  const [view, setView] = useState<"root" | "dir" | "group" | "sort">("root");
   // 关闭即回根视图：下次打开不该停在上次翻到的子面板。
   useEffect(() => { if (!open) setView("root"); }, [open]);
   // 子视图切换后（根↔目录/分组）：
@@ -197,12 +207,17 @@ function SidebarFilterMenu({ dirValue, dirOptions, groupMode, groupLabels, onDir
                 <span>{t.chat.sidebarFilterGroup}</span>
                 <span className="sf-val"><span className="sf-val-text">{groupLabels[groupMode]}</span>{chevron}</span>
               </button>
+              <div className="sf-sep" role="separator" />
+              <button type="button" role="menuitem" className="dd-item sf-row" onClick={() => setView("sort")}>
+                <span>{t.chat.sidebarFilterSort}</span>
+                <span className="sf-val"><span className="sf-val-text">{sortLabels[sortMode]}</span>{chevron}</span>
+              </button>
             </>
           ) : (
             <>
               <button type="button" role="menuitem" className="dd-item sf-back" onClick={() => setView("root")}>
                 {back}
-                <span>{view === "dir" ? t.chat.sidebarFilterDir : t.chat.sidebarFilterGroup}</span>
+                <span>{view === "dir" ? t.chat.sidebarFilterDir : view === "sort" ? t.chat.sidebarFilterSort : t.chat.sidebarFilterGroup}</span>
               </button>
               <div className="sf-sep" role="separator" />
               {view === "dir"
@@ -223,7 +238,24 @@ function SidebarFilterMenu({ dirValue, dirOptions, groupMode, groupLabels, onDir
                       </button>
                     );
                   })
-                : (["none", "dir", "date", "state"] as const).map((mode) => {
+                : view === "sort"
+                  ? (["recent", "created", "name"] as const).map((mode) => {
+                      const selected = sortMode === mode;
+                      return (
+                        <button
+                          key={mode}
+                          type="button"
+                          role="option"
+                          aria-selected={selected}
+                          className={"dd-item" + (selected ? " sel" : "")}
+                          onClick={() => pick(() => onSort(mode))}
+                        >
+                          <span className="dd-label">{sortLabels[mode]}</span>
+                          {selected && check}
+                        </button>
+                      );
+                    })
+                  : (["none", "dir", "date", "state"] as const).map((mode) => {
                     const selected = groupMode === mode;
                     return (
                       <button
@@ -316,6 +348,11 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
     const stored = localStorage.getItem(GROUP_MODE_KEY);
     if (stored === "none" || stored === "dir" || stored === "date" || stored === "state") return stored;
     return localStorage.getItem(GROUPED_KEY) === "1" ? "dir" : "none";
+  });
+  // 排序方式默认「最近活跃」= 现状顺序，同分组一样落盘。
+  const [sortMode, setSortMode] = useState<SortMode>(() => {
+    const stored = localStorage.getItem(SORT_MODE_KEY);
+    return stored === "created" || stored === "name" ? stored : "recent";
   });
   // 折叠的组(按 pathKey)。侧栏收起时本组件整个卸载,不落盘的话回来全展开了。
   const [folded, setFolded] = useState<Set<string>>(readFolded);
@@ -502,7 +539,7 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   const submitRename = (item: LiveSession, draft: string) => {
     const title = draft.trim();
     if (title && title !== item.task_title) {
-      invoke("rename_session", { cwd: item.cwd, sessionId: item.session.cc_session_id, title, provider: item.provider })
+      renameSession(item.cwd, item.session.cc_session_id, title, item.provider)
         .catch(() => setActionError(t.sticker.renameFailed));
     }
     setEditingId(null);
@@ -513,7 +550,7 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   };
   const submitNote = (item: LiveSession, noteDraft: string) => {
     if (noteDraft !== (item.note ?? "")) {
-      invoke("set_session_note", { sessionId: item.session.cc_session_id, note: noteDraft })
+      setSessionNote(item.session.cc_session_id, noteDraft)
         .catch(() => setActionError(t.sticker.noteFailed));
     }
     setNotingId(null);
@@ -530,7 +567,7 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
       const following = (ordered ?? []).find((s) => s.session.id !== id);
       if (following) onSelect(following.session.id);
     }
-    invoke("set_archived", { sessionId: id, archived: target }).catch(() => {
+    setArchived(id, target).catch(() => {
       setActionError(t.chat.sidebarActionFailed);
       void loadRef.current("refresh");
     });
@@ -544,6 +581,10 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   const changeGroupMode = (mode: GroupMode) => {
     setGroupMode(mode);
     localStorage.setItem(GROUP_MODE_KEY, mode);
+  };
+  const changeSortMode = (mode: SortMode) => {
+    setSortMode(mode);
+    localStorage.setItem(SORT_MODE_KEY, mode);
   };
   const toggleFolded = (key: string) => setFolded((prev) => {
     const next = new Set(prev);
@@ -565,14 +606,29 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
     });
 
   // 置顶浮顶:与看板同一条规则(置顶的排最前),否则「置顶」名不副实——标记亮着、位置没动。
-  // Array.sort 稳定,非置顶的相对次序原样保留(后端 connected-first + 时间倒序)。
+  // Array.sort 稳定,「最近活跃」档非置顶的相对次序原样保留(后端 connected-first +
+  // 时间倒序);「创建时间/名称」档在置顶之后按所选键重排(用户明确选了排序,不再保
+  // connected-first——正在跑的会话有状态点可辨识)。
   // 分组开着时排序发生在**分组之前**:组内置顶在前,而组序由「组内第一条的位置」派生,
   // 于是含置顶会话的目录也跟着上浮——两套顺序不打架。
   const ordered = useMemo(() => {
-    if (!sessions || starred.size === 0) return sessions;
+    if (!sessions || (starred.size === 0 && sortMode === "recent")) return sessions;
     const rank = (item: LiveSession) => (starred.has(item.session.cc_session_id) ? 0 : 1);
-    return [...sessions].sort((a, b) => rank(a) - rank(b));
-  }, [sessions, starred]);
+    return [...sessions].sort((a, b) => {
+      const star = rank(a) - rank(b);
+      if (star !== 0) return star;
+      if (sortMode === "created") return b.session.started_at - a.session.started_at;
+      if (sortMode === "name") {
+        // 未命名会话沉底（空串与 DB sentinel「(未命名会话)」同口径，见 EditorInput 的
+        // initial）：一排未命名插在人起的名字中间只会打断扫读。
+        const an = a.task_title !== UNNAMED_SESSION_SENTINEL ? a.task_title : "";
+        const bn = b.task_title !== UNNAMED_SESSION_SENTINEL ? b.task_title : "";
+        if (!an || !bn) return an ? -1 : bn ? 1 : 0;
+        return an.localeCompare(bn);
+      }
+      return 0;
+    });
+  }, [sessions, starred, sortMode]);
 
   const groups = useMemo(() => {
     if (!ordered || groupMode === "none") return null;
@@ -649,7 +705,7 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
         <span className="chat-sidebar-text">
           {editing ? (
             <EditorInput
-              initial={item.task_title && item.task_title !== "(未命名会话)" ? item.task_title : ""}
+              initial={item.task_title && item.task_title !== UNNAMED_SESSION_SENTINEL ? item.task_title : ""}
               placeholder={t.sticker.renamePlaceholder}
               onSubmit={(value) => submitRename(item, value)}
               onCancel={() => setEditingId(null)}
@@ -704,7 +760,7 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
         <button
           type="button"
           className="chat-sidebar-new"
-          onClick={() => void invoke("open_new_session_window").catch(() => {})}
+          onClick={() => void openNewSessionWindow().catch(() => {})}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <path d="M12 5v14M5 12h14" />
@@ -716,8 +772,11 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
           dirOptions={dirOptions}
           groupMode={groupMode}
           groupLabels={{ none: t.chat.groupNone, dir: t.chat.groupByDir, date: t.chat.groupByDate, state: t.chat.groupByState }}
+          sortMode={sortMode}
+          sortLabels={{ recent: t.chat.sortRecent, created: t.chat.sortCreated, name: t.chat.sortName }}
           onDir={setDirFilter}
           onGroup={changeGroupMode}
+          onSort={changeSortMode}
           t={t}
         />
         {/* macOS 专用：折叠钮留在侧栏头部（无独立顶栏）。Windows/Linux 的折叠/展开
@@ -815,8 +874,8 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
           onNote={() => startNote(ctxItem)}
           onRename={() => startRename(ctxItem)}
           onArchive={() => toggleArchived(ctxItem)}
-          onNewSession={() => void invoke("open_new_session_window", { cwd: ctxItem.cwd, provider: ctxItem.provider }).catch(() => {})}
-          onOpenDir={ctxItem.cwd ? () => void invoke("open_project_dir", { cwd: ctxItem.cwd }).catch(() => {}) : null}
+          onNewSession={() => void openNewSessionWindow({ cwd: ctxItem.cwd, provider: ctxItem.provider }).catch(() => {})}
+          onOpenDir={ctxItem.cwd ? () => void openProjectDir(ctxItem.cwd!).catch(() => {}) : null}
           // 结束会话只对本 GUI 托管的 PTY 开放（与看板同一门控）：外部终端里跑的会话
           // 杀不了，后台会话杀了也会被 supervisor 拉回来。
           onEndSession={ctxItem.pty_managed && !ctxItem.background ? () => endSession(ctxItem) : null}

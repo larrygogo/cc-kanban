@@ -28,8 +28,9 @@ const ATTACHMENT_INSTRUCTION_HEADERS = new Set(
  *  气泡是「说的话」，图片是附件，各归各的（正文里的 [Image #N] 指代照旧保留）。 */
 function splitUserText(text: string): { body: string; images: { path: string; key: string }[] } {
   const matches = [...text.matchAll(IMAGE_REF)];
-  if (matches.length === 0) return { body: text, images: [] };
   const images = matches.map((match, index) => ({ path: match[1].trim(), key: `${match.index}:${index}` }));
+  // 无图片引用也不能早退：CLI 会把附件行「- <路径>」里的图片路径吃掉、转成独立
+  // image 块，文本只剩指令头 + 光杆「-」——这形状同样要剥（实拍回归）。
   // 逐行抽引用，只删「原行确实含图片引用、抽走后只剩空白或空弹头」的行——
   // 曾按全文过滤 trim()==="-" 的行，把用户自己写的独立「-」行也误删了（评审确认）。
   const kept: string[] = [];
@@ -39,16 +40,22 @@ function splitUserText(text: string): { body: string; images: { path: string; ke
     if (stripped !== line && (leftover === "" || leftover === "-")) continue;
     kept.push(stripped);
   }
-  // 指令头后一条附件行都不剩（全是图片、已转缩略图）时连头剥掉；
-  // 仍有非图片附件行时保留头与那些行。
-  const body = kept
-    .filter((line, index) => {
-      if (!ATTACHMENT_INSTRUCTION_HEADERS.has(line.trim())) return true;
-      return !!kept[index + 1]?.trim().startsWith("- ");
-    })
-    .join("\n")
-    .trim();
-  return { body, images };
+  // 指令头连同其后紧跟的光杆「-」行（附件残行）一起处理：残行总是剥；仍有实质
+  // 附件行（非图片路径「- xxx」）时保留头，否则头也剥。用户自己写的孤立「-」
+  // 不紧跟在指令头后，不受影响。
+  const body: string[] = [];
+  for (let i = 0; i < kept.length; i++) {
+    const line = kept[i];
+    if (!ATTACHMENT_INSTRUCTION_HEADERS.has(line.trim())) {
+      body.push(line);
+      continue;
+    }
+    let j = i + 1;
+    while (j < kept.length && kept[j].trim() === "-") j++;
+    if (kept[j]?.trim().startsWith("- ")) body.push(line);
+    i = j - 1;
+  }
+  return { body: body.join("\n").trim(), images };
 }
 
 /** 大图查看层：滚轮缩放、拖拽平移、双击复位；工具栏有缩放按钮与明显的关闭键。

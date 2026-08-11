@@ -92,6 +92,51 @@ pub(crate) async fn set_session_note(
     .map_err(|e| e.to_string())?
 }
 
+/// 对话页改选启动选项后的落库（合并单键写回）：模型/权限是**启动参数**，resume/接管
+/// 时回放（`terminal::splice_stored_launch_args`）——不落库的话每次重启都回默认档
+/// （用户实拍：会话里切到 1M 上下文档，重启后回落 200K）。
+#[tauri::command]
+pub(crate) async fn set_session_launch_selection(
+    session_id: i64,
+    option: String,
+    choice: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = super::open_store(&super::db_path()).map_err(|e| e.to_string())?;
+        let mut selections: std::collections::HashMap<String, String> = store
+            .session_launch_args(session_id)
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+        selections.insert(option, choice);
+        let json = serde_json::to_string(&selections).map_err(|e| e.to_string())?;
+        store
+            .set_session_launch_args(session_id, &json)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 对话窗权限下拉的回显：读会话存的启动选项（sessions.launch_args，新建/接管改选时落库，
+/// 见 `terminal::splice_stored_launch_args`）。有存值时前端把「沿用原设置」直接亮成那一档——
+/// 一句黑盒不如具体档位（用户实拍反馈）。读库/解析失败返回空 map：回显是增强，不值得报错。
+#[tauri::command]
+pub(crate) async fn session_launch_selections(
+    session_id: i64,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(super::open_store(&super::db_path())
+            .ok()
+            .and_then(|store| store.session_launch_args(session_id).ok().flatten())
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_safe_id;

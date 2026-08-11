@@ -346,21 +346,34 @@ export function clipboardImageFingerprint(): Promise<string | null> {
   return invoke("clipboard_image_fingerprint");
 }
 
-/// 会话是否可能仍由**外部**终端持有——即托管前需要先接管（杀掉旧进程）而非直接恢复。
-///
-/// `stale` 一并算入：它只表示久未有事件，进程未必已死。判活的事实源在后端（实时查进程表），
-/// 前端这份 status 是轮询快照，只能保守。宁可多让用户确认一次接管（takeover 对已死进程同样
-/// 安全——它会先判活，死了就直接恢复），也不要给出一个必然被后端拒绝的「直接恢复」按钮。
+/**
+ * 会话是否可能仍由**外部**终端持有——即托管前需要先接管（杀掉旧进程）而非直接恢复。
+ *
+ * `stale` 一并算入：它只表示久未有事件，进程未必已死。判活的事实源在后端（实时查进程表），
+ * 前端这份 status 是轮询快照，只能保守。宁可多让用户确认一次接管（takeover 对已死进程同样
+ * 安全——它会先判活，死了就直接恢复），也不要给出一个必然被后端拒绝的「直接恢复」按钮。
+ */
 export function isExternallyHeld(status?: string): boolean {
   return status === "running" || status === "waiting" || status === "stale";
 }
 
-/// 对话窗/侧栏展示层的会话状态口径(后端 tab_class 是它的跨语言镜像,改任一端须同步)。
-/// 优先级:connected 为假时绝不展示「在跑/在等」——DB 的 running 在进程死后、reaper
-/// 收尾前是滞留值,直接展示就是假运行中;ended 同理让位于存活观测(恢复会话的轮询
-/// 窗口期 DB 还挂着旧 'ended',而 PTY 已在跑,此时按 waiting 过渡而不是谎报已结束);
-/// errored(出错,数据源为 LiveSession.errored / ChatHistoryDto.errored)高于 pending:
-/// 出错必须先被看见;pending(待审批/待交互)高于 waiting:有明确动作召唤。
+/**
+ * 对话窗/侧栏展示层的会话状态口径(后端 tab_class 是它的跨语言镜像,改任一端须同步)。
+ * 优先级:connected 为假时绝不展示「在跑/在等」——DB 的 running 在进程死后、reaper
+ * 收尾前是滞留值,直接展示就是假运行中;ended 同理让位于存活观测(恢复会话的轮询
+ * 窗口期 DB 还挂着旧 'ended',而 PTY 已在跑,此时按 waiting 过渡而不是谎报已结束);
+ * errored(出错,数据源为 LiveSession.errored / ChatHistoryDto.errored)高于 pending:
+ * 出错必须先被看见;pending(待审批/待交互)高于 waiting:有明确动作召唤。
+ */
+/** `focus_session` 的返回值（后端 terminal.rs 同名结果的镜像）：跳转外部终端的结局分类。 */
+export type FocusSessionResult =
+  | "focused"
+  | "host_focused"
+  | "alive_but_not_found"
+  | "permission_denied"
+  | "unsupported_terminal"
+  | "process_ended";
+
 export type SessionTone = "running" | "pending" | "waiting" | "offline" | "ended" | "error";
 export function sessionTone(connected: boolean, status?: string, pendingReview?: unknown, errored?: boolean): SessionTone {
   if (status === "ended" && !connected) return "ended";
@@ -399,6 +412,16 @@ export function sendBackgroundPrompt(sessionId: number, text: string): Promise<v
 export function takeoverManagedTerminal(sessionId: number, cols: number, rows: number, options?: Record<string, string>): Promise<void> {
   return invoke("takeover_managed_terminal", { sessionId, cols, rows, options });
 }
+/** 会话存的启动选项（option id → choice id）。恢复权限下拉据此把「沿用原设置」
+ *  亮成具体档位；没存过 / 旧后端无此命令时为空。 */
+export function sessionLaunchSelections(sessionId: number): Promise<Record<string, string>> {
+  return invoke<Record<string, string>>("session_launch_selections", { sessionId }).then((map) => map ?? {}).catch(() => ({}));
+}
+/** 把单个启动选项写进会话存档（合并写）。模型/权限是启动参数，resume/接管时回放
+ *  ——对话页切换后不落库的话，每次重启都回默认档（1M 上下文档回落 200K，实拍）。 */
+export function setSessionLaunchSelection(sessionId: number, option: string, choice: string): Promise<void> {
+  return invoke<void>("set_session_launch_selection", { sessionId, option, choice }).catch(() => {});
+}
 /**
  * 取终端输出快照。`since` 传上次拿到的 endOffset，只回增量——不传则全量（首帧用）。
  * backlog 上限 1 MiB，轮询里省掉的就是这一整份的 base64 + IPC 传输。
@@ -419,11 +442,13 @@ export function stopManagedTerminal(sessionId: number): Promise<void> {
   return invoke("stop_managed_terminal", { sessionId });
 }
 
-/// 「结束会话」的唯一流程:应用内确认模态(appConfirm,系统原生 MessageBox 样式与应用
-/// 脱节已弃用;window.confirm 会被 webview 吞掉,同样不可用)→ 杀托管 PTY 进程。
-/// 对话页标题栏与终端页操作条两个入口共用,确认文案/停止协议改这里一处。
-/// busy 态与错误呈现由调用方负责(两处 UI 槽位不同):`onConfirmed` 在用户确认后、真正
-/// 结束前触发,给调用方置 busy;返回 false = 用户取消;抛错 = 结束失败,调用方必须让它可见。
+/**
+ * 「结束会话」的唯一流程:应用内确认模态(appConfirm,系统原生 MessageBox 样式与应用
+ * 脱节已弃用;window.confirm 会被 webview 吞掉,同样不可用)→ 杀托管 PTY 进程。
+ * 对话页标题栏与终端页操作条两个入口共用,确认文案/停止协议改这里一处。
+ * busy 态与错误呈现由调用方负责(两处 UI 槽位不同):`onConfirmed` 在用户确认后、真正
+ * 结束前触发,给调用方置 busy;返回 false = 用户取消;抛错 = 结束失败,调用方必须让它可见。
+ */
 export async function confirmStopSession(
   sessionId: number,
   text: { title: string; message: string },
@@ -458,6 +483,42 @@ export function resolvePendingApproval(sessionId: number, requestId: string, cho
 }
 export function openAttachedTerminal(sessionId: number): Promise<void> {
   return invoke("open_attached_terminal", { sessionId });
+}
+
+/**
+ * 会话改名（写入与 Claude Code `/rename` 一致的记录，广播 board-changed）。
+ * 看板卡片、侧栏、对话窗标题三个入口共用；以 cc_session_id 为键，provider
+ * 让后端选对应插件的回写实现。
+ */
+export function renameSession(
+  cwd: string | null | undefined,
+  ccSessionId: string,
+  title: string,
+  provider?: string | null,
+): Promise<void> {
+  return invoke("rename_session", { cwd, sessionId: ccSessionId, title, provider });
+}
+
+/** 归档 / 还原会话（键为 DB 数字主键，不是 cc_session_id）。 */
+export function setArchived(sessionId: number, archived: boolean): Promise<void> {
+  return invoke("set_archived", { sessionId, archived });
+}
+
+/** 给会话挂 / 改便签（纯本地备忘，键为 cc_session_id）。 */
+export function setSessionNote(ccSessionId: string, note: string): Promise<void> {
+  return invoke("set_session_note", { sessionId: ccSessionId, note });
+}
+
+/** 在系统文件管理器里打开会话的工作目录。 */
+export function openProjectDir(cwd: string): Promise<void> {
+  return invoke("open_project_dir", { cwd });
+}
+
+/** 打开「新建会话」独立窗；带 prefill 时预选目录与 agent。 */
+export function openNewSessionWindow(prefill?: { cwd?: string | null; provider?: string | null }): Promise<void> {
+  return prefill
+    ? invoke("open_new_session_window", { cwd: prefill.cwd, provider: prefill.provider })
+    : invoke("open_new_session_window");
 }
 
 export function getLiveSessionsCounts(): Promise<LiveSessionCounts> {
@@ -537,13 +598,14 @@ export type Settings = {
   /** 打开终端方式：card = 点击卡片（默认）/ button = 卡片上单独的打开按钮。 */
   terminal_open_mode: TerminalOpenMode;
   /**
-   * 打开会话落到哪个视图：chat = Meowo 对话窗口（默认）/ terminal = 外部终端。
+   * 打开会话落到哪个视图：terminal = 外部终端（默认，后端 settings.rs 有测试钉住——
+   * 老用户升级不该被静默改掉落点）/ chat = Meowo 对话窗口。
    *
    * 两种取值下 agent 都由 Meowo 的 PTY 持有，差的只是用哪个界面看它——terminal 是把同一个
    * PTY attach 到 `resume_terminal` 选定的终端里，不是另起一个进程。
    */
   session_open_in: SessionOpenIn;
-  /** 卡片菜单触发方式：context = 右键菜单（默认）/ button = 卡片菜单按钮（触屏友好），二选一。 */
+  /** 卡片菜单触发方式：button = 卡片菜单按钮（默认）/ context = 右键菜单，二选一。 */
   card_menu_mode: CardMenuMode;
   /** 是否在卡片显示对话预览（你的提问 + AI 回复两行）。缺省开启。 */
   preview_enabled: boolean;

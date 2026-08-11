@@ -356,6 +356,35 @@ describe("ChatSidebar", () => {
     expect(heads.map((h) => h.textContent)).toEqual(["出错了1", "运行中1", "已结束1"]);
   });
 
+  /** 排序入口与目录/分组同在筛选弹层（第三行）。默认「最近活跃」= 后端顺序原样透传；
+   *  「按名称」在前端重排已加载页，未命名会话沉底，选择与分组一样落盘。 */
+  it("排序:按名称重排列表,未命名沉底,选择落盘", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "recent_cwds") return Promise.resolve([]);
+      if (command !== "get_live_sessions_page") return Promise.resolve();
+      return Promise.resolve([
+        session(1, "beta"),
+        session(2, "alpha"),
+        session(3, ""),
+      ]);
+    });
+    render(<ChatSidebar activeId={1} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
+    await screen.findByRole("button", { name: /beta/ });
+    const itemNames = () =>
+      within(screen.getByRole("navigation"))
+        .getAllByRole("button")
+        .filter((b) => b.className.includes("chat-sidebar-item"))
+        .map((b) => b.querySelector(".chat-sidebar-name-text")?.textContent);
+    // 默认「最近活跃」：后端给什么顺序就是什么顺序。
+    expect(itemNames()).toEqual(["beta", "alpha", "等待首次输入"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "筛选与分组" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^排序/ }));
+    fireEvent.click(screen.getByRole("option", { name: "按名称" }));
+    expect(itemNames()).toEqual(["alpha", "beta", "等待首次输入"]);
+    expect(localStorage.getItem("meowo-chat-sidebar-sort-mode")).toBe("name");
+  });
+
   /**
    * 会话菜单与看板卡片是同一个 CardContextMenu、同一批动作。侧栏条目从 <button> 改成
    * role=button 的 <div> 是为了能在里面放「⋯」按钮（button 套 button 非法）。

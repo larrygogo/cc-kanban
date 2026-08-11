@@ -3,8 +3,10 @@
 //! ——它跨 `meowo-reporter`（hook 子进程）与 `meowo-app`（GUI）两个二进制共用，此前散在两边，
 //! kimi 新旧版差异只能靠各处临时 `if`/fallback 硬凑。
 //!
-//! 本 crate 只依赖 std/serde/toml_edit：不碰文件写入、不联网、不依赖 Tauri。落盘与联网各由
-//! meowo-app 完成，但都以本层探测出的 [`Installation`] 为输入，不再各自重推路径。
+//! 本 crate 不联网、不依赖 Tauri、不碰数据库。文件写入仅限两处自包含的本地落盘：
+//! [`fsutil`] 的原子写（hooks 配置 / 凭据 / 缓存回写共用）与 claude transcript 里排队插话
+//! 图片的临时目录落盘（`fsutil::paste_root`）；其余落盘与全部联网由 meowo-app 完成，
+//! 但都以本层探测出的 [`Installation`] 为输入，不再各自重推路径。
 //!
 //! 迁移状态（详见 `docs/architecture/agent-plugin.md`）：
 //!

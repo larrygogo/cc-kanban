@@ -918,6 +918,34 @@ describe("ChatWindow", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("start_managed_terminal", { sessionId: 61, cols: 100, rows: 30, options: { permission: "bypassPermissions" } }));
   });
 
+  it("会话存过启动档位时，「沿用原设置」直接亮成那一档", async () => {
+    // 回归：占位文案「权限：沿用原设置」是句黑盒——后端 sessions.launch_args 存着上次
+    // 选的档，能对上插件 choices 就直接显示并预选它；「沿用」= 选中它本身，不写覆盖。
+    window.history.replaceState({}, "", "/?sessionId=62");
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 62, title: "存过档位", status: "ended", provider: "claude", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, model: null, connected: false,
+        agentModes: [{ dimension: "permission", value: "default" }],
+        contextPct: null, contextWindow: null, currentActivity: null, hasMore: false, items: [],
+      });
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
+      if (command === "list_agents") return Promise.resolve(descriptors(["claude"]));
+      if (command === "session_launch_selections") return Promise.resolve({ permission: "bypassPermissions" });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 62, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    // 胶囊直接显示存的档（启动档位词），不再是 transcript 回读的旧模式词。
+    expect(await screen.findByText("跳过权限确认")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "切换模式: 权限模式" }));
+    // 菜单里没有黑盒占位项；存的那档带高亮。
+    const item = await screen.findByRole("menuitem", { name: "跳过权限确认" });
+    expect(screen.queryByRole("menuitem", { name: "权限：沿用原设置" })).toBeNull();
+    expect(item.className).toContain("is-active");
+  });
+
   it("offers to load earlier messages when the first read was truncated", async () => {
     window.history.replaceState({}, "", "/?sessionId=33");
     const truncated = {
@@ -1134,6 +1162,70 @@ describe("ChatWindow", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("takeover_managed_terminal", { sessionId: 15, cols: 100, rows: 30 }));
     // 接管成功后自动重放刚才那次发送，用户不必重打一遍。
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 15, data: "别起第二个" }), { timeout: 3_000 });
+  });
+
+  /** 会话被外部终端占用（后端明确 ptyManaged=false）时不再摆一个发不出去的输入框：
+   *  composer 整体让位给门卡，接管是唯一动线；接管成功（ptyManaged 翻真）后 composer 回归。
+   *  （上一条用例的 mock 不带 ptyManaged 字段，覆盖的是信号缺失时的兜底旧路径。） */
+  it("外部占用的会话直接显示接管门卡,接管成功后 composer 回归", async () => {
+    window.history.replaceState({}, "", "/?sessionId=19");
+    let takenOver = false;
+    invoke.mockImplementation((command: string) => {
+      if (command === "confirm_dialog") return Promise.resolve(true);
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 19, title: "外部占用", status: "running", provider: "claude", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, items: [],
+        ptyManaged: takenOver,
+      });
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve(takenOver
+          ? { sessionId: 19, active: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
+          : { sessionId: 19, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      }
+      if (command === "takeover_managed_terminal") { takenOver = true; return Promise.resolve(); }
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    expect(await screen.findByText(/会话仍在外部终端运行/)).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "发送消息给 Agent" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "结束外部进程并接管" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("takeover_managed_terminal", { sessionId: 19, cols: 100, rows: 30 }));
+    // ptyManaged 随下一轮轮询翻真 → 门卡让位，composer 回归。
+    expect(await screen.findByRole("textbox", { name: "发送消息给 Agent" }, { timeout: 3_000 })).toBeTruthy();
+  });
+
+  /** 已结束的会话同理：不摆发不出去的输入框，「恢复会话」是唯一动线——只拉起托管终端，
+   *  不发送任何内容，恢复完成后 composer 回归。 */
+  it("已结束的会话显示恢复门卡,点恢复只拉起终端不发内容", async () => {
+    window.history.replaceState({}, "", "/?sessionId=20");
+    let resumed = false;
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 20, title: "已结束", status: "ended", provider: "claude", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: false,
+        ptyManaged: resumed,
+      });
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve(resumed
+          ? { sessionId: 20, active: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
+          : { sessionId: 20, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      }
+      if (command === "start_managed_terminal") { resumed = true; return Promise.resolve(); }
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    expect(await screen.findByText(zh.chat.composerGateEnded)).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "发送消息给 Agent" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "恢复会话" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("start_managed_terminal", expect.objectContaining({ sessionId: 20 })));
+    expect(await screen.findByRole("textbox", { name: "发送消息给 Agent" }, { timeout: 3_000 })).toBeTruthy();
+    // 恢复只是拉起终端，不发送任何内容。只查本会话：前序用例的异步尾巴可能还在
+    // 共享 mock 上落别的会话的写入，那不是本用例要防的。
+    expect(invoke.mock.calls.some(
+      (call) => call[0] === "write_managed_terminal" && (call[1] as { sessionId?: number } | undefined)?.sessionId === 20,
+    )).toBe(false);
   });
 
   /// Agent 自己派出的后台会话（Claude Code 的 FleetView）：它不消费 stdin，往它的 PTY 写
@@ -1831,6 +1923,24 @@ describe("ChatWindow", () => {
     const rows = document.querySelectorAll(".chat-image-row");
     expect(rows.length).toBe(1);
     expect(rows[0].querySelectorAll("img").length).toBe(2);
+  });
+
+  /** CLI 会把附件行「- <路径>」里的图片路径吃掉、转成独立 image 块：transcript 文本
+   *  只剩指令头 + 光杆「-」，没有任何 [Image: source:] 引用。这形状同样要剥——
+   *  曾因 splitUserText 在无图片引用时早退，把指令头和「-」原样上屏（实拍回归）。 */
+  it("附件路径被 CLI 转成 image 块后,指令头与光杆弹头行不上屏", async () => {
+    window.history.replaceState({}, "", "/?sessionId=44");
+    respondWithHistory({
+      sessionId: 44, title: "贴图残行", status: "running", provider: "claude", cwd: "C:/repo",
+      supported: true, offset: 1, reset: false, pendingReview: null,
+      items: [
+        { type: "user_text", id: "u1", timestamp: null, text: "[Image #2]这个高度能不能低一点\n请读取并结合以下本地附件完成任务（图片请使用图像读取能力）：\n-" },
+      ],
+    });
+    render(<ChatWindow />);
+    await screen.findByText(/这个高度能不能低一点/);
+    expect(screen.queryByText(/本地附件/)).toBeNull();
+    expect(screen.queryByText(/^-$/)).toBeNull();
   });
 
   /** 多问题题面用 tab 切换：全部竖排会把卡片堆得比对话区还高、把输入框挤出可视区。 */

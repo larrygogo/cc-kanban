@@ -378,7 +378,7 @@ pub(crate) fn open_new_session_window_impl(
 }
 
 /// macOS：给 Overlay 标题栏窗口挂一个空 NSToolbar（unified 风格），系统据此把红绿灯
-/// 垂直居中到加高的标题栏区（约 52px），与 64px 的自绘工具栏行对齐。这是 AppKit 的
+/// 垂直居中到加高的标题栏区（约 52px），与同高的自绘工具栏行对齐。这是 AppKit 的
 /// 官方语义，布局由系统持续维护；逐帧挪按钮 frame 的做法会在窗口重排（show/聚焦/
 /// 全屏往返）时被 AppKit 重置，builder 的 traffic_light_position 正是因此不生效。
 /// toolbar 无任何 item，titlebarAppearsTransparent 下不画任何东西，只改按钮布局。
@@ -528,7 +528,7 @@ pub(crate) fn open_chat_window_impl(
     let win = builder
         .build()
         .map_err(|e| format!("创建对话窗口失败: {e}"))?;
-    // 对话窗标题栏行高 64px（.chat-bar/.chat-sidebar-head），红绿灯默认贴顶会和同行的
+    // 对话窗标题栏行高 52px（.chat-bar/.chat-sidebar-head），红绿灯默认贴顶会和同行的
     // 标题/按钮错位；挂空 toolbar 让系统把它垂直居中（备忘录式侧栏惯例）。
     #[cfg(target_os = "macos")]
     unify_titlebar_toolbar(&win);

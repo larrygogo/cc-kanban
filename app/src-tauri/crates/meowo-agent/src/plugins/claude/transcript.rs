@@ -70,6 +70,48 @@ fn tool_summary(name: &str, input: Option<&serde_json::Value>) -> String {
     compact_json(input, 800)
 }
 
+// 排队插话里内嵌图片的落盘上限与目录，与粘贴附件共用同一份（fsutil 单点定义）——
+// CC 对单图另有更紧的限制，这里只挡异常脏数据把临时目录写爆。
+use crate::fsutil::{paste_root, PASTE_MAX_BYTES};
+
+/// 把 queued_command 里的 base64 图片块落成本地文件，返回可写进 `[Image: source: …]`
+/// 引用的绝对路径。落在 `$TEMP/meowo-paste/queued/`：该目录在 asset 协议 scope 内
+/// （tauri.conf.json），前端才能渲染缩略图；与粘贴附件同归 OS 临时清理策略。
+/// 按行 uuid + 块序号命名做幂等——refresh/full 会重解析同一行，命中即复用不重写。
+/// 任何失败都返回 None：插话正文照常显示，只是这张图退化为不显示。
+fn persist_queued_image(base_id: &str, index: usize, ext: &str, data: &str) -> Option<PathBuf> {
+    // uuid 之外的 id 形态（回退的 "message" 等）也进得来，过滤成文件名安全字符集。
+    let safe_id: String = base_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(64)
+        .collect();
+    if safe_id.is_empty() {
+        return None;
+    }
+    let dir = paste_root().join("queued");
+    let path = dir.join(format!("{safe_id}-{index}.{ext}"));
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 0 {
+            return Some(path);
+        }
+    }
+    // 编码后长度 ≈ 4/3 原始大小：先按编码长度挡超大 payload，再解码（同粘贴附件的写法）。
+    if data.len() > PASTE_MAX_BYTES / 3 * 4 + 4 {
+        return None;
+    }
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .ok()?;
+    if bytes.is_empty() || bytes.len() > PASTE_MAX_BYTES {
+        return None;
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::write(&path, &bytes).ok()?;
+    Some(path)
+}
+
 fn parse_transcript_events(line: &str) -> Vec<TranscriptEvent> {
     parse_events(line, false)
 }
@@ -196,6 +238,78 @@ fn parse_events(line: &str, allow_sidechain: bool) -> Vec<TranscriptEvent> {
                 id: base_id.to_string(),
                 timestamp,
                 kind: "compact".into(),
+            }]
+        }
+        // 运行中排队的插话被 CLI 送入时**不落普通 user 行**：记成 attachment/queued_command，
+        // 正文在 attachment.prompt（字符串或 content blocks）。不解析它的话，被处理的插话
+        // 在结构化对话里凭空消失——回执消解了、消息却哪儿都看不见（用户实拍反馈）。
+        // prompt 里的 image 块是内嵌 base64、没有本地路径（CLI 入队时就把附件行里的路径
+        // 吃掉换成了图像块）：落盘成临时文件后以 `[Image: source: …]` 行并入正文——与 CC
+        // 记录粘贴图片的形制一致，前端现成的缩略图链路直接接住。
+        "attachment" => {
+            let attachment = v.get("attachment");
+            if attachment.and_then(|a| a.get("type")).and_then(|x| x.as_str())
+                != Some("queued_command")
+            {
+                return Vec::new();
+            }
+            let prompt = attachment.and_then(|a| a.get("prompt"));
+            let mut text = match prompt {
+                Some(serde_json::Value::String(s)) => s.trim().to_string(),
+                Some(serde_json::Value::Array(blocks)) => blocks
+                    .iter()
+                    .filter_map(|block| {
+                        if block.get("type").and_then(|x| x.as_str()) != Some("text") {
+                            return None;
+                        }
+                        block.get("text").and_then(|x| x.as_str())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .trim()
+                    .to_string(),
+                _ => String::new(),
+            };
+            for (i, block) in prompt
+                .and_then(|x| x.as_array())
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                if block.get("type").and_then(|x| x.as_str()) != Some("image") {
+                    continue;
+                }
+                let Some(source) = block.get("source") else {
+                    continue;
+                };
+                if source.get("type").and_then(|x| x.as_str()) != Some("base64") {
+                    continue;
+                }
+                // 渲染端按扩展名认图（Message.tsx 的 IMAGE_EXTENSIONS），未知类型不落盘。
+                let ext = match source.get("media_type").and_then(|x| x.as_str()) {
+                    Some("image/png") => "png",
+                    Some("image/jpeg") => "jpg",
+                    Some("image/gif") => "gif",
+                    Some("image/webp") => "webp",
+                    _ => continue,
+                };
+                let Some(data) = source.get("data").and_then(|x| x.as_str()) else {
+                    continue;
+                };
+                if let Some(path) = persist_queued_image(base_id, i, ext, data) {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&format!("[Image: source: {}]", path.display()));
+                }
+            }
+            if text.is_empty() {
+                return Vec::new();
+            }
+            vec![TranscriptEvent::UserMessage {
+                id: base_id.to_string(),
+                timestamp,
+                text,
             }]
         }
         _ => Vec::new(),
@@ -1026,6 +1140,48 @@ mod tests {
 
         let sidechain = r#"{"type":"assistant","uuid":"sub","isSidechain":true,"message":{"content":[{"type":"text","text":"hidden"}]}}"#;
         assert!(parse_chat_items(sidechain).is_empty());
+    }
+
+    /// 排队插话被 CLI 送入时不落普通 user 行，而是 attachment/queued_command——
+    /// 不解析它，被处理的插话在结构化对话里凭空消失（实拍回归）。图片块是内嵌 base64
+    /// 无本地路径：落盘成临时文件后以 `[Image: source: …]` 行并入正文，接上前端现成的
+    /// 缩略图链路；其余 attachment 子类型（skill_listing 等）照旧不进时间线。
+    #[test]
+    fn queued_command_attachment_becomes_user_message_with_images() {
+        let queued = r#"{"type":"attachment","uuid":"q1-test-image","timestamp":"2026-08-11T04:02:17Z","isSidechain":false,"attachment":{"type":"queued_command","prompt":[{"type":"text","text":"这里还要再加一个排序"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]}}"#;
+        let items = parse_chat_items(queued);
+        assert_eq!(items.len(), 1);
+        let ChatItem::UserText { id, text, .. } = &items[0] else {
+            panic!("expected UserText, got {:?}", items[0]);
+        };
+        assert_eq!(id, "q1-test-image");
+        let expected_path = std::env::temp_dir()
+            .join("meowo-paste")
+            .join("queued")
+            .join("q1-test-image-1.png");
+        assert_eq!(
+            text,
+            &format!("这里还要再加一个排序\n[Image: source: {}]", expected_path.display())
+        );
+        assert!(expected_path.exists());
+        // 幂等：重解析同一行不重写、结果一致。
+        assert_eq!(parse_chat_items(queued), items);
+        std::fs::remove_file(&expected_path).ok();
+
+        // prompt 为纯字符串的兼容形状。
+        let plain = r#"{"type":"attachment","uuid":"q2","attachment":{"type":"queued_command","prompt":"继续"}}"#;
+        assert!(
+            matches!(&parse_chat_items(plain)[0], ChatItem::UserText { text, .. } if text == "继续")
+        );
+
+        // 解码失败的图片块只丢那张图，正文照常。
+        let broken = r#"{"type":"attachment","uuid":"q3","attachment":{"type":"queued_command","prompt":[{"type":"text","text":"看图"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"!!!"}}]}}"#;
+        assert!(
+            matches!(&parse_chat_items(broken)[0], ChatItem::UserText { text, .. } if text == "看图")
+        );
+
+        let skill = r#"{"type":"attachment","uuid":"s1","attachment":{"type":"skill_listing","content":"..."}}"#;
+        assert!(parse_chat_items(skill).is_empty());
     }
 
     #[test]

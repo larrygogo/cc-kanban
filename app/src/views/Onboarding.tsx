@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useShowWhenReady } from "../useShowWhenReady";
-import { useT } from "../i18n";
+import { languageOptions, useT } from "../i18n";
 import { availableTerminals, type ResumeTerminal, type StickerStyle, type CardMenuMode, type ThemeMode } from "../api";
 import { Segmented } from "./settings/widgets";
 import { Dropdown } from "./menu";
@@ -272,11 +272,7 @@ function ConfigBody({ t }: { t: Dict }) {
         </div>
         <Dropdown
           value={language}
-          options={[
-            { value: "auto" as const, label: t.settings.langAuto },
-            { value: "zh" as const, label: "中文" },
-            { value: "en" as const, label: "English" },
-          ]}
+          options={languageOptions(t)}
           onChange={(v) => patch({ language: v })}
         />
       </div>

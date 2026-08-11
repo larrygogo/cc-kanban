@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { appConfirm } from "../confirm";
-import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, dismissInteractiveQuestion, agentModels, getChatHistory, getLiveSessionsPage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, pendingInteraction, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, resolvePendingApproval, savePastedAttachment, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
+import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, dismissInteractiveQuestion, agentModels, getChatHistory, getLiveSessionsPage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openProjectDir, pendingInteraction, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
 import { useT } from "../i18n";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { reduceChatEvents } from "../chat/reducer";
@@ -254,7 +254,7 @@ function ChatTitleMenu({ title, cwd, archived, archiving, starred, onToggleStar,
             <span className="dd-label">{starred ? t.sticker.unstar : t.sticker.star}</span>
           </button>
           {cwd && (
-            <button type="button" role="menuitem" className="dd-item" title={cwd} onClick={() => pick(() => void invoke("open_project_dir", { cwd }).catch(() => {}))}>
+            <button type="button" role="menuitem" className="dd-item" title={cwd} onClick={() => pick(() => void openProjectDir(cwd).catch(() => {}))}>
               <span className="chat-title-action-ico">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg>
               </span>
@@ -631,7 +631,7 @@ export function ChatWindow() {
     if (!history) return;
     // 与侧栏/看板同一条命令、同一套参数（cc_session_id 为键）。成功后标题由 650ms
     // 轮询自然刷新，rename_session 也会广播 board-changed 让侧栏跟上。
-    await invoke("rename_session", { cwd: history.cwd, sessionId: history.ccSessionId, title, provider: history.provider });
+    await renameSessionCmd(history.cwd, history.ccSessionId, title, history.provider);
   };
   const toggleArchived = async () => {
     if (!history || archiving) return;
@@ -641,7 +641,7 @@ export function ChatWindow() {
     // 失败回滚并报错——静默失败等于骗用户「已归档」。
     setHistory((current) => (current ? { ...current, archived: next } : current));
     try {
-      await invoke("set_archived", { sessionId, archived: next });
+      await setArchivedCmd(sessionId, next);
       // 归档 = 收纳:侧栏里它当场消失,右边却还停在它的对话上,等于「收起来了却还摊在桌上」。
       // 顺手切到列表里的下一条会话。取不到(它是唯一一条,或查询失败)就留在原地——
       // 空窗比自作主张关窗好,用户仍可继续读这段对话。
@@ -718,6 +718,13 @@ export function ChatWindow() {
   const [resumePermission, setResumePermission] = useState("");
   // 换会话即归零：改选是对「这一条会话的下一次恢复」说的，带给别的会话就是暗改人家权限。
   useEffect(() => setResumePermission(""), [sessionId]);
+  // 会话存的启动选项（新建/接管改选时后端落库）：有它就把「沿用原设置」亮成具体档位，
+  // 一句黑盒不如直接告诉用户沿用的是什么（实拍反馈）。换会话重取。
+  const [storedSelections, setStoredSelections] = useState<Record<string, string>>({});
+  useEffect(() => {
+    setStoredSelections({});
+    sessionLaunchSelections(sessionId).then(setStoredSelections);
+  }, [sessionId]);
   const [agentsForOptions, setAgentsForOptions] = useState<AgentDescriptor[] | null>(null);
   useEffect(() => {
     listAgents().then(setAgentsForOptions).catch(() => {});
@@ -730,19 +737,29 @@ export function ChatWindow() {
   const resumeOptions = resumePermission && permissionOption
     ? { [permissionOption.id]: resumePermission }
     : undefined;
+  // 会话存的权限档（在插件声明的 choices 里能对上号才算数——存了未知值不能拿去显示）。
+  const storedPermission = permissionOption
+    ? permissionOption.choices.find((choice) => choice.id === storedSelections[permissionOption.id]) ?? null
+    : null;
+  // 容器不挂 data-tip：提示气泡会盖在展开的下拉菜单上挡住选项（用户实拍两回）。
+  // 「选了会记住」的说明性文案价值低于被它糊住的菜单，整个去掉。
+  // 有存值时不再放「沿用原设置」占位项：直接预选存的那一档（沿用=选中它本身，不写覆盖），
+  // 用户一眼看到沿用的是什么；没存过原值只有 CLI 自己知道，才退回占位文案。
   const resumePermissionPicker = permissionOption ? (
-    <div className="chat-resume-permission" data-tip={t.chat.resumePermissionTip}>
+    <div className="chat-resume-permission">
       <Dropdown
         align="left"
-        value={resumePermission}
+        value={storedPermission ? (resumePermission || storedPermission.id) : resumePermission}
         options={[
-          { value: "", label: t.chat.resumeKeepOptions },
+          ...(storedPermission ? [] : [{ value: "", label: t.chat.resumeKeepOptions }]),
           ...permissionOption.choices.map((choice) => ({
             value: choice.id,
             label: t.newSession.launchChoice[`${permissionOption.id}.${choice.id}`] ?? choice.label,
           })),
         ]}
-        onChange={(value) => setResumePermission(String(value))}
+        onChange={(value) => setResumePermission(
+          storedPermission && String(value) === storedPermission.id ? "" : String(value),
+        )}
       />
     </div>
   ) : null;
@@ -1855,6 +1872,16 @@ export function ChatWindow() {
   // 选择器」(文字会过滤选项、回车会提交焦点项,见 sendPrompt 的软拦)。inert 属性经
   // ref 设置:React 18 的属性表还不认识 inert,JSX 直写过不了类型检查。
   const composerLocked = !!terminalAttention;
+  // 会话不可直接对话(外部终端占用/已结束)时,composer 让位给「先接管/先恢复」门卡:
+  // 输入框摆着也发不出去,placeholder 引导远不如把唯一可行的动作直接放在手边(用户反馈)。
+  // ptyManaged 用**严格 === false**:它是 DTO 必填字段,真实后端总有值;宁可在信号缺失时
+  // 退回旧路径(发送失败再给接管条),也不能把一个其实能对话的会话锁在门外。
+  // background 例外:它没有终端可接管,composer 是唯一出口(发送时后端另有拒绝话术)。
+  const composerGated = !!history && history.supported && !history.background
+    && history.ptyManaged === false && (externalRunning || history.status === "ended");
+  // 门卡上的「恢复会话」:只拉起托管终端(withSendGuard 里的 ensureWritableTerminal),
+  // 不发任何内容;成功后轮询把 ptyManaged 翻真,门卡自动让位给 composer。
+  const resumeForChat = () => void withSendGuard(async () => true);
   const composeRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const el = composeRef.current;
@@ -1997,7 +2024,7 @@ export function ChatWindow() {
   return (
     <div className={"chat-window" + (view === "terminal" ? " is-terminal" : "")}>
       {/* Windows/Linux：独立顶栏（拖拽区 + 标准 − □ × 控制组），会话标题分离到下方
-          .chat-bar 标题行。macOS 不渲染此行——红绿灯嵌在 64px 标题栏行内
+          .chat-bar 标题行。macOS 不渲染此行——红绿灯嵌在 52px 标题栏行内
           （unify_titlebar_toolbar 垂直居中），布局保持原样不动。 */}
       {!isMac() && (
         <header className="chat-topbar" data-tauri-drag-region>
@@ -2339,7 +2366,23 @@ export function ChatWindow() {
             在探测循环移交后停更,PTY 退出后悬死 true,这里会一直显示「正在读取终端」。 */}
         </> : <span>{history?.ptyManaged ? t.chat.approvalReadingTerminal : t.chat.approvalInTerminal}</span>}
       </ApprovalCard>}
-      {view === "chat" && <footer ref={composeRef} className={"chat-compose" + (composerLocked ? " is-locked" : "")}>
+      {view === "chat" && <footer ref={composeRef} className={"chat-compose" + (composerLocked ? " is-locked" : "") + (composerGated ? " is-gated" : "")}>
+        {composerGated ? <div className="chat-compose-gate">
+          <span>{externalRunning ? t.chat.sendNeedsTakeover : t.chat.composerGateEnded}</span>
+          {/* 恢复失败的原因就地可见（接管态的主文案已是同一句，不重复）。 */}
+          {sendError && sendError !== t.chat.sendNeedsTakeover && (
+            <span className="chat-compose-gate-error" role="alert">{sendError}</span>
+          )}
+          <div className="chat-compose-gate-actions">
+            {resumePermissionPicker}
+            <button
+              type="button"
+              className="chat-send-takeover"
+              disabled={sending}
+              onClick={() => { if (externalRunning) void takeoverAndRetry(() => {}); else resumeForChat(); }}
+            >{externalRunning ? t.chat.terminalTakeover : t.chat.resumeSession}</button>
+          </div>
+        </div> : <>
         {slashMatches.length > 0 && <div className="dd-menu chat-slash-menu" role="listbox" ref={slashMenuRef}>
           {slashMatches.map((command, index) => (
             <button type="button" key={command.name} role="option" aria-selected={index === slashActive} className="chat-slash-item"
@@ -2487,7 +2530,17 @@ export function ChatWindow() {
                     key={preset.id}
                     role="menuitem"
                     className={"chat-model-item" + (active ? " is-active" : "")}
-                    onClick={() => { setModelMenu(false); sendSlash(`/model ${preset.id}`); }}
+                    onClick={() => {
+                      setModelMenu(false);
+                      retryRef.current = () => sendSlash(`/model ${preset.id}`);
+                      // 模型是启动参数：切换成功即落库，resume/接管回放 --model。
+                      // 不落库的话每次重启都回默认档（1M 上下文档回落 200K，实拍反馈）。
+                      void sendText(`/model ${preset.id}`).then((sent) => {
+                        if (!sent) return;
+                        void setSessionLaunchSelection(sessionId, "model", preset.id);
+                        setStoredSelections((prev) => ({ ...prev, model: preset.id }));
+                      });
+                    }}
                   >
                     <span className="chat-model-item-text">
                       <span className="chat-model-item-name">{preset.label}</span>
@@ -2513,10 +2566,11 @@ export function ChatWindow() {
               // resumePermission，随下一次发送经 ensureWritableTerminal 作为启动参数下发并
               // 由后端持久化，与终端封面、接管横幅里的改选共用同一个状态。后台会话除外
               //（daemon 托管，我们恢复不了它）。
+              // 有存值时同 resumePermissionPicker：不放「沿用原设置」占位，直接预选存的那档。
               const resumeChoices = permissionOption && dimension === permissionOption.id
                 && history && !history.connected && !history.background
                 ? [
-                    { value: "", label: t.chat.resumeKeepOptions, inputs: [] },
+                    ...(storedPermission ? [] : [{ value: "", label: t.chat.resumeKeepOptions, inputs: [] }]),
                     ...permissionOption.choices.map((choice) => ({
                       value: choice.id,
                       label: t.newSession.launchChoice[`${permissionOption.id}.${choice.id}`] ?? choice.label,
@@ -2543,9 +2597,11 @@ export function ChatWindow() {
               // 按钮只显示当前值（「跳过权限检查」），维度名（「权限模式」）不再做前缀
               // ——它在 aria-label 与 tooltip 里，占位不解释（实拍反馈「多此一举」）。
               // 状态未知时退回维度名：孤零零一个「—」没人知道这颗按钮是干嘛的。
-              // 休眠态已做过恢复改选时显示所选档——下一次恢复时它才是将要生效的真相。
-              const value = resumePick && resumePermission && permissionOption
-                ? (t.newSession.launchChoice[`${permissionOption.id}.${resumePermission}`] ?? resumePermission)
+              // 休眠态显示「下一次恢复将生效的档」：用户改选 > 会话存的启动档 > transcript
+              // 回读的旧模式。存档比回读值更权威——恢复回放的就是它。
+              const nextResume = resumePermission || storedPermission?.id || "";
+              const value = resumePick && nextResume && permissionOption
+                ? (t.newSession.launchChoice[`${permissionOption.id}.${nextResume}`] ?? nextResume)
                 : state ? (t.chat.modeNames[state.value] ?? state.value) : label;
               return <div className="chat-model" key={dimension} ref={modeMenu === dimension ? modeMenuUi.ref : undefined} onKeyDown={modeMenu === dimension ? modeMenuUi.onKeyDown : undefined}>
                 <button
@@ -2577,7 +2633,10 @@ export function ChatWindow() {
                 </button>
                 {modeMenu === dimension && options.length > 0 && <div className="dd-menu chat-model-menu" role="menu">
                   {options.map((option) => {
-                    const active = resumePick ? (resumePermission || "") === option.value : state?.value === option.value;
+                    // 休眠态未改选时高亮存的那档（「沿用」的具象化）；没存值高亮空占位项。
+                    const active = resumePick
+                      ? (resumePermission || storedPermission?.id || "") === option.value
+                      : state?.value === option.value;
                     return <button
                       type="button"
                       key={option.value}
@@ -2586,7 +2645,13 @@ export function ChatWindow() {
                       onClick={() => {
                         setModeMenu(null);
                         // 恢复改选只落状态、不碰终端——生效点在下一次恢复的启动参数上。
-                        if (resumePick) { setResumePermission(String(option.value)); return; }
+                        // 选回存的那档 = 沿用（置空，不写覆盖）。
+                        if (resumePick) {
+                          setResumePermission(
+                            storedPermission && String(option.value) === storedPermission.id ? "" : String(option.value),
+                          );
+                          return;
+                        }
                         if (active) return; // 已经是这个模式，别白按一圈
                         // 有直达输入的走它；只有 cycle 键的（派生项 inputs 为空）循环按到位。
                         if (option.inputs.length > 0) {
@@ -2607,15 +2672,11 @@ export function ChatWindow() {
           {history?.contextPct != null && (
             <ContextMeter pct={history.contextPct} window={history.contextWindow} t={t} />
           )}
-          {/* 停止态留空:方块图标已经把「停」说清楚了,旁边再写两个字只是重复,而这一行
-              还挤着模型、权限模式、用量。文字说明去 tooltip 和 aria-label(圆钮上都有)。
-              元素本身不能省——它的 margin-left:auto 负责把圆钮顶到最右。
-              有草稿时挂上 Ctrl+Enter=打断并发送的说明:那个动作已从常驻按钮降成加速键
-              (见 textarea 的 onKeyDown),这里是它剩下的唯一去处。 */}
-          <span
-            className="chat-compose-hint"
-            data-tip={canInterrupt && hasDraft ? t.chat.interruptAndSendTip : undefined}
-          >{stopMode ? "" : "Enter ↵"}</span>
+          {/* 「Enter ↵」提示已按用户要求取消(占位提示里写着 Enter 发送,按钮旁再标一遍
+              是重复)。空元素本身不能省——它的 margin-left:auto 负责把圆钮顶到最右。
+              Ctrl+Enter=打断并发送的说明只剩 textarea 的 onKeyDown 行为本身,不再有
+              可见挂点(此前挂这里的 tooltip 随文字一起去掉:零宽元素 hover 不到)。 */}
+          <span className="chat-compose-hint" />
           {/* 主圆钮双身份:回合运行中且输入框是空的 → 它就是停止键(黑圆方块,一按停当前
               回合)。发出去的消息撤不回,能叫停的只有这个键,它不该藏在草稿或次级按钮后面。
               一旦开始打字,身份让回「发送」——那时用户要的是把话递进去,停回合走左边的
@@ -2656,6 +2717,7 @@ export function ChatWindow() {
           <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>
           <button type="button" className="chat-send-takeover" onClick={cancelTerminalMenu}>{t.chat.slashMenuDismiss}</button>
         </div>}
+        </>}
       </footer>}
       </div>
       </div>

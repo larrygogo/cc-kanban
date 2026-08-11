@@ -1,7 +1,7 @@
 // 设置窗口「账号」页：每个 provider 的安装 / 登录 / 用量三态卡片。
 // 从 About.tsx 抽出（体量最大、最内聚，且已被 About.account.test.tsx 单独覆盖）。
 import { useCallback, useEffect, useRef, useState } from "react";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import { appConfirm } from "../../confirm";
 import {
   installAgent,
   listAgents,
@@ -355,10 +355,10 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
   const inQuota = settings?.sticker_quota_providers?.includes(provider) ?? false;
 
   const startLogout = async () => {
-    const yes = await confirm(t.account.logoutConfirm(name), {
+    const yes = await appConfirm(t.account.logoutConfirm(name), {
       title: t.account.logout,
-      kind: "warning",
-    }).catch(() => false);
+      danger: true,
+    });
     if (!yes) return;
     setLogoutBusy(true);
     setLogoutMsg(null);
@@ -748,16 +748,16 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
   /**
    * 删除账号（连同它的目录）。**活跃账号也能删** —— 后端会把活跃标记落回默认账号。
    *
-   * 确认框走 `@tauri-apps/plugin-dialog` 的 `confirm`，**不是 `window.confirm`**：后者在 Tauri 的
-   * webview 里会被直接吞掉，返回值恒为 false ——按钮看着能点，点了却什么都不发生。
+   * 确认框走 `appConfirm`（应用主题原生小窗，全应用统一），**不是 `window.confirm`**：
+   * 后者在 Tauri 的 webview 里会被直接吞掉，返回值恒为 false。
    */
   const remove = async (p: ProfileView) => {
     if (!p.id) return; // 默认账号是 agent 自己的目录，删不得
     const label = p.name || p.id;
-    const yes = await confirm(t.account.deleteProfileConfirm(label), {
+    const yes = await appConfirm(t.account.deleteProfileConfirm(label), {
       title: t.account.deleteProfile,
-      kind: "warning",
-    }).catch(() => false);
+      danger: true,
+    });
     if (!yes) return;
     run(() => deleteProfile(provider, p.id!));
   };
@@ -766,15 +766,15 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
    * 合并进默认账号：会话与历史数据并入默认账号，账号本身从列表消失——与删除的根本区别是
    * **数据全留下**（删除是连目录一起抹掉）。有进行中的会话时后端会拒绝，错误就地显示。
    *
-   * 不可逆，故与删除同规：走 tauri 的 confirm，不写 window.confirm。
+   * 不可逆，故与删除同规：走 appConfirm 确认。
    */
   const merge = async (p: ProfileView) => {
     if (!p.id) return; // 默认账号没有「合并进自己」
     const label = p.name || p.id;
-    const yes = await confirm(t.account.mergeProfileConfirm(label), {
+    const yes = await appConfirm(t.account.mergeProfileConfirm(label), {
       title: t.account.mergeProfile,
-      kind: "warning",
-    }).catch(() => false);
+      danger: true,
+    });
     if (!yes) return;
     run(() => mergeProfileIntoDefault(provider, p.id!));
   };
@@ -787,10 +787,10 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
    */
   const logout = async (p: ProfileView) => {
     const label = p.name || t.account.defaultProfile;
-    const yes = await confirm(t.account.logoutConfirm(label), {
+    const yes = await appConfirm(t.account.logoutConfirm(label), {
       title: t.account.logout,
-      kind: "warning",
-    }).catch(() => false);
+      danger: true,
+    });
     if (!yes) return;
     run(() => logoutAgent(provider, p.id));
   };

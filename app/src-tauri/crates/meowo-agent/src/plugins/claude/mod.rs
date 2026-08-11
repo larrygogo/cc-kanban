@@ -342,6 +342,24 @@ impl AgentPlugin for Claude {
                         label: "Opus Plan",
                         args: &["--model", "opusplan"],
                     },
+                    // `[m1]` 是字面方括号（CLI 文档化的 1M 上下文别名形式）。订阅计划下
+                    // Fable/Opus 分 200K 与 1M 两档，裸别名落 200K 档——不提供这几个变体，
+                    // 用户在会话里切到 1M 后每次恢复都被回放的 --model 拽回 200K（实拍反馈）。
+                    LaunchChoice {
+                        id: "fable[1m]",
+                        label: "Fable 5 (1M)",
+                        args: &["--model", "fable[1m]"],
+                    },
+                    LaunchChoice {
+                        id: "opus[1m]",
+                        label: "Opus 5 (1M)",
+                        args: &["--model", "opus[1m]"],
+                    },
+                    LaunchChoice {
+                        id: "sonnet[1m]",
+                        label: "Sonnet 5 (1M)",
+                        args: &["--model", "sonnet[1m]"],
+                    },
                 ],
             },
             LaunchOption {
@@ -426,6 +444,19 @@ impl AgentPlugin for Claude {
             crate::ModelPreset {
                 id: "opusplan",
                 label: "Opus Plan",
+            },
+            // 1M 档同 launch_options 的注释：`/model fable[1m]` 内联切换有效。
+            crate::ModelPreset {
+                id: "fable[1m]",
+                label: "Fable 5 (1M)",
+            },
+            crate::ModelPreset {
+                id: "opus[1m]",
+                label: "Opus 5 (1M)",
+            },
+            crate::ModelPreset {
+                id: "sonnet[1m]",
+                label: "Sonnet 5 (1M)",
             },
         ]
     }

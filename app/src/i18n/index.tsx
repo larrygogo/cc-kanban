@@ -29,6 +29,15 @@ export function useT(): Dict {
   return useContext(I18nCtx);
 }
 
+/** 语言选择器的选项表（设置页与引导页共用一份）。「中文 / English」是语言自称，刻意不翻译。 */
+export function languageOptions(t: Dict): { value: "auto" | "zh" | "en"; label: string }[] {
+  return [
+    { value: "auto", label: t.settings.langAuto },
+    { value: "zh", label: "中文" },
+    { value: "en", label: "English" },
+  ];
+}
+
 /** 「修复连接」失败原因 → 本地化提示。reason=null 但仍失败（罕见边界）落到泛化文案。 */
 export function repairFailMessage(t: Dict, reason: RepairReason | null): string {
   switch (reason) {

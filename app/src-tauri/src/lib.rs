@@ -66,6 +66,7 @@ use session_query::{
     live_sessions_blocking, session_connected, tab_class, LiveContext, PageReq,
     SessionRuntimeIndex, RESUME_GRACE_MS,
 };
+use session_command::{session_launch_selections, set_session_launch_selection};
 use terminal::{
     focus_session, new_session, open_project_dir, restart_session_supported, resume_session,
     takeover_managed_terminal,
@@ -1045,6 +1046,8 @@ pub fn run() {
             snap_layout::set_caption_overlay_rects,
             start_managed_terminal,
             takeover_managed_terminal,
+            session_launch_selections,
+            set_session_launch_selection,
             managed_terminal_snapshot,
             managed_terminal_binding,
             write_managed_terminal,
@@ -2252,7 +2255,7 @@ mod hooks_check_tests {
     #[test]
     fn claude_hooks_status_three_way() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("cckb-claude-hooks-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("meowo-claude-hooks-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
         let status = |p: &std::path::Path| hooks_status_at(p, claude_spec(), "claude");
@@ -2290,7 +2293,7 @@ mod hooks_check_tests {
     #[test]
     fn corrupt_config_is_unknown_for_every_agent() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("cckb-corrupt-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("meowo-corrupt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for id in ["claude", "codex", "kimi"] {
             let spec = meowo_agent::by_id(id).unwrap().variants()[0].hooks;

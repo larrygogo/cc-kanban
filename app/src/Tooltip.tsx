@@ -37,7 +37,10 @@ export function TooltipLayer() {
       if (t.closest(".dd-menu")) return null;
       const el = t.closest<HTMLElement>("[data-tip]");
       if (!el || !el.getAttribute("data-tip")) return null;
-      if (el.querySelector(".dd-btn.open")) return null;
+      // 触发器自己开着弹层（aria-expanded 是所有弹出触发器的通用语义，不止 Dropdown 的
+      // .dd-btn.open——侧栏筛选钮就翻车过：菜单开着还弹「筛选与分组」盖在菜单上）。
+      if (el.getAttribute("aria-expanded") === "true") return null;
+      if (el.querySelector('.dd-btn.open, [aria-expanded="true"]')) return null;
       return el;
     };
     // 悬停（mouseover）与键盘聚焦（focusin）走同一套延时显示；focusin 会冒泡，document 上能收到。
@@ -53,7 +56,13 @@ export function TooltipLayer() {
       }, SHOW_DELAY);
     };
     const onOver = (e: MouseEvent) => show(e.target);
-    const onFocusIn = (e: FocusEvent) => show(e.target);
+    // 聚焦弹提示只服务键盘导航（input-modality 的 data-im="kbd"）。鼠标路径下的 focusin
+    // 多是**程序化 focus**——菜单收起时把焦点还给触发钮（useMenuPopup/SidebarFilterMenu
+    // 的 btnRef.focus()），若不区分，每次收起菜单都强制弹一次提示（用户实拍反馈）。
+    const onFocusIn = (e: FocusEvent) => {
+      if (document.documentElement.getAttribute("data-im") !== "kbd") return;
+      show(e.target);
+    };
     const maybeHide = (t: EventTarget | null, to: EventTarget | null) => {
       const el = tipEl(t);
       if (!el || el !== anchor.current) return;

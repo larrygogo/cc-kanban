@@ -28,6 +28,7 @@ import {
   type ProxySettings,
 } from "../../api";
 import { useT } from "../../i18n";
+import { useTauriEvent } from "../../hooks/useTauriEvent";
 import { useAgentListRefresh } from "../../useAgents";
 import { SETTINGS_DEFAULTS, useSettingsState } from "./state";
 import { Segmented, Switch } from "./widgets";
@@ -134,25 +135,9 @@ export function NetworkSection() {
   }, [settings, agents]);
 
   // 后端每次写完 agent 配置都会 emit，据此显示「你手设了 HTTPS_PROXY，我没覆盖」这类提示。
-  useEffect(() => {
-    let un: (() => void) | undefined;
-    let alive = true;
-    import("@tauri-apps/api/event")
-      .then(({ listen }) =>
-        listen<AgentReport[]>("proxy-applied", (e) => {
-          setReports(Object.fromEntries(e.payload.map((r) => [r.agent, r])));
-        }),
-      )
-      .then((f) => {
-        if (alive) un = f;
-        else f();
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-      un?.();
-    };
-  }, []);
+  useTauriEvent<AgentReport[]>("proxy-applied", (e) => {
+    setReports(Object.fromEntries(e.payload.map((r) => [r.agent, r])));
+  });
 
   const save = (next: ProxySettings) => {
     setErr(null);

@@ -2384,6 +2384,7 @@ dependencies = [
 name = "meowo-agent"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "meowo-protocol",
  "serde",
  "serde_json",

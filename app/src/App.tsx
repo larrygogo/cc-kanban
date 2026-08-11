@@ -11,19 +11,17 @@ import {
 
 } from "./api";
 import { Sticker } from "./views/Sticker";
-import type { Tab } from "./views/sticker/types";
+import { PIN_KEY, type Item, type Tab } from "./views/sticker/types";
 import { CollapsedStrip } from "./views/CollapsedStrip";
 import { useUpdate } from "./useUpdate";
 import { useShowWhenReady } from "./useShowWhenReady";
 import { isMacPanel } from "./platform";
 
-type Item = LiveSession & { connected: boolean };
 type Edge = "left" | "right" | "top";
 type Mode = "normal" | "collapsed" | "expanded";
 
 const SNAP_KEY = "meowo-snap-edge";
 const SIZE_KEY = "meowo-normal-size";
-const PIN_KEY = "meowo-pinned"; // 与 Sticker 的置顶偏好共用
 const TAB_KEY = "meowo-tab";
 const RELEASE_POLL_MS = 90; // 拖拽中轮询鼠标左键的间隔（检测真正松手）
 const PAGE_SIZE = 100; // 贴纸会话每页条数，与首屏一致

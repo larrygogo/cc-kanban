@@ -73,6 +73,17 @@ fn write_atomic_impl(
     Ok(())
 }
 
+/// 粘贴/插话附件共用的临时根目录（`$TEMP/meowo-paste`）。三个消费方必须指同一处：
+/// meowo-app `chat.rs` 的粘贴附件落盘、claude transcript 的排队插话图片落盘、
+/// `tauri.conf.json` 的 asset 协议 scope（前端据此渲染缩略图）。改路径三处一起改。
+pub fn paste_root() -> std::path::PathBuf {
+    std::env::temp_dir().join("meowo-paste")
+}
+
+/// 粘贴/插话附件的单文件上限。覆盖截图与常规文档；防的是超大 payload 把 base64 +
+/// IPC 序列化拖住、把临时目录写爆。粘贴附件与排队插话图片同额度（此前两处各写 32MB）。
+pub const PASTE_MAX_BYTES: usize = 32 * 1024 * 1024;
+
 pub fn write_atomic(path: &std::path::Path, body: &str) -> std::io::Result<()> {
     write_atomic_impl(
         path,

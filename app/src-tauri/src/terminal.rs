@@ -1439,6 +1439,31 @@ fn splice_stored_launch_args(
             let _ = store.set_session_launch_args(sid, &json);
         }
     }
+    // 用运行时观测校正存档的模型档：用户在**终端里**手动 /model 切换不经 GUI，存档
+    // 不知道——不校正的话，恢复回放的旧档会把那次切换覆盖掉（实拍：1M 档回落 200K）。
+    // 观测源是 statusline 上报的 session_context（display_name + 精确窗口大小），只做
+    // 保守推断，认不出就保持存档——见 [`corrected_model_choice`]。本次接管带显式覆盖
+    // 时用户刚亲手选过，观测不再插手。
+    if overrides.is_none_or(|o| !o.contains_key("model")) {
+        if let Some(stored) = selections.get("model").cloned() {
+            let observed = store
+                .session_header(sid)
+                .ok()
+                .and_then(|h| store.session_context(&h.cc_session_id).ok());
+            if let Some(ctx) = observed {
+                if let Some(next) =
+                    corrected_model_choice(&stored, ctx.model.as_deref(), ctx.window_size)
+                {
+                    if next != stored {
+                        selections.insert("model".into(), next);
+                        if let Ok(json) = serde_json::to_string(&selections) {
+                            let _ = store.set_session_launch_args(sid, &json);
+                        }
+                    }
+                }
+            }
+        }
+    }
     if selections.is_empty() {
         return;
     }
@@ -1453,6 +1478,40 @@ fn splice_stored_launch_args(
     for (offset, arg) in args.into_iter().enumerate() {
         resume.insert(insert_at + offset, arg);
     }
+}
+
+/// 由运行时观测（statusline 的模型显示名 + 精确上下文窗口）推断存档模型档应改成哪档。
+/// 返回 None = 证据不足，保持存档不动。规则刻意保守：
+/// - 存档 `opusplan` 不动（执行期在 Opus/Sonnet 间切换是它的正常形态，观测必然「不符」）；
+/// - 家族(fable/opus/sonnet/haiku)从 display_name 小写包含判断，认不出则沿用存档家族；
+/// - 窗口 ≥500K 视为 1M 档，加 `[1m]` 后缀（haiku 无 1M 变体，恒裸）；窗口缺失则沿用
+///   存档的后缀——绝不在证据缺位时改写用户的选择。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn corrected_model_choice(
+    stored: &str,
+    display_name: Option<&str>,
+    window_size: Option<i64>,
+) -> Option<String> {
+    if stored == "opusplan" || stored == "default" {
+        return None;
+    }
+    let family_of = |s: &str| {
+        let lower = s.to_lowercase();
+        ["fable", "opus", "sonnet", "haiku"]
+            .into_iter()
+            .find(|f| lower.contains(f))
+    };
+    let stored_family = family_of(stored)?;
+    let family = display_name.and_then(family_of).unwrap_or(stored_family);
+    let one_m = match window_size {
+        Some(w) => w >= 500_000,
+        None => stored.ends_with("[1m]"),
+    };
+    Some(if one_m && family != "haiku" {
+        format!("{family}[1m]")
+    } else {
+        family.to_string()
+    })
 }
 
 /// resume 的终端 spawn 失败时回滚乐观复活（收尾回 ended）：GUI 构建下 stderr 不可见，
@@ -2217,6 +2276,64 @@ pub(crate) async fn restart_session_supported(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 观测校正的推断规则：升 1M / 降 200K / 换家族都要对，证据不足与 opusplan 恒不动。
+#[cfg(test)]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod corrected_model_choice_tests {
+    use super::corrected_model_choice;
+
+    #[test]
+    fn upgrades_to_1m_when_observed_window_is_large() {
+        assert_eq!(
+            corrected_model_choice("fable", Some("Fable 5"), Some(1_000_000)).as_deref(),
+            Some("fable[1m]")
+        );
+    }
+
+    #[test]
+    fn downgrades_when_observed_window_is_standard() {
+        assert_eq!(
+            corrected_model_choice("fable[1m]", Some("Fable 5"), Some(200_000)).as_deref(),
+            Some("fable")
+        );
+    }
+
+    #[test]
+    fn switches_family_from_display_name() {
+        assert_eq!(
+            corrected_model_choice("opus", Some("Sonnet 5"), Some(1_000_000)).as_deref(),
+            Some("sonnet[1m]")
+        );
+    }
+
+    #[test]
+    fn keeps_stored_suffix_without_window_evidence() {
+        assert_eq!(
+            corrected_model_choice("fable[1m]", Some("Fable 5"), None).as_deref(),
+            Some("fable[1m]")
+        );
+        assert_eq!(
+            corrected_model_choice("fable", None, None).as_deref(),
+            Some("fable")
+        );
+    }
+
+    #[test]
+    fn haiku_never_gets_a_1m_variant() {
+        assert_eq!(
+            corrected_model_choice("haiku", Some("Haiku 4.5"), Some(1_000_000)).as_deref(),
+            Some("haiku")
+        );
+    }
+
+    #[test]
+    fn opusplan_and_unknown_choices_are_left_alone() {
+        assert_eq!(corrected_model_choice("opusplan", Some("Opus 5"), Some(1_000_000)), None);
+        assert_eq!(corrected_model_choice("default", Some("Opus 5"), Some(1_000_000)), None);
+        assert_eq!(corrected_model_choice("custom-x", Some("Opus 5"), Some(1_000_000)), None);
+    }
 }
 
 #[cfg(test)]

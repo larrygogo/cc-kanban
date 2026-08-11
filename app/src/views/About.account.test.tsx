@@ -30,8 +30,9 @@ const api = vi.hoisted(() => ({
   mergeProfileIntoDefault: vi.fn(),
 }));
 vi.mock("../api", async (o) => ({ ...(await o<typeof import("../api")>()), ...api }));
+// 确认框统一走 appConfirm（应用主题原生小窗）；沿用 dialog.confirm 变量名以保住既有断言。
 const dialog = vi.hoisted(() => ({ confirm: vi.fn() }));
-vi.mock("@tauri-apps/plugin-dialog", () => dialog);
+vi.mock("../confirm", () => ({ appConfirm: dialog.confirm }));
 
 // 收集所有 ProviderCard 注册的 install-done / login-done 回调，测试里手动广播
 // （模拟 Tauri emit 到全部监听者）。进度不透传英文、前端不订阅 install-progress，故只收集 done。
@@ -848,10 +849,10 @@ describe("AccountSection 账号的增删改", () => {
   /**
    * **正在使用的账号也必须删得掉**（后端会把活跃标记落回默认账号）。
    *
-   * 确认框走 `@tauri-apps/plugin-dialog` 的 `confirm`，**不是 `window.confirm`**——后者在 Tauri 的
+   * 确认框走 `appConfirm`，**不是 `window.confirm`**——后者在 Tauri 的
    * webview 里会被直接吞掉、恒返回 false：按钮看着能点，点了却什么都不发生。这正是它此前删不掉的原因。
    */
-  it("正在使用的账号也能删除，且走 tauri 的 confirm", async () => {
+  it("正在使用的账号也能删除，且走 appConfirm", async () => {
     twoProfiles();
     api.deleteProfile.mockResolvedValue(undefined);
     render(<AccountSection />);
@@ -927,7 +928,7 @@ describe("AccountSection 合并进默认账号", () => {
 
   /**
    * 合并是「数据已拆散」的自救出口：会话与历史并入默认账号，账号本身消失。不可逆，
-   * 故与删除同规——必须弹确认（tauri confirm，不是 window.confirm），确认框里写明不可逆。
+   * 故与删除同规——必须弹确认（appConfirm，不是 window.confirm），确认框里写明不可逆。
    */
   it("确认后调 mergeProfileIntoDefault，确认框写明不可逆", async () => {
     twoProfiles();

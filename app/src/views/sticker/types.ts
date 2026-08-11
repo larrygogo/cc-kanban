@@ -7,6 +7,9 @@ export type Tab = "all" | "waiting" | "running";
 
 export const PIN_KEY = "meowo-pinned";
 export const STAR_KEY = "meowo-starred";
+/** 后端写进 DB 的「未命名会话」占位标题（reporter 侧 sentinel 的镜像）。
+ *  这是数据值不是 i18n 文案：改名/排序/空态判断都要与它比对，勿翻译、勿换字。 */
+export const UNNAMED_SESSION_SENTINEL = "(未命名会话)";
 // 用量屏选中的 provider 偏好：折叠/展开会卸载重挂 UsageScreen，持久化以记住上次选择
 // （该 provider 仍在活跃列表就沿用，被关/找不到才退回第一个——见 UsageScreen selected 计算）。
 export const USAGE_KEY = "meowo-usage-provider";

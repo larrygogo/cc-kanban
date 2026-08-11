@@ -3,12 +3,12 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAgentListRefresh } from "../useAgents";
-import { availableTerminals, getLiveSessionsPage, listAgents, agentName, type AgentId, type AgentDescriptor, type LiveSession, type PageCursor, type ThemeMode, type ResumeTerminal, type TerminalOpenMode, type SessionOpenIn, type CardMenuMode, type StickerStyle, type TerminalLineHeight } from "../api";
+import { availableTerminals, getLiveSessionsPage, listAgents, agentName, setArchived, type AgentId, type AgentDescriptor, type LiveSession, type PageCursor, type ThemeMode, type ResumeTerminal, type TerminalOpenMode, type SessionOpenIn, type CardMenuMode, type StickerStyle, type TerminalLineHeight } from "../api";
 import { folderName } from "../paths";
 import { fmtAgo } from "./sticker/helpers";
 import { useUpdate, type UpdateStatus } from "../useUpdate";
 import { useShowWhenReady } from "../useShowWhenReady";
-import { useT } from "../i18n";
+import { languageOptions, useT } from "../i18n";
 import logoUrl from "../../src-tauri/icons/128x128.png";
 import type { Dict } from "../i18n/zh";
 import { SETTINGS_DEFAULTS, useSettingsState } from "./settings/state";
@@ -139,11 +139,7 @@ function GeneralSection() {
           </div>
           <Dropdown
             value={settings?.language ?? "auto"}
-            options={[
-              { value: "auto" as const, label: t.settings.langAuto },
-              { value: "zh" as const, label: "中文" },
-              { value: "en" as const, label: "English" },
-            ]}
+            options={languageOptions(t)}
             onChange={(v) => patch({ language: v })}
           />
         </div>
@@ -328,7 +324,7 @@ function ArchivedSessions() {
   const unarchive = (id: number) => {
     // 乐观移除；失败重取首页拉回（与看板同款语义）。看板经 board-changed 自行刷新。
     setItems((prev) => prev?.filter((s) => s.session.id !== id) ?? prev);
-    void invoke("set_archived", { sessionId: id, archived: false }).catch(() => loadPage(null));
+    void setArchived(id, false).catch(() => loadPage(null));
   };
   return (
     <>

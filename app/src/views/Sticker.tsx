@@ -17,15 +17,22 @@ import {
   confirmStopSession,
   getSettings,
   getAccounts,
+  openNewSessionWindow,
+  openProjectDir,
   refreshUsage,
+  renameSession,
+  setArchived,
+  setSessionNote,
   type CardMenuMode,
+  type FocusSessionResult,
   type ProviderUsage,
 } from "../api";
 import { isMacPanel } from "../platform";
+import { useTauriEvent } from "../hooks/useTauriEvent";
 import { agentAssets, tintStyle } from "../providers";
 import { useAgents } from "../useAgents";
 import { useT } from "../i18n";
-import { type Item, type Tab, TAB_KEYS, PIN_KEY } from "./sticker/types";
+import { type Item, type Tab, TAB_KEYS, PIN_KEY, UNNAMED_SESSION_SENTINEL } from "./sticker/types";
 import { editorKeyDown, fmtAgo, useStarred, match } from "./sticker/helpers";
 import {
   CheckIcon,
@@ -44,14 +51,6 @@ import { RunBadge } from "./sticker/RunBadge";
 import { CardContextMenu } from "./sticker/CardContextMenu";
 import { EmptyState } from "./sticker/EmptyState";
 import { UsageScreen } from "./sticker/UsageScreen";
-
-type FocusSessionResult =
-  | "focused"
-  | "host_focused"
-  | "alive_but_not_found"
-  | "permission_denied"
-  | "unsupported_terminal"
-  | "process_ended";
 
 type FocusNoticeKind = FocusSessionResult | "connecting" | "failed" | "background";
 
@@ -253,24 +252,7 @@ export function Sticker({
   };
 
   // 托盘「找回贴纸」：窗口居中/置顶由 App + 后端负责，这里把置顶按钮 UI 同步为已置顶。
-  useEffect(() => {
-    let cancelled = false;
-    let un: (() => void) | undefined;
-    try {
-      listen("recall-sticker", () => setPinned(true))
-        .then((f) => {
-          if (cancelled) f();
-          else un = f;
-        })
-        .catch(() => {});
-    } catch {
-      /* 非 Tauri 环境（测试/浏览器） */
-    }
-    return () => {
-      cancelled = true;
-      try { un?.(); } catch { /* noop */ }
-    };
-  }, []);
+  useTauriEvent("recall-sticker", () => setPinned(true));
 
   // 会话置顶：置顶的会话永远排到列表最前（跨重启保留）。与「置顶窗口(alwaysOnTop)」是两回事——
   // 那是窗口行为，图标也刻意分开（这里 TopIcon，窗口那边 PinIcon）。存储键沿用 meowo-starred。
@@ -290,7 +272,7 @@ export function Sticker({
     const title = draft.trim();
     if (title && title !== l.task_title) {
       // 失败不能静默：走 focusNotice 提示通道（detail 直接展示文案，4s 自动消失）。
-      invoke("rename_session", { cwd: l.cwd, sessionId: l.session.cc_session_id, title, provider: l.provider })
+      renameSession(l.cwd, l.session.cc_session_id, title, l.provider)
         .catch(() => setFocusNotice({ kind: "failed", item: l, detail: t.sticker.renameFailed }));
     }
     setEditingId(null);
@@ -323,7 +305,7 @@ export function Sticker({
   const submitNote = (l: Item, noteDraft: string) => {
     if (noteDraft !== (l.note ?? "")) {
       // 失败不能静默：与重命名共用 focusNotice 提示通道。
-      invoke("set_session_note", { sessionId: l.session.cc_session_id, note: noteDraft })
+      setSessionNote(l.session.cc_session_id, noteDraft)
         .catch(() => setFocusNotice({ kind: "failed", item: l, detail: t.sticker.noteFailed }));
     }
     setNotingId(null);
@@ -638,7 +620,7 @@ export function Sticker({
             // 搜索有词但 0 结果：独立空态，不带「新建会话」CTA，避免误导。
             <EmptyState tab={tab} search />
           ) : (
-            <EmptyState tab={tab} onNew={() => invoke("open_new_session_window").catch(() => {})} />
+            <EmptyState tab={tab} onNew={() => openNewSessionWindow().catch(() => {})} />
           )
         ) : (
           <div
@@ -647,7 +629,7 @@ export function Sticker({
           >
             {virtualItems.map((virtualItem) => {
               const l = shown[virtualItem.index];
-              const unnamed = !l.task_title || l.task_title === "(未命名会话)";
+              const unnamed = !l.task_title || l.task_title === UNNAMED_SESSION_SENTINEL;
               const title = unnamed ? t.sticker.waitingFirstInput : l.task_title;
               const agentIcon = agentAssets(l.provider); // 品牌图标（视觉资产，按 id 查表）
               const agentLabel = agentNameOf(l.provider); // 展示名（后端下发；未知 id 显示 id 本身）
@@ -739,7 +721,7 @@ export function Sticker({
                         <div className="stk-line1">
                           {editingId === l.session.id ? (
                             <EditBox
-                              initial={l.task_title && l.task_title !== "(未命名会话)" ? l.task_title : ""}
+                              initial={l.task_title && l.task_title !== UNNAMED_SESSION_SENTINEL ? l.task_title : ""}
                               placeholder={t.sticker.renamePlaceholder}
                               inputClass="stk-edit"
                               saveLabel={t.sticker.noteSave}
@@ -914,16 +896,13 @@ export function Sticker({
             const sessionId = ctxItem.session.id;
             // 先乐观通知父层摘掉卡片（点完菜单即刻消失，不等 IPC 往返），失败再回滚。
             onArchiveOptimistic?.(sessionId);
-            invoke("set_archived", { sessionId, archived: target }).catch(() => onArchiveFailed?.());
+            setArchived(sessionId, target).catch(() => onArchiveFailed?.());
           }}
           onNewSession={() =>
-            invoke("open_new_session_window", {
-              cwd: ctxItem.cwd,
-              provider: ctxItem.provider,
-            }).catch(() => {})
+            openNewSessionWindow({ cwd: ctxItem.cwd, provider: ctxItem.provider }).catch(() => {})
           }
           onOpenDir={
-            ctxItem.cwd ? () => invoke("open_project_dir", { cwd: ctxItem.cwd }).catch(() => {}) : null
+            ctxItem.cwd ? () => openProjectDir(ctxItem.cwd!).catch(() => {}) : null
           }
           onEndSession={
             // 仅本 GUI 托管的 PTY 能结束（与对话窗标题栏入口同门控）；确认+停止走共用的
@@ -1023,7 +1002,7 @@ export function Sticker({
                 data-tip={t.newSession.newButton}
                 aria-label={t.newSession.newButton}
                 data-testid="bar-new"
-                onClick={() => invoke("open_new_session_window").catch(() => {})}
+                onClick={() => openNewSessionWindow().catch(() => {})}
               >
                 <PlusIcon />
               </button>
