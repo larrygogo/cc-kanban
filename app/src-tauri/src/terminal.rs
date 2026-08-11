@@ -2009,6 +2009,15 @@ pub(crate) fn start_managed_resume_sized(
         emit_board_changed(&app, "resume-failed");
         return Err(error);
     }
+    // 托管 PTY 已接管：摘掉 bg 旁路条目。不摘的话快照分发仍能查到旁路的定格画面
+    // （endOffset 是大数），会顶掉新 PTY 从 0 起的输出——前端把新输出全判成「已写过」
+    // 丢弃，表现为恢复会话后终端打字无回显。try_state：测试环境没有 AppState 时跳过。
+    {
+        use tauri::Manager as _;
+        if let Some(state) = app.try_state::<crate::AppState>() {
+            state.bg_ptys.detach(sid);
+        }
+    }
     // 只有会跨账号迁移的 agent 需要把账号写回 DB——它的会话账号刚刚可能变了。
     // 其余 agent 的 target_profile 恒等于原账号，写回是纯粹的冗余 DB 写。
     if supports_cross_account_resume(Some(&provider)) {

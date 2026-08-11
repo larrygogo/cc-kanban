@@ -174,7 +174,14 @@ pub(crate) async fn managed_terminal_snapshot(
     let bg = state.bg_ptys.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let since = since.unwrap_or(0);
-        // 后台会话（claude FleetView）的画面走旁路 socket，不在托管 PTY 表里。它优先：
+        // 托管 PTY 在跑时它是唯一真相，绝不让 bg 旁路遮蔽：resume 后若还按旁路的定格
+        // 画面作答，它的大 endOffset 会把新 PTY 从 0 起的输出全变成「已写过」，前端
+        // 整段丢弃——恢复会话后终端打字无回显就是这么来的。resume 成功时旁路条目
+        // 已被 detach 摘除，这里的判定是并发窗口与残留条目的双保险。
+        if ptys.is_managed(session_id) {
+            return ptys.snapshot(session_id, since);
+        }
+        // 托管 PTY 不在：后台会话（claude FleetView）的画面走旁路 socket。它优先：
         // 接上了就说明用户正在这个窗口看它，托管表里那份必然是空壳。
         bg.snapshot(session_id, since)
             .unwrap_or_else(|| ptys.snapshot(session_id, since))

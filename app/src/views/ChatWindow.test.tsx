@@ -59,7 +59,7 @@ function respondWithHistory(history: unknown, approval: unknown = null) {
     }
     if (command === "pending_interaction") return Promise.resolve({ approval, question: null });
     if (command === "managed_terminal_binding") return Promise.resolve(null);
-    if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 1, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+    if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 1, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
     return Promise.resolve();
   });
 }
@@ -157,7 +157,7 @@ describe("ChatWindow", () => {
         ],
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 9, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 9, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "get_subagent_transcript") {
         expect(args).toEqual({ sessionId: 9, toolUseId: "toolu_1" });
@@ -213,7 +213,7 @@ describe("ChatWindow", () => {
           : [swarm],
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 17, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 17, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("kimi"));
       return Promise.resolve();
     });
@@ -251,7 +251,7 @@ describe("ChatWindow", () => {
       if (command === "managed_terminal_snapshot") {
         // 命令发出后，CLI 把菜单画到屏幕上。
         return Promise.resolve({
-          sessionId: 18, active: true,
+          sessionId: 18, active: true, managed: true,
           data: sentMenuCommand ? btoa(menu) : btoa("ready"),
           startOffset: 0, endOffset: sentMenuCommand ? 400 : 5, exited: false, exitCode: null,
         });
@@ -290,7 +290,7 @@ describe("ChatWindow", () => {
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 53, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 53, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       if (command === "save_pasted_attachment") {
         return Promise.resolve(`C:/tmp/meowo-paste/1-0/${(args as { fileName: string }).fileName}`);
       }
@@ -317,7 +317,7 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") {
-        return Promise.resolve({ sessionId: 52, active: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null });
+        return Promise.resolve({ sessionId: 52, active: true, managed: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null });
       }
       return Promise.resolve();
     });
@@ -347,7 +347,7 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("kimi"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
-        sessionId: 19, active: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null,
+        sessionId: 19, active: true, managed: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null,
       });
       return Promise.resolve();
     });
@@ -512,8 +512,8 @@ describe("ChatWindow", () => {
         // endOffset 是「已产生多少输出」的判据（data 现在是 base64 增量，可能为空）；
         // 就绪判定还要求 data 里有可见文本（纯控制序列不算）。
         return Promise.resolve(started
-          ? { sessionId: 13, active: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
-          : { sessionId: 13, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+          ? { sessionId: 13, active: true, managed: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
+          : { sessionId: 13, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
       return Promise.resolve();
     });
@@ -544,11 +544,11 @@ describe("ChatWindow", () => {
       if (command === "managed_terminal_snapshot") {
         return Promise.resolve(started
           ? {
-              sessionId: 14, active: true,
+              sessionId: 14, active: true, managed: true,
               data: btoa("\x1b[2JDo you trust the contents of this directory?\r\n> 1. Yes, continue\r\n  2. No, quit"),
               startOffset: 0, endOffset: 76, exited: false, exitCode: null,
             }
-          : { sessionId: 14, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+          : { sessionId: 14, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
       return Promise.resolve();
     });
@@ -590,7 +590,7 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") {
-        return Promise.resolve({ sessionId: 44, active: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length, exited: false, exitCode: null });
+        return Promise.resolve({ sessionId: 44, active: true, managed: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length, exited: false, exitCode: null });
       }
       return Promise.resolve(null);
     });
@@ -650,7 +650,7 @@ describe("ChatWindow", () => {
         ]));
       }
       if (command === "managed_terminal_snapshot") {
-        return Promise.resolve({ sessionId: 31, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+        return Promise.resolve({ sessionId: 31, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
       return Promise.resolve();
     });
@@ -689,7 +689,7 @@ describe("ChatWindow", () => {
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_snapshot") {
-        return Promise.resolve({ sessionId: 32, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+        return Promise.resolve({ sessionId: 32, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
       if (command === "agent_chat_ui") {
         uiCalls += 1;
@@ -733,7 +733,7 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") {
-        return Promise.resolve({ sessionId: 21, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+        return Promise.resolve({ sessionId: 21, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
       return Promise.resolve();
     });
@@ -800,7 +800,7 @@ describe("ChatWindow", () => {
       if (command === "get_chat_history") return Promise.resolve(history);
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_snapshot") {
-        return Promise.resolve({ sessionId: 41, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+        return Promise.resolve({ sessionId: 41, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
       if (command === "agent_chat_ui") return Promise.resolve({
         // 与 ChatUi 真实形状对齐(必填字段全给):此前缺 menu_slash_commands 等新字段,
@@ -865,7 +865,7 @@ describe("ChatWindow", () => {
       }
       if (command === "managed_terminal_snapshot") {
         const since = Math.min(Number((args as { since?: number } | undefined)?.since ?? 0), out.length);
-        return Promise.resolve({ sessionId: 51, active: true, data: btoa(out.slice(since)), startOffset: since, endOffset: out.length, exited: false, exitCode: null });
+        return Promise.resolve({ sessionId: 51, active: true, managed: true, data: btoa(out.slice(since)), startOffset: since, endOffset: out.length, exited: false, exitCode: null });
       }
       return Promise.resolve();
     });
@@ -896,7 +896,7 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "list_agents") return Promise.resolve(descriptors(["claude"]));
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 61, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 61, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       // 拉起在断言点之后立刻失败收场，免得 waitForTerminalReady 的就绪轮询在测试结束后游荡。
       if (command === "start_managed_terminal") return Promise.reject("测试桩：不真正拉起");
       return Promise.resolve();
@@ -933,7 +933,7 @@ describe("ChatWindow", () => {
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "list_agents") return Promise.resolve(descriptors(["claude"]));
       if (command === "session_launch_selections") return Promise.resolve({ permission: "bypassPermissions" });
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 62, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 62, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -1023,7 +1023,7 @@ describe("ChatWindow", () => {
       }
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 7, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 7, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       if (command === "get_live_sessions_page") {
         return Promise.resolve([
           { session: { id: 7, cc_session_id: "a", status: "running" }, project_name: "p", task_title: "会话 7", connected: true, pending_review: null, provider: "claude", cwd: "C:/a" },
@@ -1134,8 +1134,8 @@ describe("ChatWindow", () => {
       if (command === "managed_terminal_snapshot") {
         // 接管前没有托管 PTY；接管后有，且已画出可见内容。
         return Promise.resolve(takenOver
-          ? { sessionId: 15, active: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
-          : { sessionId: 15, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+          ? { sessionId: 15, active: true, managed: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
+          : { sessionId: 15, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
       // 进程是否真活着由后端按 pid 判定——前端不再靠 status 猜，而是让这次 start 被拒。
       if (command === "start_managed_terminal") return Promise.reject("会话仍在外部终端运行，不能重复接管");
@@ -1180,8 +1180,8 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_snapshot") {
         return Promise.resolve(takenOver
-          ? { sessionId: 19, active: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
-          : { sessionId: 19, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+          ? { sessionId: 19, active: true, managed: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
+          : { sessionId: 19, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
       if (command === "takeover_managed_terminal") { takenOver = true; return Promise.resolve(); }
       return Promise.resolve();
@@ -1209,8 +1209,8 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_snapshot") {
         return Promise.resolve(resumed
-          ? { sessionId: 20, active: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
-          : { sessionId: 20, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+          ? { sessionId: 20, active: true, managed: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
+          : { sessionId: 20, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
       if (command === "start_managed_terminal") { resumed = true; return Promise.resolve(); }
       return Promise.resolve();
@@ -1271,7 +1271,7 @@ describe("ChatWindow", () => {
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_snapshot") return Promise.resolve({
-        sessionId: 18, active: true, data: btoa("screen"), startOffset: 0, endOffset: 6,
+        sessionId: 18, active: true, managed: true, data: btoa("screen"), startOffset: 0, endOffset: 6,
         exited: false, exitCode: null,
       });
       return Promise.resolve();
@@ -1332,8 +1332,8 @@ describe("ChatWindow", () => {
       if (command === "start_managed_terminal") { started = true; return Promise.resolve(); }
       if (command === "managed_terminal_snapshot") {
         return Promise.resolve(started
-          ? { sessionId: 16, active: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
-          : { sessionId: 16, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+          ? { sessionId: 16, active: true, managed: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
+          : { sessionId: 16, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
       return Promise.resolve();
     });
@@ -1362,8 +1362,8 @@ describe("ChatWindow", () => {
       if (command === "managed_terminal_snapshot") {
         snapshotCalls += 1;
         return Promise.resolve(snapshotCalls === 1
-          ? { sessionId: 14, active: false, data: "", exited: false, exitCode: null }
-          : { sessionId: 14, active: false, data: "launch error", exited: true, exitCode: 1 });
+          ? { sessionId: 14, active: false, managed: false, data: "", exited: false, exitCode: null }
+          : { sessionId: 14, active: false, managed: false, data: "launch error", exited: true, exitCode: 1 });
       }
       return Promise.resolve();
     });
@@ -1396,7 +1396,7 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
-        sessionId: 45, active: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length,
+        sessionId: 45, active: true, managed: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length,
         exited: false, exitCode: null,
       });
       return Promise.resolve();
@@ -1435,7 +1435,7 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
-        sessionId: 49, active: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length,
+        sessionId: 49, active: true, managed: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length,
         exited: false, exitCode: null,
       });
       return Promise.resolve();
@@ -1481,7 +1481,7 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
-        sessionId: 46, active: true, data: btoa(unescape(encodeURIComponent(prompt))), startOffset: 0, endOffset: prompt.length,
+        sessionId: 46, active: true, managed: true, data: btoa(unescape(encodeURIComponent(prompt))), startOffset: 0, endOffset: prompt.length,
         exited: false, exitCode: null,
       });
       return Promise.resolve();
@@ -1518,7 +1518,7 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("kimi"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
-        sessionId: 47, active: true,
+        sessionId: 47, active: true, managed: true,
         // 面板含 ▶/↑/↓ 等非 Latin1 字符,btoa 不能直接吃 Unicode 字符串,先走 UTF-8 字节。
         data: btoa(String.fromCharCode(...new TextEncoder().encode(prompt))),
         startOffset: 0, endOffset: prompt.length, exited: false, exitCode: null,
@@ -1559,7 +1559,7 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
-        sessionId: 46, active: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length,
+        sessionId: 46, active: true, managed: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length,
         exited: false, exitCode: null,
       });
       return Promise.resolve();
@@ -1602,7 +1602,7 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "managed_terminal_snapshot") return Promise.resolve({
-        sessionId: 47, active: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length,
+        sessionId: 47, active: true, managed: true, data: btoa(prompt), startOffset: 0, endOffset: prompt.length,
         exited: false, exitCode: null,
       });
       return Promise.resolve();
@@ -1641,7 +1641,7 @@ describe("ChatWindow", () => {
       if (command === "confirm_dialog") return Promise.resolve(confirmAnswers.shift() ?? false);
       if (command === "managed_terminal_snapshot") return Promise.resolve({
         // 屏幕上是识别不出的提示形态(比如 codex 自家的选择器),没有任何卡片。
-        sessionId: 48, active: true, data: btoa("\x1b[2Jsome unrecognized picker"), startOffset: 0, endOffset: 28,
+        sessionId: 48, active: true, managed: true, data: btoa("\x1b[2Jsome unrecognized picker"), startOffset: 0, endOffset: 28,
         exited: false, exitCode: null,
       });
       return Promise.resolve();
@@ -1790,7 +1790,7 @@ describe("ChatWindow", () => {
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 12, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 12, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       if (command === "get_live_sessions_page") return Promise.resolve({
         items: [liveSession(12, "当前会话"), liveSession(13, "另一条会话")],
         next_cursor: null,
@@ -1830,7 +1830,7 @@ describe("ChatWindow", () => {
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 31, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 31, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -1988,7 +1988,7 @@ describe("ChatWindow", () => {
         ptyManaged: true,
       });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 33, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 33, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       if (command === "pending_interaction") return Promise.resolve({
         approval: null,
         question: {
@@ -2021,7 +2021,7 @@ describe("ChatWindow", () => {
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 32, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 32, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -2055,7 +2055,7 @@ describe("ChatWindow", () => {
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 21, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 21, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -2110,7 +2110,7 @@ describe("ChatWindow", () => {
       if (command === "managed_terminal_snapshot") {
         // ^V 之后屏幕出现 claude 的原生占位符;mock 无状态,重复返回同段增量无妨。
         const data = pasted ? btoa("> [Image #1]") : "";
-        return Promise.resolve({ sessionId: 22, active: true, data, startOffset: 0, endOffset: pasted ? 12 : 0, exited: false, exitCode: null });
+        return Promise.resolve({ sessionId: 22, active: true, managed: true, data, startOffset: 0, endOffset: pasted ? 12 : 0, exited: false, exitCode: null });
       }
       return Promise.resolve();
     });
@@ -2144,7 +2144,7 @@ describe("ChatWindow", () => {
       if (command === "managed_terminal_binding") return Promise.resolve(null);
       if (command === "save_pasted_attachment") return Promise.resolve("C:\\Temp\\meowo-paste\\2-0\\image.png");
       if (command === "clipboard_image_fingerprint") return Promise.resolve(fingerprint);
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 23, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 23, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -2176,7 +2176,7 @@ describe("ChatWindow", () => {
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "managed_terminal_binding") return Promise.resolve(null);
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 90, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 90, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -2222,7 +2222,7 @@ describe("ChatWindow", () => {
       if (command === "get_chat_history") return Promise.resolve(current);
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 93, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 93, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -2254,7 +2254,7 @@ describe("ChatWindow", () => {
       if (command === "get_chat_history") return Promise.resolve(current);
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 95, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 95, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -2291,7 +2291,7 @@ describe("ChatWindow", () => {
       if (command === "get_chat_history") return Promise.resolve(current);
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 97, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 97, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -2323,7 +2323,7 @@ describe("ChatWindow", () => {
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 94, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 94, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -2351,7 +2351,7 @@ describe("ChatWindow", () => {
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 96, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 96, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -2388,7 +2388,7 @@ describe("ChatWindow", () => {
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 97, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 97, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -2423,7 +2423,7 @@ describe("ChatWindow", () => {
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve({ ...chatUi("kimi")!, interrupt_input: null });
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 95, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 95, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);
@@ -2461,7 +2461,7 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
       if (command === "confirm_dialog") return Promise.resolve(confirmAnswers.shift() ?? false);
-      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 92, active: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 92, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
     });
     render(<ChatWindow />);

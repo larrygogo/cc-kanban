@@ -176,6 +176,10 @@ struct BgSession {
     output_end: AtomicU64,
     /// 连接已断或会话已退出。读线程置位后不再有新字节，快照据此翻成非活跃。
     closed: AtomicBool,
+    /// 旁路已被主动摘除（托管 PTY 接管）。读线程在下一次 read 返回后据此退出——
+    /// 阻塞中的 read 没法立刻唤醒（句柄不在手里，Windows 命名管道也没有跨平台 shutdown），
+    /// 但条目已出表，画面/输入判定都不再看它，线程多躺一会儿只是有界泄漏。
+    detached: AtomicBool,
     exit_code: Mutex<Option<u32>>,
 }
 
@@ -238,6 +242,7 @@ impl BgPtyRegistry {
             backlog: Mutex::new(VecDeque::new()),
             output_end: AtomicU64::new(0),
             closed: AtomicBool::new(false),
+            detached: AtomicBool::new(false),
             exit_code: Mutex::new(None),
         });
         // 登记要**持锁复核**一次：上面的 is_active 与这里之间有一整个 connect() 的窗口，
@@ -269,9 +274,28 @@ impl BgPtyRegistry {
             // start==end==0 的空快照——前端当成「重置了，重新对齐」，最后一屏画面和从
             // `{"t":"exit"}` 帧里解出来的退出码就此丢失，用户只看到终端突然变空白。
             // 条目留着由下一次 attach 顶掉（见 `attach` 开头的 is_active 判断）。
+            // 注意这个理由只适用于**自然断流**；托管 PTY 接管时必须走 detach 主动摘表，
+            // 否则这份定格画面和大偏移会永久遮蔽新 PTY 的快照与实时输出。
             worker.closed.store(true, Ordering::Release);
         });
         Ok(())
+    }
+
+    /// 摘除一条旁路：托管 PTY 接管该会话时调用。**必须摘表**——resume 起了托管 PTY 后，
+    /// 快照分发如果还能查到 bg 条目，就会拿旁路的定格画面（endOffset 是几十 KB 的大数）
+    /// 顶掉新 PTY 从 0 起的输出，前端把新输出全判成「已写过」丢弃，表现为恢复会话后
+    /// 终端打字无回显。摘表后 snapshot/is_active 立即落空，画面与输入判定都回到托管 PTY。
+    /// 未接入时为 no-op；将来会话真回到后台形态可重新 attach（幂等门不受影响）。
+    pub(crate) fn detach(&self, session_id: i64) {
+        let removed = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&session_id);
+        if let Some(session) = removed {
+            session.detached.store(true, Ordering::Release);
+            session.closed.store(true, Ordering::Release);
+        }
     }
 
     pub(crate) fn is_active(&self, session_id: i64) -> bool {
@@ -316,6 +340,8 @@ impl BgPtyRegistry {
         Some(crate::pty::PtySnapshot {
             session_id,
             active: !closed,
+            // 旁路只是旁观:画面在、输入不通,前端不得据 active 判「终端可写」。
+            managed: false,
             data: base64::engine::general_purpose::STANDARD.encode(data),
             start_offset: start + skip as u64,
             end_offset: end,
@@ -428,6 +454,10 @@ fn read_loop(mut reader: Box<dyn Read + Send>, session: &BgSession, auth: Option
             Ok(0) | Err(_) => return, // EOF / 管道断
             Ok(n) => n,
         };
+        // 旁路被主动摘除（detach）：不再喂任何字节，安静退出。
+        if session.detached.load(Ordering::Acquire) {
+            return;
+        }
         let Ok(frames) = decoder.push(&buf[..read]) else {
             return; // 流已不可信，断开好过把噪音当帧
         };
@@ -485,6 +515,38 @@ fn append(session: &BgSession, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 测试用旁路条目：不连真 socket（writer 是空缓冲），只为验证表状态机。
+    fn dummy_bg_session() -> Arc<BgSession> {
+        Arc::new(BgSession {
+            sock: "test".into(),
+            writer: Mutex::new(Box::new(Vec::new())),
+            backlog: Mutex::new(VecDeque::new()),
+            output_end: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+            detached: AtomicBool::new(false),
+            exit_code: Mutex::new(None),
+        })
+    }
+
+    /// detach 必须摘表：托管 PTY 接管后,旁路的定格画面/大偏移不得再遮蔽快照与输入判定。
+    #[test]
+    fn detach_removes_the_entry_and_flags_the_reader() {
+        let registry = BgPtyRegistry::default();
+        let session = dummy_bg_session();
+        registry
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(7, session.clone());
+        assert!(registry.is_active(7));
+        registry.detach(7);
+        assert!(!registry.is_active(7), "摘表后不再活跃");
+        assert!(registry.snapshot(7, 0).is_none(), "快照落空,分发回落托管 PTY");
+        assert!(session.detached.load(Ordering::Acquire), "读线程收到退出旗标");
+        // 未接入的 id:no-op 不 panic。
+        registry.detach(999);
+    }
 
     #[test]
     fn frames_survive_a_round_trip() {

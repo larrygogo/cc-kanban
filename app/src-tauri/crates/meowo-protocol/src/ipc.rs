@@ -276,6 +276,10 @@ pub struct ManagedTerminalSnapshotDto {
     #[cfg_attr(test, ts(type = "number"))]
     pub session_id: i64,
     pub active: bool,
+    /// 画面来源是本 GUI 托管的 PTY（而非后台会话旁路）。前端拿它判「终端可写」：
+    /// 旁路快照的 active 只代表旁观连接活着，不代表能输入——曾拿 active 当判据，
+    /// 恢复会话被旁路活性短路，托管 PTY 根本没起。
+    pub managed: bool,
     pub data: String,
     #[cfg_attr(test, ts(type = "number"))]
     pub start_offset: u64,
@@ -308,6 +312,7 @@ mod tests {
         let value = serde_json::to_value(ManagedTerminalSnapshotDto {
             session_id: 7,
             active: true,
+            managed: true,
             data: "QUJD".into(),
             start_offset: 10,
             end_offset: 13,

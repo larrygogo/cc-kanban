@@ -54,7 +54,7 @@ const confirmAnswer = vi.hoisted(() => ({ ok: true }));
 
 import { findFakeCaret, ManagedTerminal, stripTerminalReplies } from "./ManagedTerminal";
 
-const noPty = { sessionId: 163, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null };
+const noPty = { sessionId: 163, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null };
 
 describe("ManagedTerminal", () => {
   afterEach(cleanup);

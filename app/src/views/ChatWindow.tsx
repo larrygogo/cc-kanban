@@ -580,12 +580,12 @@ export function ChatWindow() {
     if (history.background && !hasAnything) setView("terminal");
   }, [history]);
   // 后台会话(Agent 自己托管的,见 LiveSession.background):画面不在托管 PTY 表里,要先接上
-  // 那条旁路 socket,终端页才有东西可看。只接一次;接失败(worker 已退出/花名册没它了)就
-  // 让终端页维持空画面——它本来就不是我们能拉起的进程,没有可重试的动作。
-  const bgAttached = useRef(false);
+  // 那条旁路 socket,终端页才有东西可看。background 每次翻真都接(后端 attach 幂等,活着
+  // 就直接返回)——不能用一次性门闩:resume 接管会 detach 摘掉旁路,若会话之后又回到后台
+  // 形态,门闩会让画面永久断供。接失败(worker 已退出/花名册没它了)就让终端页维持空画面
+  // ——它本来就不是我们能拉起的进程,没有可重试的动作。
   useEffect(() => {
-    if (!history?.background || bgAttached.current) return;
-    bgAttached.current = true;
+    if (!history?.background) return;
     attachBackgroundSession(sessionId).catch(() => {});
   }, [history?.background, sessionId]);
   // 窗口标题随会话与状态更新:任务栏/Alt-Tab 上也能看出 agent 在跑还是在等。
@@ -956,10 +956,9 @@ export function ChatWindow() {
     // （xterm 创建 + 两个 listen + 一次全量 backlog 拉取）。终端模式下 view 仍是 terminal，
     // 常驻照旧生效，不影响「切会话保持终端模式」。
     terminalEverShownRef.current = viewRef.current === "terminal";
-    // 这两个是「每个会话判一次」的一次性闸门，换会话必须重开：不重置的话，从一个后台
-    // 会话切到另一个，第二个的画面永远接不上（attach 只跑过一次），落页判断也只对本窗口
-    // 加载的第一个会话生效过。
-    bgAttached.current = false;
+    // 「每个会话判一次」的一次性闸门，换会话必须重开：不重置的话落页判断只对本窗口
+    // 加载的第一个会话生效过。（后台旁路的 attach 已无门闩——background 翻真即接,
+    // 幂等由后端保证,无需在这里重置。）
     autoTerminalRef.current = false;
     offsetRef.current = 0;
     activeSessionRef.current = id;
@@ -1426,7 +1425,9 @@ export function ChatWindow() {
   /// 这时给出就地接管入口，而不是一句「请自己切到终端页」的死路。
   async function ensureWritableTerminal(): Promise<boolean> {
     const snapshot = await managedTerminalSnapshot(sessionId);
-    if (snapshot.active) return true;
+    // 必须同时 managed:后台会话旁路的快照 active 只代表旁观连接活着,不代表能输入。
+    // 曾只看 active,恢复会话被旁路活性短路——托管 PTY 根本没起,之后终端打字全无回显。
+    if (snapshot.active && snapshot.managed) return true;
     // capability 查询通常已随 history 完成；用户极快发送时就在这里补等一次，不能因为
     // React 状态尚未落下而漏掉 provider 声明的信任/登录提示。
     const ui = chatUi ?? (provider ? await agentChatUi(provider, cwd, sessionId).catch(() => null) : null);

@@ -1418,6 +1418,9 @@ impl PtyBroker {
         PtySnapshot {
             session_id,
             active: session.is_some(),
+            // 本 GUI 托管的 PTY:活着才算「托管中」。已退出的定格快照不许再让前端把它
+            // 当可写终端(恢复流程按 managed 判断要不要真正拉起新进程)。
+            managed: session.is_some(),
             data: base64::engine::general_purpose::STANDARD.encode(data),
             start_offset,
             end_offset,

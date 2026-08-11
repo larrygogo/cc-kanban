@@ -196,11 +196,15 @@ fn load_chat_history(
         has_more: false,
         errored: false,
         pty_managed: live.pty_live,
-        background: super::session_query::is_background(
-            &live.runtimes,
-            &header.provider,
-            &header.cc_session_id,
-        ),
+        // 托管 PTY 在跑的会话绝不算后台：resume 后 claude 的新旧运行时索引会短暂并存
+        // （旧 bg worker 还在刷新时间戳），此时误判为后台会让前端吞掉终端按键并把用户
+        // 强制切回对话页。本 GUI 自己 spawn 的 PTY 是最强的「交互态」证据。
+        background: !live.pty_live
+            && super::session_query::is_background(
+                &live.runtimes,
+                &header.provider,
+                &header.cc_session_id,
+            ),
         archived: header.archived,
         last_user_text: header.last_user_text.clone(),
         last_ai_text: header.last_ai_text.clone(),
