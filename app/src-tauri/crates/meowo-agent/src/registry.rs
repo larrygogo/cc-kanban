@@ -475,6 +475,12 @@ pub fn all() -> &'static [&'static dyn AgentPlugin] {
 pub const DEFAULT_ID: AgentId = crate::id::CLAUDE;
 
 /// 按身份串取插件（`"claude"` / `"kimi"` / `"codex"`，与 DB / 前端 provider key 同值）。
+///
+/// 与 [`resolve`] 的分工：**前端/设置来的精确 id 用本函数**——未知即应失败，不该有默认；
+/// **任何可能来自 DB 的 provider 值一律走 [`resolve`]**。store 的读取路径虽已把 NULL/空串
+/// 回退成默认 provider（`session_header` / `session_provider` / `get_live_sessions` 三处，
+/// 有测试钉住），但新增读取路径未必记得补这层——`resolve` 在其上再兜一层，语义也更诚实：
+/// 「空 = 老会话没写过 provider 列」是 resolve 的知识，不该指望每个调用点自己知道。
 pub fn by_id(id: &str) -> Option<&'static dyn AgentPlugin> {
     ALL.iter().copied().find(|p| p.id().as_str() == id)
 }

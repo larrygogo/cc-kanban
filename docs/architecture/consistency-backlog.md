@@ -9,7 +9,7 @@
 
 | # | 问题 | 位置 | 建议 | 状态 |
 |---|---|---|---|---|
-| P0-1 | `by_id()` 与 `resolve()` 混用：`resolve(Some(""))`→默认 claude，`by_id("")`→None，**老会话 provider 为空串时两条路径行为分叉**。文档称 resolve 是唯一入口，但约一半调用点走 by_id | 用 by_id：`chat.rs`、`session_query.rs`、`account/`、`profile/`、`relay.rs`、`setup/`；用 resolve：`lib.rs`、`terminal.rs`、`detect.rs`、`watch.rs` 等 | 明确两者语义分工并写进 registry.rs 文档：DB 读出的 provider 一律 `resolve`；仅当"未知即应失败"才 `by_id`。逐点核对空串路径 | 待修 |
+| P0-1 | `by_id()` 与 `resolve()` 混用，疑似空 provider 行为分叉 | `chat.rs`、`session_query.rs` 等 | **核实后降级**：store 已在全部读取路径把 NULL/空串归一化为 DEFAULT_PROVIDER（`store.rs:905,1073`、`query.rs:462`，测试 `store.rs:1325` 钉住），分叉在实践中被挡住，非活 bug。分工已写进 `registry.rs::by_id` 文档：前端/设置精确 id 用 by_id，可能来自 DB 的值一律 resolve | 已修（文档化） |
 | P0-2 | 确认对话框两套：删除账号（最危险操作）走系统 MessageBox，结束会话走应用主题小窗 `appConfirm`；两处注释互相矛盾 | `AccountSection.tsx:358,757,774,790` vs `confirm.tsx` | 统一到 `appConfirm`，删 plugin-dialog 用法 | 修复中 |
 | P0-3 | 首帧占位与真实默认不一致：`menuMode` 首帧 `"context"` 真默认 `"button"`（会闪一次）；`api.ts` 文档写 `session_open_in` 默认 chat，后端实为 terminal（有测试钉住） | `Sticker.tsx:181`、`ChatSidebar.tsx:499`、`api.ts:551-555` vs `settings.rs:37` | 占位改成真默认；订正 api.ts 注释 | 修复中（注释） |
 | P0-4 | README/官网对 opencode 接线说法冲突：官网 DocsContent 称 opencode 走原生 hook，实际是 `~/.config/opencode/plugin/` 桥接插件（README 与代码一致） | `site/components/pages/DocsContent.tsx:126(zh)/:80(en)` | 订正官网文案 | 待修 |
