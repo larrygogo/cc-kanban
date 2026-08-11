@@ -2507,6 +2507,24 @@ export function ChatWindow() {
             return dimensions.map((dimension) => {
               const control = controls.get(dimension);
               const state = states.find((mode) => mode.dimension === dimension);
+              // 休眠态（connected=false，进程不在）的权限维度换一套语义：此时切「活进程的
+              // 模式」意味着先把会话拉起来再循环按键，而且循环够不着 bypassPermissions 这类
+              // 只能在启动参数里给的档位。故这颗胶囊改卖「下一次恢复用什么权限」——选择写进
+              // resumePermission，随下一次发送经 ensureWritableTerminal 作为启动参数下发并
+              // 由后端持久化，与终端封面、接管横幅里的改选共用同一个状态。后台会话除外
+              //（daemon 托管，我们恢复不了它）。
+              const resumeChoices = permissionOption && dimension === permissionOption.id
+                && history && !history.connected && !history.background
+                ? [
+                    { value: "", label: t.chat.resumeKeepOptions, inputs: [] },
+                    ...permissionOption.choices.map((choice) => ({
+                      value: choice.id,
+                      label: t.newSession.launchChoice[`${permissionOption.id}.${choice.id}`] ?? choice.label,
+                      inputs: [],
+                    })),
+                  ]
+                : null;
+              const resumePick = resumeChoices !== null;
               // 只有 cycle 键的维度（claude 权限模式）用**屏幕回显标记**派生下拉：那些标记
               // 是 provider 文档承诺的稳定文本，每条对应一个可达模式值——用户要选的是模式，
               // 不是按几次快捷键。选中后由 cycleToMode 循环按到位（见它的注释）。
@@ -2515,14 +2533,20 @@ export function ChatWindow() {
                 label: t.chat.modeNames[marker.value] ?? marker.value,
                 inputs: [],
               }));
-              const options = control?.options?.length ? control.options : control?.cycle_input ? derived : [];
+              // 三个来源（恢复档位/插件直达项/回显标记派生）统一带 label，渲染处不再各自查表。
+              const options = resumeChoices ?? (control?.options?.length
+                ? control.options.map((option) => ({ ...option, label: t.chat.modeNames[option.value] ?? option.value }))
+                : control?.cycle_input ? derived : []);
               const canCycle = Boolean(control?.cycle_input);
               const interactive = options.length > 0 || canCycle;
               const label = t.chat.modeDimensions[dimension] ?? dimension;
               // 按钮只显示当前值（「跳过权限检查」），维度名（「权限模式」）不再做前缀
               // ——它在 aria-label 与 tooltip 里，占位不解释（实拍反馈「多此一举」）。
               // 状态未知时退回维度名：孤零零一个「—」没人知道这颗按钮是干嘛的。
-              const value = state ? (t.chat.modeNames[state.value] ?? state.value) : label;
+              // 休眠态已做过恢复改选时显示所选档——下一次恢复时它才是将要生效的真相。
+              const value = resumePick && resumePermission && permissionOption
+                ? (t.newSession.launchChoice[`${permissionOption.id}.${resumePermission}`] ?? resumePermission)
+                : state ? (t.chat.modeNames[state.value] ?? state.value) : label;
               return <div className="chat-model" key={dimension} ref={modeMenu === dimension ? modeMenuUi.ref : undefined} onKeyDown={modeMenu === dimension ? modeMenuUi.onKeyDown : undefined}>
                 <button
                   ref={modeMenu === dimension ? modeMenuUi.btnRef : undefined}
@@ -2535,7 +2559,8 @@ export function ChatWindow() {
                   aria-expanded={options.length > 0 ? modeMenu === dimension : undefined}
                   // 两种交互要分开说：有 options 是「打开菜单挑一个」，只有 cycle_input 的
                   // （codex 的协作模式）是「按一次跳下一个」，没有直达某个值的办法。
-                  data-tip={interactive ? (options.length > 0 ? t.chat.switchMode : t.chat.cycleMode) : undefined}
+                  // 休眠态的恢复改选另有一套说明（选了会记住，之后的恢复自动沿用）。
+                  data-tip={resumePick ? t.chat.resumePermissionTip : interactive ? (options.length > 0 ? t.chat.switchMode : t.chat.cycleMode) : undefined}
                   onClick={() => {
                     // 与模型菜单互斥：同时只开一个。
                     if (options.length > 0) { setModelMenu(false); setModeMenu((open) => open === dimension ? null : dimension); }
@@ -2552,7 +2577,7 @@ export function ChatWindow() {
                 </button>
                 {modeMenu === dimension && options.length > 0 && <div className="dd-menu chat-model-menu" role="menu">
                   {options.map((option) => {
-                    const active = state?.value === option.value;
+                    const active = resumePick ? (resumePermission || "") === option.value : state?.value === option.value;
                     return <button
                       type="button"
                       key={option.value}
@@ -2560,6 +2585,8 @@ export function ChatWindow() {
                       className={"chat-model-item" + (active ? " is-active" : "")}
                       onClick={() => {
                         setModeMenu(null);
+                        // 恢复改选只落状态、不碰终端——生效点在下一次恢复的启动参数上。
+                        if (resumePick) { setResumePermission(String(option.value)); return; }
                         if (active) return; // 已经是这个模式，别白按一圈
                         // 有直达输入的走它；只有 cycle 键的（派生项 inputs 为空）循环按到位。
                         if (option.inputs.length > 0) {
@@ -2569,7 +2596,7 @@ export function ChatWindow() {
                         }
                       }}
                     >
-                      <span className="chat-model-item-name">{t.chat.modeNames[option.value] ?? option.value}</span>
+                      <span className="chat-model-item-name">{option.label}</span>
                       {active && <svg className="chat-model-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"><path d="M4.5 12.5l5 5 10-11" /></svg>}
                     </button>;
                   })}

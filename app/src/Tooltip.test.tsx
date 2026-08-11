@@ -55,6 +55,37 @@ describe("TooltipLayer", () => {
     }
   });
 
+  it("下拉菜单展开期间不弹提示（悬停菜单项或容器都静默）", () => {
+    // 回归：菜单(.dd-menu)是 data-tip 容器的 DOM 子孙，悬停菜单项曾命中容器的提示，
+    // 且提示定位在容器下缘——正糊在展开的菜单顶上（终端封面的权限下拉）。
+    vi.useFakeTimers();
+    try {
+      render(
+        <>
+          <div data-tip="本次恢复使用的权限模式">
+            <div className="dd">
+              <button className="dd-btn open">trigger</button>
+              <div className="dd-menu">
+                <button className="dd-item">默认</button>
+              </div>
+            </div>
+          </div>
+          <TooltipLayer />
+        </>,
+      );
+      // 悬停展开菜单里的选项：静默
+      fireEvent.mouseOver(screen.getByText("默认"));
+      act(() => void vi.advanceTimersByTime(500));
+      expect(screen.queryByRole("tooltip")).toBeNull();
+      // 悬停触发按钮（菜单仍开着）：同样静默——提示会盖住菜单顶部
+      fireEvent.mouseOver(screen.getByText("trigger"));
+      act(() => void vi.advanceTimersByTime(500));
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("无 data-tip 的元素不弹提示", () => {
     vi.useFakeTimers();
     try {

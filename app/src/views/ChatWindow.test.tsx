@@ -38,7 +38,7 @@ vi.mock("./ManagedTerminal", async () => {
 
 import { ChatWindow } from "./ChatWindow";
 import { zh } from "../i18n/zh";
-import { chatUi } from "../test/agents";
+import { chatUi, descriptors } from "../test/agents";
 import { terminalAttention } from "../terminalAttention";
 
 function respondWithHistory(history: unknown, approval: unknown = null) {
@@ -879,6 +879,43 @@ describe("ChatWindow", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 51, data: "\u001b[Z" }));
     // transcript 静默，但屏幕是 CLI 自己画的权威状态——标签应据它回显为「计划」。
     expect(await screen.findByText("计划")).toBeTruthy();
+  });
+
+  it("休眠会话的权限胶囊改卖「下一次恢复的权限」：选择只落启动参数，不碰终端", async () => {
+    // connected=false 时切「活进程的模式」是空谈——进程都不在了，循环按键还得先拉起会话，
+    // 且循环够不着 bypassPermissions 这类启动期档位。此时胶囊菜单换成启动档位（launch_options），
+    // 选择记入 resumePermission，随下一次发送作为 start_managed_terminal 的 options 下发。
+    window.history.replaceState({}, "", "/?sessionId=61");
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 61, title: "休眠会话", status: "ended", provider: "claude", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, model: null, connected: false,
+        agentModes: [{ dimension: "permission", value: "default" }],
+        contextPct: null, contextWindow: null, currentActivity: null, hasMore: false, items: [],
+      });
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
+      if (command === "list_agents") return Promise.resolve(descriptors(["claude"]));
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 61, active: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      // 拉起在断言点之后立刻失败收场，免得 waitForTerminalReady 的就绪轮询在测试结束后游荡。
+      if (command === "start_managed_terminal") return Promise.reject("测试桩：不真正拉起");
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    fireEvent.click(await screen.findByRole("button", { name: "切换模式: 权限模式" }));
+    // 菜单是启动档位（含「沿用原设置」与循环够不着的 bypassPermissions）；等 list_agents
+    // 就位后条目才换装——findByRole 的重试恰好吸收这次异步。
+    await screen.findByRole("menuitem", { name: "权限：沿用原设置" });
+    fireEvent.click(screen.getByRole("menuitem", { name: "跳过权限确认" }));
+    // 选择只落状态：不向终端写任何字节（不发 cycle 键、不发命令）。
+    expect(invoke.mock.calls.some(([command]) => command === "write_managed_terminal")).toBe(false);
+    // 胶囊显示所选档（启动档位词「跳过权限确认」，非运行时模式词「跳过权限检查」）。
+    expect(await screen.findByText("跳过权限确认")).toBeTruthy();
+    // 下一次发送把它作为启动选项带给 start_managed_terminal。
+    const input = screen.getByRole("textbox", { name: "发送消息给 Agent" });
+    fireEvent.change(input, { target: { value: "继续" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("start_managed_terminal", { sessionId: 61, cols: 100, rows: 30, options: { permission: "bypassPermissions" } }));
   });
 
   it("offers to load earlier messages when the first read was truncated", async () => {

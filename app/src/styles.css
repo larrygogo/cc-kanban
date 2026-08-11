@@ -3979,6 +3979,10 @@ select.ns-input {
 .managed-terminal-cover-actions > button { padding: var(--sp-8) var(--sp-14); border: 1px solid rgba(255,255,255,.16); border-radius: var(--r-7); color: #e7e9e8; background: rgba(255,255,255,.06); cursor: pointer; font-size: var(--fs-11-5); }
 /* 行内按钮等高对齐 dd-btn；排在基础规则之后靠源序取胜。 */
 .managed-terminal-cover-actions > button { height: 28px; padding: 0 var(--sp-14); }
+/* 并排两件套观感对齐：下拉跟按钮同圆角/字号/底色与边框亮度，读作同一条操作栏。
+   边框限 :not(.open)——展开态保留 .dd-btn.open 的主题色描边。 */
+.managed-terminal-cover-actions .dd-btn { border-radius: var(--r-7); font-size: var(--fs-11-5); background: rgba(255,255,255,.06); }
+.managed-terminal-cover-actions .dd-btn:not(.open) { border-color: rgba(255,255,255,.16); }
 .managed-terminal-cover > button:hover,
 .managed-terminal-cover-actions > button:hover { background: rgba(255,255,255,.11); }
 .managed-terminal-cover > button:disabled,

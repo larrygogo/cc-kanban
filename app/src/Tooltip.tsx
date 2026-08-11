@@ -31,8 +31,14 @@ export function TooltipLayer() {
     // 最近的带非空 data-tip 的祖先（嵌套 data-tip 时内层优先）。
     const tipEl = (t: EventTarget | null): HTMLElement | null => {
       if (!(t instanceof Element)) return null;
+      // 下拉菜单展开期间整体静默。菜单（.dd-menu）在 DOM 里是触发容器的子孙：容器带
+      // data-tip 时，悬停菜单项会命中容器的提示，而提示定位在容器下缘——正糊在菜单顶上
+      //（真实翻车过：终端封面的权限下拉）。悬停菜单本身、或容器内还开着菜单，都不弹。
+      if (t.closest(".dd-menu")) return null;
       const el = t.closest<HTMLElement>("[data-tip]");
-      return el && el.getAttribute("data-tip") ? el : null;
+      if (!el || !el.getAttribute("data-tip")) return null;
+      if (el.querySelector(".dd-btn.open")) return null;
+      return el;
     };
     // 悬停（mouseover）与键盘聚焦（focusin）走同一套延时显示；focusin 会冒泡，document 上能收到。
     const show = (t: EventTarget | null) => {
