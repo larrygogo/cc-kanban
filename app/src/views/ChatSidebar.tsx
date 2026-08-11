@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { confirmStopSession, getLiveSessionsPage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LiveSession, type SessionTone } from "../api";
+import { useBoardRefresh } from "../hooks/useBoardRefresh";
 import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
 import { folderName, pathKey } from "../paths";
@@ -19,10 +19,6 @@ const PAGE_LIMIT = 60;
 
 /** 目录下拉里最多列几个工作目录（后端按最近活跃排序，超出的靠搜索/滚动够不着的本就是冷目录）。 */
 const DIR_LIMIT = 24;
-
-/** board-changed 刷新的冷却窗口（ms）：该事件会三连发（命令写库通知 + db-watcher 回声 +
- *  liveness 轮询），与 App.tsx 看板刷新的 leading+trailing 节流同参数、同行为。 */
-const REFRESH_THROTTLE_MS = 400;
 
 /** 旧的布尔分组开关键（只有「按目录」一档时代的遗产）。只读不写：迁移到 GROUP_MODE_KEY。 */
 const GROUPED_KEY = "meowo-chat-sidebar-grouped";
@@ -403,36 +399,14 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   const loadRef = useRef(load);
   loadRef.current = load;
 
-  // 订阅只在挂载时建一次，**不随 limit 重建**：unlisten → 新 listen 之间有异步空窗，
-  // 每翻一页都重订的话，恰落在空窗里的 board-changed 会被吞掉（节流状态也会清零）。
+  // board-changed 订阅 + 节流统一在 useBoardRefresh（订阅只建一次、不随 limit 重建：
+  // unlisten → 新 listen 之间有异步空窗，恰落在空窗里的事件会被吞掉）。
+  useBoardRefresh(() => void loadRef.current("refresh"));
   useEffect(() => {
     mountedRef.current = true;
     void loadRef.current("refresh");
-    // board-changed 会三连发（见 REFRESH_THROTTLE_MS）：leading + trailing 节流，
-    // 首个事件立即刷新，冷却窗口内的后续事件合并成窗口末尾的一次刷新。
-    let timer: number | undefined;
-    let lastRun = 0;
-    const throttledLoad = () => {
-      if (timer !== undefined) return; // trailing 已排队，本次并入
-      const fire = () => {
-        timer = undefined;
-        lastRun = Date.now();
-        void loadRef.current("refresh");
-      };
-      const since = Date.now() - lastRun;
-      if (since >= REFRESH_THROTTLE_MS) fire();
-      else timer = window.setTimeout(fire, REFRESH_THROTTLE_MS - since);
-    };
-    let cancelled = false;
-    let un: (() => void) | undefined;
-    listen("board-changed", throttledLoad).then((fn) => {
-      if (cancelled) fn(); else un = fn;
-    }).catch(() => {});
     return () => {
       mountedRef.current = false;
-      cancelled = true;
-      un?.();
-      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, []);
 

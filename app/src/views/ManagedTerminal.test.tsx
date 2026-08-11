@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
 const write = vi.hoisted(() => vi.fn());
+const resetSpy = vi.hoisted(() => vi.fn());
 const eventHandlers = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -37,7 +38,7 @@ vi.mock("@xterm/xterm", () => ({
       else callback?.();
     };
     open = vi.fn();
-    reset = vi.fn();
+    reset = resetSpy;
     focus = vi.fn();
     dispose = vi.fn();
     loadAddon = vi.fn();
@@ -60,6 +61,7 @@ describe("ManagedTerminal", () => {
   beforeEach(() => {
     invoke.mockReset();
     write.mockReset();
+    resetSpy.mockReset();
     confirmAnswer.ok = true;
     eventHandlers.clear();
     dataHandler.current = null;
@@ -381,6 +383,64 @@ describe("ManagedTerminal", () => {
     await waitFor(() => expect(write).toHaveBeenCalled());
     expect(write).toHaveBeenCalledTimes(1);
     expect(new TextDecoder().decode(write.mock.calls[0][0])).toBe("ABCDEF");
+  });
+
+  it("事件流出现偏移缺口时拉快照重对齐,画面无缺无重", async () => {
+    // 后端在 UI 卡顿时会丢 emit 帧(保 agent 不保画面),合帧线程刻意不抹平偏移洞;
+    // 前端看到洞必须拉快照补齐,否则缺口两侧直接续写,画面静默错乱。
+    let snapshots = 0;
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        snapshots += 1;
+        if (snapshots === 1) {
+          return Promise.resolve({ ...noPty, active: true, data: btoa("ABC"), endOffset: 3 });
+        }
+        // 重对齐请求(since=3):返回缺口段 DEF 及其后的 GHI。
+        return Promise.resolve({ ...noPty, active: true, data: btoa("DEFGHI"), startOffset: 3, endOffset: 9 });
+      }
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    // DEF(offset 3..6)在后端被丢帧,直接到达 offset=6 的 GHI → 缺口。
+    eventHandlers.get("pty-output")!({ payload: { sessionId: 163, offset: 6, data: btoa("GHI") } });
+    await waitFor(() => expect(snapshots).toBe(2));
+    // 快照补齐 DEFGHI;缓冲的 GHI 事件回放时因区间已覆盖被裁剪,不重复。
+    const painted = () =>
+      write.mock.calls
+        .map((call) => (typeof call[0] === "string" ? call[0] : new TextDecoder().decode(call[0])))
+        .join("");
+    await waitFor(() => expect(painted()).toBe("ABCDEFGHI"));
+  });
+
+  it("缺口段已被 backlog 淘汰时 reset 后按现存起点重画,不无限重试", async () => {
+    let snapshots = 0;
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        snapshots += 1;
+        if (snapshots === 1) {
+          return Promise.resolve({ ...noPty, active: true, data: btoa("ABC"), endOffset: 3 });
+        }
+        // since=3 的缺口段已被 1MiB 窗口淘汰:返回现存 backlog,起点仍在缺口之后。
+        return Promise.resolve({ ...noPty, active: true, data: btoa("YZ"), startOffset: 1000, endOffset: 1002 });
+      }
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    eventHandlers.get("pty-output")!({ payload: { sessionId: 163, offset: 1002, data: btoa("!") } });
+    await waitFor(() => expect(snapshots).toBe(2));
+    await waitFor(() => expect(resetSpy).toHaveBeenCalled());
+    // reset 后以 startOffset=1000 为新起点:快照内容 YZ 上屏,缓冲的实时帧 "!" 紧随其后。
+    const paintedAfterReset = () =>
+      write.mock.calls
+        .slice(1)
+        .map((call) => (typeof call[0] === "string" ? call[0] : new TextDecoder().decode(call[0])))
+        .join("");
+    await waitFor(() => expect(paintedAfterReset()).toBe("YZ!"));
+    // 不再有第三次快照:淘汰是终局,不能拿重试打转。
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(snapshots).toBe(2);
   });
 
   it("confirm 通过后真的调用接管 invoke", async () => {

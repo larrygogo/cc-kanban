@@ -405,6 +405,34 @@ fn reap_child_within(
     }
 }
 
+/// [`offer_with_deadline`] 的结果：调用方要区分「等不到位」与「接收端已死」——
+/// write() 对前者报「输入已积压」、对后者报「通道已关闭」；reader 对两者都只是丢帧。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Offer {
+    Sent,
+    TimedOut,
+    Disconnected,
+}
+
+/// 有界等待入队：队满时最多等 `wait`，到点放弃。**绝不阻塞 send**——有界通道的
+/// 阻塞 send 会把接收端的停滞原样反压到调用线程（输入侧的教训见 ManagedPty::input_tx，
+/// 输出侧的教训见 reader 的 emit 投递点）。
+fn offer_with_deadline<T>(tx: &mpsc::SyncSender<T>, item: T, wait: std::time::Duration) -> Offer {
+    let deadline = std::time::Instant::now() + wait;
+    let mut item = item;
+    loop {
+        item = match tx.try_send(item) {
+            Ok(()) => return Offer::Sent,
+            Err(mpsc::TrySendError::Disconnected(_)) => return Offer::Disconnected,
+            Err(mpsc::TrySendError::Full(item)) => item,
+        };
+        if std::time::Instant::now() >= deadline {
+            return Offer::TimedOut;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+}
+
 /// 「结束会话」的升级档位。时间轴：stop 请求 → [`STOP_KILL_TREE_AFTER`] 仍活 →
 /// 杀子孙树 + 关伪终端 → 共 [`STOP_FORCE_FINALIZE_AFTER`] 仍活 → 强制收尾。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1073,18 +1101,35 @@ impl PtyBroker {
             // 单帧上限：重输出时一帧最多聚 256KB，base64 后 ~341KB，别让单条事件无限膨胀。
             const MAX_FRAME_BYTES: usize = 256 * 1024;
             let mut last_emit = std::time::Instant::now() - FRAME;
-            while let Ok((offset, mut frame)) = emit_rx.recv() {
-                // 距上次 emit 不足一帧才聚合；chunk 偏移天然连续（单一 reader 顺序投递），
-                // 聚合帧仍以首 chunk 的 offset 对齐。
+            // 聚合中撞上偏移不连续的 chunk 时暂存于此，作为下一帧的开头。
+            let mut pending: Option<(u64, Vec<u8>)> = None;
+            loop {
+                let (offset, mut frame) = match pending.take() {
+                    Some(head) => head,
+                    None => match emit_rx.recv() {
+                        Ok(head) => head,
+                        Err(_) => return,
+                    },
+                };
+                // 距上次 emit 不足一帧才聚合，聚合帧以首 chunk 的 offset 对齐。
+                // 连续性校验：reader 超时丢帧后偏移必有洞，洞是前端重对齐的唯一信号，
+                // 合帧绝不能把洞两侧拼成「看似连续」的一帧把它抹平——不连续就先发
+                // 手头这帧，下一帧从洞后重新对齐。
                 let frame_end = last_emit + FRAME;
                 while frame.len() < MAX_FRAME_BYTES {
                     let now = std::time::Instant::now();
                     if now >= frame_end {
                         break;
                     }
-                    // Timeout/Disconnected 都先把手头的发出去；断开由外层 recv 收尾退出。
+                    // Timeout/Disconnected 都先把手头的发出去；断开由下轮 recv 收尾退出。
                     match emit_rx.recv_timeout(frame_end - now) {
-                        Ok((_, more)) => frame.extend_from_slice(&more),
+                        Ok((next_offset, more)) => {
+                            if next_offset != offset + frame.len() as u64 {
+                                pending = Some((next_offset, more));
+                                break;
+                            }
+                            frame.extend_from_slice(&more);
+                        }
                         Err(_) => break,
                     }
                 }
@@ -1177,7 +1222,16 @@ impl PtyBroker {
                             offset
                         };
                         // 对话窗的实时帧交 emitter 合帧后发出（见上），backlog/订阅者不受影响。
-                        let _ = emit_tx.send((offset, data.into_owned()));
+                        // 有界等待而非阻塞 send：emitter/UI 卡住时反压会一路传导——reader
+                        // 停读 → conhost 输出缓冲满 → 子进程写 stdout 阻塞 → 不再读 stdin，
+                        // 整个 agent 表现为挂死（「输入已积压」正是这么来的）。超时就丢这帧：
+                        // backlog/订阅者在上面已无损喂过，丢的只是对话窗实时帧；emitter 的
+                        // 连续性校验会把偏移洞暴露给前端，前端按缺口拉 snapshot 重对齐。
+                        let _ = offer_with_deadline(
+                            &emit_tx,
+                            (offset, data.into_owned()),
+                            std::time::Duration::from_secs(2),
+                        );
                     }
                 }
             }
@@ -1263,18 +1317,14 @@ impl PtyBroker {
             .ok_or("PTY 会话未运行")?;
         // 有界等待入队，绝不直接写管道（理由见 ManagedPty::input_tx）。到点仍满说明
         // 子进程长时间不读 stdin（挂死/被暂停），报错比无限阻塞调用线程诚实。
-        let mut chunk = data.to_vec();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            chunk = match session.input_tx.try_send(chunk) {
-                Ok(()) => return Ok(()),
-                Err(mpsc::TrySendError::Disconnected(_)) => return Err("PTY 输入通道已关闭".into()),
-                Err(mpsc::TrySendError::Full(chunk)) => chunk,
-            };
-            if std::time::Instant::now() >= deadline {
-                return Err("Agent 未在读取输入，输入已积压，请稍后重试".into());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(15));
+        match offer_with_deadline(
+            &session.input_tx,
+            data.to_vec(),
+            std::time::Duration::from_secs(2),
+        ) {
+            Offer::Sent => Ok(()),
+            Offer::Disconnected => Err("PTY 输入通道已关闭".into()),
+            Offer::TimedOut => Err("Agent 未在读取输入，输入已积压，请稍后重试".into()),
         }
     }
 
@@ -2355,6 +2405,32 @@ mod tests {
         assert!(
             start.elapsed() < std::time::Duration::from_secs(2),
             "必须在超时上限附近返回，不得无限等待"
+        );
+    }
+
+    /// 有界投递的三种结局。队满超时必须在上限附近返回——这是输出链不反压的根基：
+    /// emitter/UI 卡死时 reader 靠它丢帧保读，agent 才不会被 meowo 自己拖成假死。
+    #[test]
+    fn offer_with_deadline_times_out_when_full() {
+        let (tx, rx) = mpsc::sync_channel::<u8>(1);
+        assert_eq!(
+            offer_with_deadline(&tx, 1, std::time::Duration::from_millis(50)),
+            Offer::Sent
+        );
+        let start = std::time::Instant::now();
+        assert_eq!(
+            offer_with_deadline(&tx, 2, std::time::Duration::from_millis(50)),
+            Offer::TimedOut,
+            "队满且无人消费:到点放弃"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "必须在超时上限附近返回"
+        );
+        drop(rx);
+        assert_eq!(
+            offer_with_deadline(&tx, 3, std::time::Duration::from_millis(50)),
+            Offer::Disconnected
         );
     }
 

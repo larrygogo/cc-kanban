@@ -11,6 +11,7 @@ import {
 
 } from "./api";
 import { Sticker } from "./views/Sticker";
+import { useBoardRefresh } from "./hooks/useBoardRefresh";
 import { PIN_KEY, type Item, type Tab } from "./views/sticker/types";
 import { CollapsedStrip } from "./views/CollapsedStrip";
 import { useUpdate } from "./useUpdate";
@@ -25,7 +26,6 @@ const SIZE_KEY = "meowo-normal-size";
 const TAB_KEY = "meowo-tab";
 const RELEASE_POLL_MS = 90; // 拖拽中轮询鼠标左键的间隔（检测真正松手）
 const PAGE_SIZE = 100; // 贴纸会话每页条数，与首屏一致
-const REFRESH_THROTTLE_MS = 400; // board-changed 刷新的冷却窗口，见 refresh
 
 // board-changed 常是「空转」：命令写库后 db-watcher 又为同一次写入报一次、liveness 轮询重发、
 // 甚至 app 自身读库触碰 board.db-wal/-shm 的 mtime 也会被 watcher 当成变更而回声。这些刷新拉回的
@@ -312,27 +312,9 @@ export function App() {
     if (modeRef.current !== "normal") loadStrip();
   }, [filter, search, loadPage, loadStrip]);
 
-  // trailing 刷新必须用「触发那一刻」的 filter/search，而非排队那一刻捕获的值：否则排队期间切了 tab，
-  // 旧 filter 的刷新会晚于新 tab 的加载落地，把新 tab 的列表覆盖掉。
-  const doRefreshRef = useRef(doRefresh);
-  doRefreshRef.current = doRefresh;
-
-  // board-changed 会连发（命令写库后端立即通知 + db-watcher 稍后为同一次写入回声 + liveness 轮询），
-  // 故 leading + trailing 节流：首个事件立即刷新（用户操作零延迟），冷却窗口内的后续事件合并成窗口
-  // 末尾的一次刷新。每次刷新是 counts + 一整页 + 折叠条两查询，页大小随滚动增长，值得省。
-  const refreshTimerRef = useRef<number | undefined>(undefined);
-  const refreshLastRunRef = useRef(0);
-  const refresh = useCallback(() => {
-    if (refreshTimerRef.current !== undefined) return; // trailing 已排队，本次并入
-    const fire = () => {
-      refreshTimerRef.current = undefined;
-      refreshLastRunRef.current = Date.now();
-      doRefreshRef.current();
-    };
-    const since = Date.now() - refreshLastRunRef.current;
-    if (since >= REFRESH_THROTTLE_MS) fire();
-    else refreshTimerRef.current = window.setTimeout(fire, REFRESH_THROTTLE_MS - since);
-  }, []);
+  // board-changed 订阅 + leading/trailing 节流统一在 useBoardRefresh：每次刷新是
+  // counts + 一整页 + 折叠条两查询，页大小随滚动增长，值得省。E2E 观测点也在 hook 里。
+  const refresh = useBoardRefresh(doRefresh);
 
   // loadingMore 是 state：setLoadingMore(true) 到下次渲染落地之间，同一 tick 内 loadMore 仍可按
   // 旧闭包重入（Sticker 触底 effect 在一个渲染批内可能连发），以相同游标重复请求下一页。
@@ -423,42 +405,6 @@ export function App() {
 
   // 归档失败：乐观移除的卡片必须回来，否则用户以为归档成功了。此刻后端未改动，refresh 拉到的就是真实态。
   const onArchiveFailed = useCallback(() => refresh(), [refresh]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let un: (() => void) | undefined;
-    // E2E 观测点（仅 VITE_E2E=1 构建启用）：累计收到的 board-changed 次数，供回归测试断言
-    // 「空闲时看板不再被刷新」（见 app/e2e/specs/board-refresh.e2e.ts）。生产构建下 VITE_E2E
-    // 未定义，三元恒取 refresh、这段被 vite 死代码消除，运行时零开销。
-    if (import.meta.env.VITE_E2E === "1") {
-      // 挂载即初始化为 0，让 E2E 测试挂载后立刻能读到计数（不必等第一次事件）。
-      (window as typeof window & { __MEOWO_BOARD_CHANGED__?: number }).__MEOWO_BOARD_CHANGED__ ??= 0;
-    }
-    const onBoardChanged =
-      import.meta.env.VITE_E2E === "1"
-        ? () => {
-            const w = window as typeof window & { __MEOWO_BOARD_CHANGED__?: number };
-            w.__MEOWO_BOARD_CHANGED__ = (w.__MEOWO_BOARD_CHANGED__ ?? 0) + 1;
-            refresh();
-          }
-        : refresh;
-    // refresh 恒等（useCallback([])，最新的 filter/search 经 doRefreshRef 取），listener 只注册一次。
-    listen("board-changed", onBoardChanged)
-      .then((f) => {
-        if (cancelled) f();
-        else un = f;
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-      if (un) un();
-      window.clearTimeout(refreshTimerRef.current);
-      // 复位而不仅是 clearTimeout：refresh() 以「ref 非 undefined」判定 trailing 已排队。
-      // HMR 重挂载会跑 cleanup 但保留 ref——不复位则残留一个永不触发的定时器 id，
-      // 之后每次 refresh() 都以为 trailing 在排队而直接 return，看板刷新永久静默丢失。
-      refreshTimerRef.current = undefined;
-    };
-  }, [refresh]);
 
   // 托盘「找回贴纸」：把贴纸拉回主屏中央并置顶。折叠/吸附态先展开还原成正常窗口，再居中置顶。
   // macOS 面板模式无吸边/托盘菜单项，跳过。

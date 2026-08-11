@@ -54,9 +54,10 @@ export const zh = {
     openChat: "查看完整对话",
     newSession: "新建会话",
     previewMark: "最近",
-    // 界面文案是「置顶」；存储键与内部标识仍叫 star（meowo-starred），改了会丢用户已有数据。
-    star: "置顶",
-    unstar: "取消置顶",
+    // 会话星标与「置顶窗口」(pinOn/pinOff) 是两回事，文案用「星标」区分（与 README 的
+    // 「星标置顶」一致）；存储键与内部标识仍叫 star（meowo-starred），改了会丢用户已有数据。
+    star: "星标置顶",
+    unstar: "取消星标",
     noteAdd: "添加便签",
     noteEdit: "编辑便签",
     notePlaceholder: "写点备忘…",
@@ -455,7 +456,7 @@ export const zh = {
     sessionOpenInChat: "对话窗口",
     sessionOpenInTerminal: "外部终端",
     cardMenu: "卡片菜单",
-    cardMenuDesc: "置顶、便签、重命名等操作的打开方式；触屏等不便右键的设备可改用卡片按钮",
+    cardMenuDesc: "星标、便签、重命名等操作的打开方式；触屏等不便右键的设备可改用卡片按钮",
     cardMenuContext: "右键菜单",
     cardMenuButton: "卡片按钮",
     langAuto: "跟随系统",
@@ -697,7 +698,7 @@ export const zh = {
     },
     cardmenu: {
       title: "卡片菜单：整理每个会话",
-      desc: "把鼠标移到卡片上，右上角会出现「⋯」菜单——置顶、便签、改名、归档、新建会话、打开目录都在这里。",
+      desc: "把鼠标移到卡片上，右上角会出现「⋯」菜单——星标、便签、改名、归档、新建会话、打开目录都在这里。",
       mode: "选卡片上的菜单按钮，或右键呼出",
     },
     window: {

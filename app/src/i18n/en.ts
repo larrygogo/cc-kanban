@@ -53,8 +53,9 @@ export const en: Dict = {
     openChat: "View full conversation",
     newSession: "New session",
     previewMark: "Latest",
-    star: "Pin to top",
-    unstar: "Unpin",
+    // 会话星标与窗口置顶（pinOn "Unpin" / pinOff "Pin window"）区分用词，避免两个 Unpin 同屏。
+    star: "Star to top",
+    unstar: "Unstar",
     noteAdd: "Add note",
     noteEdit: "Edit note",
     notePlaceholder: "Jot a memo…",
@@ -440,7 +441,7 @@ export const en: Dict = {
     sessionOpenInChat: "Chat window",
     sessionOpenInTerminal: "External terminal",
     cardMenu: "Card menu",
-    cardMenuDesc: "How to open pin, note, rename and other actions; use the card button on devices where right-click is awkward",
+    cardMenuDesc: "How to open star, note, rename and other actions; use the card button on devices where right-click is awkward",
     cardMenuContext: "Right-click",
     cardMenuButton: "Card button",
     langAuto: "Follow system",
@@ -681,7 +682,7 @@ export const en: Dict = {
     },
     cardmenu: {
       title: "Card menu: manage each session",
-      desc: "Hover a card and a “⋯” menu appears — pin, note, rename, archive, new session and open folder all live there.",
+      desc: "Hover a card and a “⋯” menu appears — star, note, rename, archive, new session and open folder all live there.",
       mode: "Open it from the card button, or by right-click",
     },
     window: {

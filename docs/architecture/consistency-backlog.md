@@ -36,9 +36,9 @@
 | P2-3 | 有界等待子进程逐字重复两处；进程级缓存两种写法；两套手写 LRU | `lib.rs`、`agent/transcript.rs` vs `chat.rs:31-95` | 前两项已收敛：抽 `run_cli_capture(plugin, args, timeout)`，缓存统一 LazyLock。LRU **评估后不合并**：淘汰逻辑仅 5 行同构，但 `ChatMtimes` 的 version 戳还承担并发提交校验（put_if_current），跨 crate 抽象收益小于间接成本 | 已修（LRU 记录不做） |
 | P2-4 | `ToolCall` vs `ToolUse` 两套叫法（领域事件 vs IPC），映射函数纯改名 | `agent/transcript.rs:126-153` | 保留双层（边界适配是刻意的），但字段名对齐一种 | 已记录（保留双层） |
 | P2-5 | 遗留品牌：备份后缀 `.cckb-bak`、测试临时目录前缀 `cckb-*`；plans 目录 6 份带 `cc-kanban-planN-` 中缀 | `agent/wiring.rs:55`、`lib.rs:2257,2295` | 测试前缀可直接改；`.cckb-bak` 涉及用户盘上既有备份文件，改名需兼容读旧后缀，单独做 | 待修 |
-| P2-6 | 行内编辑器两份（`EditorInput`/`EditBox`）+ 两套 CSS；roving 键盘导航两份；点外关闭两种策略（pointerdown vs click 捕获）；board-changed 节流两份同参实现 | `ChatSidebar.tsx:53` vs `Sticker.tsx:62`；`menu.tsx:145` vs `widgets.tsx:78`；`menu.tsx:104` vs `CardContextMenu.tsx:57`；`App.tsx:325` vs `ChatSidebar.tsx:411` | 各收敛一份 | 待修 |
+| P2-6 | 行内编辑器两份（`EditorInput`/`EditBox`）+ 两套 CSS；roving 键盘导航两份；点外关闭两种策略（pointerdown vs click 捕获）；board-changed 节流两份同参实现 | `ChatSidebar.tsx` vs `Sticker.tsx`；`menu.tsx` vs `widgets.tsx`/`CardContextMenu.tsx` | 节流已收敛（`hooks/useBoardRefresh.ts`：订阅 + leading/trailing 节流 + E2E 观测点单点化）；行内编辑器/roving/点外关闭待收敛 | 部分已修 |
 | P2-7 | 图标：`sticker/icons.tsx` 图标库与 ~30 处内联 SVG 并存，chevron/check 形状抄 4-5 份、粗细尺寸不一；无 Button 组件，按钮类名 5 套族群（`.sbtn`/`.ns-btn`/`.stk-act`/`.icon-btn`/`.chat-send-takeover`） | 见前端调研 | 扩 icons.tsx 收编内联 SVG；抽 Button/IconButton；分批做 | 待修 |
-| P2-8 | 「置顶」语义两个（星标置顶 star 与窗口置顶 pin）共用一个中文词；存储键/变量/图标名各不同 | `zh.ts:58`、`sticker/types.ts:8-9` | 文案区分（如「星标」/「窗口置顶」） | 待修 |
+| P2-8 | 「置顶」语义两个（会话星标与窗口置顶）中英文均共用词（zh「置顶」、en「Unpin」撞车） | `zh.ts`、`en.ts` | 已修：会话星标改「星标置顶/取消星标」（与 README 一致）、en 改「Star to top/Unstar」；窗口置顶文案不变。存储键/变量名保持（改键丢用户数据） | 已修 |
 | P2-9 | 注释语言：4 个模块英文头（`chat.rs`/`managed_terminal.rs`/`session_command.rs`/`session_query.rs`），全仓其余中文；api.ts 混用 `///` 与 `/** */` | 各文件头 | 顺手统一为中文/`/** */` | 修复中（api.ts） |
 | P2-10 | CSS：`.chat-compose button` 全局 accent 皮致 8 处「解毒」规则（结构性反模式）；同一"白色叠层"概念 7 种 alpha 裸值；`.chip` 唯一不吃主题变量；flat 主题 78 行逐条覆盖而非 token | `styles.css:3441+`、`:154-279`、`:232-236`、`:2293-2370` | compose 皮改显式类并删解毒规则；叠层立 token；`.chip` 移去 poster 专用 CSS | 待修 |
 | P2-11 | Tooltip 与原生 `title` 混用（同一侧栏条目两种气泡） | `ChatSidebar.tsx:673,724,727,826`、`ChatWindow.tsx:257` | 统一 `data-tip`（长文本截断场景确认后再换） | 待修 |

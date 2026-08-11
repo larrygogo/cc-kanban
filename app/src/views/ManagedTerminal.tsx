@@ -481,6 +481,14 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       setSnapshotReady(true);
       setActive(snapshot.active);
       setExitCode(snapshot.exited ? snapshot.exitCode : undefined);
+      // 重对齐终局:请求的缺口段已被后端 1MiB backlog 淘汰(前端整体落后太多),
+      // 字节永久丢失,重试无意义。reset 后按现存 backlog 全量重画(远超一屏,足以
+      // 还原可见画面);回放的是历史,里面的查询都答过,拦 xterm 的重复应答。
+      if (hasWrittenOutput && snapshot.data && Number.isFinite(snapshot.startOffset) && snapshot.startOffset > nextOffset) {
+        terminal.reset();
+        nextOffset = snapshot.startOffset;
+        replayingHistory = true;
+      }
       if (snapshot.data) {
         // 首次全量回放(重连/重开窗口)才拦应答:里面全是答过的旧查询。增量补查是准实时
         // 输出,agent 可能正等着这些应答,不拦。启动探测(ESC[6n)的代答不在这里做——
@@ -527,12 +535,23 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       }
     });
 
+    // 缺口重对齐的排程。独立 timer,**不能**复用 snapshotTimer——每个 pty-output 事件
+    // 都会 clearTimeout(snapshotTimer)(见监听器),输出持续刷新时重对齐会被永远取消。
+    // 防抖 80ms 合并连发的缺口;期间 snapshotApplied 已为 false,后续事件只进缓冲、
+    // 不再重复排程,天然单飞。
+    let resyncTimer = 0;
+    const scheduleResync = () => {
+      window.clearTimeout(resyncTimer);
+      resyncTimer = window.setTimeout(() => { if (!cancelled) void inspectSnapshot(); }, 80);
+    };
+
     // 就地重启后把偏移归零并重新拉一次快照。新 PTY 从 0 重新计数，沿用旧的 nextOffset
     // 会让 writeOutput 把所有新输出判成「已写过」而丢弃（终端定格在旧内容）。
     rearmRef.current = () => {
       if (cancelled) return;
       window.clearTimeout(snapshotTimer);
-      // 排程中的扫描读的是旧进程的画面，重启后不再有意义。
+      // 排程中的重对齐/扫描读的都是旧进程的画面，重启后不再有意义。
+      window.clearTimeout(resyncTimer);
       window.clearTimeout(attentionScanTimer);
       attentionScanTimer = 0;
       nextOffset = 0;
@@ -556,8 +575,18 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
         setActive(true);
         setSnapshotReady(true);
         setExitCode(undefined);
-        if (snapshotApplied) writeOutput(payload);
-        else bufferedOutput.push(payload);
+        if (!snapshotApplied) {
+          bufferedOutput.push(payload);
+        } else if (hasWrittenOutput && Number.isFinite(payload.offset) && payload.offset > nextOffset) {
+          // 偏移出现缺口:后端在 UI 卡顿时保 agent 不保画面(emit 队列超时丢帧,
+          // 合帧线程刻意不抹平洞)。缺口两侧直接续写会画面错乱——转入缓冲并拉快照
+          // 补齐,快照回放后 buffer 按 offset 排序合并,复用首挂载的同一条路径。
+          snapshotApplied = false;
+          bufferedOutput.push(payload);
+          scheduleResync();
+        } else {
+          writeOutput(payload);
+        }
       }
     });
     const exitListener = listen<ExitEvent>("pty-exit", ({ payload }) => {
@@ -594,6 +623,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     return () => {
       cancelled = true;
       window.clearTimeout(snapshotTimer);
+      window.clearTimeout(resyncTimer);
       window.clearTimeout(giveUpTimer);
       window.clearTimeout(resizeTimer);
       window.clearTimeout(attentionScanTimer);

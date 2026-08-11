@@ -501,7 +501,7 @@ describe("ChatSidebar", () => {
     it("置顶与看板共用同一份存储（键沿用 meowo-starred）", async () => {
       await renderList();
       fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
-      fireEvent.click(await screen.findByRole("menuitem", { name: "置顶" }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "星标置顶" }));
       expect(JSON.parse(localStorage.getItem("meowo-starred") ?? "[]")).toEqual(["cc-2"]);
     });
 
@@ -513,7 +513,7 @@ describe("ChatSidebar", () => {
         .map((b) => b.textContent ?? "");
       expect(names()[0]).toContain("改侧栏");
       fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
-      fireEvent.click(await screen.findByRole("menuitem", { name: "置顶" }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "星标置顶" }));
       await waitFor(() => expect(names()[0]).toContain("旧任务"));
       expect(names()[1]).toContain("改侧栏");
     });
