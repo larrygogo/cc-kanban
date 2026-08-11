@@ -545,11 +545,11 @@ impl AgentPlugin for Claude {
         &[
             crate::chat_ui::SelectorAnchor {
                 marker: "type something",
-                kind: "input",
+                kind: crate::chat_ui::SelectorAnchorKind::Input,
             },
             crate::chat_ui::SelectorAnchor {
                 marker: "chat about this",
-                kind: "chat",
+                kind: crate::chat_ui::SelectorAnchorKind::Chat,
             },
         ]
     }

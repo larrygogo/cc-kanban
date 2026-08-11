@@ -52,7 +52,9 @@ jobs:
           cache-on-failure: true
       - name: 生成并校验前后端 IPC 契约
         working-directory: app/src-tauri
-        run: cargo test -p meowo-protocol && git diff --exit-code -- ../src/generated/contracts
+        # meowo-agent 的 --lib 也在导出（AgentDescriptor / ChatUi 一族，见 docs/architecture/
+        # consistency-backlog.md P1-1）；集成测试（tests/*_live.rs）不参与导出，不必跑。
+        run: cargo test -p meowo-protocol -p meowo-agent --lib && git diff --exit-code -- ../src/generated/contracts
       - name: 安装前端依赖
         working-directory: app
         run: bun install --frozen-lockfile

@@ -523,92 +523,16 @@ async fn available_terminals() -> Vec<String> {
 ///
 /// 不含图标与品牌色：那是**视觉资产**，不是 agent 的定义。位图 logo（kimi）与主题相关的品牌色
 /// （claude 在浅色/深色下取不同明度）都无法诚实地塞进后端的一个字符串字段里，故留在前端的资产表。
-#[derive(Debug, Clone, serde::Serialize)]
-struct AgentDescriptor {
-    id: String,
-    /// 产品名（"Claude Code" / "Kimi Code" / "Codex"）。**不翻译**——产品名没有译名。
-    display_name: String,
-    /// 可执行是否装在本机（决定各处是否列出/可选它）。
-    installed: bool,
-    /// 这个 agent **能不能被套上代理**（＝插件是否声明了 `ProxySpec`）。
-    ///
-    /// 为 false 的 agent，设置页不给它代理行。没有这个字段时，前端只能给每个 agent 都画一行——
-    /// 于是用户会给一个根本读不到代理配置的 agent 认真填上代理，然后对着「连不上」毫无线索地瞎试。
-    /// 这正是网络分区最忌讳的失败模式：**静默不生效**。宁可不给入口，也不给一个假的。
-    supports_proxy: bool,
-    /// 代理能写进它**自己的配置文件**吗（＝`ProxySpec.config_env`）——从而不管由谁启动
-    /// 都生效；false 则只覆盖 Meowo 拉起的会话，用户自己在终端敲命令时不走代理。
-    ///
-    /// 与 `proxy_accepts_socks` 一起，取代前端此前自己维护的两张 agent 名单。那两张表
-    /// 与后端 `ProxySpec` 是**同一事实的两份拷贝**，注释里也写着「与 Rust 侧同源」——
-    /// 而拷贝迟早不同步：新 agent 接进来时前端名单不会自动更新，用户看到的覆盖面说明
-    /// 就是错的，且没有任何报错。
-    proxy_covers_all_launches: bool,
-    /// 支持 SOCKS 代理吗（＝`ProxySpec.socks`）。填错的后果是静默连不上，故设置页要
-    /// 按它当场拒绝非法代理串，而不是等用户去猜。
-    proxy_accepts_socks: bool,
-    /// 这个 agent 有没有**账号概念**（＝插件是否声明了 account 能力槽）。
-    ///
-    /// 为 false 时，设置页与新建会话面板都不得显示登录态、也不得给出登录入口——它的
-    /// `login_argv()` 是 `None`，按钮点下去只会得到一句「拉起登录失败」。
-    ///
-    /// 没有这个字段时，前端只能靠「账号查不出来」推断，而那与「真的没登录」长得一模一样：
-    /// gemini / opencode 因此被判成「未登录」，亮出一个必然失败的按钮。**给出走不通的入口，
-    /// 比不给入口更糟**——用户会以为是自己的问题，反复去点。
-    supports_account: bool,
-    /// 这个 agent 能不能**用 API Key 登录**（＝插件声明了 `ApiKeyLoginCap`）。
-    ///
-    /// 为 gemini 而设：Google 停掉了个人版 Code Assist 的 OAuth（交互式登录必然失败），
-    /// API Key 是唯一活路，而它没有「输入 key」的登录子命令——必须由 meowo 提供入口。
-    /// 为 true 时，前端在未登录状态额外给出「填 API Key」输入。
-    supports_api_key_login: bool,
-    /// 这个 agent 能不能有**多个账号**（＝插件声明了 `ProfileSpec`）。
-    ///
-    /// false（gemini：数据目录不可被环境变量覆盖）→ 前端不给「添加账号」入口。「只有一个默认账号」
-    /// 与「压根不支持多账号」在账号列表上长得一模一样（都只有一条），必须由后端如实说清，
-    /// 否则会给一个点了必然报错的按钮。
-    supports_profiles: bool,
-    /// meowo 能否显示这个 agent 的**上下文占用**（贴纸上的百分比液柱）。
-    ///
-    /// 为 false（gemini：官方 hook 不给 token；opencode：会话 token 在它自己库里，不经 hook）时，
-    /// 前端显式标注「上下文占用：不支持」——不留空白让用户以为是 bug。
-    supports_context: bool,
-    /// 新建会话的启动选项（选择 → CLI flag 映射，由插件声明）。空 = 面板不给选项栏。
-    /// 前端只回传 choice id，翻译成 argv 在后端按这张表进行——用户输入进不了命令行。
-    launch_options: &'static [meowo_agent::LaunchOption],
-    /// 插件显式声明才存在；None 时前端不显示中转入口。
-    relay: Option<meowo_agent::RelayUi>,
-}
-
+/// 描述符定义与组装在 `meowo_agent::descriptor`（全部字段由插件声明推导），此处仅透传。
+///
 /// 全部已注册 agent 及其本机安装状态。仿 available_terminals：检测廉价（PATH/文件查询），
 /// 仍放 blocking 池避免任何意外阻塞事件循环。
 #[tauri::command]
-async fn list_agents() -> Vec<AgentDescriptor> {
+async fn list_agents() -> Vec<meowo_agent::descriptor::AgentDescriptor> {
     tauri::async_runtime::spawn_blocking(|| {
         meowo_agent::all()
             .iter()
-            .map(|a| {
-                let relay = a.relay().and_then(|cap| {
-                    let installation = a.resolve()?;
-                    cap.supports_variant(installation.variant_tag)
-                        .then(|| cap.ui())
-                });
-                AgentDescriptor {
-                    id: a.id().as_str().to_string(),
-                    display_name: a.display_name().to_string(),
-                    installed: a.is_installed(),
-                    supports_proxy: a.proxy().is_some(),
-                    // 没声明 ProxySpec 的 agent 这两项无意义（前端也不会给它代理行）。
-                    proxy_covers_all_launches: a.proxy().is_some_and(|spec| spec.config_env),
-                    proxy_accepts_socks: a.proxy().is_some_and(|spec| spec.socks),
-                    supports_account: a.account().is_some(),
-                    supports_api_key_login: a.api_key_login().is_some(),
-                    supports_profiles: a.profile().is_some(),
-                    supports_context: a.provides_context(),
-                    launch_options: a.launch_options(),
-                    relay,
-                }
-            })
+            .map(|a| meowo_agent::descriptor::AgentDescriptor::of(*a))
             .collect::<Vec<_>>()
     })
     .await

@@ -1,6 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { appConfirm } from "./confirm";
+import type { AgentDescriptor as AgentDescriptorDto } from "./generated/contracts/AgentDescriptor";
+import type { ChatUi as ChatUiDto } from "./generated/contracts/ChatUi";
 import type { ChatHistoryDto } from "./generated/contracts/ChatHistoryDto";
+import type { LaunchChoice } from "./generated/contracts/LaunchChoice";
+import type { LaunchOption } from "./generated/contracts/LaunchOption";
+import type { ModelPreset } from "./generated/contracts/ModelPreset";
+import type { ModeControl } from "./generated/contracts/ModeControl";
+import type { ModeInput } from "./generated/contracts/ModeInput";
+import type { ModeOption } from "./generated/contracts/ModeOption";
+import type { ModeScreenMarker } from "./generated/contracts/ModeScreenMarker";
+import type { RelayUi } from "./generated/contracts/RelayUi";
+import type { SlashCommand } from "./generated/contracts/SlashCommand";
 import type { ChatItem as GeneratedChatItem } from "./generated/contracts/ChatItem";
 import type { SubagentRun as GeneratedSubagentRun } from "./generated/contracts/SubagentRun";
 import type { ManagedTerminalSnapshotDto } from "./generated/contracts/ManagedTerminalSnapshotDto";
@@ -17,137 +28,27 @@ import type { LoginDoneEvent } from "./generated/contracts/LoginDoneEvent";
  */
 export type AgentId = string;
 
-/** 后端下发的一个 agent。前端认识 agent 的唯一途径。 */
-export type AgentDescriptor = {
-  id: AgentId;
-  /** 产品名，不翻译。 */
-  display_name: string;
-  /** 可执行是否装在本机。 */
-  installed: boolean;
-  /**
-   * 能否被套上代理。为 false 时设置页**不给它代理行**——给一个读不到代理配置的 agent 显示
-   * 输入框，等于请用户去配一个静默不生效的代理。
-   */
-  supports_proxy: boolean;
-  /**
-   * 代理能否写进该 agent 自己的配置文件——true 则不管由谁启动都生效，false 只覆盖
-   * Meowo 拉起的会话。仅用于选覆盖面文案。
-   */
-  proxy_covers_all_launches: boolean;
-  /** 是否支持 SOCKS 代理。false 时设置页当场拒绝 socks:// 串（否则静默连不上）。 */
-  proxy_accepts_socks: boolean;
-  /**
-   * 有没有账号概念。为 false 时**不得显示登录态、也不得给出登录入口**——该 agent 的
-   * `login_argv()` 是 None，按钮点下去只会报「拉起登录失败」。
-   *
-   * 不能靠「账号查不出来」来推断：那与「真的没登录」长得一模一样。
-   */
-  supports_account: boolean;
-  /**
-   * 能否有多个账号。false（gemini）→ 不给「添加账号」入口。
-   *
-   * 不能靠「账号列表只有一条」推断——那与「只建了默认账号」无法区分。
-   */
-  supports_profiles: boolean;
-  /**
-   * 能否用 API Key 登录（gemini：OAuth 被官方停用，key 是唯一活路，且 CLI 没有输入 key 的
-   * 登录子命令，必须由 meowo 提供入口）。为 true 时未登录卡片额外给「填 API Key」输入。
-   *
-   * 老后端不下发此字段 → undefined，按「不支持」处理（不给一个后端接不住的入口）。
-   */
-  supports_api_key_login?: boolean;
-  /**
-   * meowo 能否显示该 agent 的上下文占用（贴纸百分比液柱）。false（gemini/opencode）时
-   * 卡片显式标注「上下文占用：不支持」，不留空白让用户以为是 bug。
-   *
-   * 老后端不下发此字段 → undefined，按「支持」处理（不误标已有能力的 agent 为不支持）。
-   */
-  supports_context?: boolean;
-  /**
-   * 新建会话的启动选项（选择 → CLI flag 映射，由插件声明）。空/缺失 = 面板不给该 agent
-   * 选项栏。前端只回传 choice id；翻译成命令行参数在后端按同一张声明表进行。
-   */
-  launch_options?: LaunchOption[];
-  /** 插件未声明该能力时为 null，界面不得显示中转入口。 */
-  relay?: RelayCapability | null;
-};
+/**
+ * 后端下发的一个 agent。前端认识 agent 的唯一途径。
+ *
+ * 类型由 ts-rs 从 `meowo_agent::descriptor::AgentDescriptor` 生成（字段注释见生成文件，
+ * CI diff 守卫同步）；此处仅把 id 收窄为 `AgentId` 别名、保持既有导出名。
+ */
+export type AgentDescriptor = Omit<AgentDescriptorDto, "id"> & { id: AgentId };
 
-/** 启动选项的一个可选值。label 是产品词；细文案由 i18n 按 `<option>.<choice>` 取，缺省回退 label。 */
-export type LaunchChoice = { id: string; label: string; args: string[] };
-/** 一栏启动选项（单选）。 */
-export type LaunchOption = { id: string; choices: LaunchChoice[]; default: string };
-
-/** 快速切模型的一个预设项。描述文案在前端 i18n（chat.modelDesc）按 id 取。 */
-export type ModelPreset = { id: string; label: string };
-
-/** 一条斜杠命令。builtin 的描述走前端 i18n；user/project 是从命令文件头里读出的。 */
-export type SlashCommand = {
-  name: string;
-  description: string | null;
-  source: "builtin" | "user" | "project";
-};
-
-export type ModeInput = { data: string; submit: boolean };
-export type ModeOption = { value: string; inputs: ModeInput[] };
-/** TUI 状态栏上代表某个模式值的稳定文案片段；cycle 盲切后靠它从屏幕即时回显落点。 */
-export type ModeScreenMarker = { marker: string; value: string };
-export type ModeControl = {
-  dimension: string;
-  cycle_input: string | null;
-  options: ModeOption[];
-  /** 空表 = 该维度无屏幕回显能力，显示只随 transcript 状态走。 */
-  screen_markers: ModeScreenMarker[];
-};
+// 启动选项 / 模型预设 / 斜杠命令 / 模式控制：全部由 ts-rs 生成，原名重导出。
+export type { LaunchChoice, LaunchOption, ModelPreset, SlashCommand, ModeInput, ModeOption, ModeScreenMarker, ModeControl };
 
 /**
  * 对话页能力，由**安装实况**组装：插件内置表 ∪ 用户/项目目录里发现的自定义命令 + CLI 版本。
  * 不随 `list_agents()` 静态下发——它依赖会话的 cwd（项目级命令）且随安装变化。
+ * 类型由 ts-rs 从 `meowo_agent::chat_ui::ChatUi` 生成。`selector_anchors[].kind` 的取值
+ * 约定（"input" | "chat"）与 terminalAttention 对齐，生成类型上是 string——后端为权威。
  */
-export type ChatUi = {
-  slash_commands: SlashCommand[];
-  model_presets: ModelPreset[];
-  /**
-   * 打开「选模型」交互菜单的命令（预设为空时才有意义）。除 claude 外几家的 `/model`
-   * 不接受内联参数，只能发出它再把 CLI 弹出的菜单渲染成按钮——清单由 CLI 现给。
-   */
-  model_menu_command?: string | null;
-  /** Provider 声明的多维模式交互能力；当前值由 ChatHistory 的增量状态提供。 */
-  mode_controls: ModeControl[];
-  /** 裸发送会弹出交互界面的内置命令（含 model_menu_command，后端总装时已并入）。 */
-  menu_slash_commands: string[];
-  /** 启动时必须转到终端人工处理的提示文本片段（框架通用值 + provider 补充）。 */
-  startup_attention_markers: string[];
-  /** 数字选择器锚点(插件声明的识别文法):空 = 该 agent 的纯编号菜单不做卡片化。 */
-  selector_anchors: { marker: string; kind: "input" | "chat" }[];
-  /**
-   * 整句可操作提示（审批框、长会话确认）的识别规格，由插件声明。空 = 该 agent 未取证，
-   * 不做整句识别——误报会凭空弹卡并锁住输入框，比不弹更糟。
-   *
-   * 只含该会话自己那家的规则：识别层因此不必再按 provider 分支，也不会拿别家的
-   * 界面原文去匹配本家屏幕（引用同一句话的普通输出不该弹卡）。
-   */
-  attention_patterns: { id: string; patterns: string[]; last: boolean }[];
-  /** 中断当前回合的按键序列(如 Esc);null = 未取证,GUI 不提供强制插话入口。 */
-  interrupt_input: string | null;
-  /** runtime skill 清单尚未落盘；ChatWindow 应随 transcript 增量继续探测。 */
-  runtime_commands_pending: boolean;
-  /** 附件可用该 CLI 原生的 `@路径` 提及注入;false = 退回通用指令文本兜底。 */
-  attachment_mention: boolean;
-  /** TUI 支持 Ctrl-V 原生粘贴剪贴板图片时的 composer 占位符正则;null = 不支持。 */
-  clipboard_image_paste: string | null;
-  /** 探测到的已装 CLI 版本（`--version` 首行）；探测失败为 null。 */
-  version: string | null;
-};
+export type ChatUi = ChatUiDto;
 
-export type RelayCapability = {
-  protocols: { value: string; label: string }[];
-  auth_modes: { value: string; label: string }[];
-  default_protocol: string;
-  default_auth: string;
-  suggestions: { protocol: string; models: string[] }[];
-  /** 可勾选的附加环境变量（如 Claude Code 的两个流量/归因开关）；插件未声明时缺省。 */
-  env_options?: { id: string; label: string; env: [string, string] }[];
-};
+/** API 中转能力表（后端 `RelayUi` 的生成镜像；导出名沿用前端习惯的 RelayCapability）。 */
+export type RelayCapability = RelayUi;
 
 export type Todo = {
   id: number;

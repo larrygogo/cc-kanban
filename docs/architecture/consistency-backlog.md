@@ -19,7 +19,7 @@
 
 | # | 问题 | 位置 | 建议 | 状态 |
 |---|---|---|---|---|
-| P1-1 | IPC 契约只有一半走 ts-rs：`AgentDescriptor`/`ChatUi`/`LiveSession`/`Settings` 等为裸 `Serialize` + 前端手写类型，且 snake_case 与 protocol DTO 的 camelCase 相反，同屏并存 | `session_query.rs:181+`、`lib.rs:525+`、`chat_ui.rs:44+`、`store/query.rs`；前端 `api.ts:21-275,527-576` | 分批迁入 `meowo-protocol::ipc`（每批一组 DTO + 前端换 import），新增 DTO 一律不再手写 | 待修（分批） |
+| P1-1 | IPC 契约只有一半走 ts-rs：裸 `Serialize` + 前端手写类型，snake_case 与 protocol 的 camelCase 并存 | 前端 `api.ts` | **首批已修**：`AgentDescriptor`（移入 `meowo_agent::descriptor`，组装下沉插件层）与 `ChatUi` 一族共 18 型就地加 ts-rs 导出（`cargo test -p meowo-agent --lib` 生成，CI 契约步骤已扩）；`SelectorAnchor.kind` 顺手升为真枚举。**刻意保持 snake_case 线格式**——camelCase 统一会波及全部测试夹具，收益不成比例，记录不做。剩余批次：`LiveSession`/`Settings`/`Account` 等（位于 `session_query.rs`/`settings.rs`，需同样就地导出） | 部分已修 |
 | P1-2 | 手写 `listen()` 样板 15 处、cleanup 三种变体，统一的 `useTauriEvent` 仅 4 个使用点；subscribe-first 模式手抄 6 份 | `App.tsx`、`Sticker.tsx`、`ChatSidebar.tsx`、`ChatWindow.tsx`、`useUpdate.ts`、`ManagedTerminal.tsx` 等 | 迁 `useTauriEvent`；为 settings 抽 `useSettings()` hook | 修复中（部分） |
 | P1-3 | 重复 invoke 未进 api.ts：`rename_session`(3 份)、`set_archived`(4)、`set_session_note`(2)、`open_project_dir`(3)、`open_new_session_window`(5) | Sticker/ChatSidebar/ChatWindow/About | 收编进 api.ts 封装 | 修复中 |
 | P1-4 | 工作区新改动：`persist_queued_image` 使插件 crate 直接写宿主临时目录；32MB 上限常量在 agent/app 两 crate 各定义一遍；`$TEMP/meowo-paste` 目录约定两处独立实现 | `plugins/claude/transcript.rs` vs `chat.rs` | 已收敛：`fsutil::paste_root()` + `PASTE_MAX_BYTES` 单点定义，两处消费；crate 文档改为如实描述落盘边界（transcript 解析管线为纯函数共享，落盘不再上提） | 已修 |

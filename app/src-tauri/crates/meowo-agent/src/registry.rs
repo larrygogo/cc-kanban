@@ -10,6 +10,8 @@ use std::path::Path;
 /// 对话页快速切模型的一个预设项：前端点选后向 PTY 发送 `/model <id>`。
 /// `label` 是展示名；描述文案是翻译资产，留在前端 i18n（按 `id` 取）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct ModelPreset {
     pub id: &'static str,
     pub label: &'static str,
@@ -923,12 +925,16 @@ mod tests {
         // 选择器锚点是插件声明的识别文法:claude 有真机取证的两个锚点项;其余 provider
         // 未取证必须为空——空锚点 = 纯编号菜单不卡片化,宁可软拦也不误把正文变按钮。
         let claude_anchors = by_id("claude").unwrap().selector_anchors();
+        use crate::chat_ui::SelectorAnchorKind;
         assert_eq!(
             claude_anchors
                 .iter()
                 .map(|anchor| (anchor.marker, anchor.kind))
                 .collect::<Vec<_>>(),
-            vec![("type something", "input"), ("chat about this", "chat")]
+            vec![
+                ("type something", SelectorAnchorKind::Input),
+                ("chat about this", SelectorAnchorKind::Chat)
+            ]
         );
         for id in ["codex", "kimi", "gemini", "opencode"] {
             assert!(by_id(id).unwrap().selector_anchors().is_empty());

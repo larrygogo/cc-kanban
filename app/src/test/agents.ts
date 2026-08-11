@@ -9,13 +9,13 @@ const NAMES: Record<string, string> = {
   opencode: "OpenCode",
 };
 const RELAYS: Record<string, AgentDescriptor["relay"]> = {
-  claude: { protocols: [], auth_modes: [{ value: "bearer", label: "Bearer Token" }, { value: "api_key", label: "API Key (x-api-key)" }], default_protocol: "", default_auth: "bearer", suggestions: [{ protocol: "", models: ["claude-sonnet-5"] }] },
-  codex: { protocols: [], auth_modes: [{ value: "bearer", label: "Bearer Token" }], default_protocol: "", default_auth: "bearer", suggestions: [{ protocol: "", models: ["gpt-5.4"] }] },
-  kimi: { protocols: [{ value: "kimi", label: "Kimi" }, { value: "anthropic", label: "Anthropic Messages" }, { value: "openai", label: "OpenAI Chat Completions" }], auth_modes: [{ value: "bearer", label: "Bearer Token" }], default_protocol: "kimi", default_auth: "bearer", suggestions: [{ protocol: "kimi", models: ["kimi-for-coding"] }] },
+  claude: { protocols: [], auth_modes: [{ value: "bearer", label: "Bearer Token" }, { value: "api_key", label: "API Key (x-api-key)" }], default_protocol: "", default_auth: "bearer", suggestions: [{ protocol: "", models: ["claude-sonnet-5"] }], env_options: [] },
+  codex: { protocols: [], auth_modes: [{ value: "bearer", label: "Bearer Token" }], default_protocol: "", default_auth: "bearer", suggestions: [{ protocol: "", models: ["gpt-5.4"] }], env_options: [] },
+  kimi: { protocols: [{ value: "kimi", label: "Kimi" }, { value: "anthropic", label: "Anthropic Messages" }, { value: "openai", label: "OpenAI Chat Completions" }], auth_modes: [{ value: "bearer", label: "Bearer Token" }], default_protocol: "kimi", default_auth: "bearer", suggestions: [{ protocol: "kimi", models: ["kimi-for-coding"] }], env_options: [] },
   // gemini：只有一种协议（讲 Gemini 自己的 generateContent，故 protocols 空）+ API Key 认证。
-  gemini: { protocols: [], auth_modes: [{ value: "api_key", label: "API Key" }], default_protocol: "", default_auth: "api_key", suggestions: [{ protocol: "", models: ["gemini-2.5-pro"] }] },
+  gemini: { protocols: [], auth_modes: [{ value: "api_key", label: "API Key" }], default_protocol: "", default_auth: "api_key", suggestions: [{ protocol: "", models: ["gemini-2.5-pro"] }], env_options: [] },
   // opencode：中转＝往它配置里注入自定义 provider（OpenAI 兼容 / Anthropic）。
-  opencode: { protocols: [{ value: "openai", label: "OpenAI 兼容" }, { value: "anthropic", label: "Anthropic Messages" }], auth_modes: [{ value: "bearer", label: "Bearer Token" }], default_protocol: "openai", default_auth: "bearer", suggestions: [{ protocol: "openai", models: ["gpt-5.4"] }] },
+  opencode: { protocols: [{ value: "openai", label: "OpenAI 兼容" }, { value: "anthropic", label: "Anthropic Messages" }], auth_modes: [{ value: "bearer", label: "Bearer Token" }], default_protocol: "openai", default_auth: "bearer", suggestions: [{ protocol: "openai", models: ["gpt-5.4"] }], env_options: [] },
 };
 
 /**

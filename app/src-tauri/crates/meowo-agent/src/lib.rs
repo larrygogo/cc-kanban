@@ -30,6 +30,7 @@ pub mod caps;
 pub mod chat_ui;
 pub mod codec;
 pub mod config;
+pub mod descriptor;
 pub mod fsutil;
 pub mod id;
 pub mod install;

@@ -3,12 +3,16 @@
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct RelayOption {
     pub value: &'static str,
     pub label: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct RelaySuggestionGroup {
     /// 空串表示默认组；其它值对应协议 value。
     pub protocol: &'static str,
@@ -18,6 +22,8 @@ pub struct RelaySuggestionGroup {
 /// 随中转注入的附加环境变量选项（如 Claude Code 的 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`）。
 /// 插件在 [`RelayUi::env_options`] 里声明可选项，用户勾选的 id 经 [`RelayConfig::env_options`] 回传。
 #[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct RelayEnvOption {
     /// 稳定 id，持久化在设置里；前端 i18n 按它取文案。
     pub id: &'static str,
@@ -28,6 +34,8 @@ pub struct RelayEnvOption {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct RelayUi {
     pub protocols: &'static [RelayOption],
     pub auth_modes: &'static [RelayOption],

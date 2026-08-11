@@ -12,6 +12,8 @@ use std::collections::HashMap;
 /// 一个可选值。`label` 是产品词（"Opus" / "Plan"），不翻译；细文案由前端 i18n 按
 /// `<option>.<choice>` 取，取不到回退 `label`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct LaunchChoice {
     pub id: &'static str,
     pub label: &'static str,
@@ -22,6 +24,8 @@ pub struct LaunchChoice {
 
 /// 一栏启动选项（单选）。
 #[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct LaunchOption {
     /// 稳定标识（"model" / "approval" / "permission"）。前端按它取组标签文案，
     /// 宿主按它对齐前端传回的选择。

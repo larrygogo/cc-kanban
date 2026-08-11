@@ -14,6 +14,11 @@ toml_edit = { workspace = true }
 sha2 = "0.10"
 base64 = "0.22"
 
+[dev-dependencies]
+# 与 meowo-protocol 同一套契约生成机制：cfg(test) 下 derive(TS)，
+# `cargo test -p meowo-agent --lib` 导出 app/src/generated/contracts/*.ts，CI diff 把关。
+ts-rs = "12"
+
 [[test]]
 name = "agent_urls_live"
 path = "tests/install_urls_live.rs"

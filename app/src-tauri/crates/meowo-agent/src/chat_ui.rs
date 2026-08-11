@@ -43,6 +43,8 @@ pub struct ChatUiContext<'a> {
 /// 一条斜杠命令来自哪里。前端可据此区分展示（内置/用户级/项目级）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub enum SlashSource {
     Builtin,
     User,
@@ -51,6 +53,8 @@ pub enum SlashSource {
 
 /// 一条斜杠命令。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct SlashCommand {
     /// 含前导 `/`；子目录命令含命名空间（`/frontend:component`）。
     pub name: String,
@@ -82,6 +86,8 @@ impl SlashCommand {
 
 /// 一次模式切换需要写入 PTY 的输入。斜杠命令要提交回车，快捷键则只写原始字节。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct ModeInput {
     pub data: &'static str,
     pub submit: bool,
@@ -90,9 +96,25 @@ pub struct ModeInput {
 /// 可直接跳转到的模式值。一个选项允许由多次输入组成，例如 Kimi 回到 manual 需要同时
 /// 关闭 `/yolo` 与 `/auto`，不能让前端理解 provider 私有语义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct ModeOption {
     pub value: &'static str,
     pub inputs: &'static [ModeInput],
+}
+
+/// 锚点项的角色。此前是裸 `&str`（"input"/"chat" 靠注释约定），升级为枚举后
+/// 生成的 TS 类型自然收窄为 `"input" | "chat"`，与前端 terminalAttention 的
+/// SelectorAnchor.kind 对齐由类型系统而非注释保证。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+pub enum SelectorAnchorKind {
+    /// 自由输入项(如 Type something)。
+    Input,
+    /// 转聊天项(如 Chat about this)。
+    Chat,
 }
 
 /// 数字选择器的锚点项:该 provider 的选择器里**固有出现**的选项文案(小写子串匹配)。
@@ -100,11 +122,11 @@ pub struct ModeOption {
 /// 这些文案。声明前必须有该 provider 的真机取证;空 = 该 agent 的纯编号菜单不做卡片化
 /// (发送侧的未识别交互软拦兜底),宁可不弹卡也不把正文列表变成会打方向键的按钮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct SelectorAnchor {
     pub marker: &'static str,
-    /// "input" = 自由输入项(如 Type something);"chat" = 转聊天项(如 Chat about this)。
-    /// 取值与前端 terminalAttention 的 SelectorAnchor.kind 对齐。
-    pub kind: &'static str,
+    pub kind: SelectorAnchorKind,
 }
 
 /// 屏幕上**可操作**提示的识别规格：审批框、长会话确认这类需要用户当场决定的整句提示。
@@ -118,6 +140,8 @@ pub struct SelectorAnchor {
 /// **声明前必须有该 agent 的真机取证**：误报会凭空弹出一张卡并锁住输入框，
 /// 比不弹更糟。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct AttentionPattern {
     /// 卡片标识（如 `"claude:command-approval"`）。前端按它决定卡片形态与按键语义，
     /// 取值必须与前端已实现的分支一致，不能随意造新的。
@@ -139,6 +163,8 @@ pub struct AttentionPattern {
 /// 用户只能认为按钮坏了。声明这张表后，宿主在写入后短暂轮询 PTY 屏幕，命中即更新显示。
 /// 匹配为小写子串；文案取自 provider 文档承诺的指示文本，不是猜测。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct ModeScreenMarker {
     pub marker: &'static str,
     pub value: &'static str,
@@ -147,6 +173,8 @@ pub struct ModeScreenMarker {
 /// ChatWindow 中一个独立的模式维度。`cycle_input` 与 `options` 可任选其一或同时存在；
 /// 只读维度无需声明 control，仍可由 transcript 状态展示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct ModeControl {
     pub dimension: &'static str,
     pub cycle_input: Option<&'static str>,
@@ -157,6 +185,8 @@ pub struct ModeControl {
 
 /// 对话页能力总装的结果，原样下发前端。
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct ChatUi {
     pub slash_commands: Vec<SlashCommand>,
     pub model_presets: Vec<ModelPreset>,
