@@ -405,19 +405,47 @@ pub(crate) fn unify_titlebar_toolbar(window: &tauri::WebviewWindow) {
 /// 创建/切换失败必须传播回前端：静默失败时用户「点了没反应」，再点会重复起会话。
 #[tauri::command]
 pub(crate) async fn open_chat_window(app: tauri::AppHandle, session_id: i64) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || open_chat_window_impl(&app, session_id))
+    tauri::async_runtime::spawn_blocking(move || open_chat_window_impl(&app, session_id, true))
         .await
         .map_err(|e| e.to_string())?
 }
 
-/// 无处上报错误的入口（审批唤醒）用的 fire-and-forget 变体；失败仅留日志，
-/// 由调用方自身的兜底（消费者租约超时 → pass）保证不悬挂。
+/// 无处上报错误的入口（通知/托盘点击等**用户主动**动作）用的 fire-and-forget 变体；
+/// 失败仅留日志。点击是明确意图，窗口正常抢焦点。
 pub(crate) fn open_chat_window_detached(app: tauri::AppHandle, session_id: i64) {
     std::thread::spawn(move || {
-        if let Err(error) = open_chat_window_impl(&app, session_id) {
+        if let Err(error) = open_chat_window_impl(&app, session_id, true) {
             eprintln!("打开对话窗口失败: {error}");
         }
     });
+}
+
+/// 审批/提问唤醒专用的**安静**变体：窗口要出现（否则审批无处可答），但**不抢焦点**——
+/// 用户可能正在外部终端里打字，焦点被抢走一次就是一次输入错位（实拍反馈）。
+/// 召唤注意力由调用方的任务栏闪烁（request_user_attention）承担。
+pub(crate) fn open_chat_window_quiet(app: tauri::AppHandle, session_id: i64) {
+    std::thread::spawn(move || {
+        if let Err(error) = open_chat_window_impl(&app, session_id, false) {
+            eprintln!("打开对话窗口失败: {error}");
+        }
+    });
+}
+
+/// 显示但不激活：Windows 用 SW_SHOWNOACTIVATE（普通 show 会激活并抢焦点）。
+/// 其余平台退化为普通 show——macOS 上显示非激活 App 的窗口本就不跨应用抢焦点
+/// （激活策略未变），够用。
+fn show_window_no_activate(window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+        if let Ok(handle) = window.hwnd() {
+            unsafe {
+                ShowWindow(handle.0 as _, SW_SHOWNOACTIVATE);
+            }
+            return;
+        }
+    }
+    let _ = window.show();
 }
 
 /// 托盘点击入口：打开最近活跃会话的对话窗口。托盘没有「当前会话」上下文，
@@ -434,7 +462,7 @@ pub(crate) fn open_latest_chat_window(app: &tauri::AppHandle) {
         match latest {
             Some(session_id) => {
                 // 托盘入口没有 UI 可上报；至少留日志。
-                if let Err(error) = open_chat_window_impl(&app, session_id) {
+                if let Err(error) = open_chat_window_impl(&app, session_id, true) {
                     eprintln!("打开对话窗口失败: {error}");
                 }
             }
@@ -450,7 +478,13 @@ pub(crate) fn open_latest_chat(app: tauri::AppHandle) {
     open_latest_chat_window(&app);
 }
 
-pub(crate) fn open_chat_window_impl(app: &tauri::AppHandle, session_id: i64) -> Result<(), String> {
+/// `activate`：true = 用户主动打开（点卡片/托盘/通知），照常抢焦点；
+/// false = 审批/提问唤醒——窗口要出现但不夺焦（用户可能正在外部终端打字，实拍反馈）。
+pub(crate) fn open_chat_window_impl(
+    app: &tauri::AppHandle,
+    session_id: i64,
+    activate: bool,
+) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     crate::macos::menubar::settings_window_will_open(app, "chat");
 
@@ -460,8 +494,14 @@ pub(crate) fn open_chat_window_impl(app: &tauri::AppHandle, session_id: i64) -> 
         // 看到的却是会话 B，比不弹窗更具误导性。
         w.emit("chat-session-changed", session_id)
             .map_err(|e| format!("切换会话失败: {e}"))?;
-        let _ = w.show();
-        let _ = w.set_focus();
+        if activate {
+            let _ = w.show();
+            let _ = w.set_focus();
+        } else if !w.is_visible().unwrap_or(false) {
+            // 隐藏（关到托盘等）时无声显形；最小化的留在任务栏——闪烁已在召唤，
+            // 强行还原窗口同样是夺屏。
+            show_window_no_activate(&w);
+        }
         return Ok(());
     }
     let url = format!("index.html?sessionId={session_id}");
@@ -470,6 +510,8 @@ pub(crate) fn open_chat_window_impl(app: &tauri::AppHandle, session_id: i64) -> 
         .inner_size(960.0, 760.0)
         .min_inner_size(620.0, 480.0)
         .resizable(true)
+        // 安静唤醒的新窗口不带初始焦点（冷启动首帧 show 的激活行为随之收敛）。
+        .focused(activate)
         // 隐藏创建，前端首帧后自行显示（见 show_after_grace 注释），消除白框闪烁。
         .visible(false)
         .center();
@@ -490,7 +532,7 @@ pub(crate) fn open_chat_window_impl(app: &tauri::AppHandle, session_id: i64) -> 
     // 标题/按钮错位；挂空 toolbar 让系统把它垂直居中（备忘录式侧栏惯例）。
     #[cfg(target_os = "macos")]
     unify_titlebar_toolbar(&win);
-    show_after_grace(&win, true);
+    show_after_grace(&win, activate);
     let app_handle = app.clone();
     win.on_window_event(move |e| {
         if matches!(

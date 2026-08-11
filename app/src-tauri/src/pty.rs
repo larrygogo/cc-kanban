@@ -742,7 +742,10 @@ impl PtyBroker {
         // 于是「窗口开在会话 A、会话 B 来要审批」这种常态下，用户得在 10 秒内自己注意到
         // 闪烁、在侧栏找到 B 并点开，否则请求被撤回、答成 pass 退回 TUI——那 10 秒是按
         // WebView2 冷启动量的，不是按人的反应时间量的。
-        crate::window::open_chat_window_detached(app.clone(), session_id);
+        //
+        // quiet：唤醒不抢焦点——用户可能正在外部终端里打字（实拍反馈），召唤注意力
+        // 交给下面的任务栏闪烁；卡片可答性不依赖焦点（请求在表里，注册后轮询可取）。
+        crate::window::open_chat_window_quiet(app.clone(), session_id);
         if let Some(window) = app.get_webview_window("chat") {
             let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
         }
@@ -2012,8 +2015,8 @@ impl PtyBroker {
             }
             if let Some(app) = self.attach.app.lock().ok().and_then(|app| app.clone()) {
                 // 与审批同等待遇：把对话窗切到该会话并闪任务栏（理由见 ensure_approval_window
-                // 的取舍注释——宁可切走一次，也不要让提问悄悄漏过）。
-                crate::window::open_chat_window_detached(app.clone(), request.session_id);
+                // 的取舍注释——宁可切走一次，也不要让提问悄悄漏过）。quiet 同理不抢焦点。
+                crate::window::open_chat_window_quiet(app.clone(), request.session_id);
                 if let Some(window) = app.get_webview_window("chat") {
                     let _ =
                         window.request_user_attention(Some(tauri::UserAttentionType::Critical));

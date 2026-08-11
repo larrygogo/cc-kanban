@@ -1877,7 +1877,7 @@ pub(crate) fn reveal_session(
     }
     // 同步等窗口创建结果：PTY 已经拉起、窗口却没开时，把错误交还调用方，
     // 而不是让前端误报成功（用户「点了没反应」会再点一次，重复起会话）。
-    crate::window::open_chat_window_impl(app, sid)
+    crate::window::open_chat_window_impl(app, sid, true)
 }
 
 /// 从看板卡片恢复：会话此刻还没有任何视图，故成功后按设置把用户带过去。
