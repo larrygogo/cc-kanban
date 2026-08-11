@@ -175,6 +175,103 @@ pub(crate) fn claude_pids_snapshot() -> std::collections::HashSet<i64> {
     set
 }
 
+/// 纯函数：`parent_of`（pid → ppid）里 root 的全部子孙（不含 root 自身）。
+/// visited 去重不只是效率：Windows 复用 pid 后，快照里陈旧的 ppid 可能指回某个子孙，
+/// 构成伪环——不去重 BFS 会死循环。
+pub(crate) fn descendant_pids(
+    parent_of: &std::collections::HashMap<u32, u32>,
+    root: u32,
+) -> HashSet<u32> {
+    let mut set: HashSet<u32> = HashSet::new();
+    let mut frontier = vec![root];
+    while let Some(x) = frontier.pop() {
+        for (&pid, &ppid) in parent_of {
+            if ppid == x && pid != root && set.insert(pid) {
+                frontier.push(pid);
+            }
+        }
+    }
+    set
+}
+
+/// best-effort 强杀单个 pid。打不开句柄（已退出/权限不够）→ false。
+/// 不做 agent 白名单校验：这里杀的是「快照瞬间 ppid 链挂在我们子进程下」的任意进程
+/// （MCP server 多为 node），按名单过滤反而放跑残留。
+#[cfg(target_os = "windows")]
+fn kill_pid(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let ok = TerminateProcess(handle, 1) != 0;
+        CloseHandle(handle);
+        ok
+    }
+}
+
+/// unix：独立 argv 直接调 kill，不经 shell。SIGKILL——调用方已决定强杀，没有优雅退出环节。
+#[cfg(not(target_os = "windows"))]
+fn kill_pid(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// unix：一次 `ps -axo pid=,ppid=` 物化 pid → ppid 映射，供 kill_descendants 做子孙 BFS。
+#[cfg(not(target_os = "windows"))]
+fn snapshot_ppids() -> std::collections::HashMap<u32, u32> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+    else {
+        return map;
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut it = line.split_whitespace();
+        if let (Some(pid), Some(ppid)) = (
+            it.next().and_then(|p| p.parse::<u32>().ok()),
+            it.next().and_then(|p| p.parse::<u32>().ok()),
+        ) {
+            map.insert(pid, ppid);
+        }
+    }
+    map
+}
+
+/// 强杀 root 的整棵子孙树（**不含 root 本身**——root 由调用方的 child.kill() 负责）。
+/// portable-pty 不建 Job Object，kill 只及直接子进程；agent 拉起的 MCP server 等孙进程
+/// 会在会话结束后残留，这里按快照兜杀。
+///
+/// pid 复用的缓解：快照在调用瞬间新取（Toolhelp 1-3ms），杀的窗口只有毫秒级；且只杀
+/// 「快照时刻 ppid 链挂在 root 下」的 pid。自我保护：root 是本进程时直接放弃，
+/// 子孙集合里出现本进程 pid（伪环/复用的极端情形）也过滤掉。
+pub(crate) fn kill_descendants(root: u32) {
+    let self_pid = std::process::id();
+    if root == self_pid {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    let parent_of: std::collections::HashMap<u32, u32> = snapshot_processes()
+        .into_iter()
+        .map(|(pid, (ppid, _))| (pid, ppid))
+        .collect();
+    #[cfg(not(target_os = "windows"))]
+    let parent_of = snapshot_ppids();
+    for pid in descendant_pids(&parent_of, root) {
+        if pid != self_pid {
+            kill_pid(pid);
+        }
+    }
+}
+
 /// 一次进程表扫描 → **活着的 agent 进程 pid 集合**。
 ///
 /// 与 [`pid_is_agent`] 判定同源（都按 basename 精确匹配 agent 白名单，防 Windows pid 复用），
@@ -197,5 +294,40 @@ pub(crate) fn agent_pids_snapshot() -> HashSet<i64> {
     #[cfg(not(target_os = "windows"))]
     {
         claude_pids_snapshot()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn map(edges: &[(u32, u32)]) -> HashMap<u32, u32> {
+        edges.iter().copied().collect()
+    }
+
+    #[test]
+    fn descendant_pids_walks_chain_and_branches() {
+        // 100 → 200 → 300，100 → 400；无关的 900(← 800) 不得入选。
+        let m = map(&[(200, 100), (300, 200), (400, 100), (900, 800)]);
+        let d = descendant_pids(&m, 100);
+        assert_eq!(d, HashSet::from([200, 300, 400]));
+    }
+
+    #[test]
+    fn descendant_pids_excludes_root_itself() {
+        let m = map(&[(200, 100)]);
+        assert!(!descendant_pids(&m, 100).contains(&100));
+    }
+
+    #[test]
+    fn descendant_pids_survives_stale_ppid_cycles() {
+        // pid 复用后的陈旧 ppid 可能构成自环/互环，BFS 必须在有限时间内返回。
+        let mut m = map(&[(500, 100), (600, 500)]);
+        m.insert(700, 700); // 自环
+        m.insert(800, 900); // 互环（不挂在 root 下）
+        m.insert(900, 800);
+        let d = descendant_pids(&m, 100);
+        assert_eq!(d, HashSet::from([500, 600]));
     }
 }

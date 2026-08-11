@@ -175,6 +175,13 @@ struct ManagedPty {
     /// 以 Disconnected 快速失败。
     input_tx: mpsc::SyncSender<Vec<u8>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+    /// spawn 后立刻捕获的子进程 pid。杀子孙树按它查快照——绝不能事后再 lock child 拿
+    /// process_id：child 锁可能被卡死的收尾长持（历史死锁教训见 reap_child 注释）。
+    child_pid: Option<u32>,
+    /// 「结束会话」的请求时刻。waiter 据此升级强杀：TerminateProcess 对卡死在 ConPTY
+    /// 内核 I/O 的进程会**静默无效**（portable-pty 0.9 的 kill 恒返回 Ok，不代表进程真死），
+    /// 只等 try_wait 的话收尾永不触发，UI 永远「运行中」。只记首次，重复点击不重置计时。
+    stop_requested_at: Mutex<Option<std::time::Instant>>,
     backlog: Mutex<VecDeque<u8>>,
     /// 自 PTY 启动以来累计输出的字节位置；与 backlog 锁内更新，供快照和实时帧去重排序。
     output_end: AtomicU64,
@@ -355,22 +362,90 @@ fn readable_tail(data: &[u8], max_chars: usize) -> String {
 /// stop()/shutdown() 全在这把锁上排队，表现为「结束会话」点了没反应、退出应用卡住。
 /// EOF 后终端流已死，画面与输入都永远回不来，还活着的子进程只是僵尸，杀掉是唯一出路。
 fn reap_child(child: &mut (dyn portable_pty::Child + Send + Sync)) -> Option<u32> {
+    reap_child_within(
+        child,
+        std::time::Duration::from_millis(500),
+        std::time::Duration::from_secs(2),
+    )
+}
+
+/// `grace`：EOF 与退出之间的正常宽限；`kill_wait`：kill 后等退出码的上限。
+/// kill 后**绝不调无限阻塞的 wait()**——TerminateProcess 对卡死在 ConPTY 内核 I/O 的进程
+/// 会静默无效（portable-pty 0.9 的 kill 恒返回 Ok），wait 会拿着 child 锁永久不还，
+/// stop()/shutdown() 全在这把锁上排队。超时拿不到退出码就返回 None：
+/// 一个退出码不值得拿整个收尾路径陪葬。
+fn reap_child_within(
+    child: &mut (dyn portable_pty::Child + Send + Sync),
+    grace: std::time::Duration,
+    kill_wait: std::time::Duration,
+) -> Option<u32> {
     // EOF 与进程退出之间存在正常的毫秒级窗口（unix 上关掉 tty 的进程还在收尾）：
     // 先宽限轮询一小段，能等到就拿真实退出码。waiter 路径 try_wait 确认过退出，首轮即返回。
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    let deadline = std::time::Instant::now() + grace;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status.exit_code()),
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            // 宽限到点还活着（或 try_wait 出错拿不到结论）：kill 后收尸。kill 掉的
-            // 进程 wait 立即返回，child 锁最多被持有「宽限 + 一次 kill」的时间。
+            // 宽限到点还活着（或 try_wait 出错拿不到结论）：kill 后有限轮询收尸。
+            // 正常被杀的进程毫秒级就能等到退出码；等不到的是内核态僵尸，放弃。
             _ => {
                 let _ = child.kill();
-                return child.wait().ok().map(|s| s.exit_code());
+                let kill_deadline = std::time::Instant::now() + kill_wait;
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => return Some(status.exit_code()),
+                        _ if std::time::Instant::now() >= kill_deadline => return None,
+                        _ => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    }
+                }
             }
         }
+    }
+}
+
+/// 「结束会话」的升级档位。时间轴：stop 请求 → [`STOP_KILL_TREE_AFTER`] 仍活 →
+/// 杀子孙树 + 关伪终端 → 共 [`STOP_FORCE_FINALIZE_AFTER`] 仍活 → 强制收尾。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopStage {
+    Wait,
+    KillTree,
+    ForceFinalize,
+}
+
+const STOP_KILL_TREE_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+const STOP_FORCE_FINALIZE_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// 纯谓词，时间点由调用方注入（waiter 传真实 now，测试传构造的时刻）。
+fn stop_stage(stop_requested_at: Option<std::time::Instant>, now: std::time::Instant) -> StopStage {
+    let Some(at) = stop_requested_at else {
+        return StopStage::Wait;
+    };
+    let elapsed = now.saturating_duration_since(at);
+    if elapsed >= STOP_FORCE_FINALIZE_AFTER {
+        StopStage::ForceFinalize
+    } else if elapsed >= STOP_KILL_TREE_AFTER {
+        StopStage::KillTree
+    } else {
+        StopStage::Wait
+    }
+}
+
+/// stop 升级第二档：补刀 + 杀子孙树 + 关伪终端。child 锁只包 kill 那一下，杀树在锁外
+/// （按 spawn 时捕获的 child_pid 查即时快照，root 此刻还活着，子孙表可信）。
+/// drop master（ClosePseudoConsole）让 conhost 退出——这是解除「卡死在 ConPTY 内核
+/// I/O」的唯一杠杆：conhost 一死，挂在管道上的内核等待多半随之解除，TerminateProcess
+/// 才能真正生效。
+fn escalate_stop(managed: &ManagedPty) {
+    if let Ok(mut child) = managed.child.lock() {
+        let _ = child.kill();
+    }
+    if let Some(pid) = managed.child_pid {
+        crate::proc::kill_descendants(pid);
+    }
+    if let Ok(mut master) = managed.master.lock() {
+        drop(master.take());
     }
 }
 
@@ -885,6 +960,7 @@ impl PtyBroker {
             .slave
             .spawn_command(command)
             .map_err(|e| e.to_string())?;
+        let child_pid = child.process_id();
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
         drop(pair.slave);
@@ -895,6 +971,8 @@ impl PtyBroker {
             master: Mutex::new(Some(pair.master)),
             input_tx,
             child: Mutex::new(child),
+            child_pid,
+            stop_requested_at: Mutex::new(None),
             backlog: Mutex::new(VecDeque::new()),
             output_end: AtomicU64::new(0),
             subscribers: Mutex::new(Vec::new()),
@@ -936,21 +1014,48 @@ impl PtyBroker {
         let waiter = managed.clone();
         let waiter_broker = self.clone();
         let waiter_app = app.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            if waiter.finalized.load(Ordering::Acquire) {
-                return;
-            }
-            let exited = waiter
-                .child
-                .lock()
-                .ok()
-                .and_then(|mut child| child.try_wait().ok())
-                .flatten()
-                .is_some();
-            if exited {
-                finalize_exit(&waiter_broker, &waiter_app, &waiter);
-                return;
+        std::thread::spawn(move || {
+            let mut tree_killed = false;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if waiter.finalized.load(Ordering::Acquire) {
+                    return;
+                }
+                let exited = waiter
+                    .child
+                    .lock()
+                    .ok()
+                    .and_then(|mut child| child.try_wait().ok())
+                    .flatten()
+                    .is_some();
+                if exited {
+                    finalize_exit(&waiter_broker, &waiter_app, &waiter);
+                    return;
+                }
+                // 「结束会话」的升级链。stop() 只发 TerminateProcess，对卡死在 ConPTY 内核
+                // I/O 的进程它会静默无效（kill 恒返回 Ok 是谎报）——只等 try_wait 的话这里
+                // 永远转下去，UI 永远「运行中」。到点就加码，保证结束必定发生。
+                let stop_requested_at = waiter
+                    .stop_requested_at
+                    .lock()
+                    .ok()
+                    .and_then(|at| *at);
+                match stop_stage(stop_requested_at, std::time::Instant::now()) {
+                    StopStage::Wait => {}
+                    StopStage::KillTree => {
+                        if !tree_killed {
+                            escalate_stop(&waiter);
+                            tree_killed = true;
+                        }
+                    }
+                    StopStage::ForceFinalize => {
+                        // 杀树 + 关伪终端后又等了一轮仍杀不死：内核态僵尸，等不来退出。
+                        // 强制收尾把会话从 UI 摘除（finalize 会 emit pty-exit + 移出
+                        // sessions，前端两条感知路径都解锁）；zombie 带着句柄躺在系统里。
+                        finalize_exit(&waiter_broker, &waiter_app, &waiter);
+                        return;
+                    }
+                }
             }
         });
 
@@ -1297,14 +1402,20 @@ impl PtyBroker {
             .get(&session_id)
             .cloned()
             .ok_or("PTY 会话未运行")?;
-        let result = session
-            .child
-            .lock()
-            .map_err(|_| "PTY 进程锁已损坏")?
-            .kill()
-            .map_err(|e| e.to_string());
-        // kill 之后收尾由 waiter 在 ~200ms 内接手（finalize_exit）；这里不用做别的。
-        result
+        // 先落时间戳再 kill：即使 kill 无效（见下），waiter 的升级链也已武装，收尾有保证。
+        // get_or_insert：重复点击不重置计时，否则连点会把升级一直往后推。
+        if let Ok(mut at) = session.stop_requested_at.lock() {
+            at.get_or_insert_with(std::time::Instant::now);
+        }
+        // kill 的结果不上抛：Windows 上 portable-pty 0.9 恒返回 Ok（返回值判断反了又被
+        // .ok() 吞掉），本就不代表进程真死；而报错会让前端退回可点的「结束会话」按钮，
+        // 与「升级链已在推进」的实际状态脱节。真正的保证在 waiter：T1 仍活 → 杀树 +
+        // ClosePseudoConsole；T2 仍活 → 强制 finalize_exit。
+        if let Ok(mut child) = session.child.lock() {
+            let _ = child.kill();
+        }
+        // kill 生效的正常路径下，收尾由 waiter 在 ~200ms 内接手（finalize_exit）。
+        Ok(())
     }
 
     /// 启动仅监听 loopback 的 attach 服务。协议不暴露到 LAN，且握手必须携带 256-bit token。
@@ -1383,6 +1494,11 @@ impl PtyBroker {
             for (_, managed) in sessions.drain() {
                 if let Ok(mut child) = managed.child.lock() {
                     let _ = child.kill();
+                }
+                // kill 只及直接子进程（portable-pty 不建 Job Object）：agent 拉起的
+                // MCP server 等孙进程要按快照兜杀，否则应用退出后残留在系统里。
+                if let Some(pid) = managed.child_pid {
+                    crate::proc::kill_descendants(pid);
                 }
                 // 同 stop：不关伪终端的话 conhost 会作为孤儿留在系统里。
                 if let Ok(mut master) = managed.master.lock() {
@@ -2152,14 +2268,50 @@ mod tests {
     }
     impl portable_pty::Child for HungChild {
         fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            // kill 生效后 try_wait 能拿到退出码——贴近真实 TerminateProcess 成功的行为。
+            if self.killed.load(Ordering::Acquire) {
+                Ok(Some(portable_pty::ExitStatus::with_exit_code(1)))
+            } else {
+                Ok(None)
+            }
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            // 真实世界的 wait 对杀不死的进程会永久阻塞并拿着 child 锁不还——
+            // 收尾路径绝不许再调它，测试里直接以 panic 当哨兵。
+            panic!("reap_child 不得再调无限阻塞的 wait()");
+        }
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    /// 「TerminateProcess 静默无效」的子进程：kill 恒返回 Ok（portable-pty 0.9 的谎报），
+    /// 但 try_wait 永远拿不到退出——卡死在 ConPTY 内核 I/O 的真实场景。
+    #[derive(Debug)]
+    struct NeverDiesChild {
+        killed: Arc<AtomicBool>,
+    }
+    impl portable_pty::ChildKiller for NeverDiesChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed.store(true, Ordering::Release);
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(NeverDiesChild {
+                killed: self.killed.clone(),
+            })
+        }
+    }
+    impl portable_pty::Child for NeverDiesChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
             Ok(None)
         }
         fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
-            if self.killed.load(Ordering::Acquire) {
-                Ok(portable_pty::ExitStatus::with_exit_code(1))
-            } else {
-                Err(std::io::Error::other("wait 在未 kill 的活进程上会永久阻塞"))
-            }
+            panic!("reap_child 不得再调无限阻塞的 wait()");
         }
         fn process_id(&self) -> Option<u32> {
             None
@@ -2184,7 +2336,95 @@ mod tests {
         assert_eq!(code, Some(1), "kill 后应立即收到退出码");
     }
 
+    /// 回归：TerminateProcess 静默无效（卡死在 ConPTY 内核 I/O）时，收尸必须在超时后
+    /// 放弃返回 None，而不是无限阻塞在 wait() 上拿着 child 锁不还。
+    #[test]
+    fn reap_child_gives_up_on_unkillable_child() {
+        let killed = Arc::new(AtomicBool::new(false));
+        let mut child: Box<dyn portable_pty::Child + Send + Sync> = Box::new(NeverDiesChild {
+            killed: killed.clone(),
+        });
+        let start = std::time::Instant::now();
+        let code = reap_child_within(
+            child.as_mut(),
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_millis(50),
+        );
+        assert!(killed.load(Ordering::Acquire), "宽限到点应尝试 kill");
+        assert_eq!(code, None, "杀不死就放弃退出码");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "必须在超时上限附近返回，不得无限等待"
+        );
+    }
+
+    /// stop 升级链的档位判定：纯时间点注入，避开线程/时序 flakiness。
+    #[test]
+    fn stop_stage_escalates_by_elapsed_time() {
+        let now = std::time::Instant::now();
+        assert_eq!(stop_stage(None, now), StopStage::Wait, "未请求 stop 不升级");
+        assert_eq!(stop_stage(Some(now), now), StopStage::Wait);
+        assert_eq!(
+            stop_stage(Some(now), now + std::time::Duration::from_millis(500)),
+            StopStage::Wait
+        );
+        assert_eq!(
+            stop_stage(Some(now), now + STOP_KILL_TREE_AFTER),
+            StopStage::KillTree
+        );
+        assert_eq!(
+            stop_stage(Some(now), now + STOP_FORCE_FINALIZE_AFTER),
+            StopStage::ForceFinalize
+        );
+    }
+
+    /// stop() 必须先武装升级链（落时间戳）再 kill，且 kill 的谎报 Ok 不影响返回值语义。
+    #[test]
+    fn stop_records_request_timestamp_and_kills() {
+        let broker = PtyBroker::default();
+        let killed = Arc::new(AtomicBool::new(false));
+        let managed = managed_with_child(
+            7,
+            Box::new(NeverDiesChild {
+                killed: killed.clone(),
+            }),
+            None,
+        );
+        broker.sessions.lock().unwrap().insert(7, managed.clone());
+        assert!(broker.stop(7).is_ok());
+        assert!(killed.load(Ordering::Acquire), "stop 应发出 kill");
+        let first = managed.stop_requested_at.lock().unwrap().expect("应落时间戳");
+        // 重复点击不重置计时，否则连点会把升级一直往后推。
+        assert!(broker.stop(7).is_ok());
+        assert_eq!(managed.stop_requested_at.lock().unwrap().unwrap(), first);
+    }
+
+    /// 升级第二档：补刀 kill；pid 未知时跳过杀树，不 panic 不阻塞。
+    /// （master 的 take/drop 无法在此覆盖：测试里造不出 Box<dyn MasterPty>——
+    /// 其 Error 是 anyhow，非本 crate 直接依赖；该行为与 finalize_exit 同一句式。）
+    #[test]
+    fn escalate_stop_kills_without_tree_or_master() {
+        let killed = Arc::new(AtomicBool::new(false));
+        let managed = managed_with_child(
+            7,
+            Box::new(NeverDiesChild {
+                killed: killed.clone(),
+            }),
+            None,
+        );
+        escalate_stop(&managed);
+        assert!(killed.load(Ordering::Acquire), "升级档应补刀 kill");
+    }
+
     fn dummy_managed(session_id: i64) -> Arc<ManagedPty> {
+        managed_with_child(session_id, Box::new(DummyChild), None)
+    }
+
+    fn managed_with_child(
+        session_id: i64,
+        child: Box<dyn portable_pty::Child + Send + Sync>,
+        child_pid: Option<u32>,
+    ) -> Arc<ManagedPty> {
         // rx 直接丢弃：假会话没有 writer 线程，写入以 Disconnected 快速失败即可。
         let (input_tx, _) = mpsc::sync_channel(1);
         Arc::new(ManagedPty {
@@ -2192,7 +2432,9 @@ mod tests {
             master: Mutex::new(None),
             finalized: AtomicBool::new(false),
             input_tx,
-            child: Mutex::new(Box::new(DummyChild)),
+            child: Mutex::new(child),
+            child_pid,
+            stop_requested_at: Mutex::new(None),
             backlog: Mutex::new(VecDeque::new()),
             output_end: AtomicU64::new(0),
             subscribers: Mutex::new(Vec::new()),

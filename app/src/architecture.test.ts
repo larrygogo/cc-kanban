@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 
 const SRC = dirname(fileURLToPath(import.meta.url));
 
@@ -22,15 +22,27 @@ const SRC = dirname(fileURLToPath(import.meta.url));
  */
 const AGENT_IDS = ["claude", "codex", "kimi", "gemini", "opencode"];
 
-/** 承载「按 agent 差异化行为」的文件：这里出现身份比较，几乎必然是该下发的能力。 */
-const GUARDED_FILES = [
-  "terminalAttention.ts",
-  "views/settings/NetworkSection.tsx",
-  "views/ChatWindow.tsx",
-  "views/Sticker.tsx",
-  "views/ChatSidebar.tsx",
-  "api.ts",
-];
+/**
+ * 守卫覆盖面：src/ 下**全部**生产 ts/tsx，自动枚举——手工名单必然漂移（曾只列 6 个
+ * 文件，RelayAccess/NewSessionPanel/AccountSection 都在盲区）。排除的目录各有理由：
+ * 测试与 test/（固件按 id 造数据是本分）、generated/（后端产物）、demo/ 与 poster/
+ * （营销物料，用写死的 agent 数据演戏）。
+ */
+const EXCLUDED_DIRS = new Set(["generated", "test", "demo", "poster"]);
+
+function guardedFiles(dir: string = SRC): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!EXCLUDED_DIRS.has(entry.name)) out.push(...guardedFiles(path));
+      continue;
+    }
+    if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue;
+    out.push(relative(SRC, path).replaceAll("\\", "/"));
+  }
+  return out;
+}
 
 /**
  * 身份**比较**的形态。数据声明（`x: "claude"` / `["claude"]`）刻意不在内。
@@ -70,8 +82,11 @@ const ALIAS_COMPARISONS = (name: string) => [
 
 describe("架构守卫", () => {
   it("前端不按 agent 身份分支（能力一律由后端下发）", () => {
+    const files = guardedFiles();
+    // 枚举失灵（目录结构变了/路径算错）会静默把守卫变成空转——先钉住下限。
+    expect(files.length).toBeGreaterThan(30);
     const offences: string[] = [];
-    for (const file of GUARDED_FILES) {
+    for (const file of files) {
       const source = readFileSync(join(SRC, file), "utf8");
       const aliases = agentIdAliases(source);
       source.split("\n").forEach((line, index) => {

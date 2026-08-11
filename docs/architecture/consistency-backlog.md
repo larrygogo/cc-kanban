@@ -24,7 +24,7 @@
 | P1-3 | 重复 invoke 未进 api.ts：`rename_session`(3 份)、`set_archived`(4)、`set_session_note`(2)、`open_project_dir`(3)、`open_new_session_window`(5) | Sticker/ChatSidebar/ChatWindow/About | 收编进 api.ts 封装 | 修复中 |
 | P1-4 | 工作区新改动：`persist_queued_image` 使插件 crate 直接写宿主临时目录；32MB 上限常量在 agent/app 两 crate 各定义一遍；`$TEMP/meowo-paste` 目录约定两处独立实现 | `plugins/claude/transcript.rs` vs `chat.rs` | 已收敛：`fsutil::paste_root()` + `PASTE_MAX_BYTES` 单点定义，两处消费；crate 文档改为如实描述落盘边界（transcript 解析管线为纯函数共享，落盘不再上提） | 已修 |
 | P1-5 | 纯 DB 命令落在 `terminal.rs`（`set_session_launch_selection`/`session_launch_selections`） | `terminal.rs` → `session_command.rs` | 已移入 `session_command.rs`；返回 `HashMap` 暂不立 DTO（纯 string map，无字段可失配），若将来加字段再进 protocol | 已修 |
-| P1-6 | 架构守卫覆盖名单滞后：宿主守卫只覆盖 6 文件（`bgpty.rs`/`relay.rs` 等在盲区）；前端 `architecture.test.ts` 的 GUARDED_FILES/AGENT_IDS 是手工名单，`RelayAccess.tsx` 等未纳入 | `lib.rs:1358`、`architecture.test.ts:23-33` | 扩名单或改为按目录自动枚举 | 待修 |
+| P1-6 | 架构守卫覆盖名单滞后（宿主 6 文件、前端 6 文件手工名单） | `lib.rs`、`architecture.test.ts` | 已修：宿主守卫扩至全部 31 个 src 文件（含 macOS——include_str 不参与 cfg 编译；`#[test]` 属性补作跳过触发器修掉深度计数失衡的盲区）；前端改为目录自动枚举 + 文件数下限断言防枚举空转。扩列时实测全部生产代码本就干净——纪律已内化，守卫防回潮 | 已修 |
 | P1-7 | `ChatWindow.tsx` 的 `claudeCommandApprovalDetails`/`kimiCommandApprovalDetails` 语义上仍是前端按 agent 形态分支（以函数名规避了守卫） | `ChatWindow.tsx:76-133` | 解析逻辑下沉到插件 telemetry/chat_ui，前端只渲染 | 待修 |
 
 ## P2 —— 重复实现 / 命名漂移

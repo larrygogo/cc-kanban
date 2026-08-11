@@ -1250,13 +1250,43 @@ mod tests {
     /// 注释与测试代码不算（写具体 agent 名是正常的举例与固件）。
     #[test]
     fn host_code_does_not_branch_on_agent_identity() {
+        // 全量名单：宿主 src/ 下所有模块（含 macOS 专属——include_str 只读文本，不参与
+        // cfg 编译，Windows 上照样扫得到）。曾只列 6 个文件，`bgpty.rs`/`relay.rs` 等都在
+        // 盲区；实测扩列时全部文件的生产段本就干净（字面量都在各自测试模块里），说明
+        // 纪律已内化——守卫的作用是防回潮。新增 src/*.rs 记得补这里（漏补不会红，但该
+        // 文件就不设防了）。lib.rs 自身也在列：production_lines 会剔除其内联测试模块。
         const HOST_SOURCES: &[(&str, &str)] = &[
+            ("app_bundle.rs", include_str!("app_bundle.rs")),
+            ("bgpty.rs", include_str!("bgpty.rs")),
+            ("chat.rs", include_str!("chat.rs")),
+            ("confirm.rs", include_str!("confirm.rs")),
             ("detect.rs", include_str!("detect.rs")),
-            ("terminal.rs", include_str!("terminal.rs")),
-            ("settings.rs", include_str!("settings.rs")),
+            ("envpath.rs", include_str!("envpath.rs")),
+            ("install.rs", include_str!("install.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+            ("managed_terminal.rs", include_str!("managed_terminal.rs")),
+            ("proc.rs", include_str!("proc.rs")),
+            ("proxy.rs", include_str!("proxy.rs")),
             ("pty.rs", include_str!("pty.rs")),
+            ("relay.rs", include_str!("relay.rs")),
+            ("session_command.rs", include_str!("session_command.rs")),
             ("session_query.rs", include_str!("session_query.rs")),
+            ("settings.rs", include_str!("settings.rs")),
+            ("snap.rs", include_str!("snap.rs")),
+            ("snap_layout.rs", include_str!("snap_layout.rs")),
+            ("term_script.rs", include_str!("term_script.rs")),
+            ("terminal.rs", include_str!("terminal.rs")),
             ("watch.rs", include_str!("watch.rs")),
+            ("wezterm.rs", include_str!("wezterm.rs")),
+            ("window.rs", include_str!("window.rs")),
+            ("account/mod.rs", include_str!("account/mod.rs")),
+            ("profile/mod.rs", include_str!("profile/mod.rs")),
+            ("setup/mod.rs", include_str!("setup/mod.rs")),
+            ("macos/menubar.rs", include_str!("macos/menubar.rs")),
+            ("macos/mod.rs", include_str!("macos/mod.rs")),
+            ("macos/notify.rs", include_str!("macos/notify.rs")),
+            ("macos/panel.rs", include_str!("macos/panel.rs")),
+            ("macos/terminal.rs", include_str!("macos/terminal.rs")),
         ];
         for (name, source) in HOST_SOURCES {
             for (index, line) in production_lines(source) {
@@ -1288,8 +1318,13 @@ mod tests {
         let mut in_test = false;
         for (index, line) in source.lines().enumerate() {
             let trimmed = line.trim_start();
-            if !in_test && trimmed.starts_with("#[cfg(test)]")
-                || !in_test && trimmed.starts_with("#[cfg(all(test")
+            // `#[test]` 也作触发器：字符串字面量里的花括号会让深度计数失衡、提前退出
+            // 跳过区（lib.rs 自扫时实测踩到），此后遇到下一个测试函数的 `#[test]` 即
+            // 重新进入跳过——生产代码不会出现该属性，误触发不存在。
+            if !in_test
+                && (trimmed.starts_with("#[cfg(test)]")
+                    || trimmed.starts_with("#[cfg(all(test")
+                    || trimmed.starts_with("#[test]"))
             {
                 in_test = true;
                 depth = 0;
