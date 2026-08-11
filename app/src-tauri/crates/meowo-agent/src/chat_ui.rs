@@ -129,6 +129,26 @@ pub struct SelectorAnchor {
     pub kind: SelectorAnchorKind,
 }
 
+/// 命中提示后，**详情区**按哪种屏幕文法解析（工具名/命令段/问句怎么从文本里抠出来）。
+/// 命名的是**屏幕格式**，不是 agent：新 agent 的审批框长得像哪种就声明哪种，
+/// 都不像就 `None`——按钮照常可用，只是详情区不做结构化拆解。
+/// 此前前端按 pattern id（`"kimi:command-approval"`）猜格式，是变相的身份分支。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+pub enum AttentionDetails {
+    /// 不解析，整段命中文本原样展示。
+    #[default]
+    None,
+    /// 「Do you want to proceed?」框式：工具头行 + 命令段 + 问句尾行（claude 真机取证）。
+    /// 附带语义：「记住此决定」项是**持久**权限规则。
+    ProceedBox,
+    /// 「▶ 问题标题」面板式：▶ 标题行 + display 块（kimi 官方源码取证 approval-panel.ts）。
+    /// 附带语义：「Approve for this session」只记本会话，不是持久规则。
+    ArrowPanel,
+}
+
 /// 屏幕上**可操作**提示的识别规格：审批框、长会话确认这类需要用户当场决定的整句提示。
 ///
 /// 与 [`crate::screen::ScreenRule`] 的分工：那套只判**状态**（working/idle/blocked，只读）；
@@ -154,6 +174,8 @@ pub struct AttentionPattern {
     /// 审批框会残留在缓冲上方，取第一次会把用户看到的下方活动面板与上方残影搞混
     /// ——真实事故是「用户看着 A 批准了 B」。仅出现一次的提示（长会话确认）用 false。
     pub last: bool,
+    /// 详情区的屏幕文法风格（见 [`AttentionDetails`]）。None = 不做结构化拆解。
+    pub details: AttentionDetails,
 }
 
 /// 屏幕回显标记：TUI 状态栏上代表某个模式值的稳定文案片段（如 claude 的 "plan mode on"）。

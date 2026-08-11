@@ -530,6 +530,7 @@ impl AgentPlugin for Claude {
                 ],
                 // 该提示每次恢复只出现一次，取首个匹配即可。
                 last: false,
+                details: crate::chat_ui::AttentionDetails::None,
             },
             crate::chat_ui::AttentionPattern {
                 id: "claude:command-approval",
@@ -537,6 +538,7 @@ impl AgentPlugin for Claude {
                 // 匹配到 "do you want to procee" 这种根本不存在的前缀语义。
                 patterns: &["this command requires approval", r"do you want to proceed\?"],
                 last: true,
+                details: crate::chat_ui::AttentionDetails::ProceedBox,
             },
         ]
     }

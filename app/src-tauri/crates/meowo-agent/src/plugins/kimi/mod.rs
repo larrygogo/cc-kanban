@@ -273,6 +273,7 @@ impl AgentPlugin for Kimi {
             // 取首个匹配会把标题/命令锁在残影上，而数字键打给的是屏幕最下方的活动
             // 面板——用户看着 A 批准了 B。
             last: true,
+            details: crate::chat_ui::AttentionDetails::ArrowPanel,
         }]
     }
 

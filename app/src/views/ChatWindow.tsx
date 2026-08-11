@@ -73,7 +73,9 @@ function approvalSuggestionTip(suggestion: unknown, index: number, t: ReturnType
 
 const PROCEED_QUESTION = /^do you want to proceed\?$/i;
 
-function claudeCommandApprovalDetails(text: string) {
+/// 「proceed_box」框式审批详情（claude 真机取证的屏幕文法）。用哪种解析器由插件随
+/// AttentionPattern.details 声明，前端不再按 pattern id 猜。
+function proceedBoxApprovalDetails(text: string) {
   // TUI 把标题行用横线铺满整屏宽（"Do you want to proceed? ──────"）。这些框线是
   // 排版，不是内容：行尾的要剥掉，整行都是框线的整行丢弃。
   const lines = text.split("\n")
@@ -107,11 +109,11 @@ function claudeCommandApprovalDetails(text: string) {
   };
 }
 
-/// kimi 审批面板的文本详情（官方源码取证 apps/kimi-code/.../approval-panel.ts @ 0.29）：
+/// 「arrow_panel」面板式审批详情（kimi 官方源码取证 apps/kimi-code/.../approval-panel.ts @ 0.29）：
 /// 标题行 ▶ <按工具定制的问题>（Run this command? / Write this file? / Approve X?），
 /// 之下是命令/diff 等 display 块。详情区剥掉框线与标题，正文整段进 pre；
 /// 工具名从标题反推，反推不到就留空（工具行整体不显示，比显示一个猜的名字诚实）。
-function kimiCommandApprovalDetails(text: string) {
+function arrowPanelApprovalDetails(text: string) {
   const lines = text.split("\n").map((line) => line.trim()).filter(Boolean)
     .filter((line) => !/^[─━═|-]+$/.test(line));
   const headerIndex = lines.findIndex((line) => /^▶\s*[^\n]+\?$/.test(line));
@@ -1890,7 +1892,8 @@ export function ChatWindow() {
     else el.removeAttribute("inert");
   }, [composerLocked, view]);
 
-  const commandAttention = terminalAttention && (terminalAttention.id === "claude:command-approval" || terminalAttention.id === "kimi:command-approval") ? terminalAttention : null;
+  // 审批卡门控：插件声明了详情文法风格（details）的提示才走命令审批卡——不再枚举 pattern id。
+  const commandAttention = terminalAttention && (terminalAttention.details === "proceed_box" || terminalAttention.details === "arrow_panel") ? terminalAttention : null;
   const interactiveAttention = terminalAttention?.id === "interactive:numbered-selector" ? terminalAttention : null;
   // 屏幕识别就绪 → 可作答的交互选择器接管，结构化题面的展示卡退场（同一份题面不双卡）。
   useEffect(() => {
@@ -1905,9 +1908,9 @@ export function ChatWindow() {
   const answerableInCard =
     structuredQuestions.length === 1 && !structuredQuestions[0].multiSelect;
   const commandApproval = commandAttention
-    ? commandAttention.id === "kimi:command-approval"
-      ? kimiCommandApprovalDetails(commandAttention.text)
-      : claudeCommandApprovalDetails(commandAttention.text)
+    ? commandAttention.details === "arrow_panel"
+      ? arrowPanelApprovalDetails(commandAttention.text)
+      : proceedBoxApprovalDetails(commandAttention.text)
     : null;
   const commandOptions = commandAttention?.options ?? [];
   // claude 的选项文案是 Yes/No，kimi 是 Approve once/Reject——两家的按钮语义同一套。
@@ -2209,8 +2212,8 @@ export function ChatWindow() {
         sideActions={<>
           <button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setTerminalAttention(null)}>{t.chat.attentionDismiss}</button>
           {commandRemember && <button type="button" className="is-persistent" onClick={() => chooseTerminalOption(commandRemember)}>
-            {/* kimi 的「Approve for this session」只记本会话，不是 claude 的持久规则——文案不能混。 */}
-            {commandAttention.id === "kimi:command-approval"
+            {/* arrow_panel 的「Approve for this session」只记本会话，proceed_box 的记住是持久规则——文案不能混。 */}
+            {commandAttention.details === "arrow_panel"
               ? t.chat.allowSession
               : `${t.chat.allowRemember}${commandRemember.label.match(/for:\s*(.+)$/i)?.[1] ? ` · ${commandRemember.label.match(/for:\s*(.+)$/i)?.[1]}` : ""}`}
           </button>}

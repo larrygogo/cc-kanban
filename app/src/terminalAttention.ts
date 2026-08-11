@@ -20,7 +20,11 @@ export type TerminalAttentionOption = {
   position?: number;
   kind?: "choice" | "input" | "submit" | "chat";
 };
-export type TerminalAttention = { id: string; text: string; options?: TerminalAttentionOption[] };
+/// 审批详情区的屏幕文法风格（后端 `AttentionDetails` 的镜像，插件随 AttentionPattern 声明）：
+/// proceed_box = 「Do you want to proceed?」框式（光标移动选择、记住=持久规则）；
+/// arrow_panel = 「▶ 标题」面板式（数字键直选、记住=仅本会话）。缺省/none = 不做结构化拆解。
+export type AttentionDetailsStyle = "none" | "proceed_box" | "arrow_panel";
+export type TerminalAttention = { id: string; text: string; options?: TerminalAttentionOption[]; details?: AttentionDetailsStyle };
 
 export function visibleTerminalText(text: string): string {
   // backlog 可能保留已经处理过的旧提示。只看最后一次整屏清除之后的内容，避免重新挂载
@@ -83,7 +87,7 @@ export type SelectorAnchor = { marker: string; kind: "input" | "chat" };
 /// 可操作提示的识别规格，由插件声明、经 chatUi 下发（后端 AttentionPattern）。
 /// patterns 是 JS 正则源码，任一命中即算命中该卡片；last=true 取最后一次匹配
 /// （审批框必须如此：TUI 重绘不清屏，上一屏的残影在缓冲上方）。
-export type AttentionPattern = { id: string; patterns: string[]; last: boolean };
+export type AttentionPattern = { id: string; patterns: string[]; last: boolean; details?: AttentionDetailsStyle };
 
 export type AttentionGrammar = {
   /// 会话的 agent id。仅用于日志/调试与默认文法的自述——**识别规则不再按它分支**，
@@ -116,6 +120,7 @@ const CLAUDE_GRAMMAR: AttentionGrammar = {
     },
     {
       id: "claude:command-approval",
+      details: "proceed_box",
       patterns: ["this command requires approval", "do you want to proceed\\?"],
       last: true,
     },
@@ -379,7 +384,7 @@ export function terminalAttention(
   if (!text) return null;
   const visible = visibleTerminalText(text);
   const lower = visible.toLowerCase();
-  let best: { index: number; id: string } | null = null;
+  let best: { index: number; id: string; details?: AttentionDetailsStyle } | null = null;
   // 整句可操作提示（审批框、长会话确认）由插件声明、经 chatUi 下发——识别层不再
   // 认识任何具体 agent。规则**天然是 per-agent 的**：这些是各家 TUI 的界面原文，
   // 别家 agent 的输出里引用同一句（讨论审批流程、cat 一个含该句的脚本）不该误弹卡片、
@@ -387,7 +392,7 @@ export function terminalAttention(
   // 「你只会拿到自己的规则」。
   for (const rule of grammar.attentionPatterns ?? []) {
     const index = matchAttentionPattern(rule, visible);
-    if (index >= 0 && (!best || index > best.index)) best = { index, id: rule.id };
+    if (index >= 0 && (!best || index > best.index)) best = { index, id: rule.id, details: rule.details };
   }
   for (const marker of markers) {
     const normalized = marker.toLowerCase();
@@ -437,29 +442,31 @@ export function terminalAttention(
     };
   }
   if (!best) return null;
-  // kimi 审批面板的详情从标题行(▶ Run this command?)起取:best 可能命中面板底部的
+  // 详情区文法风格由插件随 AttentionPattern 声明（此前按 pattern id 猜，是变相身份分支）。
+  const detailsStyle: AttentionDetailsStyle = best.details ?? "none";
+  const approvalCard = detailsStyle !== "none";
+  // 面板式的详情从标题行(▶ Run this command?)起取:best 可能命中面板底部的
   // 按键提示行,从那里截会把命令正文裁掉。同样取最后一个标题——首个会落在重绘残影上。
-  const kimiHeader = best.id === "kimi:command-approval"
+  const panelHeader = detailsStyle === "arrow_panel"
     ? lastMatch(/^\s*▶\s*[^\n]+\?\s*$/gm, visible)
     : null;
   const snippetInfo = best.id === "interactive:numbered-selector"
     ? { text: visible, anchor: 0 }
-    : kimiHeader
-      ? { text: visible.slice(kimiHeader.index), anchor: 0 }
-      : promptSnippet(visible, best.index, best.id === "claude:command-approval" || best.id === "kimi:command-approval" ? 12 : 1);
+    : panelHeader
+      ? { text: visible.slice(panelHeader.index), anchor: 0 }
+      : promptSnippet(visible, best.index, approvalCard ? 12 : 1);
   const snippet = snippetInfo.text;
   // 命令审批的选项已经转换成 GUI 按钮，详情区保留命令、用途和审批问题，只从第一个
   // 编号选项起裁掉。「第一个」从 anchor(匹配行)之后数——审批的问句永远在选项之前,
   // anchor 之前的编号行是命令正文的一部分(见 NUMBERED_OPTION 的耦合注释),既不能当
   // 截断锚点,也不能被解析成选项按钮。只对命令审批收紧:generic 提示的锚点可能是
   // 选项**下方**的按键提示行(press enter/esc to …),对它们门控会把真选项排除掉。
-  const commandApproval = best.id === "claude:command-approval" || best.id === "kimi:command-approval";
-  const optionsFrom = commandApproval ? snippetInfo.anchor + 1 : 0;
+  const optionsFrom = approvalCard ? snippetInfo.anchor + 1 : 0;
   const snippetLines = snippet.split("\n");
   const firstOptionLine = snippetLines.findIndex(
     (line, index) => index >= optionsFrom && NUMBERED_OPTION.test(line),
   );
-  const displayText = commandApproval && firstOptionLine >= 0
+  const displayText = approvalCard && firstOptionLine >= 0
     ? snippetLines.slice(0, firstOptionLine).join("\n").trim()
     : snippet;
   const labels = snippetLines.flatMap((line, index) => {
@@ -588,17 +595,17 @@ export function terminalAttention(
       options: choices,
     };
   }
-  // kimi 审批面板:数字键直接选中并提交(源码 selectAndSubmit),GUI 按钮只需打数字,
-  // 无需光标相对移动;需要现场输入反馈的选项(Reject with feedback / Revise)在卡片上
-  // 完成不了,不收成按钮——想写反馈仍可从终端处理。
-  if (best.id === "kimi:command-approval") {
+  // 面板式(arrow_panel)审批:数字键直接选中并提交(kimi 源码 selectAndSubmit),GUI 按钮
+  // 只需打数字,无需光标相对移动;需要现场输入反馈的选项(Reject with feedback / Revise)
+  // 在卡片上完成不了,不收成按钮——想写反馈仍可从终端处理。
+  if (detailsStyle === "arrow_panel") {
     const byIndex = new Map<number, (typeof labels)[number]>();
     for (const entry of labels) byIndex.set(entry.index, entry);
     const options = [...byIndex.values()]
       .sort((a, b) => a.index - b.index)
       .filter(({ label }) => !/reject with feedback|^revise$/i.test(label.trim()))
       .map(({ index, label }) => ({ label, input: String(index + 1) }));
-    return { id: best.id, text: displayText, options: options.length >= 2 ? options : undefined };
+    return { id: best.id, text: displayText, details: detailsStyle, options: options.length >= 2 ? options : undefined };
   }
   // trust、长会话恢复以及其他编号选择器共用同一套结构化按钮，不再退化成上一项/下一项。
   if (labels.length >= 2) {
@@ -610,6 +617,7 @@ export function terminalAttention(
     return {
       id: best.id,
       text: displayText,
+      details: detailsStyle,
       options: merged.map(({ index, label }) => ({
         label,
         // 这些菜单和 numbered-selector 一样首尾循环，「先按 8 次上键归零」在 3 项菜单上
@@ -627,9 +635,9 @@ export function terminalAttention(
   // 让 GUI 直接给出选项按钮，而不是把「上一项/下一项」甩给用户。
   const anchored = detectAnchoredCursorMenu(visible, best.index) ?? detectCursorMenu(visible);
   if (anchored) {
-    return { id: best.id, text: displayText, options: cursorMenuOptions(anchored.lines, anchored.focused) };
+    return { id: best.id, text: displayText, details: detailsStyle, options: cursorMenuOptions(anchored.lines, anchored.focused) };
   }
-  return { id: best.id, text: displayText };
+  return { id: best.id, text: displayText, details: detailsStyle };
 }
 
 /** 兼容启动发送路径只关心是否阻塞的调用。 */

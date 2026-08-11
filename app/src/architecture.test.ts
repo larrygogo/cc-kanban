@@ -39,7 +39,7 @@ function guardedFiles(dir: string = SRC): string[] {
       continue;
     }
     if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue;
-    out.push(relative(SRC, path).replaceAll("\\", "/"));
+    out.push(relative(SRC, path).replace(/\\/g, "/"));
   }
   return out;
 }
