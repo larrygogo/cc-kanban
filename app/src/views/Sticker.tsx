@@ -7,7 +7,6 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { listen } from "@tauri-apps/api/event";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   LiveSessionCounts,
@@ -15,7 +14,6 @@ import {
 
   TerminalOpenMode,
   confirmStopSession,
-  getSettings,
   getAccounts,
   openNewSessionWindow,
   openProjectDir,
@@ -29,6 +27,7 @@ import {
 } from "../api";
 import { isMacPanel } from "../platform";
 import { useTauriEvent } from "../hooks/useTauriEvent";
+import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
 import { useAgents } from "../useAgents";
 import { useT } from "../i18n";
@@ -187,44 +186,17 @@ export function Sticker({
   const [usageRevision, setUsageRevision] = useState(0);
   const relaySignatureRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    const apply = (s: Settings) => {
-      setOpenMode(s.terminal_open_mode);
-      setMenuMode(s.card_menu_mode ?? "button");
-      setPreviewEnabled(s.preview_enabled);
-      setQuotaProviders(s.sticker_quota_providers ?? []);
-      const signature = relayEnabledSignature(s);
-      if (relaySignatureRef.current !== null && relaySignatureRef.current !== signature) {
-        setUsageRevision((n) => n + 1);
-      }
-      relaySignatureRef.current = signature;
-    };
-    let receivedLiveSettings = false;
-    getSettings().then((settings) => {
-      // 监听事件可能比首次读取更早返回；不能让旧快照覆盖刚切换完的接入方式。
-      if (!receivedLiveSettings) apply(settings);
-    }).catch(() => {});
-    // cleanup 可能先于 listen resolve 执行：用 cancelled 标记，resolve 后立即注销，防监听器泄漏。
-    let cancelled = false;
-    let un: (() => void) | undefined;
-    try {
-      listen<Settings>("settings-changed", (e) => {
-        receivedLiveSettings = true;
-        apply(e.payload);
-      })
-        .then((f) => {
-          if (cancelled) f();
-          else un = f;
-        })
-        .catch(() => {});
-    } catch {
-      /* 非 Tauri 环境（测试/浏览器） */
+  useSettingsEffect((s) => {
+    setOpenMode(s.terminal_open_mode);
+    setMenuMode(s.card_menu_mode ?? "button");
+    setPreviewEnabled(s.preview_enabled);
+    setQuotaProviders(s.sticker_quota_providers ?? []);
+    const signature = relayEnabledSignature(s);
+    if (relaySignatureRef.current !== null && relaySignatureRef.current !== signature) {
+      setUsageRevision((n) => n + 1);
     }
-    return () => {
-      cancelled = true;
-      try { un?.(); } catch { /* noop */ }
-    };
-  }, []);
+    relaySignatureRef.current = signature;
+  });
 
   // 相对时间（fmtAgo）每分钟重算：递增计数触发轻量重渲染。
   const [, setTick] = useState(0);

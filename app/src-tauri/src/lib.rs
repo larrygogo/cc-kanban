@@ -615,29 +615,19 @@ async fn list_agents() -> Vec<AgentDescriptor> {
     .unwrap_or_default()
 }
 
-/// 已装 CLI 的版本，`<launch_argv> --version` 探测，**进程级缓存**（版本只随重装变化，而
-/// node 系 CLI 冷启动要一秒上下，不能每开一个对话窗都付一次）。探测失败缓存 None，不反复重试。
-fn probe_cli_version(plugin: &'static dyn meowo_agent::AgentPlugin) -> Option<String> {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    static CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
-
-    let id = plugin.id().as_str().to_string();
-    // 中毒恢复而非 unwrap：缓存只是探测结果的备忘录，读到写一半的旧值无害；
-    // panic 则让之后每次开对话窗都失败（本函数跑在 blocking 池，用户只会看到「打不开」）。
-    if let Some(hit) = CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_or_insert_with(HashMap::new)
-        .get(&id)
-    {
-        return hit.clone();
-    }
-
+/// 以插件的 `launch_argv` 起子进程跑一个**非交互**子命令，有界等待后返回 stdout 全文。
+/// 正常亚秒返回，但一个挂死的 CLI 不该把 blocking 线程一起挂死——过 deadline 即 kill。
+/// `probe_cli_version`（`--version`，5s）与 `agent_models`（模型清单，15s）共用；
+/// 必须在 blocking 池调用（spawn + sleep 轮询，见 CLAUDE.md 线程纪律）。
+fn run_cli_capture(
+    plugin: &'static dyn meowo_agent::AgentPlugin,
+    extra_args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<String> {
     let argv = plugin.launch_argv();
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..])
-        .arg("--version")
+        .args(extra_args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
@@ -647,33 +637,48 @@ fn probe_cli_version(plugin: &'static dyn meowo_agent::AgentPlugin) -> Option<St
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    // 有界等待：`--version` 正常亚秒返回，但一个挂死的 CLI 不该把查询线程一起挂死。
-    let version = cmd.spawn().ok().and_then(|mut child| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                _ => {
-                    let _ = child.kill();
-                    break;
-                }
+    let mut child = cmd.spawn().ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                break;
             }
         }
-        let out = child.wait_with_output().ok()?;
-        let line = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())?
-            .to_string();
-        Some(line)
-    });
+    }
+    let out = child.wait_with_output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// 已装 CLI 的版本，`<launch_argv> --version` 探测，**进程级缓存**（版本只随重装变化，而
+/// node 系 CLI 冷启动要一秒上下，不能每开一个对话窗都付一次）。探测失败缓存 None，不反复重试。
+fn probe_cli_version(plugin: &'static dyn meowo_agent::AgentPlugin) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    static CACHE: LazyLock<Mutex<HashMap<String, Option<String>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    let id = plugin.id().as_str().to_string();
+    // 中毒恢复而非 unwrap：缓存只是探测结果的备忘录，读到写一半的旧值无害；
+    // panic 则让之后每次开对话窗都失败（本函数跑在 blocking 池，用户只会看到「打不开」）。
+    if let Some(hit) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
+        return hit.clone();
+    }
+    let version = run_cli_capture(plugin, &["--version"], std::time::Duration::from_secs(5))
+        .and_then(|txt| {
+            txt.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(str::to_string)
+        });
     CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .get_or_insert_with(HashMap::new)
         .insert(id, version.clone());
     version
 }
@@ -706,46 +711,13 @@ async fn agent_models(provider: String) -> Vec<String> {
         let Some(args) = plugin.model_list_command() else {
             return Vec::new();
         };
-        let argv = plugin.launch_argv();
-        let mut cmd = std::process::Command::new(&argv[0]);
-        cmd.args(&argv[1..])
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        // 有界等待：正常亚秒返回，但一个挂死的 CLI 不该把 blocking 线程一起挂死。
-        let models = cmd
-            .spawn()
-            .ok()
-            .and_then(|mut child| {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(_)) => break,
-                        Ok(None) if std::time::Instant::now() < deadline => {
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                        }
-                        _ => {
-                            let _ = child.kill();
-                            break;
-                        }
-                    }
-                }
-                let out = child.wait_with_output().ok()?;
-                Some(
-                    String::from_utf8_lossy(&out.stdout)
-                        .lines()
-                        .map(str::trim)
-                        .filter(|line| !line.is_empty())
-                        .map(str::to_string)
-                        .collect::<Vec<_>>(),
-                )
+        let models = run_cli_capture(plugin, args, std::time::Duration::from_secs(15))
+            .map(|txt| {
+                txt.lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         // 空结果同样入缓存：CLI 没这个子命令/跑失败时不该每次开菜单都重试一遍。

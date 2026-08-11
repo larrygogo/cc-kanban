@@ -32,8 +32,8 @@
 | # | 问题 | 位置 | 建议 | 状态 |
 |---|---|---|---|---|
 | P2-1 | agent 身份三种叫法并存：`provider`（DB/DTO/前端）、`agent`（插件层）、`AgentId`（类型），同一文件两词混用 | 全仓 | 约定：持久化字段名保留 `provider`（DB 兼容），代码内新写一律 `agent`；不做批量改名 | 已记录约定 |
-| P2-2 | transcript 增量读取两份实现（`read_chat_delta`/`read_transcript_delta`）；`analyze`/`analyze_shared` 同算法两份 | `agent/transcript.rs:444,578,617,632` | 抽公共的 open/seek/rposition 读取函数 | 待修 |
-| P2-3 | 两套手写 LRU（`TranscriptCache` 与 `ChatMtimes`）；有界等待子进程逐字重复两处；进程级缓存两种写法 | `agent/transcript.rs:547+` vs `chat.rs:31-95`；`lib.rs:650,722`；`lib.rs:620,692` | 各抽一个小工具 | 待修 |
+| P2-2 | transcript 增量读取两份实现（`read_chat_delta`/`read_transcript_delta`） | `agent/transcript.rs` | 已收敛：`read_chat_delta` 复用 `read_transcript_delta`（`impl AsRef<Path>`），NoChange 不早退以保留空文件首读下发默认模式的行为；`analyze`/`analyze_shared` 本就共用该函数 | 已修 |
+| P2-3 | 有界等待子进程逐字重复两处；进程级缓存两种写法；两套手写 LRU | `lib.rs`、`agent/transcript.rs` vs `chat.rs:31-95` | 前两项已收敛：抽 `run_cli_capture(plugin, args, timeout)`，缓存统一 LazyLock。LRU **评估后不合并**：淘汰逻辑仅 5 行同构，但 `ChatMtimes` 的 version 戳还承担并发提交校验（put_if_current），跨 crate 抽象收益小于间接成本 | 已修（LRU 记录不做） |
 | P2-4 | `ToolCall` vs `ToolUse` 两套叫法（领域事件 vs IPC），映射函数纯改名 | `agent/transcript.rs:126-153` | 保留双层（边界适配是刻意的），但字段名对齐一种 | 已记录（保留双层） |
 | P2-5 | 遗留品牌：备份后缀 `.cckb-bak`、测试临时目录前缀 `cckb-*`；plans 目录 6 份带 `cc-kanban-planN-` 中缀 | `agent/wiring.rs:55`、`lib.rs:2257,2295` | 测试前缀可直接改；`.cckb-bak` 涉及用户盘上既有备份文件，改名需兼容读旧后缀，单独做 | 待修 |
 | P2-6 | 行内编辑器两份（`EditorInput`/`EditBox`）+ 两套 CSS；roving 键盘导航两份；点外关闭两种策略（pointerdown vs click 捕获）；board-changed 节流两份同参实现 | `ChatSidebar.tsx:53` vs `Sticker.tsx:62`；`menu.tsx:145` vs `widgets.tsx:78`；`menu.tsx:104` vs `CardContextMenu.tsx:57`；`App.tsx:325` vs `ChatSidebar.tsx:411` | 各收敛一份 | 待修 |

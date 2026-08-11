@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { confirmStopSession, getLiveSessionsPage, getSettings, openNewSessionWindow, openProjectDir, recentCwds, renameSession, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LiveSession, type SessionTone, type Settings } from "../api";
+import { confirmStopSession, getLiveSessionsPage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LiveSession, type SessionTone } from "../api";
+import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
 import { folderName, pathKey } from "../paths";
 import { useMenuPopup } from "./menu";
@@ -499,21 +500,7 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   // 时,改设置的人会以为没生效(另一个还在),不改的人则平白多一个不知从哪来的按钮。
   // 首帧占位 context 与看板一致;真实默认(button)由 getSettings 校正。
   const [menuMode, setMenuMode] = useState<CardMenuMode>("context");
-  useEffect(() => {
-    const apply = (s: Settings) => setMenuMode(s.card_menu_mode ?? "button");
-    let live = false;
-    getSettings().then((s) => { if (!live) apply(s); }).catch(() => {});
-    // cleanup 可能先于 listen resolve:cancelled 标记防监听器泄漏(同看板写法)。
-    let cancelled = false;
-    let un: (() => void) | undefined;
-    listen<Settings>("settings-changed", (event) => { live = true; apply(event.payload); })
-      .then((fn) => { if (cancelled) fn(); else un = fn; })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-      try { un?.(); } catch { /* noop */ }
-    };
-  }, []);
+  useSettingsEffect((s) => setMenuMode(s.card_menu_mode ?? "button"));
   // 菜单内容按 id 现查:刷新后置顶/便签/归档态自动跟上,会话消失则菜单自然收起。
   const ctxItem = ctxMenu ? (sessions ?? []).find((s) => s.session.id === ctxMenu.sid) ?? null : null;
   // 置顶与看板共用同一份 localStorage(键沿用 meowo-starred,改键会丢用户已有数据),

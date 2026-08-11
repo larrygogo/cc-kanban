@@ -447,50 +447,23 @@ pub fn read_chat_delta(
     offset: u64,
     prev_mtime: Option<std::time::SystemTime>,
 ) -> ChatDelta {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return ChatDelta {
-            items: Vec::new(),
-            agent_modes: Vec::new(),
-            start: offset,
-            offset,
-            reset: false,
-            mtime: prev_mtime,
-        };
+    // 文件 IO 与失效判据复用 read_transcript_delta（与看板分析同一份）。
+    // NoChange 不早退：空文件首读（offset=0）也要走到下方 base==0 分支下发默认模式。
+    let (reset, buf, mtime) = match read_transcript_delta(path, offset, prev_mtime) {
+        DeltaOutcome::Unreadable => {
+            return ChatDelta {
+                items: Vec::new(),
+                agent_modes: Vec::new(),
+                start: offset,
+                offset,
+                reset: false,
+                mtime: prev_mtime,
+            };
+        }
+        DeltaOutcome::NoChange(mtime) => (false, Vec::new(), mtime),
+        DeltaOutcome::Data { reset, buf, mtime } => (reset, buf, mtime),
     };
-    let Ok((len, mtime)) = file.metadata().map(|m| (m.len(), m.modified().ok())) else {
-        return ChatDelta {
-            items: Vec::new(),
-            agent_modes: Vec::new(),
-            start: offset,
-            offset,
-            reset: false,
-            mtime: prev_mtime,
-        };
-    };
-    let reset = transcript_reset(len, offset, mtime, prev_mtime);
     let base = if reset { 0 } else { offset };
-    if file.seek(SeekFrom::Start(base)).is_err() {
-        return ChatDelta {
-            items: Vec::new(),
-            agent_modes: Vec::new(),
-            start: offset,
-            offset,
-            reset: false,
-            mtime: prev_mtime,
-        };
-    }
-    let mut buf = Vec::new();
-    if file.read_to_end(&mut buf).is_err() {
-        return ChatDelta {
-            items: Vec::new(),
-            agent_modes: Vec::new(),
-            start: offset,
-            offset,
-            reset: false,
-            mtime: prev_mtime,
-        };
-    }
     let consumed = buf.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
     let text = String::from_utf8_lossy(&buf[..consumed]);
     let mut items = Vec::new();
@@ -574,9 +547,10 @@ enum DeltaOutcome {
 }
 
 /// 从 offset/prev_mtime 快照出发读取 transcript 的增量字节。纯文件 IO、不触碰缓存，
-/// 供 analyze（持锁调用）与 analyze_shared（锁外调用）共用。失效判据见 [`transcript_reset`]。
+/// 供 analyze（持锁调用）/ analyze_shared（锁外调用）/ [`read_chat_delta`]（对话窗）共用。
+/// 失效判据见 [`transcript_reset`]。
 fn read_transcript_delta(
-    path: &str,
+    path: impl AsRef<Path>,
     offset: u64,
     prev_mtime: Option<std::time::SystemTime>,
 ) -> DeltaOutcome {
