@@ -1,34 +1,21 @@
 use crate::error::StoreError;
-use crate::models::{Project, Session, Task, Todo};
+use crate::models::{Session, Todo};
 use crate::store::Store;
 use serde::Serialize;
 use std::collections::HashMap;
 
-/// 总览里每个项目一行的聚合。
-#[derive(Debug, Clone, Serialize)]
-pub struct ProjectOverview {
-    pub project: Project,
-    pub active_sessions: i64,
-    pub todo_count: i64,
-    pub doing_count: i64,
-    pub done_count: i64,
-    pub last_activity_at: i64,
-}
-
-/// 项目看板里一张任务卡：任务 + 子清单 + 关联会话状态。
-#[derive(Debug, Clone, Serialize)]
-pub struct TaskCard {
-    pub task: Task,
-    pub todos: Vec<Todo>,
-    pub session_status: Option<String>,
-}
-
 /// 贴纸各分类总数（与前端 tab 一一对应，避免靠已加载数据估算导致闪烁）。
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct LiveSessionCounts {
+    #[cfg_attr(test, ts(type = "number"))]
     pub total: i64,
+    #[cfg_attr(test, ts(type = "number"))]
     pub running: i64,
+    #[cfg_attr(test, ts(type = "number"))]
     pub waiting: i64,
+    #[cfg_attr(test, ts(type = "number"))]
     pub archived: i64,
 }
 
@@ -51,24 +38,32 @@ pub struct LiveCandidate {
 
 /// 当前活跃区的一张会话卡。
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct LiveSession {
     pub session: Session,
     pub project_name: String,
     pub task_title: String,
     pub current_activity: Option<String>,
     pub column: String,
+    #[cfg_attr(test, ts(type = "number"))]
     pub todo_done: i64,
+    #[cfg_attr(test, ts(type = "number"))]
     pub todo_total: i64,
     pub todos: Vec<Todo>,
+    #[cfg_attr(test, ts(type = "number | null"))]
     pub pid: Option<i64>,
     pub archived: bool,
     /// 归档时间戳（ms）；未归档为 None。用于「归档超过 N 天自动隐藏」。
+    #[cfg_attr(test, ts(type = "number | null"))]
     pub archived_at: Option<i64>,
     /// 会话工作目录，meowo-app 用它重建 transcript 路径以实时解析 AI 标题。
     pub cwd: Option<String>,
     /// 上下文已用百分比（来自 Claude Code statusline，准确）；无 statusline 数据为 None。
+    #[cfg_attr(test, ts(type = "number | null"))]
     pub context_pct: Option<i64>,
     /// 上下文窗口大小（200000 或 1000000）；无 statusline 数据为 None。
+    #[cfg_attr(test, ts(type = "number | null"))]
     pub context_window: Option<i64>,
     /// 模型展示名（来自 Claude Code statusline 的 model.display_name，如 "Opus"）；无则 None。
     pub model: Option<String>,
@@ -129,125 +124,6 @@ impl Store {
             }
         }
         Ok(map)
-    }
-
-    /// 所有项目的总览聚合，按 last_activity_at 倒序。
-    pub fn overview(&self) -> Result<Vec<ProjectOverview>, StoreError> {
-        let projects = self.list_projects()?;
-        if projects.is_empty() {
-            return Ok(Vec::new());
-        }
-        // 活跃会话数：一次按项目分组取回（替代逐项目 count）。
-        let mut active: HashMap<i64, i64> = HashMap::new();
-        {
-            let mut stmt = self.conn.prepare(
-                "SELECT project_id, count(*) FROM sessions
-                 WHERE status IN ('running','waiting') GROUP BY project_id",
-            )?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
-            for row in rows {
-                let (pid, n) = row?;
-                active.insert(pid, n);
-            }
-        }
-        // 各列任务数（排除未命名空卡）：一次按 (项目, 列) 分组取回。
-        let mut cols: HashMap<(i64, String), i64> = HashMap::new();
-        {
-            let mut stmt = self.conn.prepare(
-                "SELECT project_id, column_name, count(*) FROM tasks
-                 WHERE (title <> '(未命名会话)' OR EXISTS (SELECT 1 FROM todos WHERE todos.task_id = tasks.id))
-                 GROUP BY project_id, column_name",
-            )?;
-            let rows = stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            })?;
-            for row in rows {
-                let (pid, col, n) = row?;
-                cols.insert((pid, col), n);
-            }
-        }
-        // 最近活动时间：一次按项目取 MAX(last_event_at)；无会话的项目回退 project.updated_at。
-        let mut last_evt: HashMap<i64, i64> = HashMap::new();
-        {
-            let mut stmt = self.conn.prepare(
-                "SELECT project_id, MAX(last_event_at) FROM sessions GROUP BY project_id",
-            )?;
-            let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
-            })?;
-            for row in rows {
-                let (pid, m) = row?;
-                if let Some(v) = m {
-                    last_evt.insert(pid, v);
-                }
-            }
-        }
-        let col_count =
-            |pid: i64, col: &str| cols.get(&(pid, col.to_string())).copied().unwrap_or(0);
-        let mut out = Vec::with_capacity(projects.len());
-        for project in projects {
-            let pid = project.id;
-            let last_activity_at = last_evt.get(&pid).copied().unwrap_or(project.updated_at);
-            out.push(ProjectOverview {
-                active_sessions: active.get(&pid).copied().unwrap_or(0),
-                todo_count: col_count(pid, "todo"),
-                doing_count: col_count(pid, "doing"),
-                done_count: col_count(pid, "done"),
-                last_activity_at,
-                project,
-            });
-        }
-        out.sort_by_key(|b| std::cmp::Reverse(b.last_activity_at));
-        Ok(out)
-    }
-
-    /// 某项目的所有任务卡，按 updated_at 倒序。
-    pub fn project_tasks(&self, project_id: i64) -> Result<Vec<TaskCard>, StoreError> {
-        // session_status 用 LEFT JOIN 一次取回（替代逐任务 query_row）。
-        let mut stmt = self.conn.prepare(
-            "SELECT t.id, t.project_id, t.session_id, t.title, t.column_name, t.column_locked,
-                    t.current_activity, t.created_at, t.updated_at, s.status
-             FROM tasks t
-             LEFT JOIN sessions s ON s.id = t.session_id
-             WHERE t.project_id = ?1
-               AND (t.title <> '(未命名会话)' OR EXISTS (SELECT 1 FROM todos WHERE todos.task_id = t.id))
-             ORDER BY t.updated_at DESC, t.id DESC",
-        )?;
-        let rows = stmt
-            .query_map([project_id], |r| {
-                let task = Task {
-                    id: r.get(0)?,
-                    project_id: r.get(1)?,
-                    session_id: r.get(2)?,
-                    title: r.get(3)?,
-                    column: r.get(4)?,
-                    column_locked: r.get::<_, i64>(5)? != 0,
-                    current_activity: r.get(6)?,
-                    created_at: r.get(7)?,
-                    updated_at: r.get(8)?,
-                };
-                let session_status: Option<String> = r.get(9)?;
-                Ok((task, session_status))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // todos 批量取回，按 task 分组（替代逐任务 list_todos 的 N+1）。
-        let task_ids: Vec<i64> = rows.iter().map(|(t, _)| t.id).collect();
-        let mut todos_map = self.todos_by_task(&task_ids)?;
-        let mut out = Vec::with_capacity(rows.len());
-        for (task, session_status) in rows {
-            let todos = todos_map.remove(&task.id).unwrap_or_default();
-            out.push(TaskCard {
-                task,
-                todos,
-                session_status,
-            });
-        }
-        Ok(out)
     }
 
     /// 活跃区：按 filter（+ 可选 search，作用于当前 tab 内）取会话，附项目名、任务标题、进度。

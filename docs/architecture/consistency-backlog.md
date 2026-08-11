@@ -19,7 +19,7 @@
 
 | # | 问题 | 位置 | 建议 | 状态 |
 |---|---|---|---|---|
-| P1-1 | IPC 契约只有一半走 ts-rs：裸 `Serialize` + 前端手写类型，snake_case 与 protocol 的 camelCase 并存 | 前端 `api.ts` | **首批已修**：`AgentDescriptor`（移入 `meowo_agent::descriptor`，组装下沉插件层）与 `ChatUi` 一族共 18 型就地加 ts-rs 导出（`cargo test -p meowo-agent --lib` 生成，CI 契约步骤已扩）；`SelectorAnchor.kind` 顺手升为真枚举。**刻意保持 snake_case 线格式**——camelCase 统一会波及全部测试夹具，收益不成比例，记录不做。剩余批次：`LiveSession`/`Settings`/`Account` 等（位于 `session_query.rs`/`settings.rs`，需同样就地导出） | 部分已修 |
+| P1-1 | IPC 契约只有一半走 ts-rs：裸 `Serialize` + 前端手写类型，snake_case 与 protocol 的 camelCase 并存 | 前端 `api.ts` | **首批已修**：`AgentDescriptor`（移入 `meowo_agent::descriptor`，组装下沉插件层）与 `ChatUi` 一族共 18 型就地加 ts-rs 导出（`cargo test -p meowo-agent --lib` 生成，CI 契约步骤已扩）；`SelectorAnchor.kind` 顺手升为真枚举。**刻意保持 snake_case 线格式**——camelCase 统一会波及全部测试夹具，收益不成比例，记录不做。**二批已修**：store 的 `LiveSession`/`Session`/`Todo`/`LiveSessionCounts` 导出（i64 逐字段 `ts(type="number")`，与 protocol 同法），api.ts 仅保留 status/column 等取值收窄与 `LiveItem` app 层增补（后者在宿主 crate，刻意不参与契约导出——契约步骤不编译 tauri 宿主）。剩余：`Settings`（settings.rs，同样受宿主 crate 限制，需评估搬 protocol 或接受手写）、`Account`/`ProviderUsage` 等 | 大部分已修 |
 | P1-2 | 手写 `listen()` 样板 15 处、cleanup 三种变体，统一的 `useTauriEvent` 仅 4 个使用点；subscribe-first 模式手抄 6 份 | `App.tsx`、`Sticker.tsx`、`ChatSidebar.tsx`、`ChatWindow.tsx`、`useUpdate.ts`、`ManagedTerminal.tsx` 等 | 迁 `useTauriEvent`；为 settings 抽 `useSettings()` hook | 修复中（部分） |
 | P1-3 | 重复 invoke 未进 api.ts：`rename_session`(3 份)、`set_archived`(4)、`set_session_note`(2)、`open_project_dir`(3)、`open_new_session_window`(5) | Sticker/ChatSidebar/ChatWindow/About | 收编进 api.ts 封装 | 修复中 |
 | P1-4 | 工作区新改动：`persist_queued_image` 使插件 crate 直接写宿主临时目录；32MB 上限常量在 agent/app 两 crate 各定义一遍；`$TEMP/meowo-paste` 目录约定两处独立实现 | `plugins/claude/transcript.rs` vs `chat.rs` | 已收敛：`fsutil::paste_root()` + `PASTE_MAX_BYTES` 单点定义，两处消费；crate 文档改为如实描述落盘边界（transcript 解析管线为纯函数共享，落盘不再上提） | 已修 |
@@ -43,7 +43,7 @@
 | P2-10 | CSS：`.chat-compose button` 全局 accent 皮致 8 处「解毒」规则（结构性反模式）；同一"白色叠层"概念 7 种 alpha 裸值；`.chip` 唯一不吃主题变量；flat 主题 78 行逐条覆盖而非 token | `styles.css:3441+`、`:154-279`、`:232-236`、`:2293-2370` | compose 皮改显式类并删解毒规则；叠层立 token；`.chip` 移去 poster 专用 CSS | 待修 |
 | P2-11 | Tooltip 与原生 `title` 混用（同一侧栏条目两种气泡） | `ChatSidebar.tsx:673,724,727,826`、`ChatWindow.tsx:257` | 统一 `data-tip`（长文本截断场景确认后再换） | 待修 |
 | P2-12 | i18n 7 个 `as Record<string,string>` 逃逸区绕过编译期 key 检查，漏翻静默降级为 id | `zh.ts:130-479`、`en.ts` 对应 | 运行时比对已覆盖 key 对齐；给逃逸区补一条「消费处 fallback 必须可读」的约定即可，不强改类型 | 已记录约定 |
-| P2-13 | `api.ts` 的 `Todo` 与生成的 `TodoDto` 同名异形；`getOverview`/`Task`/`Project` 等疑似死代码；`getLiveSessionsPage` 的旧后端兼容分支无删除时机标记 | `api.ts:152-202,507` | 死代码确认后删；兼容分支标注可删版本 | 待修 |
+| P2-13 | `getOverview`/`getProjectTasks` 全链路死代码；`Todo` 同名异形；`getLiveSessionsPage` 兼容分支无删除时机 | `api.ts`、`session_query.rs`、`store/query.rs` | 死代码已删（前端 api + 两条 Tauri 命令 + store 的 `overview`/`project_tasks`/`ProjectOverview`/`TaskCard` + 7 个测试）；`Todo` 现由 ts-rs 生成、与 protocol 的 `TodoDto`（hook 输入形）各司其职；兼容分支仍待标注 | 大部分已修 |
 | P2-14 | 插件间模式漂移：Relay 结构体可见性与位置不一（F1）；`launch_options` 变体门控只有 kimi 做（F2）；`HookEvent.timeout` 字段承载秒/毫秒两种单位（F5）；事件白名单只有 kimi/gemini 有（F6）；`attachment_mention` 三家逐字重复（F7）；登出策略三分但宿主侧删凭据是同一段隐式逻辑（F9）；`login` 的 `Some(&[])` 隐式表示裸启动（F10）；绊线测试只断言部分 agent（F11）；impl 块方法顺序各异（F12） | `plugins/*/mod.rs` | 定一份「插件排版与惯例」清单写进 plugins/mod.rs rustdoc，新改动照做，存量顺手改 | 待修 |
 | P2-15 | 通知指纹四套并行函数靠"让位"约定串联；`pending_review` 三来源靠 `pending_review_live` 校正；存活判定三处口径靠注释宣称一致 | `watch.rs`、`chat.rs:163-182`、`session_query.rs` | 各写一个单点函数供三处调用（roadmap 阶段 3/4 的延续） | 待修 |
 

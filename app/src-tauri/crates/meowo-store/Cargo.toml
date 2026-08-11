@@ -8,3 +8,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 rusqlite = { workspace = true }
+
+[dev-dependencies]
+# 契约生成同 meowo-protocol/meowo-agent：cfg(test) derive(TS)，CI diff 把关。
+ts-rs = "12"

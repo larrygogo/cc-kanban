@@ -5,6 +5,10 @@ import type { ChatUi as ChatUiDto } from "./generated/contracts/ChatUi";
 import type { ChatHistoryDto } from "./generated/contracts/ChatHistoryDto";
 import type { LaunchChoice } from "./generated/contracts/LaunchChoice";
 import type { LaunchOption } from "./generated/contracts/LaunchOption";
+import type { LiveSession as LiveSessionDto } from "./generated/contracts/LiveSession";
+import type { LiveSessionCounts } from "./generated/contracts/LiveSessionCounts";
+import type { Session as SessionDto } from "./generated/contracts/Session";
+import type { Todo as TodoRowDto } from "./generated/contracts/Todo";
 import type { ModelPreset } from "./generated/contracts/ModelPreset";
 import type { ModeControl } from "./generated/contracts/ModeControl";
 import type { ModeInput } from "./generated/contracts/ModeInput";
@@ -50,78 +54,26 @@ export type ChatUi = ChatUiDto;
 /** API 中转能力表（后端 `RelayUi` 的生成镜像；导出名沿用前端习惯的 RelayCapability）。 */
 export type RelayCapability = RelayUi;
 
-export type Todo = {
-  id: number;
-  task_id: number;
-  content: string;
-  status: "pending" | "in_progress" | "completed";
-  order_idx: number;
-};
+/** DB 行类型由 ts-rs 从 meowo-store 生成；此处仅把 status 收窄为已知取值集。 */
+export type Todo = Omit<TodoRowDto, "status"> & { status: "pending" | "in_progress" | "completed" };
+export type Session = Omit<SessionDto, "status"> & { status: "running" | "waiting" | "ended" | "stale" };
 
-export type Task = {
-  id: number;
-  project_id: number;
-  session_id: number | null;
-  title: string;
-  column: "todo" | "doing" | "done";
-  column_locked: boolean;
-  current_activity: string | null;
-  created_at: number;
-  updated_at: number;
-};
-
-export type Project = {
-  id: number;
-  root_path: string;
-  name: string;
-  created_at: number;
-  updated_at: number;
-};
-
-export type ProjectOverview = {
-  project: Project;
-  active_sessions: number;
-  todo_count: number;
-  doing_count: number;
-  done_count: number;
-  last_activity_at: number;
-};
-
-export type TaskCard = {
-  task: Task;
-  todos: Todo[];
-  session_status: string | null;
-};
-
-export function getOverview(): Promise<ProjectOverview[]> {
-  return invoke("get_overview");
-}
-
-export function getProjectTasks(projectId: number): Promise<TaskCard[]> {
-  // JS 传 projectId，Tauri 自动转成 Rust 命令的 project_id 参数。
-  return invoke("get_project_tasks", { projectId });
-}
-
-export type Session = {
-  id: number;
-  project_id: number;
-  cc_session_id: string;
-  status: "running" | "waiting" | "ended" | "stale";
-  started_at: number;
-  last_event_at: number;
-  ended_at: number | null;
-};
-
-export type LiveSession = {
+/**
+ * 看板/侧栏的一张会话卡 = store 的 `LiveSession`（ts-rs 生成）+ **app 层增补**。
+ * 增补字段来自 `session_query.rs` 的 `LiveItem`（serde flatten 到同层）：它们依赖进程表/
+ * PTY/屏幕检测，store 层给不出，故仍手写——LiveItem 在 meowo-app crate，不参与契约导出
+ * （契约步骤只跑 protocol/agent/store 的 --lib，不编译整个 tauri 宿主）。
+ */
+export type LiveSession = Omit<LiveSessionDto, "session" | "todos" | "column" | "pending_review" | "provider"> & {
   session: Session;
-  project_name: string;
-  task_title: string;
-  current_activity: string | null;
-  column: "todo" | "doing" | "done";
-  todo_done: number;
-  todo_total: number;
   todos: Todo[];
-  pid: number | null;
+  column: "todo" | "doing" | "done";
+  /** 待审批子态:回合中途等用户介入(批准工具/回答提问/批准计划);无则 null。 */
+  pending_review: "approval" | "question" | "plan" | null;
+  /** agent 身份（如 "claude"）。DB 里可能存着本版本不认识的 id，故不是联合类型。 */
+  provider: AgentId;
+} & {
+  // ── 以下为 LiveItem 的 app 层增补 ──
   connected: boolean;
   /** 本 GUI 进程正托管该会话的 PTY；门控贴纸卡片菜单「结束会话」的可见性。 */
   pty_managed: boolean;
@@ -138,42 +90,16 @@ export type LiveSession = {
    * 它也没有终端窗口可切）。
    */
   background: boolean;
-  archived: boolean;
-  archived_at: number | null;
-  cwd: string | null;
   errored: boolean;
   error_label: string | null;
   error_raw: string | null;
   /** 最近一条 AI 正文的轻推预览（清洗+截断），hover 卡片时速览；无正文回合为 null。 */
   preview: string | null;
-  /** 用户给会话挂的便签（手写备忘，存本地 DB）；无便签为 null。 */
-  note: string | null;
-  /** 上下文已用百分比（来自 Claude Code statusline，准确）；无 statusline 数据为 null。 */
-  context_pct: number | null;
-  /** 上下文窗口大小（200000 或 1000000）；无 statusline 数据为 null。 */
-  context_window: number | null;
-  /** 模型展示名（Claude Code statusline 的 model.display_name，如 "Opus"）；无则 null。 */
-  model: string | null;
-  /** 待审批子态:回合中途等用户介入(批准工具/回答提问/批准计划);无则 null。 */
-  pending_review: "approval" | "question" | "plan" | null;
-  /** 最近一条 AI 正文(锚 Stop hook);无则 null,卡片回退 preview。 */
-  last_ai_text: string | null;
-  /** 最近一条用户消息(锚 UserPromptSubmit);独立字段,不被工具活动覆盖。 */
-  last_user_text: string | null;
-  /** agent 身份（如 "claude"）。DB 里可能存着本版本不认识的 id，故不是联合类型。 */
-  provider: AgentId;
-  /** 会话所属的账号（profile id）；null = 默认账号。 */
-  profile: string | null;
   /** 所属账号的展示名（profile 已删时回退 id 本身）；null = 默认账号，不显示徽章。 */
   profile_name: string | null;
 };
 
-export type LiveSessionCounts = {
-  total: number;
-  running: number;
-  waiting: number;
-  archived: number;
-};
+export type { LiveSessionCounts };
 
 export type ChatItem = GeneratedChatItem;
 export type ChatHistory = ChatHistoryDto;

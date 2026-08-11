@@ -105,13 +105,20 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct Session {
+    #[cfg_attr(test, ts(type = "number"))]
     pub id: i64,
+    #[cfg_attr(test, ts(type = "number"))]
     pub project_id: i64,
     pub cc_session_id: String,
     pub status: String,
+    #[cfg_attr(test, ts(type = "number"))]
     pub started_at: i64,
+    #[cfg_attr(test, ts(type = "number"))]
     pub last_event_at: i64,
+    #[cfg_attr(test, ts(type = "number | null"))]
     pub ended_at: Option<i64>,
 }
 
@@ -129,11 +136,16 @@ pub struct Task {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
 pub struct Todo {
+    #[cfg_attr(test, ts(type = "number"))]
     pub id: i64,
+    #[cfg_attr(test, ts(type = "number"))]
     pub task_id: i64,
     pub content: String,
     pub status: String,
+    #[cfg_attr(test, ts(type = "number"))]
     pub order_idx: i64,
 }
 

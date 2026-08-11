@@ -135,20 +135,6 @@ fn runtime_of(
 }
 
 #[tauri::command]
-pub(crate) async fn get_overview(
-    state: State<'_, super::AppState>,
-) -> Result<Vec<meowo_store::ProjectOverview>, String> {
-    let db_path = state.db_path.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        super::open_store(&db_path)?
-            .overview()
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
 pub(crate) async fn recent_cwds(
     state: State<'_, super::AppState>,
     limit: usize,
@@ -157,21 +143,6 @@ pub(crate) async fn recent_cwds(
     tauri::async_runtime::spawn_blocking(move || {
         super::open_store(&db_path)?
             .recent_cwds(limit)
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-pub(crate) async fn get_project_tasks(
-    state: State<'_, super::AppState>,
-    project_id: i64,
-) -> Result<Vec<meowo_store::TaskCard>, String> {
-    let db_path = state.db_path.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        super::open_store(&db_path)?
-            .project_tasks(project_id)
             .map_err(|error| error.to_string())
     })
     .await

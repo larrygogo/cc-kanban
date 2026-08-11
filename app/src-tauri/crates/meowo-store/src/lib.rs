@@ -6,5 +6,5 @@ pub mod store;
 
 pub use error::StoreError;
 pub use models::*;
-pub use query::{LiveSession, ProjectOverview, TaskCard};
+pub use query::LiveSession;
 pub use store::Store;

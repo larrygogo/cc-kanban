@@ -59,7 +59,7 @@ use managed_terminal::{
 use session_command::is_safe_id;
 use session_command::{rename_session, set_archived, set_session_note};
 use session_query::{
-    get_live_sessions_counts, get_live_sessions_page, get_overview, get_project_tasks, recent_cwds,
+    get_live_sessions_counts, get_live_sessions_page, recent_cwds,
 };
 #[cfg(test)]
 use session_query::{
@@ -925,8 +925,6 @@ pub fn run() {
             ptys,
         })
         .invoke_handler(tauri::generate_handler![
-            get_overview,
-            get_project_tasks,
             get_live_sessions_counts,
             get_live_sessions_page,
             get_chat_history,
