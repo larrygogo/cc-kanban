@@ -7,9 +7,12 @@
 // - `Dropdown`（选值）、`ActionMenu`（执行动作）：本文件内的组件，fixed 定位；
 // - 对话窗模型/模式菜单：CSS 绝对定位 + 互斥状态在父组件，受控复用 `useMenuPopup`；
 // - RelayAccess 的 ModelPicker 是 combobox（输入过滤 + aria-activedescendant），模式不同，不并入。
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from "react";
 
-/** 菜单定位坐标（仅 fixed 模式；`cssPositioned` 时恒为空对象，定位交给 CSS）。 */
+/** 菜单定位坐标（仅 fixed 模式；`cssPositioned` 时恒为空对象，定位交给 CSS）。
+    maxHeight 不在这里：它由 relayout 直接写 DOM（imperative 全权管理）——曾放进 pos，
+    关闭重开时「先直写 DOM 清掉、再 setPos 出相同值」让 React 的样式 diff 视为无变化
+    跳过写回，钳制静默丢失（评审确认的回归）。 */
 type MenuPos = { top?: number; bottom?: number; left?: number; right?: number; width?: number };
 
 /**
@@ -24,14 +27,11 @@ type MenuPos = { top?: number; bottom?: number; left?: number; right?: number; w
  * 菜单打开本身不抢焦点（点击打开后焦点留在触发钮），第一根方向键才进菜单。
  */
 export function useMenuPopup({
-  itemCount = 0,
   align = "right",
   cssPositioned = false,
   open: controlledOpen,
   setOpen: controlledSetOpen,
 }: {
-  /** 菜单项数：仅 fixed 定位时用来估菜单高、决定向下弹还是向上翻。 */
-  itemCount?: number;
   /**
    * fixed 定位时的水平对齐：
    * - `"right"`（默认）：菜单右边对齐按钮右边（设置页行尾控件），宽度随内容（受 `.dd .dd-menu` 钳制）。
@@ -56,6 +56,43 @@ export function useMenuPopup({
   const [pos, setPos] = useState<MenuPos>({});
   const ref = useRef<HTMLDivElement>(null); // 容器：click-away 边界、菜单项查询范围
   const btnRef = useRef<HTMLButtonElement>(null); // 触发钮：定位锚点、焦点归还目标
+  const menuRef = useRef<HTMLDivElement>(null); // 菜单本体：fixed 模式量真实高度用
+
+  // fixed 定位：菜单挂进 DOM 后、首帧绘制前量**真实高度**再定坐标。
+  // 曾在 toggle 里按 itemCount*30+10 估高决定翻转，估矮了就误判「下方放得下」→
+  // 向下弹、被窗口底边切掉（新建会话面板的权限下拉，实拍反馈）。useLayoutEffect
+  // 同步跑在绘制前，用户看不到未定位的那一帧。
+  //
+  // 抽成可调用的 relayout：菜单在打开状态里内容变高时（如筛选面板从根视图切到
+  // 目录列表）调用方要能主动重测——首开时那次测量对新高度一无所知。
+  const relayout = useCallback(() => {
+    if (!open || cssPositioned) return;
+    const r = btnRef.current?.getBoundingClientRect();
+    const menu = menuRef.current;
+    if (!r || !menu) return;
+    // maxHeight 全程直写 DOM、不进 React style：量高前清掉旧钳制（否则量到被压扁的
+    // 高度），放不下再写回。走 React 的话「清掉→setPos 同值」会被样式 diff 跳过写回，
+    // 钳制在第二次打开时静默丢失（评审确认）。
+    menu.style.maxHeight = "";
+    const menuH = menu.offsetHeight;
+    // 上下各留 6px 按钮间隙 + 6px 贴边余量。下方放得下就向下；否则弹向空间更大的一侧，
+    // 连那侧也塞不下整个菜单时钳 maxHeight（.dd-menu overflow-y:auto 内滚兜底）。
+    const below = window.innerHeight - r.bottom - 12;
+    const above = r.top - 12;
+    const openUp = menuH > below && above > below;
+    const avail = openUp ? above : below;
+    if (menuH > avail) menu.style.maxHeight = `${Math.max(avail, 60)}px`;
+    const vert: MenuPos = openUp
+      ? { bottom: window.innerHeight - r.top + 6 }
+      : { top: r.bottom + 6 };
+    // 水平钳制：菜单比锚点侧空间宽时（如 208px 侧栏里右对齐一个 224px 面板），
+    // 不许越出视口——宁可离开与按钮的对齐线，也不能被窗口边缘裁掉（实拍反馈）。
+    const menuW = menu.offsetWidth;
+    setPos(align === "left"
+      ? { ...vert, left: Math.max(6, Math.min(r.left, window.innerWidth - menuW - 6)), width: r.width }
+      : { ...vert, right: Math.max(6, Math.min(window.innerWidth - r.right, window.innerWidth - menuW - 6)) });
+  }, [open, cssPositioned, align]);
+  useLayoutEffect(() => { relayout(); }, [relayout]);
 
   useEffect(() => {
     if (!open) return;
@@ -101,24 +138,7 @@ export function useMenuPopup({
     };
   }, [open, cssPositioned]);
 
-  const toggle = () => {
-    if (!open && !cssPositioned) {
-      const r = btnRef.current?.getBoundingClientRect();
-      if (r) {
-        // 估算菜单高（项高约 30px + 容器内边距），下方放不下且上方空间更充裕时向上弹。
-        // WebView 的内容无法溢出原生窗口，所以按钮靠近窗口底部时必须向上翻转。
-        const estHeight = itemCount * 30 + 10;
-        const fitsBelow = r.bottom + 6 + estHeight <= window.innerHeight;
-        const vert = !fitsBelow && r.top > window.innerHeight - r.bottom
-          ? { bottom: window.innerHeight - r.top + 6 }
-          : { top: r.bottom + 6 };
-        setPos(align === "left"
-          ? { ...vert, left: r.left, width: r.width }
-          : { ...vert, right: Math.max(0, window.innerWidth - r.right) });
-      }
-    }
-    setOpen(!open);
-  };
+  const toggle = () => setOpen(!open);
 
   // 方向键导航，挂在容器上（事件从触发钮或菜单项冒泡上来）。roving focus：直接搬 DOM 焦点
   // 而不是 aria-activedescendant——菜单里没有输入框，焦点落在哪项，Enter/Space 就激活哪项。
@@ -149,7 +169,7 @@ export function useMenuPopup({
     items[next]?.focus();
   };
 
-  return { open, setOpen, pos, ref, btnRef, toggle, onKeyDown };
+  return { open, setOpen, pos, ref, btnRef, menuRef, toggle, onKeyDown, relayout };
 }
 
 /**
@@ -170,7 +190,7 @@ export function Dropdown<T extends string | number>({
   /** 水平对齐：默认右对齐（设置页行尾）；`"left"` 左对齐并钉成按钮宽（新建会话的整宽表单）。 */
   align?: "left" | "right";
 }) {
-  const { open, setOpen, pos, ref, btnRef, toggle, onKeyDown } = useMenuPopup({ itemCount: options.length, align });
+  const { open, setOpen, pos, ref, btnRef, menuRef, toggle, onKeyDown } = useMenuPopup({ align });
   const cur = options.find((o) => o.value === value);
   return (
     <div className="dd" ref={ref} onKeyDown={onKeyDown}>
@@ -191,7 +211,7 @@ export function Dropdown<T extends string | number>({
         </svg>
       </button>
       {open && (
-        <div className="dd-menu" role="listbox" style={{ position: "fixed", top: pos.top, bottom: pos.bottom, left: pos.left, right: pos.right, width: pos.width }}>
+        <div className="dd-menu" role="listbox" ref={menuRef} style={{ position: "fixed", top: pos.top, bottom: pos.bottom, left: pos.left, right: pos.right, width: pos.width }}>
           {options.map((o) => (
             <button
               type="button"
@@ -237,7 +257,7 @@ export function ActionMenu({
   label: string;
   testId?: string;
 }) {
-  const { open, setOpen, pos, ref, btnRef, toggle, onKeyDown } = useMenuPopup({ itemCount: items.length });
+  const { open, setOpen, pos, ref, btnRef, menuRef, toggle, onKeyDown } = useMenuPopup({});
   if (items.length === 0) return null;
   return (
     <div className="dd" ref={ref} onKeyDown={onKeyDown}>
@@ -259,7 +279,7 @@ export function ActionMenu({
         </svg>
       </button>
       {open && (
-        <div className="dd-menu" role="menu" style={{ position: "fixed", top: pos.top, bottom: pos.bottom, right: pos.right }}>
+        <div className="dd-menu" role="menu" ref={menuRef} style={{ position: "fixed", top: pos.top, bottom: pos.bottom, right: pos.right }}>
           {items.map((it) => (
             <button
               key={it.key}

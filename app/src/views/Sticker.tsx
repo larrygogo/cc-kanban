@@ -25,8 +25,8 @@ import { isMacPanel } from "../platform";
 import { agentAssets, tintStyle } from "../providers";
 import { useAgents } from "../useAgents";
 import { useT } from "../i18n";
-import { type Item, type Tab, TAB_KEYS, PIN_KEY, STAR_KEY } from "./sticker/types";
-import { editorKeyDown, fmtAgo, loadStarred, match } from "./sticker/helpers";
+import { type Item, type Tab, TAB_KEYS, PIN_KEY } from "./sticker/types";
+import { editorKeyDown, fmtAgo, useStarred, match } from "./sticker/helpers";
 import {
   CheckIcon,
   ChatIcon,
@@ -274,16 +274,9 @@ export function Sticker({
 
   // 会话置顶：置顶的会话永远排到列表最前（跨重启保留）。与「置顶窗口(alwaysOnTop)」是两回事——
   // 那是窗口行为，图标也刻意分开（这里 TopIcon，窗口那边 PinIcon）。存储键沿用 meowo-starred。
-  const [starred, setStarred] = useState<Set<string>>(loadStarred);
-  const toggleStar = (sid: string) => {
-    setStarred((prev) => {
-      const next = new Set(prev);
-      if (next.has(sid)) next.delete(sid);
-      else next.add(sid);
-      localStorage.setItem(STAR_KEY, JSON.stringify([...next]));
-      return next;
-    });
-  };
+  // useStarred：与对话窗侧栏/标题菜单同一份写入口，且跨窗口（storage 事件）同步——
+  // 在对话窗里置顶，看板立刻跟上，反之亦然。
+  const { starred, toggleStar } = useStarred();
 
   // 重命名：editingId 为正在编辑的会话 id。草稿文本住在 EditBox 的局部状态里，
   // 按键不触发看板整表重渲染。

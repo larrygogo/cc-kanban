@@ -9,6 +9,8 @@ pub(crate) async fn start_managed_terminal(
     session_id: i64,
     cols: u16,
     rows: u16,
+    // 恢复时可改启动选项（如把权限模式切成跳过）；None = 沿用会话存的选择。
+    options: Option<std::collections::HashMap<String, String>>,
 ) -> Result<(), String> {
     let db_path = state.db_path.clone();
     let broker = state.ptys.clone();
@@ -35,11 +37,12 @@ pub(crate) async fn start_managed_terminal(
                 session.cc_session_id,
                 provider,
                 super::pty::TerminalSize::new(cols, rows),
+                options,
             )
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         {
-            let _ = (app, broker, session, cols, rows);
+            let _ = (app, broker, session, cols, rows, options);
             Err("当前平台暂不支持托管终端".into())
         }
     })

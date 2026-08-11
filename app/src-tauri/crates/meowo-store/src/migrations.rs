@@ -32,7 +32,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     --
     -- 恢复会话必须按它注入隔离环境变量，回到**同一个**账号：用当前活跃账号去 resume 一个旧会话，
     -- 会拿错误的身份去续一段不属于它的对话。
-    profile        TEXT
+    profile        TEXT,
+    -- 启动选项的**选择 map**（JSON 对象，option id → choice id，如 {"permission":
+    -- "bypassPermissions"}）。新建时的选择在 claim 认领时写入；resume/接管重启进程时
+    -- 按插件声明表把它现场翻译成 flag 回放——权限模式等选项是**启动参数**而非会话状态，
+    -- 不回放的话每次重启都重置成 CLI 默认。接管时用户改了权限模式会合并写回（成为
+    -- 会话新的持久形态）。存选择而非 flag：CLI 改 flag 名不受影响，且能按选项维度合并。
+    -- NULL = 从未选过任何选项（或会话非 meowo 启动），恢复时不追加任何 flag。
+    launch_args    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS tasks (

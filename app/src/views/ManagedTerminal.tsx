@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import { useEffect, useRef, useState, type MutableRefObject, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { appConfirm } from "../confirm";
 import { Terminal } from "@xterm/xterm";
@@ -143,9 +143,14 @@ type ManagedTerminalProps = {
   /// 供父组件在自己重启 PTY 后触发偏移复位（对话页发送/切模式也会重启 PTY，
   /// 不止组件内部的 start/takeover 按钮）。
   rearmRef?: MutableRefObject<(() => void) | null>;
+  /// 恢复/接管时对启动选项的改选（option id → choice id），随 start/takeover 下发；
+  /// 省略 = 沿用会话存的选择。状态归 ChatWindow（与对话页的接管入口共用同一份）。
+  resumeOptions?: Record<string, string>;
+  /// 渲染在 start/takeover 按钮旁的附加控件（权限改选下拉，由 ChatWindow 构造）。
+  takeoverExtra?: ReactNode;
 };
 
-export function ManagedTerminal({ sessionId, status, background = false, onBackgroundInput, visible = true, onUserSubmit, attentionMarkers = [], interactivePrompt = false, expectMenu = false, grammar, onAttention, rearmRef: externalRearmRef }: ManagedTerminalProps) {
+export function ManagedTerminal({ sessionId, status, background = false, onBackgroundInput, visible = true, onUserSubmit, attentionMarkers = [], interactivePrompt = false, expectMenu = false, grammar, onAttention, rearmRef: externalRearmRef, resumeOptions, takeoverExtra }: ManagedTerminalProps) {
   const t = useT();
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -653,7 +658,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     setError("");
     terminal.focus();
     try {
-      await startManagedTerminal(sessionId, terminal.cols || 80, terminal.rows || 24);
+      await startManagedTerminal(sessionId, terminal.cols || 80, terminal.rows || 24, resumeOptions);
       setActive(true);
       // 新 PTY 的偏移从 0 重新计数，必须归零重拉，否则新输出会被当成旧数据丢弃。
       rearmRef.current?.();
@@ -696,7 +701,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     setError("");
     terminal.focus();
     try {
-      await takeoverManagedTerminal(sessionId, terminal.cols || 80, terminal.rows || 24);
+      await takeoverManagedTerminal(sessionId, terminal.cols || 80, terminal.rows || 24, resumeOptions);
       setActive(true);
       rearmRef.current?.();
     } catch (e) {
@@ -738,7 +743,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
           {/* 后台会话的「没画面」有两种截然不同的成因，此前一律说成「已结束」：worker 明明
               还在跑、只是旁路没接上时，那句话是错的，而且不给任何出路。只有拿到退出码
               （worker 真的退了）才说结束，否则说「没接上」并给一次重接。 */}
-          <div>{error || (background
+          <div className="managed-terminal-cover-msg">{error || (background
             ? (exitCode !== undefined ? t.chat.terminalBackgroundGone : t.chat.terminalBackgroundLost)
             : exitCode !== undefined ? t.chat.terminalExited(exitCode) : externalRunning ? t.chat.terminalExternal : t.chat.terminalReady)}</div>
           {/* 后台会话不给接管/启动按钮：那两条路对它必然失败（见 background 的说明）；
@@ -750,9 +755,14 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
               </button>
             )
             : (
-              <button type="button" onClick={() => void (externalRunning ? takeover() : start())} disabled={starting}>
-                {starting ? t.chat.terminalStarting : externalRunning ? t.chat.terminalTakeover : t.chat.terminalStart}
-              </button>
+              /* 权限改选（ChatWindow 构造）与动作按钮并排成一行：各自居中堆叠时两个
+                 宽度互不相干的方块上下错落，读起来像散落的控件而不是一组操作。 */
+              <div className="managed-terminal-cover-actions">
+                {takeoverExtra}
+                <button type="button" onClick={() => void (externalRunning ? takeover() : start())} disabled={starting}>
+                  {starting ? t.chat.terminalStarting : externalRunning ? t.chat.terminalTakeover : t.chat.terminalStart}
+                </button>
+              </div>
             )}
         </div>
       )}

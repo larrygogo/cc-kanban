@@ -169,6 +169,9 @@ pub struct AgentModeDto {
 pub struct ChatHistoryDto {
     #[cfg_attr(test, ts(type = "number"))]
     pub session_id: i64,
+    /// CLI 侧会话 id：前端以它为键的动作（重命名 rename_session、置顶 STAR_KEY）
+    /// 从对话窗标题菜单发起时需要，数字主键替代不了。
+    pub cc_session_id: String,
     pub title: String,
     pub status: String,
     pub provider: String,

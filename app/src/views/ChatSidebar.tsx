@@ -1,15 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirmStopSession, getLiveSessionsPage, getSettings, recentCwds, sessionTone, type CardMenuMode, type LiveSession, type SessionTone, type Settings } from "../api";
 import { agentAssets, tintStyle } from "../providers";
 import { folderName, pathKey } from "../paths";
-import { Dropdown } from "./menu";
+import { useMenuPopup } from "./menu";
 import { CardContextMenu } from "./sticker/CardContextMenu";
-import { editorKeyDown, loadStarred } from "./sticker/helpers";
+import { editorKeyDown, useStarred } from "./sticker/helpers";
 import { MoreIcon, NoteIcon, TopIcon } from "./sticker/icons";
-import { STAR_KEY } from "./sticker/types";
 import { useT } from "../i18n";
+import { isMac } from "../platform";
 import type { Dict } from "../i18n/zh";
 
 /** 每翻一页新增的会话数。滚到底自动加载下一页，直到后端带回 next_cursor = null 为止。 */
@@ -125,6 +125,128 @@ function groupByState(items: LiveSession[], t: Dict): DirGroup[] {
   }));
 }
 
+/** 侧栏的筛选/分组弹层（Linear 式）：头部一个图标钮，面板每行「标签 · 当前值 ›」，
+ *  点行进入对应选项列表，选中即应用并收起。取代先前并排撑满一行的两个下拉。 */
+function SidebarFilterMenu({ dirValue, dirOptions, groupMode, groupLabels, onDir, onGroup, t }: {
+  dirValue: string | null;
+  dirOptions: { value: string; label: string }[];
+  groupMode: GroupMode;
+  groupLabels: Record<GroupMode, string>;
+  onDir: (value: string | null) => void;
+  onGroup: (mode: GroupMode) => void;
+  t: Dict;
+}) {
+  const { open, setOpen, pos, ref, btnRef, menuRef, toggle, onKeyDown, relayout } = useMenuPopup({});
+  const [view, setView] = useState<"root" | "dir" | "group">("root");
+  // 关闭即回根视图：下次打开不该停在上次翻到的子面板。
+  useEffect(() => { if (!open) setView("root"); }, [open]);
+  // 子视图切换后（根↔目录/分组）：
+  // 1) 重测定位——首开测量只见过 2 行高的根视图，目录列表长出来会伸出窗口底边；
+  // 2) 焦点接力——刚获焦的那一行随视图卸载，焦点落回 body、roving 键盘导航断线，
+  //    把焦点落到新视图首项（只在视图真的切换时抢，打开菜单本身仍不抢焦点）。
+  const prevViewRef = useRef(view);
+  useLayoutEffect(() => {
+    relayout();
+    if (prevViewRef.current !== view) {
+      prevViewRef.current = view;
+      ref.current?.querySelector<HTMLElement>('[role="menuitem"], [role="option"]')?.focus();
+    }
+  }, [view, relayout, ref]);
+  const dirLabel = dirValue
+    ? dirOptions.find((option) => option.value === dirValue)?.label ?? folderName(dirValue)
+    : t.chat.sidebarDirAll;
+  const chevron = (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="9 6 15 12 9 18" /></svg>
+  );
+  const back = (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="15 6 9 12 15 18" /></svg>
+  );
+  const check = (
+    <svg className="dd-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12" /></svg>
+  );
+  // 选中即应用并收起：筛选是「一次性的快速动作」，留着面板反而多一步关闭。
+  const pick = (apply: () => void) => { apply(); setOpen(false); btnRef.current?.focus(); };
+  return (
+    <div className="dd" ref={ref} onKeyDown={onKeyDown}>
+      <button
+        ref={btnRef}
+        type="button"
+        className="chat-sidebar-filter"
+        aria-label={t.chat.sidebarFilterTip}
+        data-tip={t.chat.sidebarFilterTip}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={toggle}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+          <path d="M8 4v3.2M8 12.4v7.6M16 4v7.6M16 16.8V20" />
+          <circle cx="8" cy="9.8" r="2.2" />
+          <circle cx="16" cy="14.2" r="2.2" />
+        </svg>
+      </button>
+      {open && (
+        <div className="dd-menu sf-menu" role="menu" ref={menuRef} style={{ position: "fixed", top: pos.top, bottom: pos.bottom, right: pos.right }}>
+          {view === "root" ? (
+            <>
+              <button type="button" role="menuitem" className="dd-item sf-row" onClick={() => setView("dir")}>
+                <span>{t.chat.sidebarFilterDir}</span>
+                <span className="sf-val"><span className="sf-val-text">{dirLabel}</span>{chevron}</span>
+              </button>
+              <div className="sf-sep" role="separator" />
+              <button type="button" role="menuitem" className="dd-item sf-row" onClick={() => setView("group")}>
+                <span>{t.chat.sidebarFilterGroup}</span>
+                <span className="sf-val"><span className="sf-val-text">{groupLabels[groupMode]}</span>{chevron}</span>
+              </button>
+            </>
+          ) : (
+            <>
+              <button type="button" role="menuitem" className="dd-item sf-back" onClick={() => setView("root")}>
+                {back}
+                <span>{view === "dir" ? t.chat.sidebarFilterDir : t.chat.sidebarFilterGroup}</span>
+              </button>
+              <div className="sf-sep" role="separator" />
+              {view === "dir"
+                ? [{ value: "", label: t.chat.sidebarDirAll }, ...dirOptions].map((option) => {
+                    const selected = (dirValue ?? "") === option.value;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        className={"dd-item" + (selected ? " sel" : "")}
+                        title={option.value || undefined}
+                        onClick={() => pick(() => onDir(option.value || null))}
+                      >
+                        <span className="dd-label">{option.label}</span>
+                        {selected && check}
+                      </button>
+                    );
+                  })
+                : (["none", "dir", "date", "state"] as const).map((mode) => {
+                    const selected = groupMode === mode;
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        className={"dd-item" + (selected ? " sel" : "")}
+                        onClick={() => pick(() => onGroup(mode))}
+                      >
+                        <span className="dd-label">{groupLabels[mode]}</span>
+                        {selected && check}
+                      </button>
+                    );
+                  })}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function readFolded(): Set<string> {
   try {
     const raw = JSON.parse(localStorage.getItem(FOLDED_KEY) || "[]");
@@ -182,7 +304,10 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
       const name = folderName(cwd);
       if ((counts.get(name) ?? 0) <= 1) return { value: cwd, label: name };
       const parts = cwd.split(/[\\/]+/).filter(Boolean);
-      const parent = parts.length >= 2 ? parts[parts.length - 2] : "";
+      let parent = parts.length >= 2 ? parts[parts.length - 2] : "";
+      // 上级目录只为消歧，不必全名：uuid 一类的长段（agent 沙箱的 codebase 目录）
+      // 会把菜单撑成一排乱码，取前 8 个字符足以区分彼此。
+      if (parent.length > 12) parent = `${parent.slice(0, 8)}…`;
       return { value: cwd, label: parent ? `${parent}/${name}` : name };
     });
   }, [dirs]);
@@ -356,13 +481,8 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   const ctxItem = ctxMenu ? (sessions ?? []).find((s) => s.session.id === ctxMenu.sid) ?? null : null;
   // 置顶与看板共用同一份 localStorage(键沿用 meowo-starred,改键会丢用户已有数据),
   // 两个界面看到的是同一批置顶会话,且都排到最前(见下方 ordered)。
-  const [starred, setStarred] = useState<Set<string>>(loadStarred);
-  const toggleStar = (ccSessionId: string) => setStarred((prev) => {
-    const next = new Set(prev);
-    if (!next.delete(ccSessionId)) next.add(ccSessionId);
-    localStorage.setItem(STAR_KEY, JSON.stringify([...next]));
-    return next;
-  });
+  // 置顶集：与看板/对话窗标题菜单共用 useStarred（同一份写入口 + 双通道同步）。
+  const { starred, toggleStar } = useStarred();
   // 重命名 / 便签:与看板一样就地编辑(同一条会话上只开一个编辑器)。
   // 草稿文本不在这里——住在 EditorInput 的局部状态里,按键不触发侧栏整表重渲染。
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -539,7 +659,10 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
               {starred.has(item.session.cc_session_id) && (
                 <span className="chat-sidebar-star" role="img" aria-label={t.sticker.star}><TopIcon /></span>
               )}
-              {item.task_title || t.sticker.waitingFirstInput}
+              {/* 标题必须包成自己的 span：.chat-sidebar-name 是 flex 容器（要排星标），
+                  裸文本节点是匿名 flex item，容器上的 text-overflow 对它不生效——
+                  长标题会溢出而不出省略号（实拍反馈）。 */}
+              <span className="chat-sidebar-name-text">{item.task_title || t.sticker.waitingFirstInput}</span>
             </span>
           )}
           {/* 按目录分组时每条再重复一遍目录名是噪声——组头已经写着了（按日期/状态分组时目录仍有用）。 */}
@@ -575,21 +698,31 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
 
   return (
     <aside className="chat-sidebar">
-      {/* 窗口无系统装饰，侧栏顶部也要能拖动窗口——与右列标题栏同为 drag region。 */}
+      {/* 窗口无系统装饰，侧栏顶部也要能拖动窗口——与右列标题栏同为 drag region。
+          头部即「新建会话」按钮（Kimi 式整宽 CTA），不再放「会话」标题 + 迷你加号。 */}
       <div className="chat-sidebar-head" data-tauri-drag-region>
-        <span className="chat-sidebar-title" data-tauri-drag-region>{t.chat.sidebarTitle}</span>
-        <div className="chat-sidebar-head-actions">
-          <button
-            type="button"
-            className="chat-sidebar-toggle"
-            aria-label={t.sticker.newSession}
-            data-tip={t.sticker.newSession}
-            onClick={() => void invoke("open_new_session_window").catch(() => {})}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-          </button>
+        <button
+          type="button"
+          className="chat-sidebar-new"
+          onClick={() => void invoke("open_new_session_window").catch(() => {})}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          <span>{t.sticker.newSession}</span>
+        </button>
+        <SidebarFilterMenu
+          dirValue={dirFilter}
+          dirOptions={dirOptions}
+          groupMode={groupMode}
+          groupLabels={{ none: t.chat.groupNone, dir: t.chat.groupByDir, date: t.chat.groupByDate, state: t.chat.groupByState }}
+          onDir={setDirFilter}
+          onGroup={changeGroupMode}
+          t={t}
+        />
+        {/* macOS 专用：折叠钮留在侧栏头部（无独立顶栏）。Windows/Linux 的折叠/展开
+            统一在顶栏左上角（ChatWindow 的 sidebarToggleButton），这里不再重复出口。 */}
+        {isMac() && (
           <button
             type="button"
             className="chat-sidebar-toggle"
@@ -601,27 +734,7 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
               <path d="M15 6l-6 6 6 6" />
             </svg>
           </button>
-        </div>
-      </div>
-      {/* 目录工具条:左侧筛选(收窄到一个目录,后端做,清单完整),右侧分组方式菜单
-          (只重排已加载的这一页)。两者独立——筛选后再分组等于给唯一一组加了个头,也无妨。 */}
-      <div className="chat-sidebar-tools">
-        <Dropdown
-          align="left"
-          value={dirFilter ?? ""}
-          options={[{ value: "", label: t.chat.sidebarDirAll }, ...dirOptions]}
-          onChange={(value) => setDirFilter(value ? String(value) : null)}
-        />
-        <Dropdown
-          value={groupMode}
-          options={[
-            { value: "none", label: t.chat.groupNone },
-            { value: "dir", label: t.chat.groupByDir },
-            { value: "date", label: t.chat.groupByDate },
-            { value: "state", label: t.chat.groupByState },
-          ]}
-          onChange={(mode) => changeGroupMode(mode)}
-        />
+        )}
       </div>
       <nav className="chat-sidebar-list" aria-label={t.chat.sidebarTitle} onScroll={onScroll}>
         {sessions === null && <div className="chat-sidebar-empty">{t.chat.sidebarLoading}</div>}

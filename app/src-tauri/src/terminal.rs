@@ -1407,6 +1407,54 @@ fn resolve_resume_plan(
     (resolved, resume)
 }
 
+/// 把会话的启动选项拼回恢复 argv：读存的选择 map（sessions.launch_args，claim 时落库），
+/// 合并本次接管的覆盖（用户在恢复时改权限模式），按插件声明表现场翻译成 flag。
+/// 覆盖非空时把合并结果写回——本次选择成为会话新的持久形态，之后的恢复自动沿用；
+/// 这也覆盖「当年不是以跳过权限新建、恢复时想切过去」的场景（存量会话同样适用）。
+///
+/// 权限模式等选项是**启动参数**而非会话状态——不回放的话，每次 resume/接管重启的
+/// 进程都会重置成 CLI 默认（实拍反馈「每次接管权限模式都会变」）。
+/// 插入点在 launch 前缀之后、resume 子命令之前，与首次启动的参数次序一致。
+/// 读库/解析失败一律静默跳过：回放是增强，不能因此拦掉恢复本身。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn splice_stored_launch_args(
+    resume: &mut Vec<String>,
+    provider: &str,
+    sid: i64,
+    overrides: Option<&std::collections::HashMap<String, String>>,
+) {
+    let Some(agent) = meowo_agent::resolve(Some(provider)) else { return };
+    let Ok(store) = open_store(&db_path()) else { return };
+    let mut selections: std::collections::HashMap<String, String> = store
+        .session_launch_args(sid)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
+    if let Some(over) = overrides.filter(|o| !o.is_empty()) {
+        for (option, choice) in over {
+            selections.insert(option.clone(), choice.clone());
+        }
+        if let Ok(json) = serde_json::to_string(&selections) {
+            let _ = store.set_session_launch_args(sid, &json);
+        }
+    }
+    if selections.is_empty() {
+        return;
+    }
+    // 未知 option/choice 由 resolve_launch_args 兜底（忽略/落默认），用户输入进不了 argv。
+    let args = meowo_agent::resolve_launch_args(agent.launch_options(), &selections);
+    if args.is_empty() {
+        return;
+    }
+    // resume argv = launch 前缀 + resume 子命令 + 会话 id（registry::resume_argv 的构造）。
+    let sub_len = agent.resume_args().len();
+    let insert_at = resume.len().saturating_sub(sub_len + 1);
+    for (offset, arg) in args.into_iter().enumerate() {
+        resume.insert(insert_at + offset, arg);
+    }
+}
+
 /// resume 的终端 spawn 失败时回滚乐观复活（收尾回 ended）：GUI 构建下 stderr 不可见，
 /// 至少让卡片立即回落「已断开」，而不是假显示「已连接」直到 120s 宽限过期。
 /// 只对 prepare_resume 返回 Some(确实复活过)的会话调用——未被本次复活的真连接会话不得误收尾。
@@ -1597,13 +1645,15 @@ pub(crate) async fn new_session(
     // 启动选项：前端只回传 choice id，此处按插件声明表翻译成 flag——未知 id 被忽略/落默认，
     // 用户输入永远进不了 argv。放在 relay 增补**之前**：中转声明的 `--model` 必须最后压轴
     // （中转端点只认它配置的那个模型，用户选的别名对它无意义，claude 以最后一个 --model 为准）。
+    // 选择 map 单独留一份：随临时 PTY 暂存、claim 认领时写进 sessions.launch_args，
+    // resume/接管重启进程时经声明表翻译回放（权限模式等是启动参数，不回放每次重启都
+    // 重置成 CLI 默认）。存选择而非 flag：接管时改权限只需按选项维度合并。
+    let selections = options.clone().unwrap_or_default();
     let mut argv = agent.launch_argv();
-    if let Some(sel) = &options {
-        argv.extend(meowo_agent::resolve_launch_args(
-            agent.launch_options(),
-            sel,
-        ));
-    }
+    argv.extend(meowo_agent::resolve_launch_args(
+        agent.launch_options(),
+        &selections,
+    ));
     let argv = crate::relay::augment_argv(agent.id(), argv);
     // 代理 + 中转 **+ 当前活跃账号的隔离变量**（`CLAUDE_CONFIG_DIR` 等），三者都在
     // `launch_env_for_profile` 里。
@@ -1621,7 +1671,7 @@ pub(crate) async fn new_session(
     // PTY 冷启动与杀软扫描可能阻塞数秒，放 blocking 池；首次 SessionStart hook 会把临时 PTY
     // 认领为真实数据库 session。
     let temp_id = tauri::async_runtime::spawn_blocking(move || {
-        broker.start_pending(app, &argv, Some(&dir), &env, 100, 30, &provider)
+        broker.start_pending(app, &argv, Some(&dir), &env, 100, 30, &provider, &selections)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -1686,6 +1736,8 @@ pub(crate) async fn takeover_managed_terminal(
     session_id: i64,
     cols: u16,
     rows: u16,
+    // 接管时可改启动选项（如把权限模式切成跳过）；None = 沿用会话存的选择。
+    options: Option<std::collections::HashMap<String, String>>,
 ) -> Result<(), String> {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
@@ -1728,6 +1780,7 @@ pub(crate) async fn takeover_managed_terminal(
                 session.cc_session_id,
                 provider,
                 crate::pty::TerminalSize::new(cols, rows),
+                options,
             )
         })
         .await
@@ -1735,7 +1788,7 @@ pub(crate) async fn takeover_managed_terminal(
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let _ = (app, state, session_id, cols, rows);
+        let _ = (app, state, session_id, cols, rows, options);
         Err("当前平台不支持".into())
     }
 }
@@ -1846,6 +1899,7 @@ fn start_managed_resume(
         session_id,
         provider,
         crate::pty::TerminalSize::new(100, 30),
+        None,
     )?;
     reveal_session(&app, &broker, sid)
 }
@@ -1862,12 +1916,15 @@ pub(crate) fn start_managed_resume_sized(
     session_id: String,
     provider: String,
     terminal_size: crate::pty::TerminalSize,
+    option_overrides: Option<std::collections::HashMap<String, String>>,
 ) -> Result<(), String> {
     ensure_session_profile_available(&provider, &session_id)?;
-    let (resolved, resume) = resolve_resume_plan(&session_id, cwd.as_deref(), &provider);
+    let (resolved, mut resume) = resolve_resume_plan(&session_id, cwd.as_deref(), &provider);
     if resume.is_empty() {
         return Err("该 Agent 不支持恢复会话".into());
     }
+    // 回放会话的启动选项（权限模式等；接管时的改选合并写回），恢复后的进程与选择同参。
+    splice_stored_launch_args(&mut resume, &provider, sid, option_overrides.as_ref());
     // takeover 调用本函数前已经结束旧进程；普通 resume 的旧进程本就不在。此刻复制能拿到
     // 完整的最后一帧 transcript，也不会与 Claude 正在追加同一个文件发生竞争。
     let target_profile = prepare_session_for_active_profile(&provider, &session_id)?;

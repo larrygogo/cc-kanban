@@ -32,6 +32,7 @@ mod proc;
 pub mod profile;
 mod session_command;
 mod session_query;
+mod snap_layout;
 mod terminal;
 mod watch;
 mod window;
@@ -1041,6 +1042,7 @@ pub fn run() {
             save_pasted_attachment,
             clipboard_image_fingerprint,
             open_chat_window,
+            snap_layout::set_caption_overlay_rects,
             start_managed_terminal,
             takeover_managed_terminal,
             managed_terminal_snapshot,

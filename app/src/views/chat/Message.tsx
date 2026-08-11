@@ -2,6 +2,8 @@ import { memo, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent }
 import { createPortal } from "react-dom";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useT } from "../../i18n";
+import { zh } from "../../i18n/zh";
+import { en } from "../../i18n/en";
 import { type ChatItem } from "../../api";
 import { ChatMarkdown } from "../ChatMarkdown";
 import { parseUserText } from "./localCommand";
@@ -14,13 +16,39 @@ import { parseUserText } from "./localCommand";
 // 用户名等身份信息。要看是哪张图，缩略图本身与文件名就够了。
 const IMAGE_REF = /\[Image(?: #\d+)?: source: ([^\]]+?)\]/g;
 
+/** 附件指令头（composer 注入给 CLI 的那句，见 i18n 的 attachmentInstruction）。
+ *  图片已渲染成缩略图时，这句对人是纯噪音——按下方规则剥掉。直接从两份语言资产派生
+ *  （attachmentInstruction("") 去掉附件列表后 trim），不手抄原句：文案改动自动跟上，
+ *  历史消息无论当时用哪种语言写下都认（评审：手抄字面量会在改文案时静默失效）。 */
+const ATTACHMENT_INSTRUCTION_HEADERS = new Set(
+  [zh, en].map((dict) => dict.chat.attachmentInstruction("").trim()),
+);
+
 /** 把用户文本拆成「正文（去掉图片引用行）+ 图片路径列表」。图片不混排在文字里：
  *  气泡是「说的话」，图片是附件，各归各的（正文里的 [Image #N] 指代照旧保留）。 */
 function splitUserText(text: string): { body: string; images: { path: string; key: string }[] } {
   const matches = [...text.matchAll(IMAGE_REF)];
   if (matches.length === 0) return { body: text, images: [] };
   const images = matches.map((match, index) => ({ path: match[1].trim(), key: `${match.index}:${index}` }));
-  return { body: text.replace(IMAGE_REF, "").trim(), images };
+  // 逐行抽引用，只删「原行确实含图片引用、抽走后只剩空白或空弹头」的行——
+  // 曾按全文过滤 trim()==="-" 的行，把用户自己写的独立「-」行也误删了（评审确认）。
+  const kept: string[] = [];
+  for (const line of text.split("\n")) {
+    const stripped = line.replace(IMAGE_REF, "");
+    const leftover = stripped.trim();
+    if (stripped !== line && (leftover === "" || leftover === "-")) continue;
+    kept.push(stripped);
+  }
+  // 指令头后一条附件行都不剩（全是图片、已转缩略图）时连头剥掉；
+  // 仍有非图片附件行时保留头与那些行。
+  const body = kept
+    .filter((line, index) => {
+      if (!ATTACHMENT_INSTRUCTION_HEADERS.has(line.trim())) return true;
+      return !!kept[index + 1]?.trim().startsWith("- ");
+    })
+    .join("\n")
+    .trim();
+  return { body, images };
 }
 
 /** 大图查看层：滚轮缩放、拖拽平移、双击复位；工具栏有缩放按钮与明显的关闭键。
@@ -115,7 +143,9 @@ function Lightbox({ src, name, onClose }: { src: string; name: string; onClose: 
   );
 }
 
-function ImageRef({ path }: { path: string }) {
+/** 图片缩略图 + 点开灯箱。导出给 composer 的附件条复用：粘贴的图片与 transcript
+ *  里的图片走同一套预览（按路径走 convertFileSrc，asset 读不到时回退文件名 chip）。 */
+export function ImageRef({ path }: { path: string }) {
   const [failed, setFailed] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const name = path.split(/[\\/]/).pop() || path;
@@ -181,7 +211,7 @@ export const Message = memo(function Message({ item }: { item: ChatItem }) {
     const { body, images } = splitUserText(parts.text);
     if (parts.local) {
       // 只剩免责声明（写给模型的 caveat）的那条：对人零信息量，整条不渲染。
-      if (!parts.commands.length && !parts.stdout.length && !parts.text) return null;
+      if (!parts.commands.length && !parts.stdout.length && !parts.notifications.length && !parts.text) return null;
       return (
         <article className="chat-message is-user is-command">
           {parts.commands.map((command, index) => (
@@ -204,6 +234,18 @@ export const Message = memo(function Message({ item }: { item: ChatItem }) {
                 <span className="chat-tool-chevron">›</span>
               </summary>
               <pre>{out}</pre>
+            </details>
+          ))}
+          {/* 后台任务通知默认收起：整段是 XML+JSON 的机器记录，一行摘要（通知自带的
+              <summary>，如「Agent "/code-review" finished」）足够定位，想看细节再展开。 */}
+          {parts.notifications.map((note, index) => (
+            <details className="chat-tool chat-command-out" key={`notify-${index}`}>
+              <summary>
+                <span className="chat-tool-name">{t.chat.taskNotification}</span>
+                <span className="chat-tool-summary">{/<summary>([\s\S]*?)<\/summary>/.exec(note)?.[1]?.trim() || note}</span>
+                <span className="chat-tool-chevron">›</span>
+              </summary>
+              <pre>{note}</pre>
             </details>
           ))}
         </article>

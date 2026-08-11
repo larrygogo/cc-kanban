@@ -97,11 +97,9 @@ describe("ChatWindow", () => {
     });
     render(<ChatWindow />);
     await waitFor(() => expect(screen.getByText("实现同步对话")).toBeTruthy());
-    expect(screen.getByText("实现同步对话").hasAttribute("data-tauri-drag-region")).toBe(true);
-    // cwd 是「打开项目目录」按钮：可点击、不做拖拽区（拖拽与点击手势会互相吞）。
-    const cwd = screen.getByText("C:/repo");
-    expect(cwd.tagName).toBe("BUTTON");
-    fireEvent.click(cwd);
+    // 标题是动作菜单触发钮（Kimi 式）：路径入口收进菜单里的「打开项目目录」。
+    fireEvent.click(screen.getByRole("button", { name: /实现同步对话/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "打开项目目录" }));
     expect(invoke).toHaveBeenCalledWith("open_project_dir", { cwd: "C:/repo" });
     expect(screen.getByText("开始")).toBeTruthy();
     expect(screen.getByText("我来实现")).toBeTruthy();
@@ -305,7 +303,8 @@ describe("ChatWindow", () => {
     fireEvent.paste(input, { clipboardData: { files: [file] } });
     // 内容经 base64 交给宿主落盘（[1,2,3] → "AQID"），路径回来后按文件名显示为附件。
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_pasted_attachment", { fileName: "shot.png", dataBase64: "AQID" }));
-    expect(await screen.findByText("shot.png")).toBeTruthy();
+    // 图片附件渲染为缩略图（ImageRef），文件名在 img 的 alt 上而不再是文本 chip。
+    expect(await screen.findByAltText("shot.png")).toBeTruthy();
   });
 
   it("手敲交互式内置命令（/config）走菜单识别通道：清空输入框并打开识别窗口", async () => {
@@ -487,7 +486,8 @@ describe("ChatWindow", () => {
     openDialog.mockResolvedValue(["C:/tmp/design.png", "C:/tmp/spec.pdf"]);
     render(<ChatWindow />);
     fireEvent.click(await screen.findByRole("button", { name: "添加图片或文件" }));
-    expect(await screen.findByText("design.png")).toBeTruthy();
+    // 图片附件是缩略图（alt=文件名），非图片仍是文本 chip。
+    expect(await screen.findByAltText("design.png")).toBeTruthy();
     expect(screen.getByText("spec.pdf")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", {
@@ -657,7 +657,7 @@ describe("ChatWindow", () => {
     render(<ChatWindow />);
     await screen.findByText("运行观察");
     // agent logo（标题栏最前，aria-label=provider）+ 运行指示（有活动时显示活动文本）。
-    expect(screen.getByLabelText("claude")).toBeTruthy();
+    // agent 徽标已从标题栏移除（实拍反馈），不再断言它。
     expect(screen.getByText("Bash: cargo test")).toBeTruthy();
     // 上下文用量环：环内百分比 + 环右已用/总量（63% × 200K ≈ 126K）。
     expect(screen.getByText("63")).toBeTruthy();
@@ -741,7 +741,8 @@ describe("ChatWindow", () => {
     await screen.findByText("初始标题");
     expect(screen.getByText("Bash: 第一步")).toBeTruthy();
     expect(screen.getByText("10")).toBeTruthy();
-    expect(screen.getByText("权限模式: 默认")).toBeTruthy();
+    // 模式按钮只显示当前值，维度名在 aria-label/tooltip 里。
+    expect(screen.getByText("默认")).toBeTruthy();
 
     // 权限模式现在是下拉（选项由屏幕回显标记派生）：点按钮开菜单、点某项才发 cycle 键。
     fireEvent.click(screen.getByRole("button", { name: "切换模式: 权限模式" }));
@@ -760,7 +761,7 @@ describe("ChatWindow", () => {
     expect(await screen.findByText("改后标题")).toBeTruthy();
 
     current = { ...base, currentActivity: "Bash: 第二步", contextPct: 42, title: "改后标题", agentModes: [{ dimension: "permission", value: "plan" }] };
-    expect(await screen.findByText("权限模式: 计划")).toBeTruthy();
+    expect(await screen.findByText("计划")).toBeTruthy();
 
     // 兜底时间线读 lastUserText/lastAiText（transcript 空窗期渲染 hook 落库的最近往来），
     // 它们也在比较清单里——漏掉的话空窗期内容永远停在第一轮。
@@ -828,14 +829,16 @@ describe("ChatWindow", () => {
       return Promise.resolve();
     });
     render(<ChatWindow />);
-    await screen.findByText("工作模式: 默认");
-    expect(screen.getByText("权限模式: 手动确认")).toBeTruthy();
+    // 模式按钮只显示当前值，维度名在 aria-label/tooltip 里。
+    await screen.findByRole("button", { name: "切换模式: 工作模式" });
+    expect(screen.getByText("默认")).toBeTruthy();
+    expect(screen.getByText("手动确认")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "切换模式: 权限模式" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "YOLO" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 41, data: "/yolo on" }));
     // Enter 隔 SUBMIT_GAP_MS 才发（见 submitToTerminal），同样要 waitFor。
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 41, data: "\r" }));
-    expect(await screen.findByText("权限模式: YOLO")).toBeTruthy();
+    expect(await screen.findByText("YOLO")).toBeTruthy();
   });
 
   it("cycle 盲切后从终端屏幕回显真实落点（claude 空闲期 transcript 不写模式记录）", async () => {
@@ -867,7 +870,7 @@ describe("ChatWindow", () => {
       return Promise.resolve();
     });
     render(<ChatWindow />);
-    await screen.findByText("权限模式: 默认");
+    await screen.findByText("默认");
     // 空闲期：后续轮询不再带模式增量（真实后端普通增量的 agent_modes 就是空）。
     current = { ...base, agentModes: [] };
     // 只有 cycle 键的维度也给下拉：选项由屏幕回显标记派生，选中后循环按到位（cycleToMode）。
@@ -875,7 +878,7 @@ describe("ChatWindow", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: /计划/ }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 51, data: "\u001b[Z" }));
     // transcript 静默，但屏幕是 CLI 自己画的权威状态——标签应据它回显为「计划」。
-    expect(await screen.findByText("权限模式: 计划")).toBeTruthy();
+    expect(await screen.findByText("计划")).toBeTruthy();
   });
 
   it("offers to load earlier messages when the first read was truncated", async () => {
@@ -993,16 +996,20 @@ describe("ChatWindow", () => {
       return Promise.resolve();
     });
     render(<ChatWindow />);
-    fireEvent.click(await screen.findByRole("button", { name: "归档" }));
+    // 归档入口收进标题菜单（Kimi 式）：点标题开菜单再点「归档」。
+    fireEvent.click(await screen.findByRole("button", { name: /要收起的会话/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "归档" }));
     expect(invoke).toHaveBeenCalledWith("set_archived", { sessionId: 7, archived: true });
-    // 翻面后按钮变成「取消归档」——它是这条会话已归档的唯一提示。
-    expect(await screen.findByRole("button", { name: "取消归档" })).toBeTruthy();
+    // 翻面后菜单项变成「取消归档」——它是这条会话已归档的唯一提示（菜单点完即收，重开验证）。
+    fireEvent.click(screen.getByRole("button", { name: /要收起的会话/ }));
+    expect(await screen.findByRole("menuitem", { name: "取消归档" })).toBeTruthy();
 
     archiveFails = true;
-    fireEvent.click(screen.getByRole("button", { name: "取消归档" }));
-    // 失败回滚：按钮退回归档态，并且错误可见。
-    expect(await screen.findByRole("button", { name: "取消归档" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("menuitem", { name: "取消归档" }));
+    // 失败回滚：错误可见，重开菜单仍是归档态（取消归档）。
     expect(await screen.findByText(/db busy/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /要收起的会话/ }));
+    expect(await screen.findByRole("menuitem", { name: "取消归档" })).toBeTruthy();
   });
 
   /// 归档 = 收纳：侧栏里当场消失，右边却还停在它的对话上等于「收起来了还摊在桌上」。
@@ -1022,7 +1029,8 @@ describe("ChatWindow", () => {
       return Promise.resolve();
     });
     render(<ChatWindow />);
-    fireEvent.click(await screen.findByRole("button", { name: "归档" }));
+    fireEvent.click(await screen.findByRole("button", { name: /要收起的/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "归档" }));
     expect(await screen.findByText("下一条")).toBeTruthy();
   });
 
@@ -1920,7 +1928,8 @@ describe("ChatWindow", () => {
     // 图片 → 退回指令文本(经 @提及不会作为图像块附加)。
     openDialog.mockResolvedValueOnce(["C:\\repo\\shot.png"]);
     fireEvent.click(screen.getByRole("button", { name: "添加图片或文件" }));
-    await waitFor(() => expect(screen.getByText("shot.png")).toBeTruthy());
+    // 图片附件是缩略图（alt=文件名）。
+    await waitFor(() => expect(screen.getByAltText("shot.png")).toBeTruthy());
     fireEvent.change(box(), { target: { value: "看图" } });
     fireEvent.keyDown(box(), { key: "Enter" });
     // 多行文本经括号粘贴包裹送入 PTY(\x1b[200~…\x1b[201~),指令文本恒多行,断言带包裹。
@@ -1962,7 +1971,7 @@ describe("ChatWindow", () => {
     await waitFor(() => expect(screen.getByText("原生图")).toBeTruthy());
     const box = () => screen.getByRole("textbox", { name: "发送消息给 Agent" });
     fireEvent.paste(box(), { clipboardData: { files: [new File([new Uint8Array([137, 80])], "image.png", { type: "image/png" })] } });
-    await waitFor(() => expect(screen.getByText("image.png")).toBeTruthy());
+    await waitFor(() => expect(screen.getByAltText("image.png")).toBeTruthy());
     fireEvent.change(box(), { target: { value: "看这张图" } });
     fireEvent.keyDown(box(), { key: "Enter" });
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 22, data: "\x16" }));
@@ -1995,7 +2004,7 @@ describe("ChatWindow", () => {
     await waitFor(() => expect(screen.getByText("指纹变了")).toBeTruthy());
     const box = () => screen.getByRole("textbox", { name: "发送消息给 Agent" });
     fireEvent.paste(box(), { clipboardData: { files: [new File([new Uint8Array([1])], "image.png", { type: "image/png" })] } });
-    await waitFor(() => expect(screen.getByText("image.png")).toBeTruthy());
+    await waitFor(() => expect(screen.getByAltText("image.png")).toBeTruthy());
     fingerprint = "fp-2"; // 用户中途复制了别的东西
     fireEvent.change(box(), { target: { value: "看图" } });
     fireEvent.keyDown(box(), { key: "Enter" });

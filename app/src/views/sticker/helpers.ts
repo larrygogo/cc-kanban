@@ -1,5 +1,5 @@
 // 贴纸看板的纯逻辑 helper：行内编辑键盘处理、相对时间、置顶持久化、tab 过滤。
-import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { Dict } from "../../i18n/zh";
 import { STAR_KEY, type Item, type Tab } from "./types";
 
@@ -29,6 +29,43 @@ export function loadStarred(): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+/** 置顶集变更的同窗口广播事件名。storage 事件只发给**其他**窗口（浏览器语义），
+ *  同窗口内的会话侧栏 ↔ 对话窗标题菜单要靠它互相通知。 */
+export const STARRED_CHANGED_EVENT = "meowo-starred-changed";
+
+/** 翻转一条会话的置顶态：写库 + 同窗口广播（跨窗口由原生 storage 事件覆盖）。
+ *  返回新集合供调用方 setState。看板/侧栏/标题菜单共用这一份写入口——
+ *  三处各写一份时漏了广播就是视图失同步（评审发现）。 */
+export function toggleStarred(current: Set<string>, ccSessionId: string): Set<string> {
+  const next = new Set(current);
+  if (!next.delete(ccSessionId)) next.add(ccSessionId);
+  localStorage.setItem(STAR_KEY, JSON.stringify([...next]));
+  window.dispatchEvent(new Event(STARRED_CHANGED_EVENT));
+  return next;
+}
+
+/** 置顶集的读端 + 翻转入口（看板/侧栏/标题菜单同款）。变更无论来自本窗口
+ *  （自定义事件）还是其他窗口（storage 事件），都重读落库值。 */
+export function useStarred(): { starred: Set<string>; toggleStar: (ccSessionId: string) => void } {
+  const [starred, setStarred] = useState<Set<string>>(loadStarred);
+  const starredRef = useRef(starred);
+  starredRef.current = starred;
+  useEffect(() => {
+    const reload = () => setStarred(loadStarred());
+    const onStorage = (event: StorageEvent) => { if (event.key === STAR_KEY) reload(); };
+    window.addEventListener(STARRED_CHANGED_EVENT, reload);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(STARRED_CHANGED_EVENT, reload);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+  const toggleStar = useCallback((ccSessionId: string) => {
+    setStarred(toggleStarred(starredRef.current, ccSessionId));
+  }, []);
+  return { starred, toggleStar };
 }
 
 export function match(tab: Tab, l: Item): boolean {

@@ -49,6 +49,30 @@ describe("parseUserText", () => {
     expect(parts.commands).toEqual([{ name: "/clear", args: "" }]);
     expect(parts.text).toBe("顺便看下这个");
   });
+
+  /// 技能/后台命令的另一种落盘形态：命令行是裸文本（无 <command-name>），旁边跟着
+  /// caveat/stdout/forked-skill-launch——裸命令行提升为徽章，与包裹形态渲染一致。
+  it("裸文本命令行（/code-review + caveat/stdout/launch）提升为命令徽章", () => {
+    const parts = parseUserText(
+      '<local-command-caveat>Caveat: …</local-command-caveat>\n/code-review\n<local-command-stdout>Running in the background as @code-review</local-command-stdout>\n<forked-skill-launch>{"agentId":"a1"}</forked-skill-launch>',
+    );
+    expect(parts.local).toBe(true);
+    expect(parts.commands).toEqual([{ name: "/code-review", args: "" }]);
+    expect(parts.stdout).toEqual(["Running in the background as @code-review"]);
+    expect(parts.text).toBe("");
+  });
+
+  /// 后台任务通知：Claude Code 注入的 user 消息（前导系统声明 + <task-notification>）。
+  /// 原样摊开是整屏 XML+JSON（实拍反馈），内文收进 notifications、前导段一并剥掉。
+  it("task-notification 收进 notifications，前导系统声明一并剥掉", () => {
+    const parts = parseUserText(
+      '[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event, NOT a message from the user.\nDo NOT interpret this as user acknowledgement.\n\n<task-notification>\n<task-id>abc123</task-id>\n<summary>Agent "/code-review" finished</summary>\n<result>done</result>\n</task-notification>',
+    );
+    expect(parts.local).toBe(true);
+    expect(parts.notifications).toHaveLength(1);
+    expect(parts.notifications[0]).toContain('Agent "/code-review" finished');
+    expect(parts.text).toBe("");
+  });
 });
 
 describe("Message 渲染本地命令", () => {
@@ -77,5 +101,14 @@ describe("Message 渲染本地命令", () => {
     render(<Message item={userText("继续实现")} />);
     expect(screen.getByText("继续实现")).toBeTruthy();
     expect(document.querySelector(".chat-message.is-command")).toBeNull();
+  });
+
+  it("任务通知收成一行摘要（通知自带的 <summary>），展开才见全文", () => {
+    render(<Message item={userText('<task-notification><task-id>t1</task-id><summary>Agent "/code-review" finished</summary><result>ok</result></task-notification>')} />);
+    const details = screen.getByText("后台任务通知").closest("details");
+    expect(details?.hasAttribute("open")).toBe(false);
+    expect(details?.querySelector(".chat-tool-summary")?.textContent).toBe('Agent "/code-review" finished');
+    // 全文在展开区，不再摊在气泡里。
+    expect(document.querySelector(".chat-message .chat-text")).toBeNull();
   });
 });

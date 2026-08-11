@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(() => Promise.resolve(() => {})) }));
+// 侧栏内折叠钮是 macOS 专属（非 mac 的折叠/展开统一在 ChatWindow 顶栏），按平台分测。
+const isMacMock = vi.hoisted(() => vi.fn(() => false));
+vi.mock("../platform", () => ({ isMac: isMacMock }));
 
 import { ChatSidebar } from "./ChatSidebar";
 import type { LiveSession } from "../api";
@@ -25,6 +28,7 @@ describe("ChatSidebar", () => {
   afterEach(cleanup);
   beforeEach(() => {
     invoke.mockReset();
+    isMacMock.mockReturnValue(false);
     localStorage.clear();
   });
 
@@ -89,7 +93,8 @@ describe("ChatSidebar", () => {
     });
   });
 
-  it("reports collapse to the parent", async () => {
+  it("macOS：侧栏内折叠钮上报 collapse 给父级", async () => {
+    isMacMock.mockReturnValue(true);
     invoke.mockImplementation((command: string) =>
       Promise.resolve(command === "get_live_sessions_page" ? [session(1, "任务A")] : undefined));
     const onCollapse = vi.fn();
@@ -98,6 +103,14 @@ describe("ChatSidebar", () => {
     fireEvent.click(screen.getByRole("button", { name: "收起会话列表" }));
     // 折叠状态归 ChatWindow 持有（展开入口在标题栏），侧栏只上报意图。
     expect(onCollapse).toHaveBeenCalled();
+  });
+
+  it("非 macOS：侧栏内不渲染折叠钮（折叠/展开统一在顶栏，归 ChatWindow）", async () => {
+    invoke.mockImplementation((command: string) =>
+      Promise.resolve(command === "get_live_sessions_page" ? [session(1, "任务A")] : undefined));
+    render(<ChatSidebar activeId={1} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
+    await screen.findByRole("button", { name: /任务A/ });
+    expect(screen.queryByRole("button", { name: "收起会话列表" })).toBeNull();
   });
 
   /** jsdom 里滚动尺寸恒为 0，手动装出「已经滚到底」的几何。 */
@@ -267,7 +280,9 @@ describe("ChatSidebar", () => {
     await waitFor(() => expect(args).toHaveLength(2));
     expect(args[1]).toEqual({ search: null, cwd: null, limit: 120 });
 
-    fireEvent.click(screen.getByRole("button", { name: /全部目录/ }));
+    // 筛选弹层（Linear 式）：图标钮 → 「目录」行 → 选项列表。
+    fireEvent.click(screen.getByRole("button", { name: "筛选与分组" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^目录/ }));
     fireEvent.click(await screen.findByRole("option", { name: "scratch" }));
     expect(await screen.findByRole("button", { name: /临时活儿/ })).toBeTruthy();
     expect(args[args.length - 1]).toEqual({ search: null, cwd: "D:/tmp/scratch", limit: 60 });
@@ -298,8 +313,9 @@ describe("ChatSidebar", () => {
     // 默认关：一个像素都不改，没有组头。
     expect(screen.queryByRole("button", { name: /^scratch/ })).toBeNull();
 
-    // 分组方式换成了 Group by 菜单：先开下拉（按钮显示当前档「不分组」），再选「按目录」。
-    fireEvent.click(screen.getByRole("button", { name: "不分组" }));
+    // 分组入口在筛选弹层里：图标钮 → 「分组」行（根视图显示当前档「不分组」）→ 选「按目录」。
+    fireEvent.click(screen.getByRole("button", { name: "筛选与分组" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^分组/ }));
     fireEvent.click(screen.getByRole("option", { name: "按目录" }));
     const list = screen.getByRole("navigation");
     const heads = within(list).getAllByRole("button").filter((b) => b.className.includes("group-head"));

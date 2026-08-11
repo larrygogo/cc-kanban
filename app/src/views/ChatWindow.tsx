@@ -7,19 +7,24 @@ import { appConfirm } from "../confirm";
 import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, dismissInteractiveQuestion, agentModels, getChatHistory, getLiveSessionsPage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, pendingInteraction, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, resolvePendingApproval, savePastedAttachment, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
 import { useT } from "../i18n";
 import { useShowWhenReady } from "../useShowWhenReady";
-import { agentAssets, tintStyle } from "../providers";
 import { reduceChatEvents } from "../chat/reducer";
 import { ApprovalCard } from "./chat/ApprovalCard";
 import { matchOptionByLabel, observeTranscriptForDismiss, parseAskUserQuestions, type QuestionDismissTracker, type StructuredQuestion } from "./chat/askUserQuestion";
 import { applyLearnedLabels, loadLearnedLabels, saveLearnedLabels } from "./chat/modelLabels";
 import { ContextMeter } from "./chat/ContextMeter";
+import { ImageRef } from "./chat/Message";
 import { TodoPanel } from "./chat/TodoPanel";
 import { Transcript } from "./chat/Transcript";
 import { ChatSidebar } from "./ChatSidebar";
-import { ArchiveIcon } from "./sticker/icons";
+import { ArchiveIcon, TopIcon } from "./sticker/icons";
+import { useStarred } from "./sticker/helpers";
 import { ManagedTerminal } from "./ManagedTerminal";
+import { WindowControls } from "./WindowControls";
+import { isMac } from "../platform";
 import { appendTerminalText, modeFromScreen, terminalAttention as detectTerminalAttention, visibleTerminalText, type AttentionGrammar, type TerminalAttention, type TerminalAttentionOption } from "../terminalAttention";
-import { useMenuPopup } from "./menu";
+import { Dropdown, useMenuPopup } from "./menu";
+// 恢复时的权限改选需要 agent 的启动选项声明表（与新建会话面板同源）。
+import { listAgents, type AgentDescriptor } from "../api";
 
 function initialSessionId(): number {
   const value = new URLSearchParams(window.location.search).get("sessionId");
@@ -28,6 +33,8 @@ function initialSessionId(): number {
 }
 
 const SIDEBAR_COLLAPSED_KEY = "meowo-chat-sidebar-collapsed";
+/** 窄窗门限：低于它停靠侧栏放不下（208px 侧栏 + 卡片最小可用宽），自动收起、开关改开浮窗。 */
+const SIDEBAR_NARROW_QUERY = "(max-width: 880px)";
 
 function approvalSuggestionParts(suggestion: unknown, index: number, t: ReturnType<typeof useT>): { base: string; detail: string } {
   if (!suggestion || typeof suggestion !== "object" || Array.isArray(suggestion)) {
@@ -148,7 +155,16 @@ function sameHistoryMeta(prev: ChatHistory | null, next: ChatHistory): boolean {
 /// clipFingerprint:粘贴落盘那一刻的剪贴板图像指纹。仅粘贴来源的图片有——发送时若剪贴板
 /// 指纹仍与它相等,才允许向 PTY 发 Ctrl-V 走 TUI 的原生图片附加(文件选择器来源没有指纹,
 /// 天然不走该路径)。
-type Attachment = { path: string; name: string; image: boolean; clipFingerprint?: string };
+type Attachment = { path: string; name: string; image: boolean; clipFingerprint?: string;
+  /** 字节数，仅粘贴来源有（File.size 现成）；文件选择器只给路径，拿大小要多一次 IPC，不值。 */
+  size?: number };
+
+/** 附件卡片的体积行。附件都是本地小文件，GB 档没有出场机会。 */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 100 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 
 function attachmentOf(path: string): Attachment {
@@ -206,6 +222,112 @@ const trimActivityCdPrefix = (activity: string): string =>
 /** AskUserQuestion 的题面。多问题用 tab 切换——全部竖排会把卡片堆得比对话区还高，
  *  把输入框挤出可视区（用户实拍反馈）；单问题不渲染 tab 条。可点选排队只存在于
  *  单问题形态（约束见调用处注释），多问题恒为纯展示，tab 不与点选状态相互作用。 */
+/** 标题胶囊 + 会话动作菜单（Kimi 式）：标题本身是触发钮（▾），置顶/打开目录/重命名/
+ *  归档都收进菜单——标题栏只留「正在看哪条 + 状态 + 视图切换」。重命名走独立 modal
+ *  （onRename 只负责打开它）。 */
+function ChatTitleMenu({ title, cwd, archived, archiving, starred, onToggleStar, onRename, onToggleArchived, t }: {
+  title: string;
+  cwd: string | null;
+  archived: boolean;
+  archiving: boolean;
+  starred: boolean;
+  onToggleStar: () => void;
+  onRename: () => void;
+  onToggleArchived: () => void;
+  t: ReturnType<typeof useT>;
+}) {
+  const { open, setOpen, pos, ref, btnRef, menuRef, toggle, onKeyDown } = useMenuPopup({ align: "left" });
+  // 先收菜单再执行动作：动作可能弹确认/切会话，菜单不该压在那些之上。
+  const pick = (action: () => void) => { setOpen(false); btnRef.current?.focus(); action(); };
+  return (
+    <div className="dd chat-title-menu" ref={ref} onKeyDown={onKeyDown}>
+      <button ref={btnRef} type="button" className="chat-title-btn" aria-haspopup="menu" aria-expanded={open} onClick={toggle}>
+        <span className="chat-title">{title}</span>
+        <svg className="chat-title-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
+      </button>
+      {open && (
+        /* 不铺 pos.width：菜单宽随内容（.dd .dd-menu 的 min-width: max-content），
+           只沿用左对齐与视口钳制。 */
+        <div className="dd-menu chat-title-actions" role="menu" ref={menuRef} style={{ position: "fixed", top: pos.top, bottom: pos.bottom, left: pos.left }}>
+          <button type="button" role="menuitem" className="dd-item" onClick={() => pick(onToggleStar)}>
+            <span className="chat-title-action-ico"><TopIcon /></span>
+            <span className="dd-label">{starred ? t.sticker.unstar : t.sticker.star}</span>
+          </button>
+          {cwd && (
+            <button type="button" role="menuitem" className="dd-item" title={cwd} onClick={() => pick(() => void invoke("open_project_dir", { cwd }).catch(() => {}))}>
+              <span className="chat-title-action-ico">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg>
+              </span>
+              <span className="dd-label">{t.sticker.openProjectDir}</span>
+            </button>
+          )}
+          <button type="button" role="menuitem" className="dd-item" onClick={() => pick(onRename)}>
+            <span className="chat-title-action-ico">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /></svg>
+            </span>
+            <span className="dd-label">{t.sticker.renameTitle}</span>
+          </button>
+          <button type="button" role="menuitem" className="dd-item" disabled={archiving} onClick={() => pick(onToggleArchived)}>
+            <span className="chat-title-action-ico"><ArchiveIcon archived={archived} /></span>
+            <span className="dd-label">{archived ? t.sticker.unarchive : t.sticker.archive}</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 重命名会话的独立 modal（用户指定，不做就地编辑）。Enter 保存、Esc/取消/点遮罩关闭；
+ *  失败原因就地显示在弹层里，不静默吞。 */
+function RenameModal({ initial, onSubmit, onClose, t }: {
+  initial: string;
+  onSubmit: (title: string) => Promise<void>;
+  onClose: () => void;
+  t: ReturnType<typeof useT>;
+}) {
+  const [value, setValue] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async () => {
+    const title = value.trim();
+    if (!title || saving) return;
+    if (title === initial) { onClose(); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      await onSubmit(title);
+      onClose();
+    } catch (e) {
+      setError(String(e));
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="chat-modal-overlay" role="presentation" onClick={onClose}>
+      <div className="chat-modal" role="dialog" aria-modal="true" aria-label={t.sticker.renameTitle} onClick={(event) => event.stopPropagation()}>
+        <div className="chat-modal-title">{t.sticker.renameTitle}</div>
+        <input
+          className="ns-input"
+          autoFocus
+          value={value}
+          placeholder={t.sticker.renamePlaceholder}
+          onChange={(event) => setValue(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) void submit();
+            // 截停传播：ChatWindow 有窗口级「Esc=拒绝审批」监听，关个弹层不能顺手拒了审批。
+            if (event.key === "Escape") { event.stopPropagation(); onClose(); }
+          }}
+        />
+        {error && <div className="chat-modal-error" role="alert">{error}</div>}
+        <div className="chat-modal-actions">
+          <button type="button" className="ns-btn" onClick={onClose}>{t.newSession.cancel}</button>
+          <button type="button" className="ns-btn is-primary" disabled={!value.trim() || saving} onClick={() => void submit()}>{t.chat.renameSave}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function QuestionPanels({ items, interactive, queuedAnswer, onToggle }: {
   items: StructuredQuestion[];
   interactive: boolean;
@@ -497,6 +619,20 @@ export function ChatWindow() {
   // 语义与看板逐字一致(同一条 set_archived,同一个 archived 列):只改看板可见性,
   // 不动进程、不影响本窗继续对话,故不做二次确认(误点再点一次即还原)。
   const [archiving, setArchiving] = useState(false);
+  // 标题菜单的置顶/重命名（Kimi 式）。置顶走 useStarred（看板/侧栏同款：
+  // 同一份写入口 + 同窗口自定义事件/跨窗口 storage 双通道同步）。
+  const [renaming, setRenaming] = useState(false);
+  const { starred: starredSet, toggleStar: toggleStarById } = useStarred();
+  const toggleStar = () => {
+    const id = history?.ccSessionId;
+    if (id) toggleStarById(id);
+  };
+  const renameSession = async (title: string) => {
+    if (!history) return;
+    // 与侧栏/看板同一条命令、同一套参数（cc_session_id 为键）。成功后标题由 650ms
+    // 轮询自然刷新，rename_session 也会广播 board-changed 让侧栏跟上。
+    await invoke("rename_session", { cwd: history.cwd, sessionId: history.ccSessionId, title, provider: history.provider });
+  };
   const toggleArchived = async () => {
     if (!history || archiving) return;
     const next = !history.archived;
@@ -523,11 +659,34 @@ export function ChatWindow() {
   };
   const [resolvingApproval, setResolvingApproval] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1");
-  const toggleSidebar = () => setSidebarCollapsed((prev) => {
-    const next = !prev;
-    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0");
-    return next;
-  });
+  // 窄窗（<880px）自动收起停靠侧栏：两列塞不下。此时开关切换的是**浮窗侧栏**（overlay，
+  // 盖在主列上、不挤压布局），且不写收起偏好——窗口拉宽后回到用户原本的停靠选择。
+  // jsdom 没有 matchMedia，恒按宽窗走（测试语义不变）。
+  const [narrow, setNarrow] = useState(() => typeof window.matchMedia === "function" && window.matchMedia(SIDEBAR_NARROW_QUERY).matches);
+  const [overlaySidebar, setOverlaySidebar] = useState(false);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia(SIDEBAR_NARROW_QUERY);
+    const onChange = () => {
+      setNarrow(mq.matches);
+      // 拉宽后浮窗失去意义，收掉并回到停靠形态。
+      if (!mq.matches) setOverlaySidebar(false);
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  const sidebarVisible = narrow ? overlaySidebar : !sidebarCollapsed;
+  const toggleSidebar = () => {
+    if (narrow) {
+      setOverlaySidebar((prev) => !prev);
+      return;
+    }
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0");
+      return next;
+    });
+  };
   const [modelMenu, setModelMenu] = useState(false);
   /// 刚发出一条会弹菜单的命令：在这个时间点之前让屏幕识别去认光标菜单。
   /// 不常开是刻意的——菜单形态（导航提示 + ❯）虽然特征明确，但常开等于把 agent 平时
@@ -553,6 +712,40 @@ export function ChatWindow() {
   const [capabilityOffset, setCapabilityOffset] = useState(0);
   const provider = history?.provider;
   const cwd = history?.cwd ?? null;
+  // 恢复/接管时的权限改选："" = 沿用会话存的选择；选了具体档就随本次恢复下发，
+  // 后端按选项维度合并写回，成为会话新的持久形态——覆盖「当年不是以跳过权限新建、
+  // 恢复时想切过去」的场景（存量会话同样适用）。没声明权限类选项的 agent 不显示。
+  const [resumePermission, setResumePermission] = useState("");
+  // 换会话即归零：改选是对「这一条会话的下一次恢复」说的，带给别的会话就是暗改人家权限。
+  useEffect(() => setResumePermission(""), [sessionId]);
+  const [agentsForOptions, setAgentsForOptions] = useState<AgentDescriptor[] | null>(null);
+  useEffect(() => {
+    listAgents().then(setAgentsForOptions).catch(() => {});
+  }, []);
+  const permissionOption = (provider
+    ? agentsForOptions
+        ?.find((agent) => agent.id === provider)
+        ?.launch_options?.find((option) => option.id === "permission" || option.id === "approval")
+    : null) ?? null;
+  const resumeOptions = resumePermission && permissionOption
+    ? { [permissionOption.id]: resumePermission }
+    : undefined;
+  const resumePermissionPicker = permissionOption ? (
+    <div className="chat-resume-permission" data-tip={t.chat.resumePermissionTip}>
+      <Dropdown
+        align="left"
+        value={resumePermission}
+        options={[
+          { value: "", label: t.chat.resumeKeepOptions },
+          ...permissionOption.choices.map((choice) => ({
+            value: choice.id,
+            label: t.newSession.launchChoice[`${permissionOption.id}.${choice.id}`] ?? choice.label,
+          })),
+        ]}
+        onChange={(value) => setResumePermission(String(value))}
+      />
+    </div>
+  ) : null;
   const transcriptCapabilitiesReady = capabilityOffset > 0;
   const runtimeCapabilityProbe = chatUi?.runtime_commands_pending
     ? capabilityOffset
@@ -1218,7 +1411,7 @@ export function ChatWindow() {
     // React 状态尚未落下而漏掉 provider 声明的信任/登录提示。
     const ui = chatUi ?? (provider ? await agentChatUi(provider, cwd, sessionId).catch(() => null) : null);
     try {
-      await startManagedTerminal(sessionId, 100, 30);
+      await startManagedTerminal(sessionId, 100, 30, resumeOptions);
     } catch (error) {
       // Agent 自己的守护进程托管着它（FleetView 后台会话）：接管这条路走不通——杀掉进程
       // 只会被 supervisor 按 respawnFlags 拉回来。给一句说明而不是一个注定失败的按钮。
@@ -1261,7 +1454,7 @@ export function ChatWindow() {
     setSending(true);
     setSendError("");
     try {
-      await takeoverManagedTerminal(sessionId, 100, 30);
+      await takeoverManagedTerminal(sessionId, 100, 30, resumeOptions);
       terminalRearmRef.current?.();
       setNeedsTakeover(false);
       const startup = await waitForTerminalReady(sessionId, chatUi?.startup_attention_markers ?? [], terminalReadyMessages, attentionGrammar);
@@ -1622,8 +1815,10 @@ export function ChatWindow() {
       const data = base64OfBuffer(await file.arrayBuffer());
       // 剪贴板截图统一叫 image.png；名字进的是带时间戳的独立子目录，不会互踩。
       const path = await savePastedAttachment(file.name || "pasted.png", data);
-      const attachment = attachmentOf(path);
-      return attachment.image && clipFingerprint ? { ...attachment, clipFingerprint } : attachment;
+      // 缩略图不留 data: URL 副本：粘贴目录在 asset 协议作用域内（tauri.conf.json），
+      // ImageRef 按路径回读即可——base64 常驻 state 是每图 1.33 倍体积的白付内存（评审）。
+      const base: Attachment = { ...attachmentOf(path), size: file.size };
+      return base.image && clipFingerprint ? { ...base, clipFingerprint } : base;
     }));
     const fresh = results
       .filter((entry): entry is PromiseFulfilledResult<Attachment> => entry.status === "fulfilled")
@@ -1780,9 +1975,55 @@ export function ChatWindow() {
       .catch((error) => setSendError(String(error)));
   };
 
+  // 侧栏折叠/展开的统一开关（Kimi 式面板图标，两态共用一个钮）。Windows/Linux 常驻
+  // 顶栏左上角；macOS 没有独立顶栏，折叠钮在侧栏头部（ChatSidebar 内，仅 mac 渲染）、
+  // 折叠后的展开钮进标题栏行。
+  const sidebarToggleButton = (
+    <button
+      type="button"
+      className="chat-sidebar-open"
+      aria-label={sidebarVisible ? t.chat.sidebarCollapse : t.chat.sidebarExpand}
+      data-tip={sidebarVisible ? t.chat.sidebarCollapse : t.chat.sidebarExpand}
+      aria-expanded={sidebarVisible}
+      onClick={toggleSidebar}
+    >
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
+        <rect x="3.5" y="4.5" width="17" height="15" rx="3" />
+        <path d="M9.5 4.5v15" />
+      </svg>
+    </button>
+  );
+
   return (
     <div className={"chat-window" + (view === "terminal" ? " is-terminal" : "")}>
-      {!sidebarCollapsed && <ChatSidebar
+      {/* Windows/Linux：独立顶栏（拖拽区 + 标准 − □ × 控制组），会话标题分离到下方
+          .chat-bar 标题行。macOS 不渲染此行——红绿灯嵌在 64px 标题栏行内
+          （unify_titlebar_toolbar 垂直居中），布局保持原样不动。 */}
+      {!isMac() && (
+        <header className="chat-topbar" data-tauri-drag-region>
+          {sidebarToggleButton}
+          <WindowControls onClose={close} />
+        </header>
+      )}
+      {/* 窄窗浮窗形态（Kimi 式全高抽屉）：挂在窗口层级、从最顶盖到最底——锚在 chat-body
+          会被顶栏截一刀（实拍反馈「被分割」）。scrim 点外关；抽屉自带头部行放开关钮，
+          与顶栏同高同位，视觉上按钮原地不动、抽屉从它底下展开；选中会话即收（抽屉惯例）。 */}
+      {narrow && overlaySidebar && (
+        <>
+          <div className="chat-sidebar-scrim" onClick={() => setOverlaySidebar(false)} />
+          <div className="chat-sidebar-overlay">
+            <div className="chat-sidebar-overlay-head">{sidebarToggleButton}</div>
+            <ChatSidebar
+              activeId={sessionId}
+              approvalAwaitingIds={approvalAwaitingIds}
+              onSelect={(id) => { setOverlaySidebar(false); if (id !== sessionId) resetTo(id); }}
+              onCollapse={() => setOverlaySidebar(false)}
+            />
+          </div>
+        </>
+      )}
+      <div className="chat-body">
+      {!narrow && !sidebarCollapsed && <ChatSidebar
         activeId={sessionId}
         approvalAwaitingIds={approvalAwaitingIds}
         onSelect={(id) => { if (id !== sessionId) resetTo(id); }}
@@ -1790,58 +2031,31 @@ export function ChatWindow() {
       />}
       <div className="chat-main">
       <header className="chat-bar" data-tauri-drag-region>
-        {sidebarCollapsed && (
-          <button
-            type="button"
-            className="chat-sidebar-open"
-            aria-label={t.chat.sidebarExpand}
-            data-tip={t.chat.sidebarExpand}
-            onClick={toggleSidebar}
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-              <rect x="3" y="4" width="18" height="16" rx="2.5" />
-              <path d="M9.5 4v16" />
-            </svg>
-          </button>
+        {isMac() && !sidebarVisible && sidebarToggleButton}
+        {history ? (
+          <ChatTitleMenu
+            title={history.title || t.chat.title}
+            cwd={history.cwd}
+            archived={history.archived}
+            archiving={archiving}
+            starred={!!history.ccSessionId && starredSet.has(history.ccSessionId)}
+            onToggleStar={toggleStar}
+            onRename={() => setRenaming(true)}
+            onToggleArchived={() => void toggleArchived()}
+            t={t}
+          />
+        ) : (
+          /* 历史未回时没有可操作的会话，标题降级为纯文本占位（仍是拖拽区）。 */
+          <div className="chat-title-menu" data-tauri-drag-region>
+            <span className="chat-title" data-tauri-drag-region>{t.chat.title}</span>
+          </div>
         )}
-        {history?.provider && (() => {
-          const Icon = agentAssets(history.provider).Icon;
-          return (
-            <span className="chat-provider-logo" style={tintStyle(history.provider, true)} role="img" aria-label={history.provider} data-tauri-drag-region>
-              <Icon />
-            </span>
-          );
-        })()}
-        <div className="chat-heading" data-tauri-drag-region>
-          <span className="chat-title" data-tauri-drag-region>{history?.title || t.chat.title}</span>
-          {history?.cwd && (
-            <button
-              type="button"
-              className="chat-cwd"
-              data-tip={t.sticker.openProjectDir}
-              onClick={() => history.cwd && void invoke("open_project_dir", { cwd: history.cwd }).catch(() => {})}
-            >{history.cwd}</button>
-          )}
-        </div>
         {/* 标题栏常驻状态徽标:原「Live sync」恒亮绿点与运行状态无关,信息量为零;
             改为状态驱动——滚动到哪里都能一眼看到 agent 是否在跑。 */}
         <span className={`chat-live is-${tone}`} data-tauri-drag-region role="status">
           <i data-tauri-drag-region />
           {t.chat.status[tone]}
         </span>
-        {history && (
-          <button
-            type="button"
-            className={"chat-archive" + (history.archived ? " is-on" : "")}
-            disabled={archiving}
-            aria-pressed={history.archived}
-            aria-label={history.archived ? t.sticker.unarchive : t.sticker.archive}
-            data-tip={history.archived ? t.chat.unarchiveTip : t.chat.archiveTip}
-            onClick={() => void toggleArchived()}
-          >
-            <ArchiveIcon archived={history.archived} />
-          </button>
-        )}
         {history?.ptyManaged && (
           <button type="button" className="chat-end" disabled={endingSession} data-tip={t.chat.endSessionConfirm} onClick={() => void endSession()}>
             {endingSession ? t.chat.terminalStopping : t.chat.endSession}
@@ -1851,9 +2065,6 @@ export function ChatWindow() {
           <button type="button" className={view === "chat" ? "is-active" : ""} aria-pressed={view === "chat"} onClick={() => setView("chat")}>{t.chat.conversation}</button>
           <button type="button" className={view === "terminal" ? "is-active" : ""} aria-pressed={view === "terminal"} onClick={() => setView("terminal")}>{t.chat.terminal}</button>
         </div>
-        <button type="button" className="winclose" aria-label={t.chat.close} data-tip={t.chat.close} onClick={close}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 6l12 12M18 6L6 18" /></svg>
-        </button>
       </header>
       {/* 两个视图都留在树上、用 CSS 切换可见性：此前三元表达式会在每次切 tab 时
           dispose + new Terminal()，还要把整个 backlog 重传并让 xterm 重放一遍 ANSI。
@@ -2043,6 +2254,8 @@ export function ChatWindow() {
             status={history?.status}
             visible={view === "terminal"}
             background={history?.background ?? false}
+            resumeOptions={resumeOptions}
+            takeoverExtra={resumePermissionPicker}
             // 后台会话的按键注定无效。第一下就把用户领到对话页——那里的输入框走 daemon 的
             // 送话通道，是真能用的。原先的做法是让他打完一整句再弹错误，等于白打。
             onBackgroundInput={() => {
@@ -2141,11 +2354,34 @@ export function ChatWindow() {
           ))}
         </div>}
         {attachments.length > 0 && <div className="chat-attachments">
-          {attachments.map((file) => <div className="chat-attachment" key={file.path} data-tip={file.path}>
-            <span className="chat-file-icon">{file.image ? t.chat.attachmentImage : t.chat.attachmentFile}</span>
-            <span>{file.name}</span>
-            <button type="button" aria-label={`${t.chat.removeAttachment} ${file.name}`} onClick={() => setAttachments((items) => items.filter((item) => item.path !== file.path))}>×</button>
-          </div>)}
+          {attachments.map((file) => file.image ? (
+            /* 图片附件给真缩略图（点开进灯箱，与 transcript 图片同一套 ImageRef）；
+               asset 协议读不到的路径（对话框选的任意目录）由 ImageRef 自行回退成文件名 chip。 */
+            <div className="chat-attachment is-image" key={file.path} data-tip={file.path}>
+              <ImageRef path={file.path} />
+              <button type="button" aria-label={`${t.chat.removeAttachment} ${file.name}`} onClick={() => setAttachments((items) => items.filter((item) => item.path !== file.path))}>×</button>
+            </div>
+          ) : (
+            <div className="chat-attachment" key={file.path} data-tip={file.path}>
+              <span className="chat-file-icon" role="img" aria-label={t.chat.attachmentFile}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+                  <path d="M14 3v5h5" />
+                </svg>
+              </span>
+              {/* 两行：文件名 + 「扩展名 · 大小」（大小仅粘贴来源有，见 Attachment.size）。 */}
+              <span className="chat-file-info">
+                <span className="chat-file-name">{file.name}</span>
+                <span className="chat-file-meta">
+                  {[
+                    file.name.includes(".") ? file.name.split(".").pop()!.toUpperCase() : t.chat.attachmentFile,
+                    file.size != null ? formatBytes(file.size) : null,
+                  ].filter(Boolean).join(" · ")}
+                </span>
+              </span>
+              <button type="button" aria-label={`${t.chat.removeAttachment} ${file.name}`} onClick={() => setAttachments((items) => items.filter((item) => item.path !== file.path))}>×</button>
+            </div>
+          ))}
         </div>}
         {attachmentNotice && <div className="chat-send-error" role="status"><span>{attachmentNotice}</span></div>}
         <textarea
@@ -2283,7 +2519,10 @@ export function ChatWindow() {
               const canCycle = Boolean(control?.cycle_input);
               const interactive = options.length > 0 || canCycle;
               const label = t.chat.modeDimensions[dimension] ?? dimension;
-              const value = state ? (t.chat.modeNames[state.value] ?? state.value) : "—";
+              // 按钮只显示当前值（「跳过权限检查」），维度名（「权限模式」）不再做前缀
+              // ——它在 aria-label 与 tooltip 里，占位不解释（实拍反馈「多此一举」）。
+              // 状态未知时退回维度名：孤零零一个「—」没人知道这颗按钮是干嘛的。
+              const value = state ? (t.chat.modeNames[state.value] ?? state.value) : label;
               return <div className="chat-model" key={dimension} ref={modeMenu === dimension ? modeMenuUi.ref : undefined} onKeyDown={modeMenu === dimension ? modeMenuUi.onKeyDown : undefined}>
                 <button
                   ref={modeMenu === dimension ? modeMenuUi.btnRef : undefined}
@@ -2304,7 +2543,7 @@ export function ChatWindow() {
                     else if (control?.cycle_input) void changeMode(dimension, [{ data: control.cycle_input, submit: false }], undefined, control.screen_markers);
                   }}
                 >
-                  {label}: {value}
+                  {value}
                   {options.length > 0
                     ? <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"><path d="M6 9l6 6 6-6" /></svg>
                     // 双向箭头而不是圆形箭头：后者在任何界面里都读作「刷新」，
@@ -2371,12 +2610,15 @@ export function ChatWindow() {
           <span>{sendError}</span>
           {/* 会话确实活在外部终端里：就地给接管入口。此前这里只有一句「请切到终端页接管」，
               用户得自己跨页找按钮，回来还要重打一遍刚才的消息。 */}
-          {needsTakeover && <button
-            type="button"
-            className="chat-send-takeover"
-            disabled={sending}
-            onClick={() => { const retry = retryRef.current; void takeoverAndRetry(() => retry?.()); }}
-          >{t.chat.terminalTakeover}</button>}
+          {needsTakeover && <>
+            {resumePermissionPicker}
+            <button
+              type="button"
+              className="chat-send-takeover"
+              disabled={sending}
+              onClick={() => { const retry = retryRef.current; void takeoverAndRetry(() => retry?.()); }}
+            >{t.chat.terminalTakeover}</button>
+          </>}
         </div>}
         {/* 交互式命令的过渡横幅：识别成功后 terminalAttention 卡片会替掉它；识别不出的
             面板形态（识别器只认光标菜单/编号选择器）也至少给「切到终端 / 收起」的出口。 */}
@@ -2389,6 +2631,15 @@ export function ChatWindow() {
         </div>}
       </footer>}
       </div>
+      </div>
+      {renaming && history && (
+        <RenameModal
+          initial={history.title || ""}
+          onSubmit={renameSession}
+          onClose={() => setRenaming(false)}
+          t={t}
+        />
+      )}
     </div>
   );
 }

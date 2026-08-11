@@ -108,7 +108,9 @@ impl Store {
     /// v7: sessions 加 profile 列（多账号）。该 ALTER 曾在 v6 时代被加进列表却没 bump 版本，
     ///     已升到 v6 的老库被门控挡住、列永远补不上——profile 会话的 SessionStart 写 profile
     ///     报错中断，cwd/pid 全丢（对话窗识别不到工作区的根因）。
-    const USER_VERSION: i64 = 7;
+    /// v8: sessions 加 launch_args 列（新建时选的启动选项，resume/接管时回放——
+    ///     权限模式是启动参数，不回放每次重启都重置成 CLI 默认）。
+    const USER_VERSION: i64 = 8;
 
     /// 一次性建表 + 迁移 + 建索引，用 `PRAGMA user_version` 门控：已是最新版直接返回，
     /// 避免 statusline/hook 每次 open 都重跑 DDL 与注定失败的 ALTER（hot-path 浪费）。
@@ -123,7 +125,7 @@ impl Store {
         }
         conn.execute_batch(SCHEMA)?;
         // 给旧库补列（新库 SCHEMA 已含这些列 → ALTER 必报 duplicate，忽略即可）。
-        const ALTERS: [&str; 10] = [
+        const ALTERS: [&str; 11] = [
             "ALTER TABLE sessions ADD COLUMN pid INTEGER",
             "ALTER TABLE sessions ADD COLUMN cwd TEXT",
             "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
@@ -137,6 +139,8 @@ impl Store {
             "ALTER TABLE sessions ADD COLUMN provider TEXT NOT NULL DEFAULT 'claude'",
             // 多账号：会话跑在哪个 profile 上。NULL = 默认账号——老库补齐后全是 NULL，正是我们要的。
             "ALTER TABLE sessions ADD COLUMN profile TEXT",
+            // 启动选项回放（v8）：NULL = 没选任何选项，恢复时不追加 flag。
+            "ALTER TABLE sessions ADD COLUMN launch_args TEXT",
         ];
         for sql in ALTERS {
             if let Err(e) = conn.execute(sql, []) {
@@ -737,6 +741,31 @@ impl Store {
             |row| row.get::<_, Option<i64>>(0),
         )?;
         Ok(r)
+    }
+
+    /// 记录会话的启动选项选择 map（JSON 对象，option id → choice id）。claim 认领时写入；
+    /// 接管时用户改选会合并后再次写入。resume/接管按 [`Self::session_launch_args`] 读出、
+    /// 经插件声明表翻译成 flag 回放。
+    pub fn set_session_launch_args(&self, session_id: i64, launch_args: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE sessions SET launch_args = ?1 WHERE id = ?2",
+            rusqlite::params![launch_args, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// 读会话的启动选项选择 map（JSON 对象）。NULL/行不存在 → None。
+    pub fn session_launch_args(&self, session_id: i64) -> Result<Option<String>, StoreError> {
+        use rusqlite::OptionalExtension;
+        let r = self
+            .conn
+            .query_row(
+                "SELECT launch_args FROM sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(r.flatten())
     }
 
     /// 结束会话：状态设为 ended，记录 ended_at，并清 pid。

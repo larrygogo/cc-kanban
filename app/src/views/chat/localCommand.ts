@@ -14,20 +14,24 @@ export type UserTextParts = {
   commands: LocalCommandCall[];
   /** 命令的标准输出，按出现顺序。空输出不收。 */
   stdout: string[];
-  /** 这条消息里出现过本地命令包裹——渲染层据此切换形态。 */
+  /** 后台任务通知（<task-notification> 的内文）：Claude Code 把它作为 user 消息注入
+   *  transcript，原样摊开就是整屏 XML+JSON（实拍反馈）。渲染层收成可展开的一行。 */
+  notifications: string[];
+  /** 这条消息里出现过本地命令/系统注入包裹——渲染层据此切换形态。 */
   local: boolean;
 };
 
-/** 本地命令包裹用到的标签。只认这几个，其它尖括号照旧当正文（用户可能真在讲 XML）。 */
-const TAGS = ["local-command-caveat", "local-command-stdout", "command-name", "command-message", "command-args"] as const;
+/** 本地命令/系统注入包裹用到的标签。只认这几个，其它尖括号照旧当正文（用户可能真在讲 XML）。
+ *  forked-skill-launch 是后台技能启动的机器记录（JSON），对人零信息量，直接丢。 */
+const TAGS = ["local-command-caveat", "local-command-stdout", "command-name", "command-message", "command-args", "task-notification", "forked-skill-launch"] as const;
 const PAIR = new RegExp(`<(${TAGS.join("|")})>([\\s\\S]*?)<\\/\\1>`, "g");
 // 流式写入/截断会留下没配对的半个标签。正文里留一个孤零零的 `</command-args>` 比留着
 // 整段 XML 好不到哪去，收尾时一并抹掉。
 const STRAY = new RegExp(`<\\/?(${TAGS.join("|")})>`, "g");
 
 export function parseUserText(raw: string): UserTextParts {
-  const parts: UserTextParts = { text: "", commands: [], stdout: [], local: false };
-  if (!raw.includes("<command-name>") && !raw.includes("<local-command-")) {
+  const parts: UserTextParts = { text: "", commands: [], stdout: [], notifications: [], local: false };
+  if (!raw.includes("<command-name>") && !raw.includes("<local-command-") && !raw.includes("<task-notification>")) {
     parts.text = raw;
     return parts;
   }
@@ -50,13 +54,33 @@ export function parseUserText(raw: string): UserTextParts {
       case "local-command-stdout":
         if (value) parts.stdout.push(value);
         break;
+      case "task-notification":
+        if (value) parts.notifications.push(value);
+        break;
       // command-message 是命令的短描述（"clear" 之于 /clear），与命令名重复；
-      // caveat 是写给模型的免责声明，对人零信息量。两者都丢。
+      // caveat 是写给模型的免责声明、forked-skill-launch 是机器记录，对人零信息量。都丢。
       default:
         break;
     }
     return "";
   });
-  parts.text = rest.replace(STRAY, "").trim();
+  // 通知消息的前导段（[SYSTEM NOTIFICATION - NOT USER INPUT] …）：写给模型的防误读
+  // 声明，对人零信息量，随通知一起收走（只删到段落边界，防御性保留其后内容）。
+  const cleaned = parts.notifications.length
+    ? rest.replace(/\[SYSTEM NOTIFICATION - NOT USER INPUT\][\s\S]*?(?=\n\s*\n|$)/, "")
+    : rest;
+  parts.text = cleaned.replace(STRAY, "").trim();
+  // 技能/后台命令的另一种落盘形态：命令行是**裸文本**（无 <command-name> 包裹），
+  // 旁边跟着 caveat/stdout/forked-skill-launch。把首行的「/xxx [args]」提升为命令，
+  // 与 <command-name> 形态同样渲染成徽章（实拍反馈「/code-review 没渲染好」）。
+  // 只在本地包裹语境里做——用户在输入框正常打的「/xxx」是发给 CLI 的正文，不动。
+  if (parts.commands.length === 0 && parts.text.startsWith("/")) {
+    const [first, ...restLines] = parts.text.split("\n");
+    const matched = /^\/(\S+)(?:\s+(.*))?$/.exec(first.trim());
+    if (matched) {
+      parts.commands.push({ name: `/${matched[1]}`, args: matched[2]?.trim() ?? "" });
+      parts.text = restLines.join("\n").trim();
+    }
+  }
   return parts;
 }

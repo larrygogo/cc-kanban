@@ -226,6 +226,10 @@ struct AttachState {
     next_subscriber: AtomicU64,
     next_pending: AtomicI64,
     pending: Mutex<HashMap<String, i64>>,
+    /// launch_token → 新建会话时的启动选项**选择 map**（option id → choice id）。
+    /// claim 认领时写进 sessions.launch_args——权限模式等选项是启动参数，不落库的话
+    /// resume/接管的重启进程会重置回 CLI 默认（实拍反馈）。
+    pending_launch_args: Mutex<HashMap<String, HashMap<String, String>>>,
     bindings: Mutex<HashMap<i64, i64>>,
     approvals: Mutex<HashMap<String, PendingApproval>>,
     /// 显式注册的 GUI 审批消费者。窗口存在/可见不等于已经订阅了目标 session。
@@ -280,6 +284,7 @@ impl Default for PtyBroker {
                 next_subscriber: AtomicU64::new(1),
                 next_pending: AtomicI64::new(-1),
                 pending: Mutex::new(HashMap::new()),
+                pending_launch_args: Mutex::new(HashMap::new()),
                 bindings: Mutex::new(HashMap::new()),
                 approvals: Mutex::new(HashMap::new()),
                 approval_consumers: Mutex::new(HashMap::new()),
@@ -345,6 +350,30 @@ fn readable_tail(data: &[u8], max_chars: usize) -> String {
     out
 }
 
+/// 收尸：拿 exit code，进程还活着就先杀。**不许无条件阻塞 wait**——EOF 触发的收尾里
+/// 子进程可能并没退出（conhost 先死而 agent 卡死），阻塞 wait 会拿着 child 锁永久不还，
+/// stop()/shutdown() 全在这把锁上排队，表现为「结束会话」点了没反应、退出应用卡住。
+/// EOF 后终端流已死，画面与输入都永远回不来，还活着的子进程只是僵尸，杀掉是唯一出路。
+fn reap_child(child: &mut (dyn portable_pty::Child + Send + Sync)) -> Option<u32> {
+    // EOF 与进程退出之间存在正常的毫秒级窗口（unix 上关掉 tty 的进程还在收尾）：
+    // 先宽限轮询一小段，能等到就拿真实退出码。waiter 路径 try_wait 确认过退出，首轮即返回。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.exit_code()),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            // 宽限到点还活着（或 try_wait 出错拿不到结论）：kill 后收尸。kill 掉的
+            // 进程 wait 立即返回，child 锁最多被持有「宽限 + 一次 kill」的时间。
+            _ => {
+                let _ = child.kill();
+                return child.wait().ok().map(|s| s.exit_code());
+            }
+        }
+    }
+}
+
 /// PTY 会话的唯一收尾路径：写库、通知看板与对话窗、掐断 attach、释放伪终端。
 /// 幂等（finalized 原子门），由两处触发——waiter 轮询到进程退出（主力：Windows ConPTY
 /// 在子进程退出后**不会**给 reader EOF，本机实证连 drop master 都唤不醒阻塞中的 read），
@@ -353,13 +382,11 @@ fn finalize_exit(broker: &PtyBroker, app: &tauri::AppHandle, managed: &Arc<Manag
     if managed.finalized.swap(true, Ordering::AcqRel) {
         return;
     }
-    // 到这里进程必已退出（waiter try_wait 确认过）或即将退出（EOF 场景），wait 不会久等。
     let code = managed
         .child
         .lock()
         .ok()
-        .and_then(|mut child| child.wait().ok())
-        .map(|s| s.exit_code());
+        .and_then(|mut child| reap_child(child.as_mut()));
     // 释放伪终端让 conhost 退出。它救不了阻塞的 reader，但能停掉资源。
     if let Ok(mut master) = managed.master.lock() {
         drop(master.take());
@@ -1064,6 +1091,7 @@ impl PtyBroker {
         cols: u16,
         rows: u16,
         provider: &str,
+        launch_selections: &HashMap<String, String>,
     ) -> Result<i64, String> {
         let endpoint = self
             .attach
@@ -1078,6 +1106,12 @@ impl PtyBroker {
             .lock()
             .map_err(|_| "PTY 临时会话锁已损坏")?
             .insert(launch_token.clone(), temp_id);
+        // 启动选项随 token 暂存：会话行此刻还不存在（hook 认领时才建），claim 落库。
+        if !launch_selections.is_empty() {
+            if let Ok(mut map) = self.attach.pending_launch_args.lock() {
+                map.insert(launch_token.clone(), launch_selections.clone());
+            }
+        }
         let mut launch_env = env.to_vec();
         launch_env.extend([
             ("MEOWO_PTY_ENDPOINT".into(), endpoint.to_string()),
@@ -1099,6 +1133,9 @@ impl PtyBroker {
         ) {
             if let Ok(mut pending) = self.attach.pending.lock() {
                 pending.remove(&launch_token);
+            }
+            if let Ok(mut map) = self.attach.pending_launch_args.lock() {
+                map.remove(&launch_token);
             }
             return Err(error);
         }
@@ -1925,6 +1962,23 @@ impl PtyBroker {
         if let Ok(mut bindings) = self.attach.bindings.lock() {
             bindings.insert(temp_id, real_id);
         }
+        // 新建时的选项选择此刻才有会话行可写：落进 sessions.launch_args（JSON 对象），
+        // resume/接管重启进程时经插件声明表翻译回放（见 terminal.rs 的 splice_stored_launch_args）。
+        // 本函数跑在 attach 连接的 handler 线程上，DB 写不碰主线程消息泵。
+        let stored = self
+            .attach
+            .pending_launch_args
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(launch_token));
+        if let Some(args) = stored.filter(|a| !a.is_empty()) {
+            if let (Ok(store), Ok(json)) = (
+                crate::open_store(&crate::db_path()),
+                serde_json::to_string(&args),
+            ) {
+                let _ = store.set_session_launch_args(real_id, &json);
+            }
+        }
         // 保持 Arc 活到映射完成，避免极短命进程在重绑边界提前析构。
         drop(managed);
         Ok(())
@@ -2074,6 +2128,57 @@ mod tests {
         fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
             None
         }
+    }
+
+    /// 「活着但已收不到任何输出」的子进程：EOF 先于进程退出的场景（conhost 先死、
+    /// agent 卡死）。wait 在真实世界会无限阻塞，测试里以 Err 代表「未先 kill 就挂死」。
+    #[derive(Debug)]
+    struct HungChild {
+        killed: Arc<AtomicBool>,
+    }
+    impl portable_pty::ChildKiller for HungChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed.store(true, Ordering::Release);
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(HungChild {
+                killed: self.killed.clone(),
+            })
+        }
+    }
+    impl portable_pty::Child for HungChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            if self.killed.load(Ordering::Acquire) {
+                Ok(portable_pty::ExitStatus::with_exit_code(1))
+            } else {
+                Err(std::io::Error::other("wait 在未 kill 的活进程上会永久阻塞"))
+            }
+        }
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    /// 回归：EOF 收尾遇到还活着的子进程时必须先 kill 再收尸，不得阻塞 wait——
+    /// 真实翻车过：conhost 先死、claude 卡死，finalize_exit 拿着 child 锁在 wait 上
+    /// 永久不还，stop()（结束终端/结束会话）在同一把锁上排队，按钮点了毫无反应。
+    #[test]
+    fn reap_child_kills_live_child_instead_of_blocking_wait() {
+        let killed = Arc::new(AtomicBool::new(false));
+        let mut child: Box<dyn portable_pty::Child + Send + Sync> = Box::new(HungChild {
+            killed: killed.clone(),
+        });
+        let code = reap_child(child.as_mut());
+        assert!(killed.load(Ordering::Acquire), "活着的子进程应先被 kill");
+        assert_eq!(code, Some(1), "kill 后应立即收到退出码");
     }
 
     fn dummy_managed(session_id: i64) -> Arc<ManagedPty> {

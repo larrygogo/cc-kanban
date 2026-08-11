@@ -148,6 +148,7 @@ fn load_chat_history(
         .map_err(|e| e.to_string())?;
     let mut history = ChatHistory {
         session_id,
+        cc_session_id: header.cc_session_id.clone(),
         title: header
             .title
             .clone()

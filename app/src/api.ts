@@ -372,8 +372,10 @@ export function sessionTone(connected: boolean, status?: string, pendingReview?:
 }
 
 export type ManagedTerminalSnapshot = ManagedTerminalSnapshotDto;
-export function startManagedTerminal(sessionId: number, cols: number, rows: number): Promise<void> {
-  return invoke("start_managed_terminal", { sessionId, cols, rows });
+/** `options`：恢复时对启动选项的改选（option id → choice id，如 {permission:"bypassPermissions"}），
+ *  省略 = 沿用会话存的选择。改选会被后端合并写回，成为会话新的持久形态。 */
+export function startManagedTerminal(sessionId: number, cols: number, rows: number, options?: Record<string, string>): Promise<void> {
+  return invoke("start_managed_terminal", { sessionId, cols, rows, options });
 }
 /**
  * 接上一个后台会话的画面（Agent 自己托管的会话，见 LiveSession.background）。
@@ -393,8 +395,9 @@ export function sendBackgroundPrompt(sessionId: number, text: string): Promise<v
   return invoke("send_background_prompt", { sessionId, text });
 }
 
-export function takeoverManagedTerminal(sessionId: number, cols: number, rows: number): Promise<void> {
-  return invoke("takeover_managed_terminal", { sessionId, cols, rows });
+/** `options` 语义同 startManagedTerminal：接管时改权限模式等启动选项，省略 = 沿用。 */
+export function takeoverManagedTerminal(sessionId: number, cols: number, rows: number, options?: Record<string, string>): Promise<void> {
+  return invoke("takeover_managed_terminal", { sessionId, cols, rows, options });
 }
 /**
  * 取终端输出快照。`since` 传上次拿到的 endOffset，只回增量——不传则全量（首帧用）。
