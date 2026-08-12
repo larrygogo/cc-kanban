@@ -100,6 +100,41 @@ Var LegacyHadStartMenuLnk
   ; 开机自启项是 app 自己（tauri-plugin-autostart）写的，键名取 productName，
   ; 卸载器只管 INSTDIR，不会碰它——留着就是一条指向已删除 exe 的死自启项。
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${LEGACY_NAME}"
+
+  ; ── 升级清场：把锁着待覆盖文件的进程先清掉，并**等到真正消失** ──
+  ;
+  ; 「安装到一半提示无法复制 meowo-app.exe」（实拍）的三个锁点：
+  ;  1. 第二个 Meowo 实例（自启版 + 手动再开的并存）。模板内置的 CheckIfAppIsRunning
+  ;     虽会按名杀进程，但 kill 之后只盲睡 500ms 就开始复制、不复查进程是否真死——
+  ;     退出慢（shutdown 要杀子孙树、清 ConPTY）或根本杀不死（线程卡死在 ConPTY 内核
+  ;     I/O 时 TerminateProcess 静默无效，与「结束会话失效」同一根因）时照样撞锁。
+  ;  2. meowo-reporter.exe：外部同步终端里的 attach 客户端是长驻进程，锁着 sidecar。
+  ;  3. OpenConsole.exe（0.5.14 起随应用打包）：孤儿化的 ConPTY 宿主从安装目录加载，
+  ;     锁着 OpenConsole.exe 与 conpty.dll。必须按**路径**精确杀——按映像名全杀会把
+  ;     Windows Terminal 自己的宿主一起带走。
+  ; 杀完复查而不是盲睡：最多等 10s；等不到也放行，交给内置宏再试一轮并给出它的标准
+  ; 失败提示（不比现状差）。寄存器用 $R4/$R5：避开本文件的 $R6-$R9 与内置宏的 $R0-$R3。
+  DetailPrint "Closing running ${PRODUCTNAME} processes..."
+  nsis_tauri_utils::KillProcessCurrentUser "${MAINBINARYNAME}.exe"
+  Pop $R4
+  nsis_tauri_utils::KillProcessCurrentUser "meowo-reporter.exe"
+  Pop $R4
+  ; NSIS 里字面 $ 须写作 $$（$$_ 即 PowerShell 的 $_），\" 是传给 PS 的字面引号。
+  nsExec::ExecToStack 'powershell -NoProfile -Command "Get-Process OpenConsole -ErrorAction SilentlyContinue | Where-Object { $$_.Path -eq \"$INSTDIR\OpenConsole.exe\" } | Stop-Process -Force"'
+  Pop $R4
+  StrCpy $R5 20
+  meowo_wait_dead:
+    nsis_tauri_utils::FindProcessCurrentUser "${MAINBINARYNAME}.exe"
+    Pop $R4
+    ${If} $R4 != 0
+      Goto meowo_wait_done     ; 非 0 = 已经找不到，锁已释放
+    ${EndIf}
+    Sleep 500
+    IntOp $R5 $R5 - 1
+    ${If} $R5 > 0
+      Goto meowo_wait_dead
+    ${EndIf}
+  meowo_wait_done:
 !macroend
 
 ; 把旧品牌的快捷方式按新名字补回来。
