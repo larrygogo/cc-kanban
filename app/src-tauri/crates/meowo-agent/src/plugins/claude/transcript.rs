@@ -190,7 +190,15 @@ fn parse_events(line: &str, allow_sidechain: bool) -> Vec<TranscriptEvent> {
                 )
                 .collect()
         }
-        "assistant" => content
+        "assistant" => {
+            // model=<synthetic> 是 CC 对「非模型产出的系统插入文案」的官方标记（API 错误
+            // 全走它）。命中错误分类的 text 块降级为 TurnError——前端渲染成错误气泡；
+            // 非错误的 synthetic 文案（如「No response requested.」）仍按普通正文显示。
+            let synthetic = v
+                .pointer("/message/model")
+                .and_then(|x| x.as_str())
+                == Some("<synthetic>");
+            content
             .and_then(|x| x.as_array())
             .into_iter()
             .flatten()
@@ -201,10 +209,22 @@ fn parse_events(line: &str, allow_sidechain: bool) -> Vec<TranscriptEvent> {
                         .get("text")
                         .and_then(|x| x.as_str())
                         .filter(|s| !s.trim().is_empty())
-                        .map(|text| TranscriptEvent::AssistantMessage {
-                            id: format!("{base_id}:{i}"),
-                            timestamp: timestamp.clone(),
-                            text: text.to_string(),
+                        .map(|text| {
+                            if let Some(label) =
+                                synthetic.then(|| classify_error(text, true)).flatten()
+                            {
+                                return TranscriptEvent::TurnError {
+                                    id: format!("{base_id}:{i}"),
+                                    timestamp: timestamp.clone(),
+                                    label: label.to_string(),
+                                    text: text.to_string(),
+                                };
+                            }
+                            TranscriptEvent::AssistantMessage {
+                                id: format!("{base_id}:{i}"),
+                                timestamp: timestamp.clone(),
+                                text: text.to_string(),
+                            }
                         }),
                     Some("thinking") => block
                         .get("thinking")
@@ -232,7 +252,8 @@ fn parse_events(line: &str, allow_sidechain: bool) -> Vec<TranscriptEvent> {
                     _ => None,
                 },
             )
-            .collect(),
+            .collect()
+        }
         "system" if v.get("subtype").and_then(|x| x.as_str()) == Some("compact_boundary") => {
             vec![TranscriptEvent::Metadata {
                 id: base_id.to_string(),
@@ -365,10 +386,17 @@ pub(crate) fn preview_text(s: &str) -> Option<String> {
     }
 }
 
-/// 把 assistant 正文归类为「卡死错误」短标签；非卡死返回 None。
-/// 刻意排除 529/500/ECONNRESET 等临时错误（多数自愈，标红会误报）。
-/// 真实卡死错误都是独立短文案；长正文（如讨论/引用错误日志的正常回答）不判错，避免误报。
-pub(crate) fn classify_error(text: &str) -> Option<&'static str> {
+/// 把 assistant 正文归类为「回合错误」短标签；非错误返回 None。
+/// `synthetic` = 该消息的 model 为 `<synthetic>`——CC 对「非模型产出的系统插入文案」的
+/// 官方标记，API 错误全部以它写盘。鉴权类规则不依赖它（老 transcript 无 model 字段也要
+/// 能判）；**通用 API 错误只在 synthetic 下判**——正常回答里聊到「API Error」字样绝不能
+/// 标红，这个标记就是零误报的那道门。长正文（讨论/引用错误日志的正常回答）不判错。
+///
+/// 529/5xx/连接中断这类「临时」错误此前刻意放过（怕自愈路上误报）——那是只能拿文本猜
+/// 的年代的防误报代价。判定的输入本就是**最近一条** assistant：重试成功自会有新正文把
+/// 错误顶掉，还挂在末尾就意味着 agent 此刻停在错误上，不提示的话会话就静静挂着，
+/// 用户以为还在跑（实拍反馈：API Error 在 meowo 里毫无动静）。
+pub(crate) fn classify_error(text: &str, synthetic: bool) -> Option<&'static str> {
     let t = text.trim();
     if t.chars().count() > 200 {
         return None;
@@ -382,6 +410,17 @@ pub(crate) fn classify_error(text: &str) -> Option<&'static str> {
     if t.starts_with("Failed to authenticate") || t.contains("API Error: 401") {
         return Some("认证失败");
     }
+    // 实拍文案（2026-08 各版本）：「API Error: Overloaded」「API Error: Connection lost
+    // mid-response. …」「API Error: upstream stream disconnected: unexpected EOF」
+    // 「Unable to connect to API (ECONNRESET)」。都以固定前缀开头，synthetic 门内按前缀分两类。
+    if synthetic {
+        if t.starts_with("Unable to connect to API") {
+            return Some("无法连接 API");
+        }
+        if t.starts_with("API Error") {
+            return Some("API 请求出错");
+        }
+    }
     None
 }
 
@@ -391,8 +430,8 @@ pub(crate) fn classify_error(text: &str) -> Option<&'static str> {
 struct ParseState {
     custom: Option<String>,
     ai: Option<String>,
-    last_text: Option<(String, String)>, // (正文, uuid)
-    last_usage: Option<u64>,             // 最近一条 assistant 的上下文已用 token
+    last_text: Option<(String, bool)>, // (正文, model 是否 <synthetic>)
+    last_usage: Option<u64>,           // 最近一条 assistant 的上下文已用 token
 }
 
 impl ParseState {
@@ -452,12 +491,14 @@ impl ParseState {
                         }
                     });
                 if let Some(text) = text {
-                    let uuid = v
-                        .get("uuid")
-                        .and_then(|u| u.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    self.last_text = Some((text, uuid));
+                    // CC 把 API 错误等系统插入文案写成 model=<synthetic> 的 assistant 行，
+                    // 这是「这不是模型说的话」的官方标记，供 classify_error 零误报判错。
+                    let synthetic = v
+                        .get("message")
+                        .and_then(|m| m.get("model"))
+                        .and_then(|m| m.as_str())
+                        == Some("<synthetic>");
+                    self.last_text = Some((text, synthetic));
                 }
             }
             _ => {}
@@ -466,11 +507,15 @@ impl ParseState {
 
     /// 从累积状态产出 TranscriptInfo。
     fn to_info(&self) -> TranscriptInfo {
-        let error = self.last_text.as_ref().and_then(|(text, uuid)| {
-            classify_error(text).map(|label| TurnError {
+        let error = self.last_text.as_ref().and_then(|(text, synthetic)| {
+            classify_error(text, *synthetic).map(|label| TurnError {
                 label: label.to_string(),
                 raw: text.clone(),
-                fingerprint: uuid.clone(),
+                // 指纹取标签而非消息 uuid：CC 自动重试期间每隔几十秒写一条**新 uuid** 的
+                // 同类 synthetic 错误（实拍 30s 一条），按 uuid 去重等于每条各弹一次桌面
+                // 通知。按标签去重，一轮故障只弹一条；错误消失时 watch 清掉去重条目，
+                // 之后再出错（哪怕同标签）照样重新提醒。
+                fingerprint: label.to_string(),
             })
         });
         let context_pct = self.last_usage.map(|u| {
@@ -1211,42 +1256,65 @@ mod tests {
 
     #[test]
     fn classify_matches_stuck_errors() {
+        // 鉴权类不依赖 synthetic 标记（老 transcript 无 model 字段也要能判）。
         assert_eq!(
-            classify_error("The model's tool call could not be parsed (retry also failed)."),
+            classify_error("The model's tool call could not be parsed (retry also failed).", false),
             Some("工具调用解析失败")
         );
         assert_eq!(
-            classify_error("Please run /login · API Error: 403 Request not allowed"),
+            classify_error("Please run /login · API Error: 403 Request not allowed", false),
             Some("需要重新登录")
         );
         assert_eq!(
-            classify_error("API Error: 403 Request not allowed"),
+            classify_error("API Error: 403 Request not allowed", false),
             Some("需要重新登录")
         );
         assert_eq!(
             classify_error(
-                "Failed to authenticate. API Error: 401 Invalid authentication credentials"
+                "Failed to authenticate. API Error: 401 Invalid authentication credentials",
+                false
             ),
             Some("认证失败")
         );
         assert_eq!(
-            classify_error("API Error: 401 Invalid authentication credentials"),
+            classify_error("API Error: 401 Invalid authentication credentials", false),
             Some("认证失败")
         );
     }
 
     #[test]
-    fn classify_ignores_transient_and_normal() {
+    fn classify_api_errors_only_behind_synthetic_gate() {
+        // synthetic 门内：通用 API 错误按前缀分两类（实拍文案）。
         assert_eq!(
-            classify_error("API Error: 529 Overloaded. This is a server-side issue"),
+            classify_error("API Error: Overloaded", true),
+            Some("API 请求出错")
+        );
+        assert_eq!(
+            classify_error(
+                "API Error: Connection lost mid-response. The response above may be incomplete.",
+                true
+            ),
+            Some("API 请求出错")
+        );
+        assert_eq!(
+            classify_error("API Error: upstream stream disconnected: unexpected EOF", true),
+            Some("API 请求出错")
+        );
+        assert_eq!(
+            classify_error("Unable to connect to API (ECONNRESET)", true),
+            Some("无法连接 API")
+        );
+        // synthetic 的非错误插入文案（如队列消息「No response requested.」）不判错。
+        assert_eq!(classify_error("No response requested.", true), None);
+        assert_eq!(classify_error("这是一段正常的助手回答。", true), None);
+        // 门外：模型正文聊到「API Error」字样绝不能标红——这正是当年放过 5xx 的原因，
+        // 现在由 synthetic 标记承担零误报，门外维持 None。
+        assert_eq!(
+            classify_error("API Error: 529 Overloaded. This is a server-side issue", false),
             None
         );
-        assert_eq!(classify_error("API Error: 500 status code (no body)"), None);
-        assert_eq!(
-            classify_error("Unable to connect to API (ECONNRESET)"),
-            None
-        );
-        assert_eq!(classify_error("这是一段正常的助手回答。"), None);
+        assert_eq!(classify_error("API Error: 500 status code (no body)", false), None);
+        assert_eq!(classify_error("Unable to connect to API (ECONNRESET)", false), None);
     }
 
     #[test]
@@ -1256,7 +1324,7 @@ mod tests {
             "{}先看日志里的 API Error: 403 Request not allowed，这是因为……",
             "分析：".repeat(100)
         );
-        assert_eq!(classify_error(&long), None);
+        assert_eq!(classify_error(&long, false), None);
     }
 
     fn write_tmp(name: &str, content: &str) -> std::path::PathBuf {
@@ -1282,7 +1350,51 @@ mod tests {
         assert_eq!(info.title.as_deref(), Some("做某功能"));
         let e = info.error.expect("应检测到错误");
         assert_eq!(e.label, "工具调用解析失败");
-        assert_eq!(e.fingerprint, "u-err-1");
+        // 指纹 = 标签（重试连发同类错误只提醒一次，见 to_info 注释）。
+        assert_eq!(e.fingerprint, "工具调用解析失败");
+    }
+
+    #[test]
+    fn chat_parser_renders_synthetic_api_error_as_turn_error() {
+        // synthetic + 错误分类命中 → TurnError（前端错误气泡）；label 与卡片 error_label 同源。
+        let line = r#"{"type":"assistant","uuid":"a-err","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error: Overloaded"}]}}"#;
+        let items = parse_chat_items(line);
+        assert!(
+            matches!(&items[0], ChatItem::TurnError { label, text, .. }
+                if label == "API 请求出错" && text == "API Error: Overloaded"),
+            "items={items:?}"
+        );
+        // 非错误的 synthetic 插入文案仍是普通正文，不套错误皮。
+        let benign = r#"{"type":"assistant","uuid":"a-ok","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}"#;
+        assert!(matches!(
+            &parse_chat_items(benign)[0],
+            ChatItem::AssistantText { .. }
+        ));
+        // 模型正文聊到「API Error」（无 synthetic 标记）绝不误判成错误气泡。
+        let normal = r#"{"type":"assistant","uuid":"a-talk","message":{"role":"assistant","model":"claude-opus-4","content":[{"type":"text","text":"API Error: 500 的成因通常是……"}]}}"#;
+        assert!(matches!(
+            &parse_chat_items(normal)[0],
+            ChatItem::AssistantText { .. }
+        ));
+    }
+
+    #[test]
+    fn analyze_flags_synthetic_api_error_at_tail() {
+        // 实拍：CC 把 API 错误写成 model=<synthetic> 的 assistant 行；停在末尾就该提示
+        //（此前被「临时错误」名单放过，meowo 全程无动静——本测试钉住这条回归）。
+        let content = concat!(
+            r#"{"type":"assistant","uuid":"u1","message":{"role":"assistant","content":[{"type":"text","text":"正在处理。"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"u-api","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error: Overloaded"}]}}"#,
+            "\n",
+        );
+        let p = write_tmp("api_err", content);
+        let info = analyze_transcript(p.to_str().unwrap());
+        std::fs::remove_file(&p).ok();
+        let e = info.error.expect("末尾的 synthetic API 错误应被检测");
+        assert_eq!(e.label, "API 请求出错");
+        assert_eq!(e.raw, "API Error: Overloaded");
+        assert_eq!(e.fingerprint, "API 请求出错");
     }
 
     #[test]

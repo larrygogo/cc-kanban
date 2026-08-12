@@ -197,8 +197,9 @@ pub(crate) fn descendant_pids(
 /// best-effort 强杀单个 pid。打不开句柄（已退出/权限不够）→ false。
 /// 不做 agent 白名单校验：这里杀的是「快照瞬间 ppid 链挂在我们子进程下」的任意进程
 /// （MCP server 多为 node），按名单过滤反而放跑残留。
+/// pub(crate)：pty.rs 的升级链最后一档拿它直接杀 conhost（见 conhost_children）。
 #[cfg(target_os = "windows")]
-fn kill_pid(pid: u32) -> bool {
+pub(crate) fn kill_pid(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, TerminateProcess, PROCESS_TERMINATE,
@@ -216,7 +217,7 @@ fn kill_pid(pid: u32) -> bool {
 
 /// unix：独立 argv 直接调 kill，不经 shell。SIGKILL——调用方已决定强杀，没有优雅退出环节。
 #[cfg(not(target_os = "windows"))]
-fn kill_pid(pid: u32) -> bool {
+pub(crate) fn kill_pid(pid: u32) -> bool {
     std::process::Command::new("kill")
         .args(["-KILL", &pid.to_string()])
         .status()
@@ -253,6 +254,28 @@ fn snapshot_ppids() -> std::collections::HashMap<u32, u32> {
 /// pid 复用的缓解：快照在调用瞬间新取（Toolhelp 1-3ms），杀的窗口只有毫秒级；且只杀
 /// 「快照时刻 ppid 链挂在 root 下」的 pid。自我保护：root 是本进程时直接放弃，
 /// 子孙集合里出现本进程 pid（伪环/复用的极端情形）也过滤掉。
+/// 本进程直接子进程中的 ConPTY 宿主（conhost.exe / OpenConsole.exe）pid 集合；
+/// 其它平台无此概念，恒空集。CreatePseudoConsole 会以本进程为父 spawn 一个宿主进程
+/// 却不暴露它的 pid——openpty 前后取差集即可锁定新会话的宿主，「结束会话」升级链的
+/// 最后一档要拿它开刀（TerminateProcess 对卡死在 ConPTY 内核 I/O 的 agent 静默无效，
+/// ClosePseudoConsole 又可能对僵死的宿主永不返回，直接杀宿主是唯一确定有效的解法）。
+#[cfg(target_os = "windows")]
+pub(crate) fn conhost_children() -> HashSet<u32> {
+    let me = std::process::id();
+    snapshot_processes()
+        .into_iter()
+        .filter(|(_, (ppid, name))| {
+            *ppid == me && (name == "conhost.exe" || name == "openconsole.exe")
+        })
+        .map(|(pid, _)| pid)
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn conhost_children() -> HashSet<u32> {
+    HashSet::new()
+}
+
 pub(crate) fn kill_descendants(root: u32) {
     let self_pid = std::process::id();
     if root == self_pid {

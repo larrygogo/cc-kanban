@@ -208,11 +208,35 @@ impl BgSession {
     ///
     /// 控制帧不需要认证（服务端只对**数据帧**查令牌），所以新连接连上就能发，不必重走握手。
     fn send_once(&self, frame: &Frame) -> Result<(), String> {
-        let (_reader, mut writer) = connect(&self.sock)?;
-        writer
-            .write_all(&encode(frame))
-            .and_then(|()| writer.flush())
-            .map_err(|e| format!("写后台会话 PTY 失败：{e}"))
+        let sock = self.sock.clone();
+        let bytes = encode(frame);
+        // 牺牲线程 + 限时（send_prompt 同款纪律）：守护进程卡死不收时，connect/write 会
+        // 挂住调用它的 spawn_blocking 工位——kill/resize 由「结束会话」等 UI 动作驱动，
+        // 一次卡死就是一个永不返回的按钮。低概率不等于不发生，而这条路径没有别的兜底。
+        with_timeout("发送后台会话控制帧", move || {
+            let (_reader, mut writer) = connect(&sock)?;
+            writer
+                .write_all(&bytes)
+                .and_then(|()| writer.flush())
+                .map_err(|e| format!("写后台会话 PTY 失败：{e}"))
+        })
+    }
+}
+
+/// 把可能无限阻塞的管道操作丢进牺牲线程限时等待。Wire 两端都没有超时可设（Windows 命名
+/// 管道是同步 File），调用线程绝不亲自碰这些句柄。超时后牺牲线程留给 OS 收尾（至多阻塞
+/// 到对端关闭），每次调用至多产生一条。
+fn with_timeout<T: Send + 'static>(
+    what: &'static str,
+    op: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(op());
+    });
+    match rx.recv_timeout(std::time::Duration::from_millis(SEND_PROMPT_TIMEOUT_MS)) {
+        Ok(result) => result,
+        Err(_) => Err(format!("{what}超时：后台会话守护进程未响应")),
     }
 }
 
@@ -235,7 +259,10 @@ impl BgPtyRegistry {
         if self.is_active(session_id) {
             return Ok(());
         }
-        let (reader, writer) = connect(&endpoint.sock)?;
+        // 同 send_once：connect 打开的是无超时的同步句柄，卡死的守护进程能把 attach 的
+        // spawn_blocking 工位一起带走（对话页首开该会话时正等着它返回）。
+        let sock = endpoint.sock.clone();
+        let (reader, writer) = with_timeout("连接后台会话", move || connect(&sock))?;
         let session = Arc::new(BgSession {
             sock: endpoint.sock.clone(),
             writer: Mutex::new(writer),

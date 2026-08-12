@@ -178,6 +178,11 @@ struct ManagedPty {
     /// spawn 后立刻捕获的子进程 pid。杀子孙树按它查快照——绝不能事后再 lock child 拿
     /// process_id：child 锁可能被卡死的收尾长持（历史死锁教训见 reap_child 注释）。
     child_pid: Option<u32>,
+    /// 本会话的 ConPTY 宿主（conhost）pid：openpty 前后差集捕获（见 start_spawned），
+    /// 非 Windows / 捕获失败为 None。升级链最后一档与退出清理的锤子——对僵死的 conhost
+    /// 而言 ClosePseudoConsole 永不返回，直接 TerminateProcess 它才能解除挂在 ConPTY
+    /// 内核管道上的等待（实拍等价于任务管理器手杀 conhost，agent 随之真正可杀）。
+    conhost_pid: Option<u32>,
     /// 「结束会话」的请求时刻。waiter 据此升级强杀：TerminateProcess 对卡死在 ConPTY
     /// 内核 I/O 的进程会**静默无效**（portable-pty 0.9 的 kill 恒返回 Ok，不代表进程真死），
     /// 只等 try_wait 的话收尾永不触发，UI 永远「运行中」。只记首次，重复点击不重置计时。
@@ -264,6 +269,12 @@ struct PendingApproval {
 #[derive(Clone)]
 pub(crate) struct PtyBroker {
     sessions: Arc<Mutex<HashMap<i64, Arc<ManagedPty>>>>,
+    /// chat 窗此刻正在展示终端视图的会话 id（0 = 没有）。emitter 只对它做 base64 + emit：
+    /// pty-output 只有一个消费者（chat 窗的 ManagedTerminal，单实例），其余托管会话的
+    /// 实时帧发出去也只是在 JS 侧被 sessionId 过滤丢弃——N 个并发会话齐跑时，白付的
+    /// 编码与 WebView2 IPC 正好是压垮前端的那部分。切换会话由前端重新注册 + 快照全量
+    /// 补齐（rearm 的既有机制），不漏字节。
+    viewed_session: Arc<AtomicI64>,
     /// 已登记、但还在锁外 openpty+spawn 的会话（纯集合，值无语义）。冷启动叠加杀软扫描时
     /// spawn 可达数秒，绝不能用 sessions 锁跨过它——snapshot/write/resize/stop 都是主线程
     /// 上的同步 Tauri 命令，持锁期间它们全部排队，一个会话冷启动卡顿就冻结整应用。
@@ -284,6 +295,7 @@ impl Default for PtyBroker {
         let token = random_token();
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            viewed_session: Arc::new(AtomicI64::new(0)),
             starting: Arc::new(Mutex::new(HashSet::new())),
             shutting_down: Arc::new(AtomicBool::new(false)),
             completed: Arc::new(Mutex::new(HashMap::new())),
@@ -436,6 +448,14 @@ fn offer_with_deadline<T>(tx: &mpsc::SyncSender<T>, item: T, wait: std::time::Du
         std::thread::sleep(std::time::Duration::from_millis(15));
     }
 }
+
+/// [`PtyBroker::write`] 的输入积压错误（有界等待超时）。attach 输入循环靠它区分
+/// 「临时积压」与「会话真没了」：前者丢帧继续转发，后者才断开镜像连接。
+pub(crate) const INPUT_BACKLOGGED: &str = "Agent 未在读取输入，输入已积压，请稍后重试";
+
+/// [`PtyBroker::resize`] 的尺寸通道忙错误（master 锁有界等待超时）。与积压同理属临时
+/// 状态，attach 循环对它同样只跳过本帧。
+pub(crate) const RESIZE_BUSY: &str = "PTY 尺寸通道忙（可能已僵死），本次调整跳过";
 
 /// 「结束会话」的升级档位。时间轴：stop 请求 → [`STOP_KILL_TREE_AFTER`] 仍活 →
 /// 杀子孙树 + 关伪终端 → 共 [`STOP_FORCE_FINALIZE_AFTER`] 仍活 → 强制收尾。
@@ -590,12 +610,23 @@ fn finalize_exit(broker: &PtyBroker, app: &tauri::AppHandle, managed: &Arc<Manag
         if let Ok(mut pending) = broker.attach.pending.lock() {
             pending.retain(|_, id| *id != session_id);
         }
+        // 负 id（未认领的临时会话）没有库写入，直接发退出事件。
+        if let Some(window) = app.get_webview_window("chat") {
+            let _ = window.emit("pty-exit", PtyExit { session_id, code });
+        }
     } else {
         // 托管 PTY 是这个 agent 进程的唯一持有者——它退出，会话就真的结束了。必须主动
         // 收尾：resume 路径已经乐观复活过 DB（prepare_resume），没人回滚的话卡片会一直
         // 假显示「已连接」，直到 pid 判活的宽限窗口过期才自愈。这同时覆盖了「PTY 起来了
         // 但 CLI 秒退（不在 PATH）」——那种情况 start() 返回 Ok，调用方的回滚够不着。
         // 写失败时卡片会假显示「已连接」，靠 pid 判活的宽限窗口自愈；留一条日志方便定位。
+        //
+        // pty-exit 先于写库发出：对话窗的解锁（按钮卸载、退出遮罩）只看这个事件，而
+        // end_session 在库忙（busy_timeout 3s，双实例并发写时是常态）时会把 emit 拖到
+        // 秒级——「结束会话」的 UI 反馈没有理由等一笔迟早会自愈的库写入。
+        if let Some(window) = app.get_webview_window("chat") {
+            let _ = window.emit("pty-exit", PtyExit { session_id, code });
+        }
         match crate::open_store(&crate::db_path()) {
             Ok(store) => {
                 if let Err(error) = store.end_session(session_id, crate::now_ms()) {
@@ -610,9 +641,6 @@ fn finalize_exit(broker: &PtyBroker, app: &tauri::AppHandle, managed: &Arc<Manag
             bindings.retain(|_, real| *real != session_id);
         }
         crate::watch::emit_board_changed(app, "pty-exit");
-    }
-    if let Some(window) = app.get_webview_window("chat") {
-        let _ = window.emit("pty-exit", PtyExit { session_id, code });
     }
 }
 
@@ -1003,9 +1031,23 @@ impl PtyBroker {
         provider: &str,
     ) -> Result<(), String> {
         let pty_size = size(terminal_size.cols, terminal_size.rows);
-        let pair = native_pty_system()
-            .openpty(pty_size)
-            .map_err(|e| e.to_string())?;
+        // conhost 捕获：CreatePseudoConsole 以本进程为父 spawn 宿主进程却不暴露它的 pid，
+        // openpty 前后对直接子进程里的宿主取差集锁定它（用途见 ManagedPty::conhost_pid）。
+        // 进程级锁把「快照 → openpty → 快照」串行化，并发 start 的差集才不会混入对方的
+        // 宿主；锁内只有毫秒级的 openpty 与两次只读快照，不含秒级的 spawn_command。
+        let (pair, conhost_pid) = {
+            static OPENPTY_LOCK: Mutex<()> = Mutex::new(());
+            let _guard = OPENPTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let before = crate::proc::conhost_children();
+            let pair = native_pty_system()
+                .openpty(pty_size)
+                .map_err(|e| e.to_string())?;
+            let conhost = crate::proc::conhost_children()
+                .difference(&before)
+                .next()
+                .copied();
+            (pair, conhost)
+        };
         let mut command = CommandBuilder::new(&argv[0]);
         command.args(&argv[1..]);
         if let Some(cwd) = cwd.filter(|c| !c.trim().is_empty()) {
@@ -1051,6 +1093,7 @@ impl PtyBroker {
             input_tx,
             child: Mutex::new(child),
             child_pid,
+            conhost_pid,
             stop_requested_at: Mutex::new(None),
             backlog: Mutex::new(VecDeque::new()),
             output_end: AtomicU64::new(0),
@@ -1129,9 +1172,18 @@ impl PtyBroker {
                         }
                     }
                     StopStage::ForceFinalize => {
-                        // 杀树 + 关伪终端后又等了一轮仍杀不死：内核态僵尸，等不来退出。
+                        // 最后一把锤子：直接 TerminateProcess conhost。走到这一档说明
+                        // TerminateProcess 对 agent 静默无效（卡死在 ConPTY 内核 I/O）、
+                        // ClosePseudoConsole 也没能奏效（牺牲线程可能正卡在里面）——杀掉
+                        // conhost 会解除挂在管道上的全部内核等待（实拍等价于任务管理器
+                        // 手杀），agent 随之真正可杀，finalize 的有界收尸多半还能等到
+                        // 退出码。纯句柄操作不碰任何锁，永不阻塞 waiter。
+                        if let Some(pid) = waiter.conhost_pid {
+                            crate::proc::kill_pid(pid);
+                        }
                         // 强制收尾把会话从 UI 摘除（finalize 会 emit pty-exit + 移出
-                        // sessions，前端两条感知路径都解锁）；zombie 带着句柄躺在系统里。
+                        // sessions，前端两条感知路径都解锁）；万一 conhost 也杀不掉，
+                        // zombie 带着句柄躺在系统里。
                         finalize_exit(&waiter_broker, &waiter_app, &waiter);
                         return;
                     }
@@ -1148,6 +1200,7 @@ impl PtyBroker {
         let (emit_tx, emit_rx) = mpsc::sync_channel::<(u64, Vec<u8>)>(64);
         let emitter_app = app.clone();
         let emitter_managed = managed.clone();
+        let emitter_viewed = self.viewed_session.clone();
         std::thread::spawn(move || {
             const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
             // 单帧上限：重输出时一帧最多聚 256KB，base64 后 ~341KB，别让单条事件无限膨胀。
@@ -1185,14 +1238,20 @@ impl PtyBroker {
                         Err(_) => break,
                     }
                 }
-                // 先确认对话窗存在再构造 payload：窗口关着时 base64 全是白做的。
-                if let Some(window) = emitter_app.get_webview_window("chat") {
-                    let payload = PtyOutput {
-                        session_id: emitter_managed.session_id.load(Ordering::Acquire),
-                        offset,
-                        data: base64::engine::general_purpose::STANDARD.encode(&frame),
-                    };
-                    let _ = window.emit("pty-output", &payload);
+                // 只喂 chat 窗正在看的会话（viewed_session）：pty-output 只有那一个消费者，
+                // 别的托管会话的帧发出去也只是被 JS 按 sessionId 过滤丢弃——N 个会话齐跑时
+                // 这些白付的 base64 + WebView2 IPC 正是压垮前端的那部分。不是它就整帧跳过；
+                // 窗口关着同理（base64 白做）。错过的字节由前端切会话时的快照全量补齐。
+                let session_id = emitter_managed.session_id.load(Ordering::Acquire);
+                if emitter_viewed.load(Ordering::Acquire) == session_id {
+                    if let Some(window) = emitter_app.get_webview_window("chat") {
+                        let payload = PtyOutput {
+                            session_id,
+                            offset,
+                            data: base64::engine::general_purpose::STANDARD.encode(&frame),
+                        };
+                        let _ = window.emit("pty-output", &payload);
+                    }
                 }
                 last_emit = std::time::Instant::now();
             }
@@ -1376,7 +1435,7 @@ impl PtyBroker {
         ) {
             Offer::Sent => Ok(()),
             Offer::Disconnected => Err("PTY 输入通道已关闭".into()),
-            Offer::TimedOut => Err("Agent 未在读取输入，输入已积压，请稍后重试".into()),
+            Offer::TimedOut => Err(INPUT_BACKLOGGED.into()),
         }
     }
 
@@ -1400,7 +1459,7 @@ impl PtyBroker {
         // 必须在这里快速失败，不能一个个排进同一把锁把线程池搭光；升级链/收尾同样等着
         // 这把锁的有界让路（见 escalate_stop / finalize_exit）。
         let result = lock_within(&session.master, std::time::Duration::from_millis(500))
-            .ok_or("PTY 尺寸通道忙（可能已僵死），本次调整跳过")?
+            .ok_or(RESIZE_BUSY)?
             .as_ref()
             .ok_or("PTY 已结束")?
             .resize(clamped)
@@ -1622,6 +1681,13 @@ impl PtyBroker {
                 if let Some(pid) = managed.child_pid {
                     crate::proc::kill_descendants(pid);
                 }
+                // conhost 先杀再关句柄：僵死的 conhost 会让下面牺牲线程里的
+                // ClosePseudoConsole 永不返回、孤儿常驻；先 TerminateProcess 它，
+                // 句柄关闭立即完成，agent 若还挂在内核等待上也随之解除。
+                // 反正整个会话都在退出，强杀与优雅关闭殊途同归。
+                if let Some(pid) = managed.conhost_pid {
+                    crate::proc::kill_pid(pid);
+                }
                 // 同 stop：不关伪终端的话 conhost 会作为孤儿留在系统里。
                 if let Some(mut master) =
                     lock_within(&managed.master, std::time::Duration::from_millis(500))
@@ -1633,6 +1699,24 @@ impl PtyBroker {
                 std::thread::spawn(move || drop(masters));
             }
         }
+    }
+
+    /// chat 窗终端视图声明「正在看」的会话（register_terminal_viewer 命令）。
+    /// emitter 只对它推送实时帧，见 [`Self::viewed_session`]。
+    pub(crate) fn set_viewer(&self, session_id: i64) {
+        self.viewed_session.store(session_id, Ordering::Release);
+    }
+
+    /// 注销「正在看」，带 CAS 语义：只在 viewed 仍是自己时清零——React 重挂时旧实例的
+    /// cleanup 可能晚于新实例的注册落地，无条件清零会把新注册抹掉，实时流就此断掉
+    /// （只剩快照兜底，表现为终端每 80ms 一跳的卡顿画面）。
+    pub(crate) fn clear_viewer(&self, session_id: i64) {
+        let _ = self.viewed_session.compare_exchange(
+            session_id,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 
     /// 该会话此刻是否由 Meowo 的 PTY 持有。
@@ -2133,6 +2217,13 @@ impl PtyBroker {
                 _ => break,
             };
             if let Err(error) = result {
+                // 输入积压 / 尺寸通道忙都是**临时**状态（agent 正忙、或另一次 resize 卡在
+                // syscall 里）：丢掉这一帧继续转发，别把整条镜像连接杀掉——外部同步终端
+                // 因为打字太快被整个断开、画面定格，比丢几个按键糟得多。其余错误
+                // （会话没了 / 输入通道已关闭）才是终态，照旧断开清理。
+                if error == INPUT_BACKLOGGED || error == RESIZE_BUSY {
+                    continue;
+                }
                 frame_error = Some(error);
                 break;
             }
@@ -2518,6 +2609,19 @@ mod tests {
         );
     }
 
+    /// 注销「正在看」必须是 CAS：React 重挂时旧实例的 cleanup 可能晚于新实例的注册，
+    /// 无条件清零会抹掉新注册、实时流断掉（快照兜底下画面 80ms 一跳）。
+    #[test]
+    fn viewer_clear_is_cas_scoped_to_own_registration() {
+        let broker = PtyBroker::default();
+        broker.set_viewer(7);
+        broker.set_viewer(9); // 新实例先注册
+        broker.clear_viewer(7); // 旧实例的迟到注销
+        assert_eq!(broker.viewed_session.load(Ordering::Acquire), 9);
+        broker.clear_viewer(9);
+        assert_eq!(broker.viewed_session.load(Ordering::Acquire), 0);
+    }
+
     /// 有界拿锁的三种结局。占用超时必须在上限附近返回——这是保证路径（waiter 升级链 /
     /// finalize / shutdown）不被卡死在 ConPTY syscall 里的持锁者拖死的根基
     /// （0.5.13「结束会话仍无效」的回归）。中毒按全仓策略恢复，破坏性收尾不因一次
@@ -2625,6 +2729,7 @@ mod tests {
             input_tx,
             child: Mutex::new(child),
             child_pid,
+            conhost_pid: None,
             stop_requested_at: Mutex::new(None),
             backlog: Mutex::new(VecDeque::new()),
             output_end: AtomicU64::new(0),

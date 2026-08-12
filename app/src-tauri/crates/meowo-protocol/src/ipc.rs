@@ -74,6 +74,16 @@ pub enum ChatItem {
         timestamp: Option<String>,
         text: String,
     },
+    /// 回合级错误（API Error 等，CC 以 model=`<synthetic>` 写盘的系统插入文案）。
+    /// 独立变体而非复用 AssistantText：前端要渲染成错误气泡，不能与模型正文同皮——
+    /// 「API Error: Overloaded」被当成模型的话平铺在对话里，用户读不出这是故障。
+    TurnError {
+        id: String,
+        timestamp: Option<String>,
+        /// 短中文标签（与看板卡片的 error_label 同源，见 claude 插件 classify_error）。
+        label: String,
+        text: String,
+    },
     Reasoning {
         id: String,
         timestamp: Option<String>,

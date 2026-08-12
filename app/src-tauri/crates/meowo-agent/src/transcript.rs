@@ -41,6 +41,14 @@ pub enum TranscriptEvent {
         timestamp: Option<String>,
         text: String,
     },
+    /// 回合级错误（API Error 等系统插入文案）。与 AssistantMessage 分开：这不是模型说的
+    /// 话，前端按错误气泡渲染（label 与看板卡片的 error_label 同源）。
+    TurnError {
+        id: String,
+        timestamp: Option<String>,
+        label: String,
+        text: String,
+    },
     Reasoning {
         id: String,
         timestamp: Option<String>,
@@ -103,6 +111,17 @@ impl From<TranscriptEvent> for ChatItem {
             } => Self::AssistantDelta {
                 id,
                 timestamp,
+                text,
+            },
+            TranscriptEvent::TurnError {
+                id,
+                timestamp,
+                label,
+                text,
+            } => Self::TurnError {
+                id,
+                timestamp,
+                label,
                 text,
             },
             TranscriptEvent::Reasoning {
@@ -198,7 +217,9 @@ impl AgentMode {
     }
 }
 
-/// 检测到的回合错误：短中文标签 + 原始文案 + 去重指纹（出错 assistant 消息的 uuid）。
+/// 检测到的回合错误：短中文标签 + 原始文案 + 去重指纹。指纹取**标签**而非出错消息的
+/// uuid——自动重试会连发多条同类错误（每条新 uuid），按 uuid 去重会通知轰炸
+///（缘由详见 claude 插件 to_info 的注释）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TurnError {
     pub label: String,

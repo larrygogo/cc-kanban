@@ -118,6 +118,7 @@ fn locates_real_kimi_subagent_streams_including_still_running_ones() {
                         }
                         meowo_agent::transcript::ChatItem::ToolUse { .. } => "tool_use",
                         meowo_agent::transcript::ChatItem::ToolResult { .. } => "tool_result",
+                        meowo_agent::transcript::ChatItem::TurnError { .. } => "turn_error",
                         meowo_agent::transcript::ChatItem::Meta { .. } => "meta",
                     };
                     *census.entry(kind).or_insert(0usize) += 1;

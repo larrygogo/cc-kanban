@@ -366,6 +366,19 @@ pub(crate) fn dismiss_interactive_question(state: State<'_, super::AppState>, se
     state.ptys.clear_interactive_question(session_id);
 }
 
+/// chat 窗终端视图声明「正在看」哪个会话——emitter 只对它推送 pty-output 实时帧
+/// （见 PtyBroker::viewed_session）。纯原子写，同步命令合规。
+#[tauri::command]
+pub(crate) fn register_terminal_viewer(state: State<'_, super::AppState>, session_id: i64) {
+    state.ptys.set_viewer(session_id);
+}
+
+/// 注销「正在看」（CAS，只清自己的注册，见 PtyBroker::clear_viewer）。
+#[tauri::command]
+pub(crate) fn unregister_terminal_viewer(state: State<'_, super::AppState>, session_id: i64) {
+    state.ptys.clear_viewer(session_id);
+}
+
 #[tauri::command]
 pub(crate) fn register_approval_consumer(
     state: State<'_, super::AppState>,

@@ -515,6 +515,12 @@ impl AgentPlugin for Claude {
     fn interrupt_input(&self) -> Option<&'static str> {
         Some("\x1b")
     }
+
+    /// ESC+CR(meta+return)= composer 插入换行,ink 官方识别;WT 的 /terminal-setup
+    /// 给 Shift+Enter 配置的正是这条序列,xterm 默认的 Alt+Enter 有效亦同理(实拍确认)。
+    fn newline_input(&self) -> Option<&'static str> {
+        Some("\x1b\r")
+    }
     /// AskUserQuestion 选择器的固有锚点项(真机截屏取证):单选/多问题标签页形态的
     /// 纯编号菜单靠它们与正文编号列表区分。识别层的选择器文法由此声明,不再硬编码。
     /// 整句可操作提示（真机截屏取证）。此前硬编码在前端并按 `provider === "claude"`

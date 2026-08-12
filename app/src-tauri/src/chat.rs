@@ -525,6 +525,19 @@ fn save_pasted_attachment_blocking(
 /// 匹配才敢向 CLI 的 PTY 发 Ctrl-V,让 TUI 自己读剪贴板、走它的原生图片附加
 /// (claude 的 `[Image #N]`、kimi 的 `[image:…]`);不匹配(用户中途复制过别的东西)
 /// 绝不能发,否则会把错的图附给 agent。
+/// 读剪贴板文本（终端右键粘贴用，见 ManagedTerminal 的 contextmenu 处理）。
+/// navigator.clipboard.readText 在 WebView2 里要站点权限弹窗，走后端 arboard 零打扰；
+/// 剪贴板无文本内容（空/图片）回 None，调用方静默跳过。
+#[tauri::command]
+pub(crate) async fn clipboard_text() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        Ok(clipboard.get_text().ok().filter(|text| !text.is_empty()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub(crate) async fn clipboard_image_fingerprint() -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(|| {

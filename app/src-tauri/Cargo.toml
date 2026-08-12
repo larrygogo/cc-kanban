@@ -94,6 +94,7 @@ vt100 = "0.16.2"
 # 实测已因此漏判过 codex 的多空格状态行、且漏掉了 kimi 审批行的 `?` 结尾约束。
 # regex 本就在依赖树里（ureq/notify 等的传递依赖），提为直接依赖不增加编译体积。
 regex = "1"
+tauri-plugin-single-instance = "2.4.3"
 # codex config.toml 的结构保持编辑（保注释与键序）。kimi 的已迁入 meowo-agent::config。
 # codex hook 预信任的 trusted_hash 计算（SHA-256）。
 

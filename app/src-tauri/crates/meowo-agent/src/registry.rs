@@ -140,6 +140,14 @@ pub trait AgentPlugin: Sync {
         None
     }
 
+    /// Ctrl/Shift+Enter 在 composer 里「插入换行」的注入序列(取证见 claude 插件)。
+    /// 终端传统编码把带修饰的 Enter 与裸 Enter 同编成 `\r`(修饰信息不存在),用户按
+    /// 「换行」CLI 收到的却是「提交」——声明此序列后 GUI 终端替用户注入。None = 未经
+    /// 取证不注入:ESC 前缀在 crossterm 系 TUI 可能被拆成裸 Esc(= 中断回合),宁缺勿滥。
+    fn newline_input(&self) -> Option<&'static str> {
+        None
+    }
+
     /// 自定义斜杠命令的发现规格（用户/项目目录里放了什么命令文件，补全就出什么）。
     /// None = 该 agent 无自定义命令机制，或其机制未经调研——**没验证过的不声明**。
     fn custom_commands(&self) -> Option<&'static crate::chat_ui::CustomCommandSpec> {
@@ -198,6 +206,7 @@ pub trait AgentPlugin: Sync {
             selector_anchors: self.selector_anchors().to_vec(),
             attention_patterns: self.attention_patterns().to_vec(),
             interrupt_input: self.interrupt_input(),
+            newline_input: self.newline_input(),
             runtime_commands_pending,
             attachment_mention: self.attachment_mention(ctx.version),
             clipboard_image_paste: self.clipboard_image_paste(ctx.version),

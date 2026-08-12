@@ -232,6 +232,9 @@ pub struct ChatUi {
     /// 中断当前回合的按键序列(如 Esc)。运行中「强制插话」= 先写它停掉当前回合,
     /// CLI 随即处理排队消息/接受新输入。None = 该 agent 的中断键未经取证,GUI 不提供入口。
     pub interrupt_input: Option<&'static str>,
+    /// Ctrl/Shift+Enter 在 composer 插入换行的注入序列(如 claude 的 ESC+CR)。
+    /// None = 未声明,前端保持终端原生语义(带修饰的 Enter 与裸 Enter 同码 `\r`)。
+    pub newline_input: Option<&'static str>,
     /// 当前会话支持 runtime 命令自发现、但权威清单尚未写入 transcript。前端据此继续随
     /// transcript 增量重试；一旦为 false 就停止探测，避免稳态轮询反复扫描文件。
     pub runtime_commands_pending: bool,

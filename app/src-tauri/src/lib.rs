@@ -39,8 +39,8 @@ mod window;
 
 // run() 的 generate_handler 以裸标识符登记这些命令，须在 crate 根作用域可见。
 use chat::{
-    clipboard_image_fingerprint, get_chat_history, get_subagent_transcript, refresh_session_model,
-    refresh_session_todos, save_pasted_attachment,
+    clipboard_image_fingerprint, clipboard_text, get_chat_history, get_subagent_transcript,
+    refresh_session_model, refresh_session_todos, save_pasted_attachment,
 };
 use install::{
     add_agent_to_user_path, agent_path_gap, api_key_login, cancel_login, check_provider_hooks,
@@ -49,11 +49,11 @@ use install::{
 use managed_terminal::{
     dismiss_interactive_question, managed_terminal_binding,
     managed_terminal_snapshot, attach_background_session, open_attached_terminal,
-    pending_interaction, register_approval_consumer,
+    pending_interaction, register_approval_consumer, register_terminal_viewer,
     resize_managed_terminal, screen_detect_explain, screen_detect_explain_text,
     send_background_prompt,
     resolve_pending_approval, start_managed_terminal, stop_managed_terminal,
-    unregister_approval_consumer, write_managed_terminal,
+    unregister_approval_consumer, unregister_terminal_viewer, write_managed_terminal,
 };
 #[cfg(test)]
 use session_command::is_safe_id;
@@ -866,6 +866,25 @@ pub fn run() {
         return;
     }
     harden_dll_search_path();
+    // ConPTY 来源诊断:应用目录里有打包的 conpty.dll(随安装分发 + OpenConsole.exe 宿主,
+    // 见 scripts/fetch-conpty.mjs)时 portable-pty 会优先加载它——新版实现修掉了系统
+    // conhost 的一批僵死死锁(输出停滞/Resize/Close 挂起),是管道卡死的治本项。缺失则
+    // 回退系统 conhost,僵死概率回到用户 OS 版本的水平——这行日志是现场诊断的第一问。
+    #[cfg(target_os = "windows")]
+    {
+        let bundled = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("conpty.dll").exists()))
+            .unwrap_or(false);
+        eprintln!(
+            "ConPTY: {}",
+            if bundled {
+                "打包版(应用目录 conpty.dll + OpenConsole.exe)"
+            } else {
+                "系统 conhost(未找到打包版,僵死修复以 OS 版本为准)"
+            }
+        );
+    }
     migrate_legacy_data();
     let path = db_path();
     let tx_cache: Arc<Mutex<meowo_agent::TranscriptCache>> =
@@ -877,6 +896,24 @@ pub fn run() {
         eprintln!("启动 PTY attach 服务失败: {error}");
     }
     let builder = tauri::Builder::default();
+    // single-instance 必须最先注册（官方要求，越早越能拦住二次启动）。仅 release：
+    // debug 构建豁免——本机开发的常态是「安装版自启 + dev 版并行」，同 identifier 的
+    // single-instance 会把 dev 实例当二次启动当场掐死，开发流程整个断掉；双开的已知
+    // 代价（discovery 文件互覆、双份轮询）由开发环境自担。线上则根治整类双实例问题：
+    // 双击第二次 = 把已有实例的看板带到前台，而不是两个进程互抢 approval-broker.json、
+    // 对同一会话各拉一个 agent（CLI 报 already in use 秒退）。
+    // cfg! 而非 #[cfg]：两个分支都要过编译——release 专属代码若只在 release 编译，
+    // dev 的 clippy/CI 全绿也发现不了它坏了（平台专属代码的同款教训，见 CLAUDE.md）。
+    let builder = if cfg!(debug_assertions) {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
+    };
     // E2E 构建（cargo --features e2e）才注入 WDIO 内嵌 WebDriver 服务器 + execute/mock/日志桥；
     // 生产构建不含这两个插件（见 Cargo.toml [features].e2e 与 app/e2e/README.md）。
     #[cfg(feature = "e2e")]
@@ -936,6 +973,7 @@ pub fn run() {
             refresh_session_todos,
             save_pasted_attachment,
             clipboard_image_fingerprint,
+            clipboard_text,
             open_chat_window,
             snap_layout::set_caption_overlay_rects,
             start_managed_terminal,
@@ -951,6 +989,8 @@ pub fn run() {
             pending_interaction,
             dismiss_interactive_question,
             stop_managed_terminal,
+            register_terminal_viewer,
+            unregister_terminal_viewer,
             register_approval_consumer,
             unregister_approval_consumer,
             resolve_pending_approval,
@@ -1078,7 +1118,12 @@ pub fn run() {
                         w: wa.size.width as i32,
                         h: wa.size.height as i32,
                     };
-                    let edge = edge_for_rect(win, work, SNAP_THRESHOLD);
+                    // 阈值按缩放放大：SNAP_THRESHOLD 是逻辑手感（20 逻辑像素），而这里全程
+                    // 物理像素比较——不乘 scale 的话 150% 屏上等效只剩 13 逻辑像素、200% 剩
+                    // 10，同一拖拽动作「有时吸得住有时吸不住」，用户会归因为随机故障
+                    // （条厚度 STRIP_W_LOGICAL 早就乘了 scale，两处度量此前口径不一）。
+                    let threshold = (f64::from(SNAP_THRESHOLD) * m.scale_factor()).round() as i32;
+                    let edge = edge_for_rect(win, work, threshold);
                     let _ = window.emit("snap-changed", SnapPayload { edge });
                 }
             }
