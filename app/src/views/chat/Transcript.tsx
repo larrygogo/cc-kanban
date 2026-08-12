@@ -75,6 +75,9 @@ export const Transcript = memo(function Transcript({ sessionId, items }: { sessi
       const consumed = new Set<string>();
       const callCount = tools.filter((tool) => tool.type === "tool_use").length;
       const failureCount = tools.filter((tool) => tool.type === "tool_result" && tool.is_error).length;
+      // 无回执的调用 = 还在跑：收起态此前完全看不出这组是「跑完了」还是「卡住了」，
+      // 只能展开逐条找。摘要上复用单条工具的同一枚跳动点（.chat-tool-pending）。
+      const pendingCount = tools.filter((tool) => tool.type === "tool_use" && !results.has(tool.id)).length;
       // 摘要直接说做了什么（「运行终端 ×2 · 读取文件」，Claude Code 的
       // 「Ran 2 commands, read a file」同款），不再是「执行了 N 次工具调用」+
       // 重复的种类列表——同一行两段文字说的是同一件事。种类只列前 3 个。
@@ -91,6 +94,7 @@ export const Transcript = memo(function Transcript({ sessionId, items }: { sessi
         <summary className="chat-activity-summary">
           <span className="chat-tool-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 17l6-6-6-6M12 19h8" /></svg></span>
           <span className="chat-activity-kinds">{label || t.chat.toolActivities(callCount || tools.length)}</span>
+          {pendingCount > 0 && <span className="chat-tool-pending" aria-label={t.chat.toolRunning}><i /><i /><i /></span>}
           {failureCount > 0 && <span className="chat-activity-errors">{t.chat.toolFailures(failureCount)}</span>}
           <span className="chat-tool-chevron">›</span>
         </summary>

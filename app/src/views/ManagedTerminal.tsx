@@ -164,6 +164,21 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState("");
   const [exitCode, setExitCode] = useState<number | null | undefined>(undefined);
+  // state 供渲染 / ref 供同步判定：onData 闭包里要同步判「进程是否已退出」。
+  const exitedRef = useRef(false);
+  exitedRef.current = exitCode !== undefined;
+  // 最近一次下发给 PTY 的尺寸：同值跳过。切回终端 tab 时曾无条件重发 resize，后端照样
+  // 调 master.resize → agent 收到 SIGWINCH 整屏重排，对话↔终端来回切一次闪一次。
+  const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
+  const resizeIfChanged = (sid: number, cols: number, rows: number) => {
+    const last = lastSentSizeRef.current;
+    if (last && last.cols === cols && last.rows === rows) return;
+    lastSentSizeRef.current = { cols, rows };
+    void resizeManagedTerminal(sid, cols, rows).catch(() => {
+      // 失败则清记录：下次同尺寸仍要重试（后端可能根本没收到）。
+      lastSentSizeRef.current = null;
+    });
+  };
   const externalRunning = isExternallyHeld(status);
   /// 就地重启（结束终端 → 再接管）后重新对齐输出偏移。新 PTY 的 output_end 从 0 重新计数，
   /// 而 nextOffset 还停在上一个进程的高位，writeOutput 会把新输出全部当成「已写过」丢掉，
@@ -229,11 +244,43 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     // 粘贴，xterm 自带的 paste 监听接住文本（含 bracketed paste 包装）走 onData 下发。
     // 刻意不自己读剪贴板：navigator.clipboard 在 webview 里要额外权限，原生事件路径零依赖。
     // Shift+Insert 是 Windows 终端的习惯粘贴键，一并放行。
+    //
+    // 复制：xterm 的选区是自绘的，不是 DOM selection——WebView 的原生复制拿不到它，
+    // 右键菜单又在生产构建被封死（devtools-guard），此前终端内容只能肉眼抄。约定与
+    // 现代终端一致：**有选区**的 Ctrl/Cmd+C 与 Ctrl+Shift+C = 复制选区且不下发按键；
+    // 无选区的 Ctrl+C 维持终端语义（发 ^C 中断前台进程）。
+    const copyTerminalSelection = () => {
+      const text = terminal.getSelection();
+      if (!text) return;
+      const fallback = () => {
+        // execCommand 通道零权限：临时 textarea 承接选区文本，复制完把焦点还给终端。
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+        terminal.focus();
+      };
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(text).catch(fallback);
+      } else {
+        fallback();
+      }
+    };
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
       const paste = ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === "KeyV")
         || (event.shiftKey && !event.ctrlKey && !event.metaKey && event.code === "Insert");
-      return !paste;
+      if (paste) return false;
+      const copyCombo = (event.ctrlKey || event.metaKey) && !event.altKey && event.code === "KeyC";
+      if (copyCombo && (event.shiftKey || terminal.hasSelection())) {
+        copyTerminalSelection();
+        return false;
+      }
+      return true;
     });
     // 上面的放行有个盲区：剪贴板是**图片**时 paste 事件没有文本数据，xterm 的 paste 监听
     // 不产生任何输入，^V 也早被拦下——claude 的原生贴图（^V 让 TUI 自己读系统剪贴板出
@@ -298,6 +345,9 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
         onBackgroundInputRef.current?.();
         return;
       }
+      // 进程已退出后画面仍可交互（退出态只留底部横条，好让用户翻看/复制最后的输出）——
+      // 此时按键没有接收方，写下去只会换来一条 IPC 报错盖掉退出说明，直接丢弃。
+      if (exitedRef.current) return;
       if (payload.includes("\r")) {
         onUserSubmitRef.current?.();
       }
@@ -515,8 +565,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
           : start + (snapshot.data ? decodeBase64(snapshot.data).length : 0),
       );
       snapshotApplied = true;
-      bufferedOutput.sort((a, b) => a.offset - b.offset).forEach(writeOutput);
-      bufferedOutput.length = 0;
+      replayBuffered(true);
       if (bufferedExit) { applyExit(bufferedExit); bufferedExit = null; }
       // PTY 可能先 active、后输出首屏；在此期间保持初始化遮罩并补查快照，避免监听器
       // 尚未注册完成时漏掉极早的一段输出，最终永远停在黑屏或加载态。
@@ -528,8 +577,8 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     }).catch(() => {
       if (!cancelled) {
         snapshotApplied = true;
-        bufferedOutput.sort((a, b) => a.offset - b.offset).forEach(writeOutput);
-        bufferedOutput.length = 0;
+        // 快照 IPC 都失败了,没有可补的字节来源:尽力直写(可能跨洞错乱)也不锁死画面。
+        replayBuffered(false);
         if (bufferedExit) { applyExit(bufferedExit); bufferedExit = null; }
         setSnapshotReady(true);
       }
@@ -543,6 +592,25 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     const scheduleResync = () => {
       window.clearTimeout(resyncTimer);
       resyncTimer = window.setTimeout(() => { if (!cancelled) void inspectSnapshot(); }, 80);
+    };
+
+    /// 快照落地后回放缓冲的实时帧。快照请求与回放之间后端可能**又**丢过帧——缓冲里的
+    /// 相邻事件之间仍可能有洞,而 writeOutput 只裁剪重叠、不识别缺口。strict(正常路径)
+    /// 遇洞即停:已连续的先上屏,剩余事件继续压在缓冲里再拉一次快照补齐;直接跨洞续写
+    /// 会把洞两侧拼成「看似连续」的字节流,正是终端花屏(多帧内容交错重叠)的来源。
+    /// 非 strict 供快照失败的兜底路径:没有可补的来源,宁可错乱也不锁死画面。
+    const replayBuffered = (strict: boolean) => {
+      bufferedOutput.sort((a, b) => a.offset - b.offset);
+      while (bufferedOutput.length > 0) {
+        const next = bufferedOutput[0];
+        if (strict && hasWrittenOutput && Number.isFinite(next.offset) && next.offset > nextOffset) {
+          snapshotApplied = false;
+          scheduleResync();
+          return;
+        }
+        bufferedOutput.shift();
+        writeOutput(next);
+      }
     };
 
     // 就地重启后把偏移归零并重新拉一次快照。新 PTY 从 0 重新计数，沿用旧的 nextOffset
@@ -563,6 +631,9 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       snapshotApplied = false;
       bufferedOutput.length = 0;
       bufferedExit = null;
+      // 尺寸去重记录随旧 PTY 作废：新 PTY 以启动参数的占位尺寸（如 100×30）起，
+      // 若沿用旧记录，observer 下发的真实尺寸会因「同值」被跳过，TUI 停在占位宽度。
+      lastSentSizeRef.current = null;
       terminal.reset();
       setInitialized(false);
       setExitCode(undefined);
@@ -615,7 +686,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       resizeTimer = window.setTimeout(() => {
         fit.fit();
         if (visibleRef.current && terminal.cols > 1 && terminal.rows > 1) {
-          void resizeManagedTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {});
+          resizeIfChanged(sessionId, terminal.cols, terminal.rows);
         }
       }, 80);
     });
@@ -671,11 +742,12 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     const raf = requestAnimationFrame(() => {
       fit.fit();
       if (terminal.cols > 1 && terminal.rows > 1) {
-        void resizeManagedTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {});
+        resizeIfChanged(sessionId, terminal.cols, terminal.rows);
       }
       terminal.focus();
     });
     return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, sessionId]);
 
   const initializing = !snapshotReady || ((active || sessionId < 0) && !initialized);
@@ -769,7 +841,11 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
         </div>
       )}
       {!initializing && !active && (
-        <div className="managed-terminal-cover">
+        // 拿到退出码 = 屏幕上留着最后的输出（报错原因多半就在那里）——此时降级为底部
+        // 横条，不再整屏遮罩：文案承诺「上方保留了终端输出」，94% 不透明的全屏遮罩会把
+        // 它盖到既看不见也滚不动。其余状态（未启动/外部占用/旁路没接上）没有画面可看，
+        // 维持整屏居中。
+        <div className={"managed-terminal-cover" + (exitCode !== undefined ? " is-exited" : "")}>
           {/* 后台会话的「没画面」有两种截然不同的成因，此前一律说成「已结束」：worker 明明
               还在跑、只是旁路没接上时，那句话是错的，而且不给任何出路。只有拿到退出码
               （worker 真的退了）才说结束，否则说「没接上」并给一次重接。 */}

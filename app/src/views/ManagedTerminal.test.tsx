@@ -21,6 +21,8 @@ const termOptions = vi.hoisted(() => ({ current: null as Record<string, unknown>
 // 窗口里注入 xterm 自动应答,manual 模式把回调攒进队列由测试择机触发。
 const dataHandler = vi.hoisted(() => ({ current: null as ((data: string) => void) | null }));
 const writeCallbacks = vi.hoisted(() => ({ manual: false, queue: [] as (() => void)[] }));
+// 终端选区：复制快捷键测试用（有选区的 Ctrl+C=复制不发 ^C，无选区照旧发）。
+const selection = vi.hoisted(() => ({ text: "" }));
 vi.mock("@xterm/addon-web-links", () => ({
   WebLinksAddon: class {
     constructor(handler: (event: MouseEvent, uri: string) => void) { linkOpen.current = handler; }
@@ -44,6 +46,8 @@ vi.mock("@xterm/xterm", () => ({
     loadAddon = vi.fn();
     onData = (handler: (data: string) => void) => { dataHandler.current = handler; return { dispose: vi.fn() }; };
     attachCustomKeyEventHandler = (handler: (event: KeyboardEvent) => boolean) => { keyHandler.current = handler; };
+    hasSelection = () => selection.text.length > 0;
+    getSelection = () => selection.text;
   },
 }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); } }));
@@ -67,6 +71,7 @@ describe("ManagedTerminal", () => {
     dataHandler.current = null;
     writeCallbacks.manual = false;
     writeCallbacks.queue = [];
+    selection.text = "";
     global.ResizeObserver = class {
       observe = vi.fn();
       disconnect = vi.fn();
@@ -89,9 +94,31 @@ describe("ManagedTerminal", () => {
     // 组合键的 keyup 与普通按键照常交给 xterm（否则 ^V 之外的键序全部失灵）。
     expect(keyHandler.current!(key({ type: "keyup", code: "KeyV", ctrlKey: true }))).toBe(true);
     expect(keyHandler.current!(key({ type: "keydown", code: "KeyV" }))).toBe(true);
+    // 无选区的 Ctrl+C 维持终端语义：交给 xterm 发 ^C 中断前台进程。
     expect(keyHandler.current!(key({ type: "keydown", code: "KeyC", ctrlKey: true }))).toBe(true);
     // Ctrl+Alt+V（AltGr 组合可能产字符）不劫持。
     expect(keyHandler.current!(key({ type: "keydown", code: "KeyV", ctrlKey: true, altKey: true }))).toBe(true);
+  });
+
+  it("复制快捷键：有选区的 Ctrl/Cmd+C 与 Ctrl+Shift+C 复制选区且不下发按键", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(noPty);
+      return Promise.resolve();
+    });
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(keyHandler.current).toBeTruthy());
+    const key = (init: Partial<KeyboardEvent> & { type: string; code: string }) => init as KeyboardEvent;
+    selection.text = "error: os error 2";
+    // 有选区：Ctrl+C = 复制，false 表示不交给 xterm（绝不发 ^C 中断 agent）。
+    expect(keyHandler.current!(key({ type: "keydown", code: "KeyC", ctrlKey: true }))).toBe(false);
+    expect(writeText).toHaveBeenCalledWith("error: os error 2");
+    // Ctrl+Shift+C（终端惯用复制键）同样复制。
+    expect(keyHandler.current!(key({ type: "keydown", code: "KeyC", ctrlKey: true, shiftKey: true }))).toBe(false);
+    // macOS 的 Cmd+C 同理。
+    expect(keyHandler.current!(key({ type: "keydown", code: "KeyC", metaKey: true }))).toBe(false);
+    expect(writeText).toHaveBeenCalledTimes(3);
   });
 
   it("链接走终端惯例：Ctrl/Cmd+点击经 open_link 打开，普通点击不动", async () => {

@@ -408,8 +408,20 @@ pub(crate) fn show_session_notification(
                 let title = focus_title.clone();
                 let cwd = focus_cwd.clone();
                 let token = focus_token.clone();
+                let fallback_app = click_app.clone();
                 std::thread::spawn(move || {
-                    let _ = focus_session_terminal(pid, Some(title), cwd, token, title_based);
+                    let result = focus_session_terminal(pid, Some(title), cwd, token, title_based);
+                    // 定位失败不能静默丢弃返回值：用户点了通知却毫无反应，只会以为通知坏了。
+                    // 窗口级聚焦成功（HostFocused）算达成目的；其余分类（不支持的终端/标签
+                    // 没找到/无权限/进程已结束）一律回退打开对话窗并落在该会话——它对任何
+                    // 会话都存在，进程已结束时还能看到历史与恢复入口。
+                    if !matches!(
+                        result,
+                        crate::terminal::FocusSessionResult::Focused
+                            | crate::terminal::FocusSessionResult::HostFocused
+                    ) {
+                        crate::window::open_chat_window_detached(fallback_app, session_id);
+                    }
                 });
                 Ok(())
             })
@@ -488,7 +500,9 @@ fn flash_chat_window_if_unfocused(app: &tauri::AppHandle) {
 /// 周期轮询：收尾进程已死的卡住会话；存活集合变化或有收尾时发 board-changed 让前端刷新。
 /// 同时对「连接中」会话做去重桌面通知：出错（优先）或进入待交互时各弹一次。
 /// 总开关（settings.notifications_enabled）只门控是否 .show()，去重 map 始终更新，
-/// 故中途打开开关不会把积压的旧错误/待交互一次性炸出来。启动首扫只播种不弹。
+/// 故中途打开开关不会把积压的旧错误/待交互一次性炸出来。启动首扫**分类播种**：
+/// 错误/待交互播种不弹（旧闻不炸）；待审批/屏幕阻塞**不播种**——这两类指纹不随时间
+/// 推进，首轮播种即永久静音，而「agent 停着等决定」无论新旧都该提醒，留到第二轮触发。
 pub(crate) fn spawn_liveness_watch(
     app: tauri::AppHandle,
     db_path: PathBuf,
@@ -631,10 +645,12 @@ pub(crate) fn spawn_liveness_watch(
                         let fired = seeded && should_notify(prev, Some(&e.fingerprint)) && !suppressed;
                         attention_fired |= fired;
                         if fired && notify_on {
+                            // 标题带项目名：多会话并行时通知中心里堆着一排相同的状态标题，
+                            // 必须逐条点开正文才分得清是谁在叫（四类通知同此）。
                             show_session_notification(
                                 &app,
-                                tr(lang, "notify.error").into(),
-                                format!("{} · {}", s.project_name, e.label),
+                                format!("{} · {}", s.project_name, tr(lang, "notify.error")),
+                                format!("{} · {}", display_title, e.label),
                                 s.session.id,
                                 pid,
                                 display_title.clone(),
@@ -667,8 +683,8 @@ pub(crate) fn spawn_liveness_watch(
                                 };
                                 show_session_notification(
                                     &app,
-                                    tr(lang, key).into(),
-                                    format!("{} · {}", s.project_name, display_title),
+                                    format!("{} · {}", s.project_name, tr(lang, key)),
+                                    display_title.clone(),
                                     s.session.id,
                                     pid,
                                     display_title.clone(),
@@ -677,7 +693,13 @@ pub(crate) fn spawn_liveness_watch(
                                     title_based,
                                 );
                             }
-                            notified_pending.insert(sid.clone(), fp);
+                            // 启动首轮（seeded=false）不播种待审批指纹：pending 指纹不随时间推进，
+                            // 首轮播种 = 这条审批永久静音——重启前就挂着的审批，重启后一条通知都
+                            // 不会有，而「agent 停着等决定」无论新旧都该提醒。留空让下一轮（5s 后）
+                            // 按 prev=None 正常触发。错误/待交互仍首轮播种（旧闻不炸，见各自注释）。
+                            if seeded {
+                                notified_pending.insert(sid.clone(), fp);
+                            }
                         }
                         None => {
                             notified_pending.remove(&sid);
@@ -700,8 +722,8 @@ pub(crate) fn spawn_liveness_watch(
                             if fired && notify_on {
                                 show_session_notification(
                                     &app,
-                                    tr(lang, "notify.blocked").into(),
-                                    format!("{} · {}", s.project_name, display_title),
+                                    format!("{} · {}", s.project_name, tr(lang, "notify.blocked")),
+                                    display_title.clone(),
                                     s.session.id,
                                     pid,
                                     display_title.clone(),
@@ -710,7 +732,11 @@ pub(crate) fn spawn_liveness_watch(
                                     title_based,
                                 );
                             }
-                            notified_blocked.insert(sid.clone(), fp);
+                            // 与待审批同理：blocked 指纹恒为 "blocked"（刻意不掺时间戳），首轮播种
+                            // 即永久静音。重启时已阻塞的会话留到下一轮按 prev=None 触发。
+                            if seeded {
+                                notified_blocked.insert(sid.clone(), fp);
+                            }
                         }
                         None => {
                             notified_blocked.remove(&sid);
@@ -735,8 +761,8 @@ pub(crate) fn spawn_liveness_watch(
                             if fired && notify_on {
                                 show_session_notification(
                                     &app,
-                                    tr(lang, "notify.waiting").into(),
-                                    format!("{} · {}", s.project_name, display_title),
+                                    format!("{} · {}", s.project_name, tr(lang, "notify.waiting")),
+                                    display_title.clone(),
                                     s.session.id,
                                     pid,
                                     display_title.clone(),
@@ -745,7 +771,12 @@ pub(crate) fn spawn_liveness_watch(
                                     title_based,
                                 );
                             }
-                            notified_waiting.insert(sid.clone(), fp);
+                            // 被「正在看」抑制时不写指纹：抑制的前提「他就在屏幕前」只在此刻成立。
+                            // 写了指纹，用户切走后这条等待就永远静音；不写，离开注视后的下一轮照常
+                            // 补发（若期间已回复，status 离开 waiting、指纹变 None，条目自然清掉）。
+                            if !suppressed {
+                                notified_waiting.insert(sid.clone(), fp);
+                            }
                         }
                         None => {
                             notified_waiting.remove(&sid);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -16,6 +16,7 @@ import { Switch, Segmented, SwatchPicker, FontSizeSlider } from "./settings/widg
 import { Dropdown } from "./menu";
 import { AccountSection } from "./settings/AccountSection";
 import { NetworkSection } from "./settings/NetworkSection";
+import { useEscClose } from "../hooks/useEscClose";
 
 const REPO = "github.com/larrygogo/meowo";
 const REPO_URL = "https://github.com/larrygogo/meowo";
@@ -107,11 +108,18 @@ function IconGlobe() {
 
 
 
+/** 设置保存失败的统一错误行：patch 失败时开关会被回读「弹回去」，没有这一行用户
+ *  只能看到界面自己变回去、零解释（S-3——曾只有网络分区把错误显示了出来）。 */
+function SettingsError({ error }: { error: string | null }) {
+  if (!error) return null;
+  return <div className="sec-hint proxy-err" role="alert">{error}</div>;
+}
+
 // 通用：应用级设置（语言、自启、更新、通知）。会话与卡片的行为在 SessionsSection。
 function GeneralSection() {
   const t = useT();
   const [autostart, setAutostart] = useState(false);
-  const [settings, patch] = useSettingsState();
+  const [settings, patch, patchError] = useSettingsState();
   // dev 下开机自启会注册调试二进制(开机连不上 dev server → 白屏)，故禁用此开关，仅安装版可用。
   const autostartDisabled = import.meta.env.DEV;
   useEffect(() => {
@@ -173,6 +181,7 @@ function GeneralSection() {
           <Switch checked={flashOn} onChange={toggleFlash} label={t.settings.attentionFlash} />
         </div>}
       </div>
+      <SettingsError error={patchError} />
       <div className="sec-hint">{t.settings.moreSoon}</div>
     </>
   );
@@ -181,7 +190,7 @@ function GeneralSection() {
 // 会话：新建/打开/归档等会话行为，外加看板卡片的展示与交互（独立成第二张卡）。
 function SessionsSection() {
   const t = useT();
-  const [settings, patch] = useSettingsState();
+  const [settings, patch, patchError] = useSettingsState();
   const [availTerms, setAvailTerms] = useState<ResumeTerminal[] | null>(null);
   const [agents, setAgents] = useState<AgentDescriptor[]>([]);
   const availAgents = agents.filter((a) => a.installed).map((a) => a.id);
@@ -288,6 +297,7 @@ function SessionsSection() {
           />
         </div>
       </div>
+      <SettingsError error={patchError} />
       <ArchivedSessions />
     </>
   );
@@ -391,19 +401,48 @@ const lineHeightOptions = (t: Dict): { value: TerminalLineHeight; label: string 
   { value: "relaxed", label: t.settings.lineRelaxed },
 ];
 
+/** 滑杆草稿：拖动期间只更新本地显示，松手（pointerup）或键盘调节静默 240ms 后才提交。
+ *  逐像素 onChange 直发 patch = 每 px 一轮完整的 set_settings 链（全量写盘 + 读写 claude
+ *  配置文件 + proxy-applied/settings-changed 双广播），拖一次滑杆等于几十轮流程，低端机
+ *  与杀软环境下可感知卡顿。 */
+function useSliderDraft(commit: (v: number) => void) {
+  const [draft, setDraft] = useState<number | null>(null);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const change = (v: number) => {
+    setDraft(v);
+    window.clearTimeout(timer.current);
+    // 键盘方向键调节没有 pointerup：静默 240ms 后兜底提交。
+    timer.current = window.setTimeout(() => { commit(v); setDraft(null); }, 240);
+  };
+  const release = (v: number) => {
+    window.clearTimeout(timer.current);
+    commit(v);
+    setDraft(null);
+  };
+  return { draft, change, release };
+}
+
 function AppearanceSection() {
   const t = useT();
-  const [settings, patch] = useSettingsState();
-  const theme = settings?.theme ?? "dark";
-  const opacity = settings?.opacity ?? 94;
-  const uiScale = settings?.ui_scale ?? 100;
-  const stickerStyle = settings?.sticker_style ?? "elevated";
-  const stickerColor = settings?.sticker_color ?? "neutral";
-  const termFont = settings?.terminal_font_size ?? 12;
-  const termLine = settings?.terminal_line_height ?? "normal";
+  const [settings, patch, patchError] = useSettingsState();
+  // 占位一律读 SETTINGS_DEFAULTS：曾在此手写 `?? 94` / `?? "elevated"` 字面量，与真实默认
+  // （settings.rs：100 / "flat"）不符——设置页每次打开都先高亮错误档位再跳正确值。
+  const theme = settings?.theme ?? SETTINGS_DEFAULTS.theme;
+  const opacity = settings?.opacity ?? SETTINGS_DEFAULTS.opacity;
+  const uiScale = settings?.ui_scale ?? SETTINGS_DEFAULTS.ui_scale;
+  const stickerStyle = settings?.sticker_style ?? SETTINGS_DEFAULTS.sticker_style;
+  const stickerColor = settings?.sticker_color ?? SETTINGS_DEFAULTS.sticker_color;
+  const termFont = settings?.terminal_font_size ?? SETTINGS_DEFAULTS.terminal_font_size;
+  const termLine = settings?.terminal_line_height ?? SETTINGS_DEFAULTS.terminal_line_height;
+  // 滑杆草稿（拖动中本地显示，松手才提交）：见 useSliderDraft。
+  const opacityDraft = useSliderDraft((v) => void patch({ opacity: v }));
+  const termFontDraft = useSliderDraft((v) => void patch({ terminal_font_size: v }));
+  const opacityShown = opacityDraft.draft ?? opacity;
+  const termFontShown = termFontDraft.draft ?? termFont;
   // 钳到 [0,100]：手改 settings.json 为越界值时，避免算出负/超界的 linear-gradient 填充宽度。
-  const fill = Math.max(0, Math.min(100, ((opacity - OPACITY_MIN) / (OPACITY_MAX - OPACITY_MIN)) * 100));
-  const termFill = Math.max(0, Math.min(100, ((termFont - TERM_FONT_MIN) / (TERM_FONT_MAX - TERM_FONT_MIN)) * 100));
+  const fill = Math.max(0, Math.min(100, ((opacityShown - OPACITY_MIN) / (OPACITY_MAX - OPACITY_MIN)) * 100));
+  const termFill = Math.max(0, Math.min(100, ((termFontShown - TERM_FONT_MIN) / (TERM_FONT_MAX - TERM_FONT_MIN)) * 100));
   return (
     <>
       <div className="row-card">
@@ -441,16 +480,17 @@ function AppearanceSection() {
               <div className="row-label">{t.settings.opacity}</div>
               <div className="row-desc">{t.settings.opacityDesc}</div>
             </div>
-            <span className="row-val">{opacity}%</span>
+            <span className="row-val">{opacityShown}%</span>
           </div>
           <input
             type="range"
             className="slider"
             min={OPACITY_MIN}
             max={OPACITY_MAX}
-            value={opacity}
+            value={opacityShown}
             style={{ background: `linear-gradient(90deg, var(--cc-accent) ${fill}%, var(--cc-border) ${fill}%)` }}
-            onChange={(e) => patch({ opacity: Number(e.target.value) })}
+            onChange={(e) => opacityDraft.change(Number(e.target.value))}
+            onPointerUp={(e) => opacityDraft.release(Number((e.target as HTMLInputElement).value))}
             aria-label={t.settings.opacity}
           />
         </div>
@@ -464,16 +504,17 @@ function AppearanceSection() {
               <div className="row-label">{t.settings.termFontSize}</div>
               <div className="row-desc">{t.settings.termFontSizeDesc}</div>
             </div>
-            <span className="row-val">{termFont}px</span>
+            <span className="row-val">{termFontShown}px</span>
           </div>
           <input
             type="range"
             className="slider"
             min={TERM_FONT_MIN}
             max={TERM_FONT_MAX}
-            value={termFont}
+            value={termFontShown}
             style={{ background: `linear-gradient(90deg, var(--cc-accent) ${termFill}%, var(--cc-border) ${termFill}%)` }}
-            onChange={(e) => patch({ terminal_font_size: Number(e.target.value) })}
+            onChange={(e) => termFontDraft.change(Number(e.target.value))}
+            onPointerUp={(e) => termFontDraft.release(Number((e.target as HTMLInputElement).value))}
             aria-label={t.settings.termFontSize}
           />
         </div>
@@ -485,6 +526,7 @@ function AppearanceSection() {
           <Segmented value={termLine} options={lineHeightOptions(t)} onChange={(v) => patch({ terminal_line_height: v })} label={t.settings.termLineHeight} />
         </div>
       </div>
+      <SettingsError error={patchError} />
       <div className="sec-hint">{t.settings.appearanceHint}</div>
     </>
   );
@@ -515,8 +557,14 @@ function AboutSection({
       : { label: t.about.checkUpdate, primary: false };
 
   const verText = `v${version || "—"}`;
+  // checking/error 也要有话说：曾经两态都落空串——打开「关于」十秒空窗、检查失败一片安静。
+  // unknown（关了自动更新、从未检查）只显示版本号，不谎报「已是最新」。
   const verStatus =
-    hasUpdate ? t.about.foundNew(newVersion ?? "") : status === "latest" ? t.about.upToDate : "";
+    hasUpdate ? t.about.foundNew(newVersion ?? "")
+      : status === "latest" ? t.about.upToDate
+      : status === "checking" ? t.about.checking
+      : status === "error" ? t.about.checkFailed
+      : "";
   const verSub = verStatus ? `${verText} · ${verStatus}` : verText;
 
   return (
@@ -591,8 +639,19 @@ export function About() {
   const t = useT();
   // 窗口以 visible:false 创建（window.rs），首帧渲染后再显示，消除打开瞬间的白框闪烁。
   useShowWhenReady();
-  const [sec, setSec] = useState<Section>("general");
+  // 分区记忆：每次开窗回 general 让最常改的分区（外观/Agent）永远多点一次。
+  const [sec, setSec] = useState<Section>(() => {
+    const s = localStorage.getItem("meowo-settings-section");
+    return s === "general" || s === "sessions" || s === "appearance" || s === "network" || s === "account" || s === "about"
+      ? s
+      : "general";
+  });
+  const pickSec = (next: Section) => {
+    setSec(next);
+    try { localStorage.setItem("meowo-settings-section", next); } catch { /* 隐私模式禁写 */ }
+  };
   const close = () => getCurrentWindow().close().catch(() => {});
+  useEscClose(close); // 弹出式任务窗的基本预期：Esc 关窗（输入框内让位）
   // 设置窗口也服从自动更新开关；关闭时不做后台检查，用户仍可从「关于」手动打开更新窗口检查。
   const { status, version: newVersion } = useUpdate({ automatic: true });
 
@@ -601,27 +660,27 @@ export function About() {
       <aside className="side">
         <div className="side-top" data-tauri-drag-region />
         <nav className="side-nav">
-          <button className={"nav-item" + (sec === "general" ? " on" : "")} aria-current={sec === "general" ? "page" : undefined} onClick={() => setSec("general")}>
+          <button className={"nav-item" + (sec === "general" ? " on" : "")} aria-current={sec === "general" ? "page" : undefined} onClick={() => pickSec("general")}>
             <IconGear />
             <span>{t.settings.nav.general}</span>
           </button>
-          <button className={"nav-item" + (sec === "sessions" ? " on" : "")} aria-current={sec === "sessions" ? "page" : undefined} onClick={() => setSec("sessions")}>
+          <button className={"nav-item" + (sec === "sessions" ? " on" : "")} aria-current={sec === "sessions" ? "page" : undefined} onClick={() => pickSec("sessions")}>
             <IconCards />
             <span>{t.settings.nav.sessions}</span>
           </button>
-          <button className={"nav-item" + (sec === "appearance" ? " on" : "")} aria-current={sec === "appearance" ? "page" : undefined} onClick={() => setSec("appearance")}>
+          <button className={"nav-item" + (sec === "appearance" ? " on" : "")} aria-current={sec === "appearance" ? "page" : undefined} onClick={() => pickSec("appearance")}>
             <IconAppearance />
             <span>{t.settings.nav.appearance}</span>
           </button>
-          <button className={"nav-item" + (sec === "network" ? " on" : "")} aria-current={sec === "network" ? "page" : undefined} onClick={() => setSec("network")}>
+          <button className={"nav-item" + (sec === "network" ? " on" : "")} aria-current={sec === "network" ? "page" : undefined} onClick={() => pickSec("network")}>
             <IconGlobe />
             <span>{t.settings.nav.network}</span>
           </button>
-          <button className={"nav-item" + (sec === "account" ? " on" : "")} aria-current={sec === "account" ? "page" : undefined} onClick={() => setSec("account")}>
+          <button className={"nav-item" + (sec === "account" ? " on" : "")} aria-current={sec === "account" ? "page" : undefined} onClick={() => pickSec("account")}>
             <IconAgent />
             <span>{t.settings.nav.account}</span>
           </button>
-          <button className={"nav-item" + (sec === "about" ? " on" : "")} aria-current={sec === "about" ? "page" : undefined} onClick={() => setSec("about")}>
+          <button className={"nav-item" + (sec === "about" ? " on" : "")} aria-current={sec === "about" ? "page" : undefined} onClick={() => pickSec("about")}>
             <IconInfo />
             <span>{t.settings.nav.about}</span>
             {(status === "available" || status === "downloading" || status === "ready") && (

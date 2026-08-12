@@ -122,6 +122,10 @@ beforeEach(() => {
   events.settingsChanged = null;
 });
 
+/** 首帧占位已与生产默认(button)对齐；测试注入的 card_menu_mode=context 要等 get_settings
+ *  resolve 并被 useSettingsEffect 套用后右键才生效——右键前先冲刷一次异步队列。 */
+const settingsApplied = () => act(async () => {});
+
 describe("断开会话不再催人交互", () => {
   const pending = { pending_review: "approval" } as Partial<Item>;
 
@@ -185,6 +189,7 @@ describe("会话卡片的后台会话标注", () => {
     const { container } = render(
       <Sticker filter="all" data={[mk({ background: true, pty_managed: false })]} />,
     );
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     const item = screen.getByText(zh.chat.endSession);
     invokeMock.mockImplementationOnce(() => Promise.resolve(true) as Promise<unknown> as Promise<void>);
@@ -275,9 +280,10 @@ describe("Sticker", () => {
     expect(container.querySelector(".stk-sub")).toBeNull();
   });
 
-  it("右键菜单置顶切换状态并持久化到 localStorage,操作后菜单关闭", () => {
+  it("右键菜单置顶切换状态并持久化到 localStorage,操作后菜单关闭", async () => {
     localStorage.removeItem("meowo-starred");
     const { container } = render(<Sticker filter="all" data={[mk({ session: { id: 7, project_id: 1, cc_session_id: "star-me", status: "running", started_at: 0, last_event_at: Date.now(), ended_at: null } })]} />);
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     fireEvent.click(screen.getByText(zh.sticker.star));
     expect(container.querySelector(".stk-card.is-star")).toBeTruthy();
@@ -286,8 +292,29 @@ describe("Sticker", () => {
     localStorage.removeItem("meowo-starred");
   });
 
-  it("右键打开菜单:含置顶/便签/重命名/归档四项,Escape 关闭", () => {
+  it("菜单键盘可达:挂载即聚焦首项,↑↓ 移动,Enter 激活当前项", async () => {
+    localStorage.removeItem("meowo-starred");
+    const { container } = render(<Sticker filter="all" data={[mk({ session: { id: 7, project_id: 1, cc_session_id: "kbd-star", status: "running", started_at: 0, last_event_at: Date.now(), ended_at: null } })]} />);
+    await settingsApplied();
+    fireEvent.contextMenu(container.querySelector(".stk-card")!);
+    const menu = document.querySelector(".ctx-menu")! as HTMLElement;
+    const items = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+    // 挂载即聚焦首项：菜单 DOM 在滚动区外，Tab 走不进来，这是键盘用户唯一的入口。
+    expect(document.activeElement).toBe(items[0]);
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(items[1]);
+    fireEvent.keyDown(menu, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(items[0]);
+    // Enter 激活当前项（首项=星标置顶）并关闭菜单
+    fireEvent.keyDown(menu, { key: "Enter" });
+    expect(JSON.parse(localStorage.getItem("meowo-starred") ?? "[]")).toContain("kbd-star");
+    expect(document.querySelector(".ctx-menu")).toBeNull();
+    localStorage.removeItem("meowo-starred");
+  });
+
+  it("右键打开菜单:含置顶/便签/重命名/归档四项,Escape 关闭", async () => {
     const { container } = render(<Sticker filter="all" data={[mk()]} />);
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     const menu = document.querySelector(".ctx-menu")!;
     expect(menu).toBeTruthy();
@@ -297,13 +324,15 @@ describe("Sticker", () => {
     expect(document.querySelector(".ctx-menu")).toBeNull();
   });
 
-  it("点击菜单外部关闭菜单,且该次点击不触发卡片点击", () => {
+  it("点击菜单外部关闭菜单,且该次点击不触发卡片点击", async () => {
     const { container } = render(<Sticker filter="all" data={[mk()]} />);
     // 先打开重命名编辑器作观察哨:卡片 onClick 若被触发会关闭编辑器。
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     fireEvent.click(screen.getByText(zh.sticker.renameTitle));
     expect(container.querySelector(".stk-edit")).toBeTruthy();
     // 再开菜单,点击卡片(菜单外部)——菜单应关闭,但编辑器保持打开,证明点击被捕获相拦下。
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     expect(document.querySelector(".ctx-menu")).toBeTruthy();
     fireEvent.click(container.querySelector(".stk-card")!);
@@ -311,15 +340,18 @@ describe("Sticker", () => {
     expect(container.querySelector(".stk-edit")).toBeTruthy(); // 编辑器未被误关
   });
 
-  it("默认(右键菜单模式)不渲染卡片菜单按钮", () => {
-    // card_menu_mode=button 时按钮与右键二选一;按钮模式依赖设置注入,与 terminal_open_mode
-    // 的按钮模式一样走手动验证(测试环境 getSettings 不可用,仅锁默认形态)。
+  it("首帧按真实默认(button)渲染菜单按钮;注入 context 设置后按钮让位右键", async () => {
     const { container } = render(<Sticker filter="all" data={[mk()]} />);
+    // 首帧占位与后端默认(button)一致：按钮直接在场，不再「settings 回来才凭空弹入」。
+    expect(container.querySelector(".stk-menu-btn")).toBeTruthy();
+    await settingsApplied();
+    // 本测试文件的 get_settings 注入 card_menu_mode=context → 套用后二选一，按钮让位。
     expect(container.querySelector(".stk-menu-btn")).toBeNull();
   });
 
-  it("有 cwd 的会话菜单末尾多出「打开项目目录」,无 cwd 则隐藏", () => {
+  it("有 cwd 的会话菜单末尾多出「打开项目目录」,无 cwd 则隐藏", async () => {
     const { container } = render(<Sticker filter="all" data={[mk({ cwd: "C:\\proj" })]} />);
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     expect(screen.getByText(zh.sticker.openProjectDir)).toBeTruthy();
     expect(document.querySelector(".ctx-sep")).toBeTruthy(); // 与卡片管理操作以分隔线分组
@@ -327,12 +359,14 @@ describe("Sticker", () => {
 
     cleanup();
     const { container: c2 } = render(<Sticker filter="all" data={[mk({ cwd: null })]} />);
+    await settingsApplied();
     fireEvent.contextMenu(c2.querySelector(".stk-card")!);
     expect(screen.queryByText(zh.sticker.openProjectDir)).toBeNull();
   });
 
   it("本 GUI 托管的会话菜单末尾多出「结束会话」,确认后发出 stop_managed_terminal", async () => {
     const { container } = render(<Sticker filter="all" data={[mk({ pty_managed: true })]} />);
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     const item = screen.getByText(zh.chat.endSession);
     // 确认框应答「确认」→ 停止命令发出。once 紧贴点击设置,免被挂载期调用吃掉。
@@ -349,6 +383,7 @@ describe("Sticker", () => {
 
   it("「结束会话」确认框取消时不发停止命令", async () => {
     const { container } = render(<Sticker filter="all" data={[mk({ pty_managed: true })]} />);
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     // 默认 invokeMock 对 confirm_dialog 返回 undefined → appConfirm 按取消收场。
     fireEvent.click(screen.getByText(zh.chat.endSession));
@@ -356,25 +391,28 @@ describe("Sticker", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("stop_managed_terminal", expect.anything());
   });
 
-  it("非本 GUI 托管的会话(外部终端)不显示「结束会话」", () => {
+  it("非本 GUI 托管的会话(外部终端)不显示「结束会话」", async () => {
     const { container } = render(<Sticker filter="all" data={[mk({ pty_managed: false, connected: true })]} />);
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     expect(document.querySelector(".ctx-menu")).toBeTruthy();
     expect(screen.queryByText(zh.chat.endSession)).toBeNull();
   });
 
-  it("已置顶/有便签的会话,菜单项显示反向文案", () => {
+  it("已置顶/有便签的会话,菜单项显示反向文案", async () => {
     // 已归档的会话不再上看板（管理入口在设置 → 会话），板上的菜单只会出现「归档」正向文案。
     localStorage.setItem("meowo-starred", JSON.stringify(["s"]));
     const { container } = render(<Sticker filter="all" data={[mk({ note: "有便签", connected: true })]} />);
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     const labels = Array.from(document.querySelectorAll(".ctx-item")).map((el) => el.textContent);
     expect(labels).toEqual([zh.sticker.unstar, zh.sticker.noteEdit, zh.sticker.renameTitle, zh.sticker.archive, zh.sticker.newSession]);
     localStorage.removeItem("meowo-starred");
   });
 
-  it("菜单「新建会话」用当前会话的 cwd 和 provider 打开新建窗口", () => {
+  it("菜单「新建会话」用当前会话的 cwd 和 provider 打开新建窗口", async () => {
     const { container } = render(<Sticker filter="all" data={[mk({ cwd: "C:\\\\proj", provider: "kimi" })]} />);
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     fireEvent.click(screen.getByText(zh.sticker.newSession));
     expect(invokeMock).toHaveBeenCalledWith("open_new_session_window", { cwd: "C:\\\\proj", provider: "kimi" });
@@ -386,6 +424,7 @@ describe("Sticker", () => {
     const { container } = render(
       <Sticker filter="all" data={[mk()]} onArchiveOptimistic={onArchiveOptimistic} onArchiveFailed={onArchiveFailed} />
     );
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     fireEvent.click(screen.getByText(zh.sticker.archive));
     expect(onArchiveOptimistic).toHaveBeenCalledWith(1); // 同步：await 之前就已调用
@@ -401,6 +440,7 @@ describe("Sticker", () => {
     const { container } = render(
       <Sticker filter="all" data={[mk()]} onArchiveOptimistic={onArchiveOptimistic} onArchiveFailed={onArchiveFailed} />
     );
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     // once 必须紧贴点击设置：放在 render 前会被挂载时的 get_settings 调用吃掉。
     // as Promise<void>：invokeMock 的返回类型是各命令结果的联合，reject 分支需显式收窄。
@@ -446,9 +486,10 @@ describe("Sticker", () => {
     expect(container.querySelector(".stk-note")).toBeTruthy();
   });
 
-  it("无便签时经右键菜单打开编辑框", () => {
+  it("无便签时经右键菜单打开编辑框", async () => {
     const { container } = render(<Sticker filter="all" data={[mk({ note: null })]} />);
     expect(container.querySelector(".stk-note-edit")).toBeNull();
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     fireEvent.click(screen.getByText(zh.sticker.noteAdd));
     const input = container.querySelector(".stk-note-edit") as HTMLInputElement;
@@ -463,8 +504,9 @@ describe("Sticker", () => {
     expect(input.value).toBe("旧便签");
   });
 
-  it("便签编辑框有保存/取消按钮，点取消关闭且保留原文", () => {
+  it("便签编辑框有保存/取消按钮，点取消关闭且保留原文", async () => {
     const { container } = render(<Sticker filter="all" data={[mk({ note: "保留我" })]} />);
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     fireEvent.click(screen.getByText(zh.sticker.noteEdit));
     expect(screen.getByLabelText(zh.sticker.noteSave)).toBeTruthy();
@@ -473,8 +515,9 @@ describe("Sticker", () => {
     expect(screen.getByText("保留我")).toBeTruthy(); // 便签块仍在
   });
 
-  it("点便签保存按钮关闭编辑框", () => {
+  it("点便签保存按钮关闭编辑框", async () => {
     const { container } = render(<Sticker filter="all" data={[mk({ note: null })]} />);
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     fireEvent.click(screen.getByText(zh.sticker.noteAdd));
     fireEvent.change(container.querySelector(".stk-note-edit") as HTMLInputElement, { target: { value: "新便签" } });
@@ -482,8 +525,9 @@ describe("Sticker", () => {
     expect(container.querySelector(".stk-note-edit")).toBeNull();
   });
 
-  it("重命名编辑器有保存/取消按钮，点取消关闭", () => {
+  it("重命名编辑器有保存/取消按钮，点取消关闭", async () => {
     const { container } = render(<Sticker filter="all" data={[mk()]} />);
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     fireEvent.click(screen.getByText(zh.sticker.renameTitle));
     expect(container.querySelector(".stk-editbox")).toBeTruthy();
@@ -492,10 +536,11 @@ describe("Sticker", () => {
     expect(container.querySelector(".stk-edit")).toBeNull();
   });
 
-  it("编辑态下点击卡片只关闭编辑器、不导航开终端", () => {
+  it("编辑态下点击卡片只关闭编辑器、不导航开终端", async () => {
     // 守卫成立的可观察证据：点击卡片后编辑器关闭（setEditingId(null) 只在早返回分支执行）；
     // 若无守卫，onClick 会走 focus_session 分支、editingId 不变、编辑器仍在。
     const { container } = render(<Sticker filter="all" data={[mk({ connected: true })]} />);
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     fireEvent.click(screen.getByText(zh.sticker.renameTitle));
     expect(container.querySelector(".stk-edit")).toBeTruthy();
@@ -884,6 +929,7 @@ describe("Sticker", () => {
 
   it("重命名保存失败时经 focusNotice 提示，不静默吞错", async () => {
     const { container } = render(<Sticker filter="all" data={[mk()]} />);
+    await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     fireEvent.click(screen.getByText(zh.sticker.renameTitle));
     fireEvent.change(container.querySelector(".stk-edit") as HTMLInputElement, { target: { value: "新名字" } });

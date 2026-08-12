@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { appConfirm } from "../../confirm";
 import {
-  installAgent,
   listAgents,
   listProfiles,
   createProfile,
@@ -15,7 +14,6 @@ import {
   type AgentDescriptor,
   type ProfileView,
   type Settings,
-  type InstallDone,
 } from "../../api";
 import {
   getAccounts,
@@ -40,6 +38,7 @@ import { useSettingsState } from "./state";
 import { RelayAccess } from "./RelayAccess";
 import { useTauriEvent } from "../../hooks/useTauriEvent";
 import { useLoginOperations, type LoginOperationState } from "../../hooks/useLoginOperations";
+import { useInstallOperations, type InstallOperationState } from "../../hooks/useInstallOperations";
 
 function RefreshIcon({ spinning }: { spinning?: boolean }) {
   return (
@@ -82,12 +81,14 @@ function fmtResetIn(iso: string, t: Dict): string {
     const m = min % 60;
     return m > 0 ? t.account.resetInHourMin(h, m) : t.account.resetInHour(h);
   }
+  // 时刻/日期走 Intl：手拼 `pad(getHours())` 是硬编码 24 小时制，英文用户看到的是
+  // "Resets tomorrow 14:30" 而非 "2:30 PM"；月/日顺序同理随 locale。
   const r = new Date(ts);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const clock = `${pad(r.getHours())}:${pad(r.getMinutes())}`;
+  const clock = new Intl.DateTimeFormat(t.locale, { hour: "numeric", minute: "2-digit" }).format(r);
   if (dayDiff === 1) return t.account.resetTomorrow(clock);
   if (dayDiff === 2) return t.account.resetDayAfter(clock);
-  return t.account.resetOnDate(r.getMonth() + 1, r.getDate(), clock);
+  const date = new Intl.DateTimeFormat(t.locale, { month: "short", day: "numeric" }).format(r);
+  return t.account.resetOnDate(date, clock);
 }
 
 function laneLabel(kind: string, t: Dict): string {
@@ -140,7 +141,7 @@ function UsageBar({ lane, label }: { lane: UsageLane; label: string }) {
 
 // 单个 provider 卡片：安装/登录/用量三态。已装且登录 = 现有账号信息 + 用量泳道 + 刷新按钮 + 贴纸显示开关；
 // 已装未登录 = 提示语；未装 = 一键安装按钮。
-function ProviderCard({ provider, name, installed, supportsAccount, supportsApiKeyLogin, supportsProfiles, supportsContext, relay, payload, usage, err, onRefresh, onInstalled, onLoggedIn, loginState, onStartLogin, onCancelLogin, refreshing, settings, patchSettings, onToggleQuota }: {
+function ProviderCard({ provider, name, installed, supportsAccount, supportsApiKeyLogin, supportsProfiles, supportsContext, relay, payload, usage, err, onRefresh, installOp, onStartInstall, onLoggedIn, loginState, onStartLogin, onCancelLogin, refreshing, settings, patchSettings, onToggleQuota, usageRefreshedAt }: {
   provider: AgentId;
   /** 展示名，来自后端 list_agents()（产品名，不翻译）。 */
   name: string;
@@ -172,8 +173,10 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
   usage: ProviderUsage | null;
   err: "unsupported" | "error" | null;
   onRefresh: () => void;
-  /** 后台安装成功后重查安装检测（令卡片转「已装」）。 */
-  onInstalled: () => void;
+  /** 页面级安装状态（useInstallOperations）；切换 provider 导致卡片重挂载时仍会保留。 */
+  installOp: InstallOperationState | undefined;
+  /** 发起后台安装（状态机在页面级）。 */
+  onStartInstall: () => void;
   /** 登录成功后重查账号（令卡片转「已登录」并显示身份/用量）。 */
   onLoggedIn: () => void;
   /** 页面级登录状态；切换 provider 导致卡片重挂载时仍会保留。 */
@@ -187,19 +190,28 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
   patchSettings: (p: Partial<Settings>) => Promise<string | null>;
   /** 切换本 provider 的贴纸配额显示开关。 */
   onToggleQuota: () => void;
+  /** 最近一次联网刷新配额的时刻（epoch ms）；null = 本次会话尚未刷新过（只显示缓存）。 */
+  usageRefreshedAt?: number | null;
 }) {
   const t = useT();
   const assets = agentAssets(provider);
   const acc = payload?.account ?? null;
 
-  // 后台安装态：idle=未装可点 / installing=转圈+本地化「安装中…」/ error=失败可重试。
+  // 后台安装态从页面级 useInstallOperations 派生（installOp prop）：状态曾住在本卡片里，
+  // 安装中切换下拉 = 卡片卸载 + install-done 监听注销，回来显示「安装」按钮诱导二次安装，
+  // 失败原因永久丢失。idle=未装可点 / installing=转圈 / error=失败可重试。
   // 不透传安装脚本的英文原始输出，进度只用 i18n 文案（随界面语言）。
-  const [installState, setInstallState] = useState<"idle" | "installing" | "error">("idle");
+  const installState: "idle" | "installing" | "error" =
+    installOp?.phase === "installing"
+      ? "installing"
+      : installOp?.phase === "error" || (installOp?.phase === "done" && !installOp.ok)
+        ? "error"
+        : "idle";
   // 安装失败时的日志落点（后端把脚本输出重定向到该文件）。只展示路径，不透传英文原文。
-  const [installLog, setInstallLog] = useState<string | null>(null);
+  const installLog = installOp?.phase === "done" ? installOp.logPath : null;
   // 后端在**跑脚本之前**就失败时的诊断（如引导脚本被 Cloudflare 人机校验拦截）。这是我们自己写的
   // 中文诊断，不是脚本的英文输出，故直接展示——此时还没有日志文件，不给这句话用户就一点线索都没有。
-  const [installMsg, setInstallMsg] = useState<string | null>(null);
+  const installMsg = installOp?.phase === "error" ? installOp.message : null;
   // 装好了但 bin 目录不在持久 PATH 上时，这里是那个目录——终端里敲命令会找不到。
   // 官方安装器不保证写 PATH（claude 在 Windows 上只打印一行提示就 exit 0），而 meowo 启动
   // agent 走绝对路径、察觉不到，故须显式检测并给用户一键写入。
@@ -226,9 +238,6 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
   const [apiKeyMsg, setApiKeyMsg] = useState<string | null>(null);
   // 刚装完（本次会话内）→ 把「登录」按钮标为下一步，把「装完 → 登录」串成一条链路。
   const [justInstalled, setJustInstalled] = useState(false);
-  // onInstalled 每次渲染新建，用 ref 存最新，事件订阅只依赖 provider、不反复重订。
-  const onInstalledRef = useRef(onInstalled);
-  onInstalledRef.current = onInstalled;
 
   useEffect(() => {
     let cancelled = false;
@@ -272,18 +281,8 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
       .finally(() => setRepairingHooks(false));
   };
 
-  const startInstall = () => {
-    setInstallState("installing");
-    setInstallMsg(null);
-    setInstallLog(null);
-    // 后端在 spawn 之前的失败（取不到脚本 / 被 CF 拦）走这里，错误串是我们自己的中文诊断。
-    // 此前是 `.catch(() => setInstallState("error"))`，把它整个丢掉了——而此时还没有日志文件，
-    // 用户只会看到一句通用的「安装失败」，一点线索都没有。
-    installAgent(provider).catch((e) => {
-      setInstallState("error");
-      setInstallMsg(String(e));
-    });
-  };
+  // 发起安装：状态机在页面级（useInstallOperations），卡片只是触发器。
+  const startInstall = () => onStartInstall();
 
   /** 拉起交互式登录。成功 spawn 后不清 busy——等 login-done（或 5 分钟超时 / 用户取消）才落回。 */
   const startLogin = () => {
@@ -305,25 +304,21 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
     void onCancelLogin().catch(() => {});
   };
 
-  // 只关心装完结果；进度不透传英文，无需订阅 install-progress。
-  useTauriEvent<InstallDone>("install-done", (e) => {
-    if (e.payload.provider !== provider) return;
-    setInstallLog(e.payload.logPath);
-    // 脚本确实跑起来了 → 失败原因在日志里，清掉「跑之前」那条诊断，免得两种失败串台。
-    setInstallMsg(null);
-    if (e.payload.ok) {
-      setInstallState("idle");
-      setJustInstalled(true); // 装完通常尚未登录 → 高亮「登录」作为下一步
-      onInstalledRef.current();
-      // 「退出码 0」不等于「装好就能用」：claude 的安装器不写 PATH 也照样 exit 0。
-      agentPathGap(provider).then(setPathGapDir).catch(() => {});
-      // 后端装完顺手接了 hooks（best-effort）——重查一下，接上了就让「未接入」提示条自动消失。
-      // 装完常常还没登录（kimi 的 config.toml 尚不存在），此时多半仍未接上，那就等登录后再接。
-      checkProviderHooks(provider).then(setHooksStatus).catch(() => {});
-    } else {
-      setInstallState("error");
-    }
-  });
+  // 装完（成功）后的卡片侧后续动作。install-done 事件由页面级 useInstallOperations 消费
+  // （名单重查也在那边）——卡片对 installOp 的**状态变迁**响应，安装中切走再切回也不漏：
+  // installOp 在重挂后仍是 done，effect 照常触发一次。
+  const installDoneHandledRef = useRef<InstallOperationState | undefined>(undefined);
+  useEffect(() => {
+    if (installDoneHandledRef.current === installOp) return;
+    installDoneHandledRef.current = installOp;
+    if (installOp?.phase !== "done" || !installOp.ok) return;
+    setJustInstalled(true); // 装完通常尚未登录 → 高亮「登录」作为下一步
+    // 「退出码 0」不等于「装好就能用」：claude 的安装器不写 PATH 也照样 exit 0。
+    agentPathGap(provider).then(setPathGapDir).catch(() => {});
+    // 后端装完顺手接了 hooks（best-effort）——重查一下，接上了就让「未接入」提示条自动消失。
+    // 装完常常还没登录（kimi 的 config.toml 尚不存在），此时多半仍未接上，那就等登录后再接。
+    checkProviderHooks(provider).then(setHooksStatus).catch(() => {});
+  }, [installOp, provider]);
 
   // 成功事件由页面级状态机匹配；卡片只处理与展示相关的后续动作。
   useEffect(() => {
@@ -625,6 +620,13 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
         <div className="provider-usage">
           <div className="usage-bar-head">
             <span className="usage-card-title">{t.account.quota}</span>
+            {/* 数据时刻：没有它，开着设置页越久显示的越陈旧且毫无提示——用户判断
+                「要不要现在跑大任务」依据的可能是十几分钟前的额度。 */}
+            {usageRefreshedAt != null && (
+              <span className="usage-updated">
+                {t.account.usageUpdatedAt(new Intl.DateTimeFormat(t.locale, { hour: "numeric", minute: "2-digit" }).format(usageRefreshedAt))}
+              </span>
+            )}
             <button className="icon-btn" data-tip={t.account.refresh} aria-label={t.account.refresh} disabled={refreshing || err === "unsupported" || (!(payload?.usage_supported ?? false) && !usage)} onClick={onRefresh}>
               <RefreshIcon spinning={refreshing} />
             </button>
@@ -1005,6 +1007,7 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
 const SELECTED_AGENT_KEY = "meowo-account-agent";
 
 export function AccountSection() {
+  const t = useT();
   // 读取/写入应用设置（用于贴纸配额开关）
   const [settings, patchSettings] = useSettingsState();
   // 顶部下拉选中的 agent id。模型一多，全部竖排要滚半天——改为一次只看一张卡。
@@ -1031,8 +1034,23 @@ export function AccountSection() {
     listAgents().then(setAgents).catch(() => {});
   };
   useEffect(() => { refreshInstalled(); }, []);
+  // 窗口聚焦：重查安装态 + 账号态。用户常在外部终端完成登录后切回来——此前只查安装态，
+  // 登录超时文案指向的「刷新」按钮在未登录态根本不渲染，登录完成只有重开设置窗才被看见。
+  // 只回填缓存、不逐 provider 联网刷配额（那是挂载/登录成功时的事，聚焦高频不该扇出网络请求）。
   useEffect(() => {
-    const onFocus = () => refreshInstalled();
+    const onFocus = () => {
+      refreshInstalled();
+      getAccounts()
+        .then((ps) => {
+          setPayloads(ps);
+          setUsageMap((m) => {
+            const next = { ...m };
+            ps.forEach((p) => { if (p.usage && !next[p.provider]) next[p.provider] = p.usage; });
+            return next;
+          });
+        })
+        .catch(() => {});
+    };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, []);
@@ -1047,6 +1065,8 @@ export function AccountSection() {
     patchSettings({ sticker_quota_providers: next });
   };
 
+  // provider → 最近一次联网刷新成功的时刻（本次会话内）。缓存预填不算——它的年龄未知。
+  const [usageRefreshedAt, setUsageRefreshedAt] = useState<Record<string, number>>({});
   const doRefresh = (provider: string) => {
     setRefreshingSet((s) => new Set([...s, provider]));
     setErrMap((m) => ({ ...m, [provider]: null }));
@@ -1054,6 +1074,7 @@ export function AccountSection() {
     refreshUsage(provider)
       .then((u) => {
         setUsageMap((m) => ({ ...m, [provider]: u }));
+        setUsageRefreshedAt((m) => ({ ...m, [provider]: Date.now() }));
       })
       .catch((e) => {
         const unsupported = String(e).includes("USAGE_UNSUPPORTED");
@@ -1078,8 +1099,10 @@ export function AccountSection() {
         const initial: Record<string, ProviderUsage> = {};
         ps.forEach((p) => { if (p.usage) initial[p.provider] = p.usage; });
         setUsageMap(initial);
-        // 对支持用量的 provider 发起联网刷新
-        ps.filter((p) => p.usage_supported).forEach((p) => doRefresh(p.provider));
+        // 对支持用量的 provider 发起联网刷新。过滤与贴纸对齐（Sticker.tsx 同款）：
+        // 未登录/走中转的 provider 发请求纯属浪费，还会把失败写进 errMap 误报。
+        ps.filter((p) => p.account != null && p.usage_supported && !p.relay_enabled)
+          .forEach((p) => doRefresh(p.provider));
       })
       .catch(() => {});
   };
@@ -1087,7 +1110,25 @@ export function AccountSection() {
   const loginOperations = useLoginOperations((event) => {
     if (event.outcome === "success") loadAccounts();
   });
+  // 安装状态同理挂页面级：安装动辄一两分钟，切换下拉不能丢转圈态/失败原因（登录早修过同一坑）。
+  const installOperations = useInstallOperations((event) => {
+    if (event.ok) refreshInstalled();
+  });
   useEffect(() => { loadAccounts(); }, []);
+  // 配额自动刷新：与贴纸同节奏（5 分钟）。设置页开着不动时数据不再越放越陈旧。
+  // 过滤条件与贴纸对齐：已登录 + 支持用量 + 未走中转（未登录/中转发请求纯属浪费还写 errMap）。
+  const payloadsRef = useRef(payloads);
+  payloadsRef.current = payloads;
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      payloadsRef.current
+        .filter((p) => p.account != null && p.usage_supported && !p.relay_enabled)
+        .forEach((p) => doRefresh(p.provider));
+    }, 5 * 60_000);
+    return () => window.clearInterval(id);
+    // doRefresh 每次渲染新建但只用稳定 setter，按挂载一次即可。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 检测中（agents===null）先不渲染，避免下拉框空跳一帧。
   const rawList = agents ?? [];
@@ -1126,7 +1167,10 @@ export function AccountSection() {
               </span>
             );
             // 未安装的置灰：仍可选（点进去就是安装入口），但一眼看得出「还没配」。
-            return { value: a.id, label: a.display_name, icon, muted: !a.installed };
+            // 后台安装中的在标签上注明——安装态在页面级，切去看别的 agent 也不会丢。
+            const installing = installOperations.states.get(a.id)?.phase === "installing";
+            const label = installing ? `${a.display_name} · ${t.account.installing}` : a.display_name;
+            return { value: a.id, label, icon, muted: !a.installed };
           })}
           onChange={pickAgent}
         />
@@ -1145,7 +1189,8 @@ export function AccountSection() {
         usage={usageMap[cur.id] ?? null}
         err={errMap[cur.id] ?? null}
         onRefresh={() => doRefresh(cur.id)}
-        onInstalled={refreshInstalled}
+        installOp={installOperations.states.get(cur.id)}
+        onStartInstall={() => installOperations.start(cur.id)}
         onLoggedIn={loadAccounts}
         loginState={loginOperations.states.get(cur.id)}
         onStartLogin={(profile) => loginOperations.start(cur.id, { profile })}
@@ -1154,6 +1199,7 @@ export function AccountSection() {
         settings={settings}
         patchSettings={patchSettings}
         onToggleQuota={() => toggleQuotaProvider(cur.id)}
+        usageRefreshedAt={usageRefreshedAt[cur.id] ?? null}
       />
     </>
   );

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { LiveSession } from "../api";
 import { useT } from "../i18n";
+import { cardTone } from "./sticker/helpers";
 
 type Item = LiveSession & { connected: boolean };
 type Edge = "left" | "right" | "top";
@@ -44,6 +45,25 @@ export function CollapsedStrip({
   const dotsRef = useRef<HTMLDivElement>(null);
   const horizontal = edge === "top"; // 顶部为横条，沿宽度排列
 
+  // hover-intent：进入 250ms 后才展开。缩略条贴在屏幕边缘——那是鼠标的高频经过区
+  // （滚动条、关闭按钮、开始菜单），零延迟展开意味着划过一下就弹出整块看板遮住工作区。
+  // 离开/按下（开始拖动）都取消；键盘聚焦与 Enter/Space 仍即时展开（无误触问题）。
+  const hoverTimer = useRef<number | null>(null);
+  const cancelExpand = () => {
+    if (hoverTimer.current != null) {
+      window.clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+  };
+  const scheduleExpand = () => {
+    if (hoverTimer.current != null) return;
+    hoverTimer.current = window.setTimeout(() => {
+      hoverTimer.current = null;
+      onExpand();
+    }, 250);
+  };
+  useEffect(() => cancelExpand, []);
+
   useEffect(() => {
     const el = dotsRef.current;
     if (el && onMeasure) {
@@ -54,14 +74,20 @@ export function CollapsedStrip({
   }, [items.length, onMeasure, horizontal]);
 
   return (
-    // 键盘可达：可聚焦，聚焦/Enter/Space 与悬停一样展开。用 group 而非 button——
-    // button 会把内部状态点的 img 语义压掉，状态点的可访问文本就丢了。
+    // 键盘可达：可聚焦，聚焦/Enter/Space 即时展开（悬停走 hover-intent 延迟）。用 group
+    // 而非 button——button 会把内部状态点的 img 语义压掉，状态点的可访问文本就丢了。
+    // data-tauri-drag-region：README 承诺的「拖离边缘恢复」此前根本做不到（条上没有拖拽
+    // 区，按住毫无反应）。挂上后 App 的 mousedown 捕获会进入拖拽流程，拖离边缘松手时
+    // handleDragRelease 走 snap_restore 还原普通窗口；原地点一下（不位移）不触发任何切换。
     <div
       className={"cstrip cstrip-" + edge}
       role="group"
       tabIndex={0}
       aria-label={t.sticker.expandBoard}
-      onMouseEnter={onExpand}
+      data-tauri-drag-region
+      onMouseEnter={scheduleExpand}
+      onMouseLeave={cancelExpand}
+      onMouseDown={cancelExpand}
       onFocus={onExpand}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -70,25 +96,35 @@ export function CollapsedStrip({
         }
       }}
     >
-      <div className="cstrip-dots" ref={dotsRef}>
+      {/* 拖拽属性要下沉到子元素：Tauri 只认事件 target **自身**的 data-tauri-drag-region，
+          点在点阵/占位上时 target 不是根节点，缺属性就拖不动。 */}
+      <div className="cstrip-dots" ref={dotsRef} data-tauri-drag-region>
         {items.length === 0 ? (
-          <span className="cstrip-empty">
+          <span className="cstrip-empty" data-tauri-drag-region>
             <EyesMark />
           </span>
         ) : (
           items.map((l) => {
-            const cls = l.errored
+            // 状态判定与看板卡片同源（cardTone）：这里曾自写一套只看 DB status 的映射，
+            // 漏掉 pending_review/screen_state，待审批会话被画成绿色运行点。
+            // items 已过滤 connected，不会出现 offline。
+            const tone = cardTone(l);
+            const cls = tone === "error"
               ? "cstrip-error"
-              : l.session.status === "running"
+              : tone === "pending"
+              ? "cstrip-pending"
+              : tone === "running"
               ? "cstrip-running"
-              : l.session.status === "waiting"
+              : tone === "waiting"
               ? "cstrip-waiting"
               : "cstrip-on";
-            const status = l.errored
+            const status = tone === "error"
               ? t.sticker.sessionError
-              : l.session.status === "running"
+              : tone === "pending"
+              ? (l.pending_review ? t.pending[l.pending_review] : t.chat.status.pending)
+              : tone === "running"
               ? t.badge.running
-              : l.session.status === "waiting"
+              : tone === "waiting"
               ? t.badge.waiting
               : t.sticker.online;
             return (
@@ -97,6 +133,7 @@ export function CollapsedStrip({
                 className={"cstrip-dot " + cls}
                 role="img"
                 aria-label={`${l.task_title || t.sticker.waitingFirstInput} · ${status}`}
+                data-tauri-drag-region
               />
             );
           })

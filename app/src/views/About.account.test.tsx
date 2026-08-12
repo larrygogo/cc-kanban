@@ -59,7 +59,7 @@ const fireLogin = (provider: string, outcome: "success" | "cancelled" | "timeout
  * 顶部模型下拉切到某个 agent（按展示名）——列表现在一次只渲染选中的那一张卡（agent 一多，全部
  * 竖排要滚半天）。默认选中首个已安装的（beforeEach 里是 claude），要断言别家就先切过去。
  */
-async function selectAgent(name: string) {
+async function selectAgent(name: string | RegExp) {
   await waitFor(() => expect(document.querySelector(".account-agent-switch .dd-btn")).toBeTruthy());
   fireEvent.click(document.querySelector(".account-agent-switch .dd-btn") as HTMLElement);
   fireEvent.click(await screen.findByRole("option", { name }));
@@ -238,6 +238,41 @@ describe("AccountSection agent 卡", () => {
     await waitFor(() => expect(screen.queryByTestId("agent-installing-kimi")).toBeNull());
     // 仍未装 → 按钮回来（文案为重试），testid 不变
     expect(screen.getByTestId("agent-install-kimi")).toBeTruthy();
+  });
+
+  // 安装状态住在页面级（useInstallOperations）：安装动辄一两分钟，用户会切下拉去看别的
+  // agent。状态曾住在 keyed 卡片里，切换即卸载 + install-done 监听注销——回来显示「安装」
+  // 按钮诱导二次安装，后台那次若失败原因也永久丢失（登录侧早为同一坑做了页面级提升）。
+  it("安装中切去别的 agent 再切回：仍在安装中，不显示安装按钮", async () => {
+    api.installAgent.mockResolvedValue(undefined);
+    render(<AccountSection />);
+    await selectAgent("Kimi Code");
+    fireEvent.click(await screen.findByTestId("agent-install-kimi"));
+    await waitFor(() => expect(screen.getByTestId("agent-installing-kimi")).toBeTruthy());
+    await selectAgent("Claude Code");
+    await screen.findByTestId("agent-card-claude");
+    // 下拉里安装中的 agent 标签带「· 安装中…」后缀，用前缀匹配
+    await selectAgent(/Kimi Code/);
+    // 回来仍是安装中（不是「安装」按钮）——二次点击 = 重复安装
+    expect(await screen.findByTestId("agent-installing-kimi")).toBeTruthy();
+    expect(screen.queryByTestId("agent-install-kimi")).toBeNull();
+    expect(api.installAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("卡片卸载期间 install-done 失败也不丢：切回后显示重试与失败信息", async () => {
+    api.installAgent.mockResolvedValue(undefined);
+    render(<AccountSection />);
+    await selectAgent("Kimi Code");
+    fireEvent.click(await screen.findByTestId("agent-install-kimi"));
+    await waitFor(() => expect(screen.getByTestId("agent-installing-kimi")).toBeTruthy());
+    // 切走后（kimi 卡已卸载）后台安装失败
+    await selectAgent("Claude Code");
+    await screen.findByTestId("agent-card-claude");
+    fireDone("kimi", false, "C:/logs/kimi-install.log");
+    // 切回：失败态还在——重试按钮 + 日志路径提示
+    await selectAgent("Kimi Code");
+    expect(await screen.findByTestId("agent-install-kimi")).toBeTruthy();
+    expect(screen.getByText(zh.account.installLogHint("C:/logs/kimi-install.log"))).toBeTruthy();
   });
 
   // 已登录的卡片只显示邮箱。此前拼 显示名 · 邮箱 · 组织，个人账号的组织名恰是

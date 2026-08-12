@@ -6,16 +6,18 @@ export function lockdownInProduction() {
   // 屏蔽 WebView 默认右键菜单（重新加载/另存为/检查等）。
   window.addEventListener("contextmenu", (e) => e.preventDefault(), { capture: true });
 
-  // 封死 DevTools 快捷键：F12、Ctrl+Shift+I/J/C，以及 macOS 的 Cmd+Opt+I/J/C。
+  // 封死 DevTools 快捷键：F12、Ctrl+Shift+I/J，以及 macOS 的 Cmd+Opt+I/J/C。
   // 用 e.code 而非 e.key，避免 Shift/Opt 改变字符带来的判定遗漏。
+  // Ctrl+Shift+C 刻意不拦：它是终端界的惯用复制键（托管终端靠它复制选区），而生产构建
+  // 的 WebView 本就不带 DevTools，单靠这一个组合键开不出任何调试入口——F12/I/J 仍拦。
   window.addEventListener(
     "keydown",
     (e) => {
-      const ijc = e.code === "KeyI" || e.code === "KeyJ" || e.code === "KeyC";
+      const ij = e.code === "KeyI" || e.code === "KeyJ";
       const isDevtools =
         e.code === "F12" ||
-        (e.ctrlKey && e.shiftKey && ijc) ||
-        (e.metaKey && e.altKey && ijc);
+        (e.ctrlKey && e.shiftKey && ij) ||
+        (e.metaKey && e.altKey && (ij || e.code === "KeyC"));
       if (isDevtools) e.preventDefault();
     },
     { capture: true }

@@ -41,6 +41,12 @@ import { zh } from "../i18n/zh";
 import { chatUi, descriptors } from "../test/agents";
 import { terminalAttention } from "../terminalAttention";
 
+/// UTF-8 → base64。btoa 只吃 latin1,含中文的终端回显必须先转字节,否则直接抛
+/// InvalidCharacterError(生产端 decodeBase64 按 UTF-8 字节解码,两头对齐)。
+function b64utf8(text: string): string {
+  return btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+}
+
 function respondWithHistory(history: unknown, approval: unknown = null) {
   invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
     // 增量语义必须模拟：组件把每次轮询返回的 items **追加**进 transcript，真实后端
@@ -297,7 +303,7 @@ describe("ChatWindow", () => {
       return Promise.resolve();
     });
     render(<ChatWindow />);
-    const input = await screen.findByRole("textbox");
+    const input = await screen.findByRole("textbox", { name: "发送消息给 Agent" });
     // jsdom 的 File/Blob 实现参差，只按组件用到的形状（name + arrayBuffer）伪造。
     const file = { name: "shot.png", arrayBuffer: () => Promise.resolve(new Uint8Array([1, 2, 3]).buffer) } as unknown as File;
     fireEvent.paste(input, { clipboardData: { files: [file] } });
@@ -322,7 +328,7 @@ describe("ChatWindow", () => {
       return Promise.resolve();
     });
     render(<ChatWindow />);
-    const input = await screen.findByRole("textbox");
+    const input = await screen.findByRole("textbox", { name: "发送消息给 Agent" });
     // 等 chatUi（menu_slash_commands 的来源）就位再回车，否则命中判断还没有数据。
     await screen.findByRole("button", { name: "切换模式: 权限模式" });
     fireEvent.change(input, { target: { value: "/config" } });
@@ -504,15 +510,22 @@ describe("ChatWindow", () => {
     };
     respondWithHistory(history);
     let started = false;
-    invoke.mockImplementation((command: string) => {
+    let wrote = false;
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_chat_history") return Promise.resolve(history);
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "start_managed_terminal") { started = true; return Promise.resolve(); }
+      // 刚恢复的发送走写后回显验证(submitToTerminal 的 verify):正文写入后快照要
+      // 能看到它的回显,否则发送被撤销——mock 据此在 write 之后把回显补进画面。
+      if (command === "write_managed_terminal") {
+        if (String((args as { data?: string } | undefined)?.data ?? "").includes("继续")) wrote = true;
+        return Promise.resolve();
+      }
       if (command === "managed_terminal_snapshot") {
         // endOffset 是「已产生多少输出」的判据（data 现在是 base64 增量，可能为空）；
         // 就绪判定还要求 data 里有可见文本（纯控制序列不算）。
         return Promise.resolve(started
-          ? { sessionId: 13, active: true, managed: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
+          ? { sessionId: 13, active: true, managed: true, data: b64utf8(wrote ? "ready \u276f 继续" : "ready"), startOffset: 0, endOffset: wrote ? 20 : 5, exited: false, exitCode: null }
           : { sessionId: 13, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
       return Promise.resolve();
@@ -525,7 +538,42 @@ describe("ChatWindow", () => {
       sessionId: 13, cols: 100, rows: 30,
     }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 13, data: "继续" }), { timeout: 2_000 });
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 13, data: "\r" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 13, data: "\r" }), { timeout: 2_000 });
+  });
+
+  it("恢复后发送:正文没有回显时撤销发送、绝不发回车", async () => {
+    // 实拍回归:接管长会话后 claude 弹 resume 确认选择器,而「可见+安静」的就绪判定
+    // 认不出它——正文被选择器吞掉,旧逻辑的无条件回车还会替用户按下默认项:消息蒸发、
+    // 恢复继续、没有任何报错(transcript 里根本没有那条 user 消息)。
+    window.history.replaceState({}, "", "/?sessionId=71");
+    const history = {
+      sessionId: 71, title: "恢复吞字", status: "ended", provider: "claude", cwd: "C:/repo",
+      supported: true, offset: 0, reset: false, pendingReview: null, items: [],
+    };
+    respondWithHistory(history);
+    let started = false;
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve(history);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      if (command === "start_managed_terminal") { started = true; return Promise.resolve(); }
+      if (command === "managed_terminal_snapshot") {
+        // 拉起后有可见画面但正文**永不回显**——未被识别的恢复确认选择器吞输入的形态。
+        return Promise.resolve(started
+          ? { sessionId: 71, active: true, managed: true, data: btoa("resume this session?"), startOffset: 0, endOffset: 20, exited: false, exitCode: null }
+          : { sessionId: 71, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      }
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    const input = await screen.findByRole("textbox", { name: "发送消息给 Agent" }) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "go on" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 71, data: "go on" }), { timeout: 2_000 });
+    // 回显等满超时后:Ctrl-U 撤销、报错可见、输入框保留原文——唯独不能出现的是回车。
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 71, data: "\x15" }), { timeout: 5_000 });
+    expect(invoke).not.toHaveBeenCalledWith("write_managed_terminal", { sessionId: 71, data: "\r" });
+    expect(await screen.findByText(/消息没有进入终端输入框/)).toBeTruthy();
+    expect(input.value).toBe("go on");
   });
 
   it("opens a non-Claude startup trust prompt in the terminal without typing the chat message into it", async () => {
@@ -1125,16 +1173,22 @@ describe("ChatWindow", () => {
       supported: true, offset: 0, reset: false, pendingReview: null, items: [],
     };
     let takenOver = false;
+    let wrote = false;
     // 确认走应用内原生小窗(invoke confirm_dialog):按队列依次给答案,不再 mock 系统 confirm。
     const confirmAnswers: boolean[] = [false, true];
-    invoke.mockImplementation((command: string) => {
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "confirm_dialog") return Promise.resolve(confirmAnswers.shift() ?? false);
       if (command === "get_chat_history") return Promise.resolve(history);
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      // 接管后的重发走写后回显验证(submitToTerminal 的 verify),write 之后补回显。
+      if (command === "write_managed_terminal") {
+        if (String((args as { data?: string } | undefined)?.data ?? "").includes("别起第二个")) wrote = true;
+        return Promise.resolve();
+      }
       if (command === "managed_terminal_snapshot") {
         // 接管前没有托管 PTY；接管后有，且已画出可见内容。
         return Promise.resolve(takenOver
-          ? { sessionId: 15, active: true, managed: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
+          ? { sessionId: 15, active: true, managed: true, data: b64utf8(wrote ? "ready ❯ 别起第二个" : "ready"), startOffset: 0, endOffset: wrote ? 30 : 5, exited: false, exitCode: null }
           : { sessionId: 15, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
       // 进程是否真活着由后端按 pid 判定——前端不再靠 status 猜，而是让这次 start 被拒。
@@ -1326,13 +1380,19 @@ describe("ChatWindow", () => {
       supported: true, offset: 0, reset: false, pendingReview: null, items: [],
     };
     let started = false;
-    invoke.mockImplementation((command: string) => {
+    let wrote = false;
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_chat_history") return Promise.resolve(history);
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "start_managed_terminal") { started = true; return Promise.resolve(); }
+      // 刚拉起的发送走写后回显验证(submitToTerminal 的 verify),write 之后补回显。
+      if (command === "write_managed_terminal") {
+        if (String((args as { data?: string } | undefined)?.data ?? "").includes("继续")) wrote = true;
+        return Promise.resolve();
+      }
       if (command === "managed_terminal_snapshot") {
         return Promise.resolve(started
-          ? { sessionId: 16, active: true, managed: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null }
+          ? { sessionId: 16, active: true, managed: true, data: b64utf8(wrote ? "ready ❯ 继续" : "ready"), startOffset: 0, endOffset: wrote ? 20 : 5, exited: false, exitCode: null }
           : { sessionId: 16, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       }
       return Promise.resolve();

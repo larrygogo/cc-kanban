@@ -2,14 +2,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { checkUpdate, downloadUpdate, getSettings, installDownloadedUpdate, type Settings } from "./api";
 
-export type UpdateStatus = "checking" | "latest" | "available" | "downloading" | "ready" | "error";
+// "unknown"：本会话从未检查过（自动更新被关掉）。不能用 "latest" 顶替——那会让
+// 「关于」页在从未联网确认的情况下显示「已是最新版本」，恰恰误导了最需要手动确认的用户。
+export type UpdateStatus = "checking" | "unknown" | "latest" | "available" | "downloading" | "ready" | "error";
 
 /// 检查更新；对外暴露状态/版本/更新说明/进度，以及下载、安装和手动重检操作。
 /// 非 Tauri 环境（测试/浏览器）或网络失败一律降级为 error，不抛错。
 /// automatic=true 时服从设置里的自动更新开关，延迟检查并后台下载；安装始终由更新窗口确认。
 export function useUpdate(options: { automatic?: boolean; delayMs?: number } = {}) {
   const { automatic = false, delayMs = 10_000 } = options;
-  const [status, setStatus] = useState<UpdateStatus>("checking");
+  // automatic 模式的首个真实检查最早也在 delayMs（默认 10s）之后——初值若是 "checking"，
+  // 「关于」页会顶着「检查中…」空转十秒（其实什么都没在查）。unknown = 尚未检查，只显示版本号。
+  const [status, setStatus] = useState<UpdateStatus>(automatic ? "unknown" : "checking");
   const [version, setVersion] = useState<string | null>(null);
   // 新版本的更新说明（release notes，来自 updater manifest 的 notes 字段），无则 null。
   const [notes, setNotes] = useState<string | null>(null);
@@ -124,7 +128,8 @@ export function useUpdate(options: { automatic?: boolean; delayMs?: number } = {
       if (timer != null) window.clearTimeout(timer);
       if (interval != null) window.clearInterval(interval);
       if (!enabled) {
-        setStatus("latest");
+        // 关掉自动更新 = 没检查，不是「已是最新」。UI 对 unknown 只显示版本号。
+        setStatus("unknown");
         return;
       }
       timer = window.setTimeout(() => {

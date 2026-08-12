@@ -1,6 +1,7 @@
 // 设置窗口的共享状态层：设置对象的默认占位与读写 hook。
 // 各 section（general/appearance/account）与主 About 共用，避免从 About.tsx 反向导入成环。
 import { useRef, useState, useEffect } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { getSettings, setSettings, type Settings } from "../../api";
 
 export const SETTINGS_DEFAULTS: Settings = {
@@ -8,7 +9,8 @@ export const SETTINGS_DEFAULTS: Settings = {
   attention_flash_enabled: true,
   auto_update_enabled: true,
   theme: "dark",
-  opacity: 94,
+  // 与后端 settings.rs 的 default_opacity() 一致：曾占位 94，设置页读数先显 94% 再跳 100。
+  opacity: 100,
   ui_scale: 100,
   resume_terminal: "terminal",
   language: "auto",
@@ -36,8 +38,37 @@ export const SETTINGS_DEFAULTS: Settings = {
 // 既有调用方忽略返回值即可，行为不变。
 export function useSettingsState() {
   const [settings, setSettingsState] = useState<Settings | null>(null);
+  // 最近一次 patch 的失败原因（成功清空）。通用/会话/外观分区此前完全忽略 patch 返回值：
+  // 后端拒收/写盘失败时开关「自己弹回去」零解释——正是本文件头注释想解决、却只在网络
+  // 分区落实了的那件事。各分区渲染同一条错误行即可（见 About.tsx 的 SettingsError）。
+  const [lastError, setLastError] = useState<string | null>(null);
   const ref = useRef<Settings>(SETTINGS_DEFAULTS);
   const loadRef = useRef<Promise<Settings> | null>(null);
+  // 跨窗同步：设置窗与 Onboarding 同开时各持一份快照，整对象写回会把对方刚改的字段
+  // 静默打回去（后端只保护 profiles/onboarding_seen）。订阅广播让本快照跟上任何来源
+  // 的写入；自己 patch 引发的回声是同值覆盖，无害。
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    try {
+      listen<Settings>("settings-changed", (event) => {
+        ref.current = event.payload;
+        setSettingsState(event.payload);
+        loadRef.current = Promise.resolve(event.payload);
+      })
+        .then((dispose) => {
+          if (cancelled) dispose();
+          else unlisten = dispose;
+        })
+        .catch(() => {});
+    } catch {
+      /* 非 Tauri 环境（测试/浏览器） */
+    }
+    return () => {
+      cancelled = true;
+      try { unlisten?.(); } catch { /* noop */ }
+    };
+  }, []);
   // 所有整对象写必须串行。并发 set_settings 不仅会产生“旧请求最后落盘”，还会争用后端
   // 同一个 pid 临时文件；队列同时保证失败回读发生在下一次 patch 之前。
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
@@ -73,6 +104,7 @@ export function useSettingsState() {
         ref.current = next;
         setSettingsState(next);
         await setSettings(next);
+        setLastError(null);
         return null;
       } catch (err) {
         // 后端拒收：等待回读完成再放行队列中的下一次 patch，避免旧回读覆盖新操作。
@@ -81,11 +113,12 @@ export function useSettingsState() {
         } catch {
           // 原始保存错误更有用；回读失败不覆盖它。
         }
+        setLastError(String(err));
         return String(err);
       }
     });
     saveQueue.current = task.then(() => undefined);
     return task;
   };
-  return [settings, patch] as const;
+  return [settings, patch, lastError] as const;
 }

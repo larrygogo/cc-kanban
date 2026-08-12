@@ -31,6 +31,27 @@ describe("CollapsedStrip", () => {
     expect(container.querySelectorAll(".cstrip-waiting").length).toBe(1);
   });
 
+  it("待审批/屏幕阻塞会话显示琥珀点（与看板卡片 cardTone 同口径），不被画成绿色运行点", () => {
+    const data: Item[] = [
+      // DB status 还停在 running，但 broker 正压着审批——必须显示 pending 而不是 running。
+      mk({ session: { id: 1, project_id: 1, cc_session_id: "a", status: "running", started_at: 0, last_event_at: 0, ended_at: null }, pending_review: "approval" }),
+      // 屏幕检测到 blocked（审批弹窗挂在 TUI 上）同理。
+      mk({ session: { id: 2, project_id: 1, cc_session_id: "b", status: "running", started_at: 0, last_event_at: 0, ended_at: null }, screen_state: "blocked" }),
+    ];
+    const { container } = render(<CollapsedStrip data={data} edge="left" onExpand={() => {}} />);
+    expect(container.querySelectorAll(".cstrip-pending").length).toBe(2);
+    expect(container.querySelectorAll(".cstrip-running").length).toBe(0);
+  });
+
+  it("出错会话优先显示红点，即便 status 是 running", () => {
+    const data: Item[] = [
+      mk({ session: { id: 1, project_id: 1, cc_session_id: "a", status: "running", started_at: 0, last_event_at: 0, ended_at: null }, errored: true }),
+    ];
+    const { container } = render(<CollapsedStrip data={data} edge="left" onExpand={() => {}} />);
+    expect(container.querySelectorAll(".cstrip-error").length).toBe(1);
+    expect(container.querySelectorAll(".cstrip-running").length).toBe(0);
+  });
+
   it("disconnected（断开/历史）会话不显示", () => {
     const data: Item[] = [
       mk({ session: { id: 1, project_id: 1, cc_session_id: "a", status: "running", started_at: 0, last_event_at: 0, ended_at: null }, connected: true }),

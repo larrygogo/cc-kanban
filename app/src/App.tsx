@@ -264,7 +264,11 @@ export function App() {
             if (!map.has(l.session.id)) append.push(l);
             map.set(l.session.id, l);
           }
-          const next = [...prev.map((l) => map.get(l.session.id)!), ...append];
+          const merged = [...prev.map((l) => map.get(l.session.id)!), ...append];
+          // connected-first 是**每页内**排序（session_query 对单页做），直接追加会把第 2 页
+          // 的已连接会话排到第 1 页断开会话之下——活跃会话散落在历史会话之间，越滚越乱。
+          // 合并后按 connected 稳定分区恢复全局不变量（两组内部保持原有相对顺序）。
+          const next = [...merged.filter((l) => l.connected), ...merged.filter((l) => !l.connected)];
           if (!search.trim()) unsearchedItemsRef.current[filter] = next;
           return next;
         });
@@ -389,6 +393,13 @@ export function App() {
     }
     setSearch(next);
   }, [filter, search]);
+
+  // 折叠即卸载 Sticker，searchOpen（Sticker 局部态）随之丢失；若搜索词留在这里，
+  // 再展开时列表仍被后端过滤、底栏却没有搜索框，空结果会被误读成「会话全丢了」——折叠时清空。
+  // 走 changeSearch 的完整清空路径（恢复搜索前列表 + 作废在途搜索请求）。
+  useEffect(() => {
+    if (mode === "collapsed" && search) changeSearch("");
+  }, [mode, search, changeSearch]);
 
   // 归档/取消归档会改变当前 tab 的可见性：乐观从列表移除该卡片并调整 counts，卡片即刻消失。
   // 这里不能顺手 refresh()——refresh 是前沿触发，会与尚未落库的 set_archived 赛跑，抢先拉回旧数据
@@ -677,6 +688,17 @@ export function App() {
         outCount = 0;
         return;
       }
+      // 交互保护：搜索框/编辑器有焦点、或菜单开着时不自动收回。键盘输入时手常不在鼠标上，
+      // 光标停在窗外 ~360ms 就折叠 = Sticker 卸载，编辑中的草稿与搜索状态全部丢失。
+      const active = document.activeElement;
+      const interacting =
+        (active instanceof HTMLElement
+          && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable))
+        || document.querySelector(".ctx-menu") != null;
+      if (interacting) {
+        outCount = 0;
+        return;
+      }
       invoke<boolean>("cursor_over_window")
         .then((over) => {
           if (over) {
@@ -720,6 +742,7 @@ export function App() {
         initialLoading={initialLoading}
         loadError={loadError}
         onRetry={retryLoad}
+        snapped={mode !== "normal"}
       />
     </div>
   );

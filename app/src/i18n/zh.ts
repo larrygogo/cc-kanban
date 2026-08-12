@@ -1,6 +1,8 @@
 // 中文字典（基准）。en.ts 用 `typeof zh` 约束 key 与函数签名编译期对齐。
 // 注意：「(未命名会话)」是数据库 sentinel 不在此处——展示层用 sticker.waitingFirstInput 映射。
 export const zh = {
+  // BCP-47 locale：日期/时刻格式化走 Intl（12/24 小时制、月日顺序随语言），不再手拼。
+  locale: "zh-CN",
   // 应用内确认模态(confirm.tsx)的通用按钮。
   dialog: { ok: "确定", cancel: "取消" },
   tabs: { all: "全部", waiting: "待交互", running: "运行中" },
@@ -9,6 +11,11 @@ export const zh = {
     minAgo: (m: number) => `${m} 分钟前`,
     hourAgo: (h: number) => `${h} 小时前`,
     dayAgo: (d: number) => `${d} 天前`,
+    // 「待交互」tab 的时长语义（等最久在前的倒排列表，见 helpers.fmtWaited）。
+    waitedNow: "刚开始等待",
+    waitedMin: (m: number) => `已等待 ${m} 分钟`,
+    waitedHour: (h: number) => `已等待 ${h} 小时`,
+    waitedDay: (d: number) => `已等待 ${d} 天`,
   },
   badge: {
     waiting: "等待输入",
@@ -70,6 +77,9 @@ export const zh = {
     retry: "重试",
     renameFailed: "重命名失败，请稍后再试。",
     noteFailed: "便签保存失败，请稍后再试。",
+    archiveFailed: "归档失败，请稍后再试。",
+    archivedNotice: "已归档，可在「设置 → 会话」找回",
+    archiveUndo: "撤销",
     focusConnecting: "会话正在连接，暂时无法定位终端，请稍后再试。",
     focusHostOnly: "已打开终端窗口，但无法精确定位对应标签页，请手动切换。",
     focusNotFound: "会话仍在运行，但 Meowo 无法定位对应的终端标签页。",
@@ -166,6 +176,12 @@ export const zh = {
     loadEarlier: "加载更早的对话",
     loadingEarlier: "正在加载…",
     loadError: "读取对话失败，正在重试",
+    jumpLatest: "回到最新",
+    codeCopy: "复制",
+    codeCopied: "已复制",
+    questionExpired: "提问卡等待超时已收起，可回终端页继续作答",
+    terminalApprovalBanner: "有 1 条待授权的工具调用（终端里不会显示，agent 在等你）",
+    terminalApprovalGo: "去处理",
     you: "你",
     assistant: "Agent",
     toolResult: "工具结果",
@@ -285,6 +301,7 @@ export const zh = {
     composerGateEnded: "会话已结束。恢复后即可继续对话。",
     resumeSession: "恢复会话",
     terminalNeedsAttention: "Agent 正在等待启动确认，请直接在当前对话页的交互卡片中完成选择，然后重新发送。",
+    sendEchoTimeout: "消息没有进入终端输入框——刚恢复的会话可能正停在恢复确认或启动提示上。已撤销这次发送，请切到终端页确认状态后重试。",
     queuedInterjections: (n: number) => `${n} 条插话已排队,当前回合结束后处理`,
     queuedAttachmentOnly: "(附件)",
     interjectNow: "立即插话",
@@ -319,6 +336,9 @@ export const zh = {
     sidebarExpand: "展开会话列表",
     sidebarEmpty: "暂无会话",
     sidebarEmptyDir: "该目录下暂无会话",
+    sidebarSearch: "搜索标题 / 仓库…",
+    sidebarSearchClear: "清空搜索",
+    sidebarEmptySearch: "没有匹配的会话",
     sidebarLoading: "正在加载会话…",
     sidebarDirAll: "全部目录",
     sidebarShowIdle: (n: number) => `显示 ${n} 个未运行会话`,
@@ -466,8 +486,9 @@ export const zh = {
     themeDark: "深色",
     themeLight: "浅色",
     themeSystem: "跟随系统",
-    fontSize: "字体大小",
-    fontSizeDesc: "调整贴纸卡片的字号",
+    fontSize: "界面缩放",
+    // 间距/徽标已随字号同比缩放（--sp/--fs 阶梯整梯乘 --cc-ui），叫「字体大小」名不副实。
+    fontSizeDesc: "调整贴纸窗口的字号与间距（其余窗口不受影响）",
     fontSizeSmall: "小",
     fontSizeNormal: "中",
     fontSizeLarge: "大",
@@ -581,9 +602,11 @@ export const zh = {
     login: "登录",
     loggingIn: "等待登录…",
     cancelLogin: "取消等待",
-    loginCancelled: "已取消等待登录。若已在终端登录完成，点刷新即可",
+    // 不能写「点刷新」：刷新按钮只在已登录态渲染，未登录用户照着找会发现根本没有那个按钮。
+    // 窗口聚焦会自动重查账号态，文案照实说。
+    loginCancelled: "已取消等待登录。若已在终端登录完成，切回本窗口会自动检测",
     loginFailed: "拉起登录失败",
-    loginTimeout: "未检测到登录完成。若已在终端登录，请点刷新",
+    loginTimeout: "未检测到登录完成。若已在终端登录，切回本窗口会自动检测",
     // API Key 登录（gemini：官方已停掉个人账号的 OAuth，key 是唯一活路）
     apiKeyLogin: "API Key 登录",
     apiKeyPlaceholder: "粘贴 API Key",
@@ -613,6 +636,7 @@ export const zh = {
     relayBadge: "中转",
     relayActive: "正在使用 API 中转；官方账号配额不适用",
     refresh: "刷新",
+    usageUpdatedAt: (time: string) => `更新于 ${time}`,
     quota5h: "5 小时配额",
     quota7d: "7 天配额",
     quotaOpus: "Opus · 7 天",
@@ -628,7 +652,8 @@ export const zh = {
     resetInHourMin: (h: number, m: number) => `${h} 小时 ${m} 分后重置`,
     resetTomorrow: (clock: string) => `明天 ${clock} 重置`,
     resetDayAfter: (clock: string) => `后天 ${clock} 重置`,
-    resetOnDate: (mo: number, d: number, clock: string) => `${mo} 月 ${d} 日 ${clock} 重置`,
+    // date 由 Intl.DateTimeFormat(t.locale) 生成（zh-CN 形如「1月5日」），不再手拼月/日。
+    resetOnDate: (date: string, clock: string) => `${date} ${clock} 重置`,
     laneFiveHour: "5 小时配额",
     laneSevenDay: "7 天配额",
     laneOpus: "Opus · 7 天",
@@ -645,9 +670,13 @@ export const zh = {
     download: "下载更新",
     ready: "更新已下载，可以重启安装",
     restart: "重启并更新",
+    // 重启会终止全部 Meowo 托管的 PTY 会话（退出收尾 shutdown，见 lib.rs RunEvent::Exit）——
+    // 有托管会话在跑时必须先确认，不能静默杀掉。
+    restartConfirm: (n: number) => `有 ${n} 个由 Meowo 托管的会话正在运行，重启会中断它们。仍要重启并更新吗？`,
     downloading: "正在下载更新…",
     downloadingPct: (p: number) => `正在下载更新… ${p}%`,
-    restartHint: "下载完成后不会打断当前工作",
+    // 只承诺下载阶段：安装需要重启，托管中的会话会被中断（曾写「不会打断当前工作」误导用户）。
+    restartHint: "下载在后台进行，不打断当前工作；安装需重启 Meowo，托管中的会话会中断",
     error: "检查更新失败，请检查网络后重试",
     retry: "重试",
     recheck: "重新检查",
@@ -657,6 +686,7 @@ export const zh = {
     updateTo: (v: string) => `更新到 v${v}`,
     checking: "检查中…",
     checkUpdate: "检查更新",
+    checkFailed: "检查更新失败",
     foundNew: (v: string) => `发现新版本 v${v}`,
     upToDate: "已是最新版本",
     versionInfo: "版本信息",
@@ -709,6 +739,9 @@ export const zh = {
         "从系统托盘 / 菜单栏图标随时找回贴纸、打开设置。",
         "主题明暗、通知、开机自启等都在设置里调整。",
       ],
+      // 仅 Windows 追加（Onboarding 按平台拼接）：吸边是最有辨识度的窗口能力，却一直
+      // 没人教——用户误吸附后以为「窗口不见了」，是实拍过的求助场景。
+      snapPoint: "拖到屏幕左 / 右 / 顶边缘可收成缩略条，悬停展开、拖离边缘恢复。",
       reopenHint: "以后可以从托盘 / 菜单栏图标或设置页重新打开本引导。",
     },
     setup: {

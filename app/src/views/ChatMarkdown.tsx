@@ -1,7 +1,8 @@
-import { memo, type ReactNode } from "react";
+import { memo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openLink } from "../api";
+import { useT } from "../i18n";
 
 const PLUGINS = [remarkGfm];
 
@@ -70,7 +71,43 @@ function renderGrid(text: string): ReactNode[] {
   return out;
 }
 
+/** 带复制按钮与语言角标的代码块外壳。AI 输出的代码是最高频「要拿走」的内容，
+ *  此前只能跨滚动区手动框选。文本从 DOM 取（innerText）——网格重排（chat-md-diagram）
+ *  后 children 已不是纯文本，从 props 拼会丢字。 */
+function CopyablePre({ children }: { children?: ReactNode }) {
+  const t = useT();
+  const preRef = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    const text = preRef.current?.innerText ?? "";
+    if (!text) return;
+    const done = () => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    };
+    if (navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(text).then(done).catch(() => {});
+    }
+  };
+  // 语言角标：react-markdown 给 code 子元素挂 language-xxx 类，从子节点 props 里读。
+  let lang: string | null = null;
+  if (children && typeof children === "object" && "props" in children) {
+    const cls = (children as { props?: { className?: string } }).props?.className ?? "";
+    lang = /language-(\w+)/.exec(cls)?.[1] ?? null;
+  }
+  return (
+    <div className="chat-md-pre">
+      <pre ref={preRef}>{children}</pre>
+      <div className="chat-md-pre-tools">
+        {lang && <span className="chat-md-lang">{lang}</span>}
+        <button type="button" onClick={copy}>{copied ? t.chat.codeCopied : t.chat.codeCopy}</button>
+      </div>
+    </div>
+  );
+}
+
 const components: Components = {
+  pre: ({ children }) => <CopyablePre>{children}</CopyablePre>,
   // ASCII 框图的对齐前提是「中文恰为两倍拉丁宽」，但代码字体 Consolas 没有中文字形，
   // 中文会回退到比例失配的雅黑；Windows 自带字体里也不存在框线半角 + 中文两倍宽的组合。
   // 故检测到框线字符的代码块直接按网格重排（见 renderGrid）；普通代码块原样输出。

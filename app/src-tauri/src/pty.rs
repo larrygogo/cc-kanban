@@ -11,7 +11,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use tauri::{Emitter, Manager};
 
@@ -188,6 +188,10 @@ struct ManagedPty {
     subscribers: Mutex<Vec<AttachSubscriber>>,
     /// 屏幕检测状态（终端仿真 + 防抖）。见 [`ScreenProbe`]。
     probe: ScreenProbe,
+    /// 最近一次生效的 PTY 尺寸（cols<<16|rows 打包，0 = 尚未设置）。resize 的同值短路用：
+    /// 前端切换视图/多视图并存时会重复下发同一尺寸，不短路的话每次都是一发 SIGWINCH、
+    /// TUI 整屏重排 + 屏幕状态机扫描位点清零。
+    last_size: AtomicU32,
 }
 
 /// 一个在线的外部同步终端（attach 客户端）。pid 是客户端上报的自身进程号，供查重
@@ -460,40 +464,82 @@ fn stop_stage(stop_requested_at: Option<std::time::Instant>, now: std::time::Ins
     }
 }
 
+/// 有界拿锁：try_lock 轮询到 deadline，拿不到返回 None；中毒锁按全仓策略恢复
+/// （确认框同款 into_inner，见 confirm.rs）。
+///
+/// **保证路径（waiter 升级链、finalize、shutdown）绝不允许无界 `lock()`**——`master`
+/// 锁的持有者可能正卡死在 ConPTY syscall 里：conhost 僵死时 ResizePseudoConsole /
+/// ClosePseudoConsole 都会永不返回（实拍：外部 attach 的握手 resize 先卡死持锁，
+/// 「结束会话」的升级链再无界等锁，waiter 线程陪葬，ForceFinalize 永远轮不到——
+/// 0.5.13 仍「结束不了」的直接根因）。
+fn lock_within<T>(
+    mutex: &Mutex<T>,
+    wait: std::time::Duration,
+) -> Option<std::sync::MutexGuard<'_, T>> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// stop 升级第二档：补刀 + 杀子孙树 + 关伪终端。child 锁只包 kill 那一下，杀树在锁外
 /// （按 spawn 时捕获的 child_pid 查即时快照，root 此刻还活着，子孙表可信）。
 /// drop master（ClosePseudoConsole）让 conhost 退出——这是解除「卡死在 ConPTY 内核
 /// I/O」的唯一杠杆：conhost 一死，挂在管道上的内核等待多半随之解除，TerminateProcess
 /// 才能真正生效。
-fn escalate_stop(managed: &ManagedPty) {
-    if let Ok(mut child) = managed.child.lock() {
+///
+/// 本函数在 waiter 线程上同步调用，而 waiter 还要负责推进 ForceFinalize 档，故这里
+/// **一步都不许阻塞**：锁全部有界（持有者可能卡死在 ConPTY syscall，见 lock_within），
+/// ClosePseudoConsole 丢牺牲线程——conhost 僵死时它同样永不返回，让那根线程带着句柄
+/// 躺着（与 reader/writer 同一纪律），换 waiter 的 3s 兜底必定触发。锁拿不到时放弃的
+/// 只是「关伪终端」这根杠杆，收尾与 UI 解锁由 ForceFinalize 无条件保证。
+fn escalate_stop(managed: &Arc<ManagedPty>) {
+    if let Some(mut child) = lock_within(&managed.child, std::time::Duration::from_millis(500)) {
         let _ = child.kill();
     }
     if let Some(pid) = managed.child_pid {
         crate::proc::kill_descendants(pid);
     }
-    if let Ok(mut master) = managed.master.lock() {
-        drop(master.take());
-    }
+    let cleanup = managed.clone();
+    std::thread::spawn(move || {
+        if let Some(mut master) = lock_within(&cleanup.master, std::time::Duration::from_secs(5)) {
+            drop(master.take());
+        }
+    });
 }
 
 /// PTY 会话的唯一收尾路径：写库、通知看板与对话窗、掐断 attach、释放伪终端。
 /// 幂等（finalized 原子门），由两处触发——waiter 轮询到进程退出（主力：Windows ConPTY
 /// 在子进程退出后**不会**给 reader EOF，本机实证连 drop master 都唤不醒阻塞中的 read），
 /// 以及 reader 万一真读到 EOF。收尾**从不等待 reader**；它若永远阻塞，就带着句柄躺着。
+/// 同理**从不无界等锁**：这是「结束必定生效」的最后一档，completed/sessions/emit/写库
+/// 必须无条件执行——锁有界、可能卡死的 ConPTY 释放丢牺牲线程（见 lock_within 的实拍）。
 fn finalize_exit(broker: &PtyBroker, app: &tauri::AppHandle, managed: &Arc<ManagedPty>) {
     if managed.finalized.swap(true, Ordering::AcqRel) {
         return;
     }
-    let code = managed
-        .child
-        .lock()
-        .ok()
+    // reap 本身有界（宽限 + kill 后限时收尸，见 reap_child），锁也必须有界：child 锁的
+    // 持有者理论上都短持，但保证路径不赌这个——拿不到就放弃退出码，一个退出码不值得
+    // 拿整个收尾陪葬（与 reap 内部的原则一脉相承）。
+    let code = lock_within(&managed.child, std::time::Duration::from_millis(500))
         .and_then(|mut child| reap_child(child.as_mut()));
-    // 释放伪终端让 conhost 退出。它救不了阻塞的 reader，但能停掉资源。
-    if let Ok(mut master) = managed.master.lock() {
-        drop(master.take());
-    }
+    // 释放伪终端让 conhost 退出。它救不了阻塞的 reader，但能停掉资源。牺牲线程 + 有界
+    // 拿锁：conhost 僵死时 ClosePseudoConsole 永不返回，锁的持有者（卡死的 resize）也
+    // 永不放手——两种形态都不许把收尾拖死在这一步。
+    let cleanup = managed.clone();
+    std::thread::spawn(move || {
+        if let Some(mut master) = lock_within(&cleanup.master, std::time::Duration::from_secs(5)) {
+            drop(master.take());
+        }
+    });
     let session_id = managed.session_id.load(Ordering::Acquire);
     let final_data = managed
         .backlog
@@ -797,6 +843,11 @@ fn size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
+/// cols/rows 打包进一个 u32（resize 同值短路的原子比较用）。0 保留为「尚未设置」。
+fn pack_size(cols: u16, rows: u16) -> u32 {
+    (u32::from(cols) << 16) | u32::from(rows)
+}
+
 impl PtyBroker {
     pub(crate) fn set_app_handle(&self, app: tauri::AppHandle) {
         if let Ok(mut current) = self.attach.app.lock() {
@@ -1006,6 +1057,7 @@ impl PtyBroker {
             subscribers: Mutex::new(Vec::new()),
             finalized: AtomicBool::new(false),
             probe: ScreenProbe::new(pty_size.rows, pty_size.cols, provider.to_string()),
+            last_size: AtomicU32::new(pack_size(pty_size.cols, pty_size.rows)),
         });
         // writer 线程：唯一直接触碰 ConPTY 输入管道的地方。写失败（管道断）即退出；
         // ManagedPty 被收尾丢弃后 tx 断开，recv 出错线程随之结束。它若卡死在一次
@@ -1337,10 +1389,18 @@ impl PtyBroker {
             .cloned()
             .ok_or("PTY 会话未运行")?;
         let clamped = size(cols, rows);
-        let result = session
-            .master
-            .lock()
-            .map_err(|_| "PTY 尺寸锁已损坏")?
+        // 同值短路：前端切视图/attach 客户端并存时会重复下发同一尺寸，每次都过
+        // master.resize = 一发 SIGWINCH（TUI 整屏重排）+ 扫描位点清零，纯浪费还闪屏。
+        let packed = pack_size(clamped.cols, clamped.rows);
+        if session.last_size.load(Ordering::Acquire) == packed {
+            return Ok(());
+        }
+        // 有界拿锁：ResizePseudoConsole 在 conhost 僵死时**永不返回**，第一个撞上的调用
+        // 会握着 master 锁卡死在 syscall 里（牺牲掉自己所在的 IPC/attach 线程）。后来者
+        // 必须在这里快速失败，不能一个个排进同一把锁把线程池搭光；升级链/收尾同样等着
+        // 这把锁的有界让路（见 escalate_stop / finalize_exit）。
+        let result = lock_within(&session.master, std::time::Duration::from_millis(500))
+            .ok_or("PTY 尺寸通道忙（可能已僵死），本次调整跳过")?
             .as_ref()
             .ok_or("PTY 已结束")?
             .resize(clamped)
@@ -1349,6 +1409,7 @@ impl PtyBroker {
         // 同时清掉扫描位点：新尺寸下 grid 重排，即便字节数没变也该重判一次
         //（正常路径上 SIGWINCH 会触发 TUI 重绘、字节数自然会变，这里是兜底）。
         if result.is_ok() {
+            session.last_size.store(packed, Ordering::Release);
             if let Some(parser) = session.probe.parser.as_ref() {
                 if let Ok(mut parser) = parser.lock() {
                     parser.screen_mut().set_size(clamped.rows, clamped.cols);
@@ -1544,8 +1605,16 @@ impl PtyBroker {
             let _ = std::fs::remove_file(dir.join(APPROVAL_BROKER_FILE));
         }
         if let Ok(mut sessions) = self.sessions.lock() {
+            // ClosePseudoConsole 对僵死的 conhost 永不返回，退出路径同样不许被它拖死
+            //（表现为窗口没了、进程残留）：句柄批量取出丢牺牲线程。正常情况毫秒级关完、
+            // 赶在进程退出前生效；僵死情况同步关也一样关不掉，不欠新的孤儿。
+            let mut masters = Vec::new();
             for (_, managed) in sessions.drain() {
-                if let Ok(mut child) = managed.child.lock() {
+                // 锁有界（保证路径纪律，见 lock_within）：拿不到 child 锁时 kill_descendants
+                // 仍按 pid 兜杀，直接子进程随后被杀树/句柄回收覆盖。
+                if let Some(mut child) =
+                    lock_within(&managed.child, std::time::Duration::from_millis(500))
+                {
                     let _ = child.kill();
                 }
                 // kill 只及直接子进程（portable-pty 不建 Job Object）：agent 拉起的
@@ -1554,9 +1623,14 @@ impl PtyBroker {
                     crate::proc::kill_descendants(pid);
                 }
                 // 同 stop：不关伪终端的话 conhost 会作为孤儿留在系统里。
-                if let Ok(mut master) = managed.master.lock() {
-                    drop(master.take());
+                if let Some(mut master) =
+                    lock_within(&managed.master, std::time::Duration::from_millis(500))
+                {
+                    masters.push(master.take());
                 }
+            }
+            if !masters.is_empty() {
+                std::thread::spawn(move || drop(masters));
             }
         }
     }
@@ -1609,9 +1683,9 @@ impl PtyBroker {
     /// 最近一个上报 pid 的订阅者，供反查实际宿主，绝不看「恢复终端」设置——设置与视图
     /// 实际所在的应用可能不一致。
     ///
-    /// 目前仅 macOS 的 attach 查重调用（Windows 刻意不做，见 attach_in_external_terminal）；
+    /// Windows/macOS 的 attach 查重共用（见 attach_in_external_terminal）；
     /// 逻辑平台无关，留在 cfg 外全平台编译与单测。
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     pub(crate) fn external_viewer(&self, session_id: i64) -> ExternalViewer {
         let Some(session) = self
             .sessions
@@ -1974,9 +2048,6 @@ impl PtyBroker {
         // 重绑成真实 id；握手里带的还是旧 id，按绑定表翻译后再查，否则「新会话开在外部
         // 终端」会间歇性打开一扇只写着「PTY 会话未运行」的死窗口。
         let session_id = self.binding(session_id).unwrap_or(session_id);
-        if let Err(error) = self.resize(session_id, cols, rows) {
-            return refuse(stream, error);
-        }
         let session = match self
             .sessions
             .lock()
@@ -2022,6 +2093,16 @@ impl PtyBroker {
             // PTY 退出时 subscribers 随 ManagedPty 一起 drop；关闭 socket 唤醒客户端与服务端读循环。
             let _ = output.shutdown(Shutdown::Both);
         });
+
+        // 尺寸对齐放在订阅+回放**之后**且只 best-effort：resize 要过 master 锁 + 一次
+        // ResizePseudoConsole，conhost 僵死时两者都可能卡死/失败。此前它排在回放之前
+        // 还带一票否决（refuse），僵死会话的外部终端于是一个字节都收不到——纯黑屏，
+        // 连「定格的最后画面」这条诊断线索都没有（实拍）。backlog 在我们自己内存里，
+        // 与 conhost 死活无关；失败的代价只是尺寸不齐，画面凑合能看、回放照常。
+        // 会话真不存在的拒绝由上方 sessions 查询兜底，不靠 resize 探测。
+        if let Err(error) = self.resize(session_id, cols, rows) {
+            eprintln!("attach 握手 resize 失败（尺寸未对齐，回放照常）: {error}");
+        }
 
         stream.set_read_timeout(None).ok();
         // 出错也必须走下方的 subscriber 清理，不能 `?` 提前返回——残留的订阅项会让
@@ -2437,6 +2518,37 @@ mod tests {
         );
     }
 
+    /// 有界拿锁的三种结局。占用超时必须在上限附近返回——这是保证路径（waiter 升级链 /
+    /// finalize / shutdown）不被卡死在 ConPTY syscall 里的持锁者拖死的根基
+    /// （0.5.13「结束会话仍无效」的回归）。中毒按全仓策略恢复，破坏性收尾不因一次
+    /// 别处 panic 永久失效。
+    #[test]
+    fn lock_within_gives_up_on_held_lock_and_recovers_poison() {
+        let mutex = Arc::new(Mutex::new(0u8));
+        assert!(lock_within(&mutex, std::time::Duration::from_millis(20)).is_some());
+        let guard = mutex.lock().unwrap();
+        let start = std::time::Instant::now();
+        assert!(
+            lock_within(&mutex, std::time::Duration::from_millis(50)).is_none(),
+            "锁被占:到点放弃"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "必须在超时上限附近返回"
+        );
+        drop(guard);
+        let poisoner = mutex.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("毒化锁");
+        })
+        .join();
+        assert!(
+            lock_within(&mutex, std::time::Duration::from_millis(20)).is_some(),
+            "中毒恢复,不永久失效"
+        );
+    }
+
     /// stop 升级链的档位判定：纯时间点注入，避开线程/时序 flakiness。
     #[test]
     fn stop_stage_escalates_by_elapsed_time() {
@@ -2518,6 +2630,7 @@ mod tests {
             output_end: AtomicU64::new(0),
             subscribers: Mutex::new(Vec::new()),
             probe: ScreenProbe::new(24, 80, "claude".into()),
+            last_size: AtomicU32::new(0),
         })
     }
 
@@ -2580,8 +2693,7 @@ mod tests {
             " Bash command\r\n Do you want to proceed?\r\n \u{276F} 1. Yes\r\n   2. No\r\n"
                 .as_bytes(),
         );
-        let after_grace =
-            probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);
+        let after_grace = probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);
         assert_eq!(
             probe.tick(u64::MAX, after_grace),
             Some(crate::detect::ScreenState::Blocked)
@@ -2594,8 +2706,7 @@ mod tests {
     #[test]
     fn osc_progress_reaches_the_rules() {
         let probe = ScreenProbe::new(24, 80, "claude".into());
-        let after_grace =
-            probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);
+        let after_grace = probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);
         // 屏幕上只有历史输出、标题也不带 ✳：唯一的空闲证据就是进度清零。
         feed_screen(&probe, b"\x1b]0;my-terminal\x07");
         feed_screen(&probe, "  cargo build finished\r\n".as_bytes());
@@ -2617,8 +2728,7 @@ mod tests {
     #[test]
     fn screen_probe_takes_provider_from_caller_not_argv() {
         let probe = ScreenProbe::new(24, 80, "claude".into());
-        let after_grace =
-            probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);
+        let after_grace = probe.started_at + DETECT_STARTUP_GRACE + std::time::Duration::from_secs(1);
         feed_screen(&probe, "\x1b]0;\u{2733} claude\x07".as_bytes());
         assert_eq!(
             probe.tick(1, after_grace),

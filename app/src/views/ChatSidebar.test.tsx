@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
@@ -373,8 +373,10 @@ describe("ChatSidebar", () => {
     const itemNames = () =>
       within(screen.getByRole("navigation"))
         .getAllByRole("button")
-        .filter((b) => b.className.includes("chat-sidebar-item"))
-        .map((b) => b.querySelector(".chat-sidebar-name-text")?.textContent);
+        // "chat-sidebar-item" 子串会连 ⋯ 按钮（chat-sidebar-item-menu）一起捞进来——
+        // 首帧默认已改 button 模式，⋯ 常驻，按有无标题文本过滤。
+        .map((b) => b.querySelector(".chat-sidebar-name-text")?.textContent)
+        .filter((n): n is string => n != null);
     // 默认「最近活跃」：后端给什么顺序就是什么顺序。
     expect(itemNames()).toEqual(["beta", "alpha", "等待首次输入"]);
 
@@ -391,15 +393,18 @@ describe("ChatSidebar", () => {
    */
   describe("会话菜单", () => {
     const listed = [session(1, "改侧栏", { connected: true }), session(2, "旧任务")];
-    /** menuMode 跟随「卡片菜单」设置：不传 = 右键模式（getSettings 无响应时的占位默认）。 */
-    const renderList = async (activeId = 1, cardMenuMode?: "button" | "context") => {
+    /** menuMode 跟随「卡片菜单」设置。首帧占位已与生产默认(button)对齐，右键模式必须
+     *  显式注入 context 设置——本组右键用例默认注入并等设置套用。 */
+    const renderList = async (activeId = 1, cardMenuMode: "button" | "context" = "context") => {
       invoke.mockImplementation((command: string) => {
         if (command === "get_live_sessions_page") return Promise.resolve(listed);
-        if (command === "get_settings" && cardMenuMode) return Promise.resolve({ card_menu_mode: cardMenuMode });
+        if (command === "get_settings") return Promise.resolve({ card_menu_mode: cardMenuMode });
         return Promise.resolve();
       });
       render(<ChatSidebar activeId={activeId} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
       await screen.findByRole("button", { name: /改侧栏/ });
+      // 等注入的 card_menu_mode 套用（getSettings 是异步的，右键在此之前不生效）。
+      await act(async () => {});
     };
 
     it("右键条目弹出菜单，归档走 set_archived 并把条目乐观摘掉", async () => {
@@ -416,9 +421,11 @@ describe("ChatSidebar", () => {
     it("归档当前会话：摘掉它并切到下一条", async () => {
       const onSelect = vi.fn();
       invoke.mockImplementation((command: string) =>
-        Promise.resolve(command === "get_live_sessions_page" ? listed : undefined));
+        Promise.resolve(command === "get_live_sessions_page" ? listed
+          : command === "get_settings" ? { card_menu_mode: "context" } : undefined));
       render(<ChatSidebar activeId={1} approvalAwaitingIds={new Set()} onSelect={onSelect} onCollapse={() => {}} />);
       await screen.findByRole("button", { name: /改侧栏/ });
+      await act(async () => {});
       fireEvent.contextMenu(screen.getByRole("button", { name: /改侧栏/ }));
       fireEvent.click(await screen.findByRole("menuitem", { name: "归档" }));
       expect(invoke).toHaveBeenCalledWith("set_archived", { sessionId: 1, archived: true });
@@ -430,9 +437,11 @@ describe("ChatSidebar", () => {
     it("归档别的会话不动当前对话", async () => {
       const onSelect = vi.fn();
       invoke.mockImplementation((command: string) =>
-        Promise.resolve(command === "get_live_sessions_page" ? listed : undefined));
+        Promise.resolve(command === "get_live_sessions_page" ? listed
+          : command === "get_settings" ? { card_menu_mode: "context" } : undefined));
       render(<ChatSidebar activeId={1} approvalAwaitingIds={new Set()} onSelect={onSelect} onCollapse={() => {}} />);
       await screen.findByRole("button", { name: /改侧栏/ });
+      await act(async () => {});
       fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
       fireEvent.click(await screen.findByRole("menuitem", { name: "归档" }));
       expect(onSelect).not.toHaveBeenCalled();
@@ -485,11 +494,13 @@ describe("ChatSidebar", () => {
       invoke.mockImplementation((command: string) => {
         if (command === "get_live_sessions_page") return Promise.resolve([session(2, "旧任务", { note: "先跑一遍测试" })]);
         if (command === "set_session_note") return Promise.reject(new Error("db busy"));
+        if (command === "get_settings") return Promise.resolve({ card_menu_mode: "context" });
         return Promise.resolve();
       });
       render(<ChatSidebar activeId={0} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
       // 已有便签直接显示在条目里——写了看不见的备忘等于没写。
       expect(await screen.findByText("先跑一遍测试")).toBeTruthy();
+      await act(async () => {});
       fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
       fireEvent.click(await screen.findByRole("menuitem", { name: "编辑便签" }));
       const input = screen.getByPlaceholderText("写点备忘…");

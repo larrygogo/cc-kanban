@@ -1855,16 +1855,37 @@ pub(crate) async fn takeover_managed_terminal(
 /// 在用户选定的外部终端里起 attach 客户端，把托管 PTY 镜像过去。
 /// Agent 与 PTY 都不迁移——外部窗口只是同一个 PTY 的第二个视图。
 ///
-/// **macOS 上先查重**：该会话已有在线的外部视图（broker 订阅表非空）时不再开新窗口，
-/// 只把宿主终端应用带到前台。没有这层，每点一次卡片就多一个镜像窗口——Ghostty 尤甚
-/// （`open -na` 每次都是整个新实例）。Windows 不做：wt 开的是新标签页且我们拿不到
-/// attach 客户端的窗口句柄，「激活到不确定的窗口」比多开一个标签更糟。
+/// **两个平台都先查重**：该会话已有在线的外部视图（broker 订阅表非空）时不再开新窗口，
+/// 把已有视图带到前台。没有这层，每点一次卡片就多一个镜像窗口/标签——默认设置
+/// （session_open_in=terminal）下点连接中的卡片就是这条路，连点几下就冒出几个标签。
+/// macOS 按订阅者 pid 反查宿主精确聚焦；Windows 拿不到 attach 客户端所在的具体标签，
+/// 但能按进程组命中宿主顶层窗口（与 focus_session_terminal 的兜底同一套原语）——
+/// 「窗口级置前」不如精确切标签，但远好于无限多开。
 pub(crate) fn attach_in_external_terminal(
     broker: &crate::pty::PtyBroker,
     sid: i64,
 ) -> Result<(), String> {
     broker.ensure_attachable(sid)?;
     let terminal = load_settings().resume_terminal;
+    #[cfg(target_os = "windows")]
+    match broker.external_viewer(sid) {
+        crate::pty::ExternalViewer::Pid(pid) => {
+            // attach 客户端是控制台程序，宿主（WindowsTerminal/conhost/wezterm）是它的
+            // 进程组祖先，窗口 pid 落在组内 → find_window_for_pids 可靠命中正确窗口。
+            // 聚焦失败必须报错让用户看见（同 macOS 分支原则）：静默成功就是「点了没反应」，
+            // 而静默新开则回到「连点冒标签」的老问题。
+            let targets = console_group_pids(pid);
+            if let Some(hwnd) = find_window_for_pids(&targets) {
+                force_foreground(hwnd);
+                return Ok(());
+            }
+            return Err("外部同步终端已在线，但未能将其带到前台，请手动切换到对应窗口".into());
+        }
+        // 旧 reporter 的订阅没有 pid：无从定位，维持原行为（新开一扇）。
+        crate::pty::ExternalViewer::Legacy => {}
+        // 无在线视图 → 落到下方正常新开一扇。
+        crate::pty::ExternalViewer::None => {}
+    }
     // 在线判定与激活目标一次取齐（见 ExternalViewer）：拆成两问会被「关窗口同时点卡片」
     // 的 detach 竞态穿插，把新 reporter 误判成旧 reporter、按设置激活错误应用。
     #[cfg(target_os = "macos")]
@@ -1982,6 +2003,25 @@ pub(crate) fn start_managed_resume_sized(
     let (resolved, mut resume) = resolve_resume_plan(&session_id, cwd.as_deref(), &provider);
     if resume.is_empty() {
         return Err("该 Agent 不支持恢复会话".into());
+    }
+    // 可判定的失败前置判定：CLI 被卸载 / 项目目录没了时，spawn 只会抛一句原始系统错误
+    // （`os error 2` 之类），用户拿不到任何可执行的下一步。这两种失败都有明确修复动作，
+    // 在做乐观复活/账号迁移等副作用之前就拦下（新建路径的 validate_new_session_cwd 同理，
+    // 恢复路径此前漏了）。
+    if let Some(plugin) = meowo_agent::resolve(Some(&provider)) {
+        if !plugin.is_installed() {
+            return Err(format!(
+                "{} 未安装或已被卸载，无法恢复会话。请到 设置 → Agent 重新安装",
+                plugin.display_name()
+            ));
+        }
+    }
+    if let Some(dir) = resolved.as_deref() {
+        if !std::path::Path::new(dir).is_dir() {
+            return Err(format!(
+                "项目目录已不存在：{dir}。目录被移动或删除后无法在原位置恢复会话"
+            ));
+        }
     }
     // 回放会话的启动选项（权限模式等；接管时的改选合并写回），恢复后的进程与选择同参。
     splice_stored_launch_args(&mut resume, &provider, sid, option_overrides.as_ref());

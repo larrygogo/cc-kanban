@@ -1,5 +1,5 @@
 // 卡片右键/菜单按钮弹出的操作菜单：置顶/便签/重命名/归档/新建会话/打开目录。
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useT } from "../../i18n";
 import { ArchiveIcon, FolderIcon, NoteIcon, PencilIcon, PlusIcon, StopIcon, TopIcon } from "./icons";
 
@@ -73,23 +73,63 @@ export function CardContextMenu({
       e.preventDefault();
       onClose();
     };
+    // 菜单外滚动关闭：fixed 定位下列表滚走后菜单钉在原地、指向另一张卡（与 menu.tsx 的
+    // 下拉同款策略；菜单自身无滚动内容，不用区分内外目标——ctx-menu 不限高）。
+    const closeOnScroll = (e: Event) => {
+      if (ref.current && e.target instanceof Node && ref.current.contains(e.target)) return;
+      onClose();
+    };
     document.addEventListener("click", clickAway, true);
     document.addEventListener("contextmenu", ctxAway, true);
     document.addEventListener("keydown", key);
     window.addEventListener("blur", onClose);
+    window.addEventListener("scroll", closeOnScroll, true);
     return () => {
       document.removeEventListener("click", clickAway, true);
       document.removeEventListener("contextmenu", ctxAway, true);
       document.removeEventListener("keydown", key);
       window.removeEventListener("blur", onClose);
+      window.removeEventListener("scroll", closeOnScroll, true);
     };
   }, [onClose]);
+  // 键盘可达：挂载即把焦点搬进首项（菜单 DOM 挂在列表滚动区之外，Tab 永远走不进来——
+  // 这曾让置顶/便签/重命名/归档对键盘用户完全不可达）；关闭时焦点仍在菜单内才归还给
+  // 打开前的元素（鼠标用户点外部关闭时焦点已在别处，不抢；某项动作打开了编辑框时，
+  // 编辑框的 autoFocus 在归还之后生效、优先级更高）。
+  useEffect(() => {
+    const prev = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    ref.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+    return () => {
+      if (document.activeElement === document.body || ref.current?.contains(document.activeElement)) {
+        prev?.focus();
+      }
+    };
+  }, []);
+  // roving focus：↑↓/Home/End 搬 DOM 焦点，Enter/Space 激活当前项（与 menu.tsx 同款）。
+  const onMenuKeyDown = (e: ReactKeyboardEvent) => {
+    const items = Array.from(ref.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+    if (items.length === 0) return;
+    const cur = items.indexOf(document.activeElement as HTMLElement);
+    let next: number;
+    if (e.key === "ArrowDown") next = cur >= 0 ? (cur + 1) % items.length : 0;
+    else if (e.key === "ArrowUp") next = cur >= 0 ? (cur - 1 + items.length) % items.length : items.length - 1;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = items.length - 1;
+    else if ((e.key === "Enter" || e.key === " ") && cur >= 0) {
+      // 显式激活：jsdom 不合成按钮的 Enter/Space 点击；preventDefault 挡住原生那次，只触发一回。
+      e.preventDefault();
+      (document.activeElement as HTMLElement).click();
+      return;
+    } else return;
+    e.preventDefault();
+    items[next]?.focus();
+  };
   const act = (fn: () => void) => () => {
     fn();
     onClose();
   };
   return (
-    <div ref={ref} className="ctx-menu" role="menu" style={pos} onClick={(e) => e.stopPropagation()}>
+    <div ref={ref} className="ctx-menu" role="menu" style={pos} onClick={(e) => e.stopPropagation()} onKeyDown={onMenuKeyDown}>
       <button type="button" role="menuitem" className="ctx-item" onClick={act(onStar)}>
         <TopIcon />
         {starred ? t.sticker.unstar : t.sticker.star}

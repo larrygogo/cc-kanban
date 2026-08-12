@@ -8,6 +8,7 @@ import { Segmented } from "./settings/widgets";
 import { Dropdown } from "./menu";
 import { useSettingsState } from "./settings/state";
 import logoUrl from "../../src-tauri/icons/128x128.png";
+import { useEscClose } from "../hooks/useEscClose";
 
 type Dict = ReturnType<typeof useT>;
 
@@ -348,7 +349,9 @@ export function Onboarding() {
     { hero: <HeroCardMenu t={t} />, title: t.onboarding.cardmenu.title, desc: t.onboarding.cardmenu.desc, body: <CardMenuControl t={t} /> },
     { hero: <HeroBoard t={t} />, title: t.onboarding.board.title, points: t.onboarding.board.points },
     { hero: <HeroTerminal />, title: t.onboarding.terminal.title, points: t.onboarding.terminal.points },
-    { hero: <HeroWindow />, title: t.onboarding.window.title, points: t.onboarding.window.points },
+    // 吸边仅 Windows 有（macOS 是菜单栏面板），要点按平台拼接——不教的话用户误吸附后
+    // 只会以为「窗口不见了」。
+    { hero: <HeroWindow />, title: t.onboarding.window.title, points: IS_MAC ? t.onboarding.window.points : [...t.onboarding.window.points, t.onboarding.window.snapPoint] },
   ];
   const total = steps.length;
   const isFirst = step === 0;
@@ -360,6 +363,8 @@ export function Onboarding() {
     invoke("mark_onboarding_seen").catch(() => {});
     getCurrentWindow().close().catch(() => {});
   };
+  // Esc = 跳过（与点 ✕ 同语义，一样落盘「已看过」）。
+  useEscClose(dismiss);
   const next = () => (isLast ? dismiss() : setStep((s) => Math.min(s + 1, total - 1)));
   const back = () => setStep((s) => Math.max(s - 1, 0));
 

@@ -354,6 +354,12 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   // 折叠的组(按 pathKey)。侧栏收起时本组件整个卸载,不落盘的话回来全展开了。
   const [folded, setFolded] = useState<Set<string>>(readFolded);
 
+  // 会话搜索:输入防抖 300ms 后下沉后端(searchRef 是 load 的同步读源)。
+  // 不落盘——搜索是临时视图,残留的词会让下次打开的列表被静默过滤(看板踩过同款坑)。
+  const [search, setSearch] = useState("");
+  const searchRef = useRef("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
   // refresh = 整段重取替换（首载 / board-changed）；grow = 翻页，只把新条目**追加到尾部**。
   // 追加而非替换：后端对整页做 connected-first 排序，扩大 limit 可能把更深处的活会话
   // 顶到列表最上方——用户正停在底部等下一页，上方插行会让视口内容跳走。已加载段的
@@ -363,13 +369,16 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
     const dir = dirFilterRef.current;
     // 目录走专用 cwd 参数(后端斜杠归一后精确比较),不复用 search 的子串 LIKE——
     // 那会让另一种斜杠写法的会话整批消失,还把兄弟目录/标题命中漏进来。
-    // (search 这里恒传 null:侧栏没有搜索框,筛选只有目录这一维。)
-    return getLiveSessionsPage("all", null, null, lim, dir)
+    // 搜索走 search 参数(标题/cwd/项目名 LIKE,与看板同一条后端通道):会话上百条时
+    // 靠滚动翻页找会话的路是断的,此前只能退回看板去搜。
+    const q = searchRef.current.trim() || null;
+    return getLiveSessionsPage("all", q, null, lim, dir)
       .then((page) => {
         if (!mountedRef.current) return;
-        // 切目录期间发出的旧请求回来了:它装的是上一个目录的会话,原样落盘会让列表
-        // 与下拉显示的目录对不上。丢弃。
+        // 切目录/改搜索词期间发出的旧请求回来了:它装的是旧条件的会话,原样落盘会让
+        // 列表与筛选状态对不上。丢弃。
         if (dirFilterRef.current !== dir) return;
+        if ((searchRef.current.trim() || null) !== q) return;
         setReachedEnd(page.next_cursor === null);
         if (mode === "grow") {
           setSessions((prev) => {
@@ -465,6 +474,41 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
     void loadRef.current("refresh");
   }, [dirFilter]);
 
+  // 搜索词变化:防抖 300ms 重取首页(翻页状态清回首页,与切目录同一套语义)。
+  // 不清 sessions——保留旧列表到新结果落地,避免每敲一个字闪一次加载占位。
+  const searchTouchedRef = useRef(false);
+  useEffect(() => {
+    if (!searchTouchedRef.current) {
+      searchTouchedRef.current = true;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      searchRef.current = search;
+      prevLimitRef.current = PAGE_LIMIT;
+      limitRef.current = PAGE_LIMIT;
+      setLimit(PAGE_LIMIT);
+      setReachedEnd(false);
+      growingRef.current = false;
+      setGrowing(false);
+      void loadRef.current("refresh");
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  // Ctrl/Cmd+F 聚焦搜索框（终端视图内让位——焦点在 xterm 里时用户多半想找终端内容，
+  // 抢过来只会打断；终端自己的搜索是后续项）。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.code !== "KeyF") return;
+      if (document.activeElement?.closest(".managed-terminal")) return;
+      e.preventDefault();
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // 会话操作菜单:与看板卡片是同一个 CardContextMenu、同一批动作(置顶/便签/重命名/归档/
   // 新建会话/打开目录/结束会话)。两处共用一个组件是刻意的——菜单项一旦各写一份,迟早
   // 会一边有、另一边没有。触发方式:条目右键,或条目上的「⋯」按钮。
@@ -472,8 +516,8 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   // 触发方式跟随「卡片菜单」设置(card_menu_mode),与看板同一个开关、同一套语义:
   // button = 条目上的「⋯」按钮,context = 右键。**二选一**,不同时存在——两个入口并存
   // 时,改设置的人会以为没生效(另一个还在),不改的人则平白多一个不知从哪来的按钮。
-  // 首帧占位 context 与看板一致;真实默认(button)由 getSettings 校正。
-  const [menuMode, setMenuMode] = useState<CardMenuMode>("context");
+  // 首帧占位与后端真实默认(button)一致,与看板同步改过——占位 context 会让 ⋯ 按钮延迟弹入。
+  const [menuMode, setMenuMode] = useState<CardMenuMode>("button");
   useSettingsEffect((s) => setMenuMode(s.card_menu_mode ?? "button"));
   // 菜单内容按 id 现查:刷新后置顶/便签/归档态自动跟上,会话消失则菜单自然收起。
   const ctxItem = ctxMenu ? (sessions ?? []).find((s) => s.session.id === ctxMenu.sid) ?? null : null;
@@ -756,10 +800,41 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
           </button>
         )}
       </div>
+      {/* 会话搜索（Ctrl/Cmd+F 聚焦）：标题/仓库名下沉后端 LIKE，与看板同一条通道。 */}
+      <div className="chat-sidebar-search">
+        <input
+          ref={searchInputRef}
+          value={search}
+          placeholder={t.chat.sidebarSearch}
+          aria-label={t.chat.sidebarSearch}
+          // IME 合成守卫：与看板搜索框同款，拼音中间态不下发。
+          onChange={(e) => {
+            if ((e.nativeEvent as InputEvent).isComposing) return;
+            setSearch(e.target.value);
+          }}
+          onCompositionEnd={(e) => setSearch(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape" && search) {
+              e.stopPropagation(); // 有词时 Esc 只清词，不落到窗口级「拒绝审批」
+              setSearch("");
+            }
+          }}
+        />
+        {search && (
+          <button
+            type="button"
+            className="chat-sidebar-search-x"
+            aria-label={t.chat.sidebarSearchClear}
+            onClick={() => setSearch("")}
+          >×</button>
+        )}
+      </div>
       <nav className="chat-sidebar-list" aria-label={t.chat.sidebarTitle} onScroll={onScroll}>
         {sessions === null && <div className="chat-sidebar-empty">{t.chat.sidebarLoading}</div>}
         {sessions !== null && sessions.length === 0 && (
-          <div className="chat-sidebar-empty">{dirFilter ? t.chat.sidebarEmptyDir : t.chat.sidebarEmpty}</div>
+          <div className="chat-sidebar-empty">
+            {search.trim() ? t.chat.sidebarEmptySearch : dirFilter ? t.chat.sidebarEmptyDir : t.chat.sidebarEmpty}
+          </div>
         )}
         {groups
           ? groups.map((group) => {

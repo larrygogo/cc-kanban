@@ -23,6 +23,7 @@ import { useAgentListRefresh } from "../useAgents";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useLoginOperations } from "../hooks/useLoginOperations";
 import { useT, repairFailMessage } from "../i18n";
+import { useEscClose } from "../hooks/useEscClose";
 
 function FolderIcon() {
   return (
@@ -47,6 +48,27 @@ function FolderIcon() {
 const qs = new URLSearchParams(window.location.search);
 const initialCwd = normalizePath(qs.get("cwd") ?? "");
 const initialProvider: AgentId | null = qs.get("provider");
+
+/** 启动选项记忆（provider → {option id → choice id}）。常用「跳过权限确认 / 指定模型」的
+ *  用户每开一个会话都要重选两次下拉，且极易忘记而以默认档起会话——恢复路径早有持久化
+ *  （会话存档回放），新建路径此前完全没有。localStorage 即可：这是 UI 预填偏好，
+ *  未知 id 由后端声明表忽略/落默认，脏数据无害。 */
+const LAUNCH_OPTS_KEY = "meowo-launch-selections";
+function loadStoredOpts(): Record<string, Record<string, string>> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAUNCH_OPTS_KEY) ?? "{}");
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+function saveStoredOpts(provider: string, opts: Record<string, string>) {
+  try {
+    localStorage.setItem(LAUNCH_OPTS_KEY, JSON.stringify({ ...loadStoredOpts(), [provider]: opts }));
+  } catch {
+    /* 隐私模式禁写：只失去记忆 */
+  }
+}
 
 export function NewSessionPanel(): ReactElement {
   const t = useT();
@@ -148,7 +170,13 @@ export function NewSessionPanel(): ReactElement {
             return true;
           });
       })
-      .then(setRecent)
+      .then((list) => {
+        setRecent(list);
+        // 无 prefill 时默认选中最近一个目录（保持可改）：从托盘/空态新建时表单原本是
+        // 空的，必须先点一次最近项或浏览，而九成场景就是「上次那个目录」。
+        // 函数式读当前值：只在用户还没填过时预填，绝不覆盖手动输入。
+        if (list.length > 0) setCwd((current) => current || list[0]);
+      })
       .catch(() => {});
     reloadAgents();
   }, []);
@@ -159,12 +187,16 @@ export function NewSessionPanel(): ReactElement {
   useEffect(() => {
     if (avail && avail.length > 0 && !avail.includes(provider)) setProvider(avail[0]);
   }, [avail, provider]);
-  useEffect(() => setOpts({}), [provider]);
+  // 换 agent 重置选择（不同 agent 的选项 id 可能撞名但语义不同，残留会串），
+  // 但优先回填本 provider 上次的选择——见 LAUNCH_OPTS_KEY。
+  useEffect(() => setOpts(loadStoredOpts()[provider] ?? {}), [provider]);
   const launchOptions = agents?.find((a) => a.id === provider)?.launch_options ?? [];
 
   function closeWin() {
     getCurrentWindow().close();
   }
+  // Esc 关窗（输入框内让位）：填错想放弃时不必去点右上角 ✕。
+  useEscClose(closeWin);
 
   async function pickDir() {
     const picked = await open({ directory: true });
@@ -178,6 +210,7 @@ export function NewSessionPanel(): ReactElement {
     setError(null);
     try {
       await newSession(cwd.trim(), provider, opts);
+      saveStoredOpts(provider, opts); // 启动成功才记：失败的组合不该成为下次的默认
       closeWin();
     } catch (e) {
       launchPendingRef.current = false;

@@ -5,7 +5,10 @@ import { getVersion } from "@tauri-apps/api/app";
 import { useUpdate } from "../useUpdate";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { useT } from "../i18n";
+import { getLiveSessionsPage } from "../api";
+import { appConfirm } from "../confirm";
 import logoUrl from "../../src-tauri/icons/128x128.png";
+import { useEscClose } from "../hooks/useEscClose";
 
 // 紧凑高度（检查中/已最新/失败：只有状态行+按钮）与增高高度（发现新版：带更新说明滚动区）。
 // 与 Rust 侧 open_update_window_impl 的初始 inner_size 保持一致。
@@ -26,6 +29,34 @@ export function Updater() {
     getVersion().then(setCurrent).catch(() => {});
   }, []);
   const close = () => getCurrentWindow().close().catch(() => {});
+  useEscClose(close); // Esc = 「稍后」：关窗不打断下载（下载是后端进程级任务）
+
+  // 重启安装前先看有没有托管会话在跑：应用退出会 shutdown 全部托管 PTY（lib.rs RunEvent::Exit），
+  // 正在跑的 agent 会被当场杀掉——必须过一次危险确认，不能静默。查询失败不阻断更新（按无会话处理）。
+  const [installing, setInstalling] = useState(false);
+  const restartAndInstall = async () => {
+    if (installing) return;
+    setInstalling(true);
+    try {
+      let managed = 0;
+      try {
+        const page = await getLiveSessionsPage("all", null, null, 200);
+        managed = page.items.filter((l) => l.connected && l.pty_managed).length;
+      } catch {
+        /* 查询失败按 0 处理，不挡更新 */
+      }
+      if (managed > 0) {
+        const ok = await appConfirm(t.updater.restartConfirm(managed), {
+          title: t.updater.restart,
+          danger: true,
+        });
+        if (!ok) return;
+      }
+      await install();
+    } finally {
+      setInstalling(false);
+    }
+  };
 
   // 有更新说明可读时（发现新版/下载中）窗口增高，其余状态收回紧凑高度并保持居中。
   // Windows 上 resizable(false) 会把窗口 min/max 锁死成当前尺寸，程序化 setSize 也被钳住——
@@ -126,7 +157,7 @@ export function Updater() {
             ) : (
               <>
                 <div className="up-status">{t.updater.ready}</div>
-                <button className="sbtn primary" onClick={() => void install()}>{t.updater.restart}</button>
+                <button className="sbtn primary" disabled={installing} onClick={() => void restartAndInstall()}>{t.updater.restart}</button>
               </>
             )}
           </>

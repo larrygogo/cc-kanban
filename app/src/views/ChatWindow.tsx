@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { appConfirm } from "../confirm";
-import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, dismissInteractiveQuestion, agentModels, getChatHistory, getLiveSessionsPage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openProjectDir, pendingInteraction, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
+import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, dismissInteractiveQuestion, agentModels, getChatHistory, getLiveSessionsPage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, openProjectDir, pendingInteraction, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
 import { useT } from "../i18n";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { reduceChatEvents } from "../chat/reducer";
@@ -307,7 +307,19 @@ function RenameModal({ initial, onSubmit, onClose, t }: {
   };
   return (
     <div className="chat-modal-overlay" role="presentation" onClick={onClose}>
-      <div className="chat-modal" role="dialog" aria-modal="true" aria-label={t.sticker.renameTitle} onClick={(event) => event.stopPropagation()}>
+      <div
+        className="chat-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t.sticker.renameTitle}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          // Esc 关弹层挂在容器上：窗口级「Esc=拒绝审批」监听按 activeElement 白名单让路，
+          // 焦点在 modal 的按钮上时不在白名单内——只在 input 上处理会漏掉这一路，
+          // 按 Esc 就顺手把 agent 的审批请求拒了。容器统一截停传播。
+          if (event.key === "Escape") { event.stopPropagation(); onClose(); }
+        }}
+      >
         <div className="chat-modal-title">{t.sticker.renameTitle}</div>
         <input
           className="ns-input"
@@ -317,8 +329,6 @@ function RenameModal({ initial, onSubmit, onClose, t }: {
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.nativeEvent.isComposing) void submit();
-            // 截停传播：ChatWindow 有窗口级「Esc=拒绝审批」监听，关个弹层不能顺手拒了审批。
-            if (event.key === "Escape") { event.stopPropagation(); onClose(); }
           }}
         />
         {error && <div className="chat-modal-error" role="alert">{error}</div>}
@@ -402,8 +412,47 @@ function QuestionPanels({ items, interactive, queuedAnswer, onToggle }: {
 /// 节流、正文与回车之间又隔 SUBMIT_GAP_MS——交互提示恰在这窗口里弹出时,这个 `\r`
 /// 会替用户回答它(如命令审批的默认焦点项)。复核命中则不发回车,并 Ctrl-U 尽力清掉
 /// 已写进对方界面的正文,抛错让调用方把「终端在等交互」呈现出来。
-async function submitToTerminal(sessionId: number, content: string, abortIf?: () => string | null): Promise<void> {
+///
+/// `verify`:写后回显验证(恢复/接管后的险区才传,见 RESUME_VERIFY_WINDOW_MS)。刚拉起
+/// 的 CLI 可能还压着 resume 确认选择器、或 composer 尚未挂载——waitForTerminalReady 的
+/// 「可见 + 安静 700ms」对这两种形态都会误判成就绪。此时正文被吞,而无条件回车会替用户
+/// 按下选择器的默认焦点项:消息蒸发、恢复继续、没有任何报错(实拍:接管后对话页发送,
+/// transcript 里根本没有这条 user 消息)。写完正文先确认它真的出现在屏幕上,再发回车。
+async function submitToTerminal(sessionId: number, content: string, abortIf?: () => string | null, verify?: { message: string }): Promise<void> {
+  const before = verify ? await managedTerminalSnapshot(sessionId) : null;
   await writeManagedTerminal(sessionId, terminalInput(content));
+  if (before && verify) {
+    // 匹配规则:正文与可见文本都压掉空白与框线字符后做前缀包含——回显会被 composer
+    // 边框/自动折行打散;长粘贴认 claude 的占位形态(Pasted text)。只扫**写入之后的
+    // 增量**输出:屏幕旧内容(上一回合恰好含同样字句)不作数。
+    const squash = (text: string) => text.replace(/[\s│┃❯>|]/g, "").toLowerCase();
+    const needle = squash(content).slice(0, 16);
+    const decoder = new TextDecoder();
+    let tail = "";
+    let since = Number.isFinite(before.endOffset) ? before.endOffset : 0;
+    let seen = needle.length === 0;
+    for (let attempt = 0; attempt < 10 && !seen; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
+      const snapshot = await managedTerminalSnapshot(sessionId, since);
+      if (!snapshot.active) break;
+      if (Number.isFinite(snapshot.endOffset) && snapshot.endOffset < since) {
+        // 偏移回绕(PTY 被重启复位):归零重对齐,别拿旧偏移空等(同 sendWithClipboardImage)。
+        since = 0;
+        tail = "";
+        continue;
+      }
+      since = snapshot.endOffset;
+      tail = appendTerminalText(tail, snapshot.data, decoder);
+      const visible = visibleTerminalText(tail);
+      if (squash(visible).includes(needle) || /pasted text/i.test(visible)) seen = true;
+    }
+    if (!seen) {
+      // 回显没来 = 正文没进 composer(被恢复确认/启动提示拦下,或被初始化丢弃)。
+      // **绝不能发回车**;Ctrl-U 尽力清掉可能已落进对方界面的残余,抛错让消息退回输入框。
+      await writeManagedTerminal(sessionId, "\x15").catch(() => {});
+      throw new Error(verify.message);
+    }
+  }
   await new Promise((resolve) => window.setTimeout(resolve, SUBMIT_GAP_MS));
   const abortReason = abortIf?.() ?? null;
   if (abortReason) {
@@ -412,6 +461,11 @@ async function submitToTerminal(sessionId: number, content: string, abortIf?: ()
   }
   await writeManagedTerminal(sessionId, "\r");
 }
+
+/// 恢复/接管完成后的险区时间窗:这段时间内的发送启用 submitToTerminal 的写后回显验证。
+/// 稳态终端不验证——占用检查、attention 识别与 abortIf 复核已经覆盖,逐条轮询屏幕只会
+/// 拖慢每次发送。
+const RESUME_VERIFY_WINDOW_MS = 15_000;
 
 type TerminalStartupResult = "ready" | TerminalAttention;
 
@@ -467,6 +521,8 @@ export function ChatWindow() {
   const [items, setItems] = useState<ChatItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
+  // 是否贴在底部（followRef 的渲染镜像）：驱动「回到最新」悬浮钮显隐。
+  const [atBottom, setAtBottom] = useState(true);
   // 首读裁剪掉的更早消息：hasMore 只在首读那一发为 true，轮询会把它带回 false，
   // 所以单独存一份状态，别直接读 history.hasMore（提示会闪一下就没）。
   const [hasEarlier, setHasEarlier] = useState(false);
@@ -488,6 +544,32 @@ export function ChatWindow() {
     priorItemIds: ReadonlySet<string>;
   }[]>([]);
   const queuedIdRef = useRef(0);
+  // 空闲态发送的乐观回显：正文要等 CLI 落盘 + 650ms 轮询才上屏，0.65~2s 的空窗是最典型的
+  // 「消息发丢了？」体感。本地先以 user_text 形态接到 transcript 末尾（displayItems），
+  // transcript 出现同文本（水位线之后的新证据，匹配规则与排队回执一致）即移除；15s 兜底
+  // 防匹配失败时回显永挂。运行中的插话仍走排队回执（那是 CLI 真实的排队语义，不混用）。
+  const [pendingEchoes, setPendingEchoes] = useState<{
+    id: number;
+    text: string;
+    at: number;
+    priorUserText: string | null;
+    priorItemIds: ReadonlySet<string>;
+  }[]>([]);
+  const echoIdRef = useRef(0);
+  // 渲染序列 = 真实 transcript + 乐观回显（以 user_text 形态挂在末尾）。
+  // 消解/计数等逻辑一律读真实 items，回显只进显示层。
+  const displayItems = useMemo<ChatItem[]>(() => {
+    if (pendingEchoes.length === 0) return items;
+    return [
+      ...items,
+      ...pendingEchoes.map((echo) => ({
+        type: "user_text" as const,
+        id: `echo-${echo.id}`,
+        timestamp: null,
+        text: echo.text,
+      })),
+    ];
+  }, [items, pendingEchoes]);
   // 会话确实还活在用户自己的终端里（后端按 pid 判定）：就地给接管入口，而不是把用户
   // 打发去终端页自己找按钮。retryRef 记住被拒的那个动作，接管成功后原样重放。
   const [needsTakeover, setNeedsTakeover] = useState(false);
@@ -545,6 +627,30 @@ export function ChatWindow() {
   if (view === "terminal") terminalEverShownRef.current = true;
   const terminalMounted = terminalEverShownRef.current || terminalMonitorNeeded;
   const [approval, setApproval] = useState<PendingApproval | null>(null);
+  // broker 审批的剩余时间：后端 300s 超时此前只写在注释里，卡片到点凭空消失像 bug。
+  // 后端不下发 deadline，从本窗口首见该 requestId 起本地计时（晚开窗只会显得更宽裕，
+  // 不会提前误报超时）；每秒 tick 一次驱动徽章上的倒计时。
+  const APPROVAL_TIMEOUT_MS = 300_000;
+  const approvalSeenRef = useRef<{ id: string; at: number } | null>(null);
+  const [approvalNow, setApprovalNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!approval) {
+      approvalSeenRef.current = null;
+      return;
+    }
+    if (approvalSeenRef.current?.id !== approval.requestId) {
+      approvalSeenRef.current = { id: approval.requestId, at: Date.now() };
+      setApprovalNow(Date.now());
+    }
+    const timer = window.setInterval(() => setApprovalNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [approval]);
+  const approvalCountdown = (() => {
+    if (!approval || !approvalSeenRef.current) return null;
+    const left = Math.max(0, APPROVAL_TIMEOUT_MS - (approvalNow - approvalSeenRef.current.at));
+    const totalSeconds = Math.floor(left / 1000);
+    return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, "0")}`;
+  })();
   // AskUserQuestion 的结构化题面（broker 自动放行后经 interactive-question 事件直达）。
   // 负责「与终端表单同步出现」的展示与**排队作答**：点选的答案先记下（queuedAnswer），
   // 等屏幕识别确认表单在屏后自动落键——绝不向未确认就绪的表单盲写按键。
@@ -690,6 +796,31 @@ export function ChatWindow() {
       return next;
     });
   };
+  // 窗口级快捷键（均带 Ctrl/Cmd，不与输入冲突）：B=收展侧栏，1/2=对话/终端视图，
+  // N=新建会话。Ctrl+F 聚焦侧栏搜索在 ChatSidebar 内注册；Esc 语义各归其主（审批/菜单/弹层）。
+  // 此前整个对话窗除 Esc 外零快捷键，收侧栏、切视图、新建全要鼠标。
+  const toggleSidebarRef = useRef(toggleSidebar);
+  toggleSidebarRef.current = toggleSidebar;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      if (e.code === "KeyB") {
+        e.preventDefault();
+        toggleSidebarRef.current();
+      } else if (e.code === "Digit1") {
+        e.preventDefault();
+        setView("chat");
+      } else if (e.code === "Digit2") {
+        e.preventDefault();
+        setView("terminal");
+      } else if (e.code === "KeyN") {
+        e.preventDefault();
+        void openNewSessionWindow().catch(() => {});
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   const [modelMenu, setModelMenu] = useState(false);
   /// 刚发出一条会弹菜单的命令：在这个时间点之前让屏幕识别去认光标菜单。
   /// 不常开是刻意的——菜单形态（导航提示 + ❯）虽然特征明确，但常开等于把 agent 平时
@@ -980,6 +1111,7 @@ export function ChatWindow() {
     setTerminalMonitorNeeded(false);
     setMenuWatchUntil(0);
     setQueuedInterjections([]);
+    setPendingEchoes([]);
     setAttachments(draft?.attachments ?? []);
     setAttachmentNotice("");
     setApproval(null);
@@ -1219,18 +1351,34 @@ export function ChatWindow() {
   // 题面的轮询兜底并入上面 pendingInteraction 的合并轮询（同一次 IPC 取审批 + 题面）。
   // 兜底过期：识别一直没就绪、用户已在终端答完的情况下，别让展示卡挂一辈子。
   // 题面卡消失（过期/收起/会话切换）时排队的答案一并作废——没有卡背书的按键不许落。
+  //
+  // dismiss 后端待处理表只允许「本窗口真的展示过这张卡、且卡在同一会话上消解」时发：
+  // 会话切换/挂载也会把 structuredQuestion 置 null，但那不是「问题了结」——若此时按新
+  // sessionId 无条件 dismiss，会把目标会话里挂着的题面（超出 3s 领养窗口、要靠轮询兜底
+  // 才能取到的那种）从后端待处理表里抹掉，题面卡永远不出现，用户只能回终端作答。
+  const shownQuestionSessionRef = useRef<number | null>(null);
   useEffect(() => {
     if (!structuredQuestion) {
       setQueuedAnswer(null);
-      // 卡已消解：清掉领养 ref 与后端待处理表，否则切走再切回、或下一轮轮询会把
-      // 早已了结的问题重新弹成幽灵卡。
+      // 卡已消解：清掉领养 ref；仅当消解发生在展示卡的同一会话上（= 过期/收起/答完，
+      // 而非切会话）才清后端待处理表，防止切走再切回时弹幽灵卡。
       lastInteractiveQuestionRef.current = null;
-      if (sessionId > 0) void dismissInteractiveQuestion(sessionId).catch(() => {});
+      const shownSid = shownQuestionSessionRef.current;
+      shownQuestionSessionRef.current = null;
+      if (shownSid != null && shownSid === sessionId && sessionId > 0) {
+        void dismissInteractiveQuestion(shownSid).catch(() => {});
+      }
       return;
     }
-    const timer = window.setTimeout(() => setStructuredQuestion(null), 180_000);
+    shownQuestionSessionRef.current = structuredQuestion.sessionId;
+    const timer = window.setTimeout(() => {
+      setStructuredQuestion(null);
+      // 过期不能只是凭空消失（用户离开一会儿回来，分不清是自己漏点还是超时）——
+      // 说清卡去哪了、该去哪继续。
+      setSendError(t.chat.questionExpired);
+    }, 180_000);
     return () => window.clearTimeout(timer);
-  }, [structuredQuestion, sessionId]);
+  }, [structuredQuestion, sessionId, t]);
   // 「问题已了结」的收卡信号：判定逻辑见 observeTranscriptForDismiss。
   //
   // 计数**必须**读独立累积的 items state，不能读 history.offset/history.items——那两个
@@ -1266,28 +1414,30 @@ export function ChatWindow() {
     if (!history?.pendingReview) setBrokerOwnsReview(false);
   }, [history?.pendingReview]);
 
+  // 程序化吸底一律瞬移（临时关掉 smooth）：`.chat-scroll` 的平滑滚动是动画，动画途中
+  // 浏览器持续派发 scroll 事件——一条长消息到达时，从旧位置滚向新底部的中途距离远大于
+  // onScroll 的 80px 阈值，followRef 被误置 false，吸底从此断掉（此坑首帧定位早就堵过，
+  // 但只堵了首帧；后续每一批 delta 的吸底都在裸奔）。smooth 留给用户主动的滚动。
+  const stickToBottom = (el: HTMLElement) => {
+    const behavior = el.style.scrollBehavior;
+    el.style.scrollBehavior = "auto";
+    el.scrollTop = el.scrollHeight;
+    el.style.scrollBehavior = behavior;
+  };
   useLayoutEffect(() => {
     if (view !== "chat") {
       // 终端页会卸载 chat-scroll；切回来得到的是全新的滚动容器，必须重新做一次首帧定位。
       positionedRef.current = false;
       followRef.current = true;
+      setAtBottom(true);
       return;
     }
     if (!followRef.current) return;
     const el = scrollRef.current;
-    if (!el || items.length === 0) return;
-    if (!positionedRef.current) {
-      // 历史消息首次出现时必须在绘制前瞬移到底部；否则 `.chat-scroll` 的 smooth 行为会让
-      // 用户每次打开窗口都看到整段对话从顶部滚下来。
-      const behavior = el.style.scrollBehavior;
-      el.style.scrollBehavior = "auto";
-      el.scrollTop = el.scrollHeight;
-      el.style.scrollBehavior = behavior;
-      positionedRef.current = true;
-      return;
-    }
-    el.scrollTop = el.scrollHeight;
-  }, [items, view]);
+    if (!el || displayItems.length === 0) return;
+    stickToBottom(el);
+    positionedRef.current = true;
+  }, [displayItems, view]);
 
   // 终端页会把焦点交给 xterm（且 footer 整个卸载，回来的 textarea 是全新节点）；
   // 用户切回对话时把焦点还给输入框。只在「终端 → 对话」的切换沿触发——chat 内的
@@ -1298,6 +1448,16 @@ export function ChatWindow() {
     prevViewRef.current = view;
     if (view === "chat" && prev === "terminal") promptInputRef.current?.focus();
   }, [view]);
+
+  // 输入框随内容长高（上限与 CSS max-height:150px 对齐）：rows=1 + min-height 曾把高度
+  // 钉死不动，max-height 是死代码——写 5 行提示词只能在 3 行可视高的框里内部滚动。
+  // 依赖 prompt 而非 onChange：清空发送、恢复草稿等程序化赋值也要跟着缩/涨。
+  useEffect(() => {
+    const el = promptInputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 150)}px`;
+  }, [prompt, view]);
 
   /// 拉取被首读裁掉的更早消息，并保持用户当前看的那一行不动。
   /// 直接替换 items 会让滚动位置塌到顶部——记下加载前的 scrollHeight，补回增量即可。
@@ -1322,10 +1482,16 @@ export function ChatWindow() {
       requestAnimationFrame(() => {
         const node = scrollRef.current;
         if (!node) return;
+        // 保位是程序化定位：必须瞬移，smooth 会把「保持原位」动画成一次上下滑动。
+        const behavior = node.style.scrollBehavior;
+        node.style.scrollBehavior = "auto";
         node.scrollTop = prevTop + (node.scrollHeight - prevHeight);
+        node.style.scrollBehavior = behavior;
         // 按落位重算吸底状态。内容不足一屏时 scrollTop 仍是 0，不会有 scroll 事件来
         // 恢复 followRef，漏掉这一步会让之后的新消息再也不自动滚到底。
-        followRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+        const at = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+        followRef.current = at;
+        setAtBottom(at);
       });
     } catch {
       // 失败不清空已有消息：保留提示让用户可以再点一次。
@@ -1337,7 +1503,19 @@ export function ChatWindow() {
 
   const onScroll = () => {
     const el = scrollRef.current;
-    if (el) followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (!el) return;
+    const at = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    followRef.current = at;
+    // 驱动「回到最新」悬浮钮的显隐；同值短路避免滚动过程反复重渲染。
+    setAtBottom((prev) => (prev === at ? prev : at));
+  };
+  // 上翻后回到底部的唯一出口（此前只能手动滚回去，新消息静默追加在视口外）。
+  const jumpToLatest = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    followRef.current = true;
+    setAtBottom(true);
+    stickToBottom(el);
   };
   const close = () => getCurrentWindow().close().catch(() => {});
   /// 发送类动作的公共守卫:sending 置位/清错 → 终端占用检查 → 确保可写终端 → 执行 body,
@@ -1375,9 +1553,14 @@ export function ChatWindow() {
   /// 回车前复核(见 submitToTerminal 的 abortIf):正文落下后、回车发出前,交互提示
   /// 恰好弹出的话,这个回车会替用户回答它——命中就中止提交。
   const attentionAbort = () => (terminalAttentionRef.current ? t.chat.terminalNeedsAttention : null);
+  /// 恢复/接管的完成时刻:险区窗口内(RESUME_VERIFY_WINDOW_MS)的发送做写后回显验证。
+  const resumedAtRef = useRef(0);
   /// 发送一段文本到会话（消息正文与斜杠命令共用）。返回是否真的送达。
   const sendText = (content: string): Promise<boolean> => withSendGuard(async () => {
-    await submitToTerminal(sessionId, content, attentionAbort);
+    const verify = Date.now() - resumedAtRef.current < RESUME_VERIFY_WINDOW_MS
+      ? { message: t.chat.sendEchoTimeout }
+      : undefined;
+    await submitToTerminal(sessionId, content, attentionAbort, verify);
     return true;
   });
   /// 剪贴板原生图片附加:向 PTY 发 Ctrl-V,让 TUI 自己读剪贴板走它的官方图片粘贴通道
@@ -1451,6 +1634,8 @@ export function ChatWindow() {
     // 已挂载的后台终端还停在旧进程的输出偏移上，必须归零重拉，否则新 PTY 的输出
     // 会被它当成「已写过」整段丢弃，画面定格、屏幕识别全部失效。
     terminalRearmRef.current?.();
+    // 刚拉起的终端进入回显验证险区(见 RESUME_VERIFY_WINDOW_MS)。
+    resumedAtRef.current = Date.now();
     const startup = await waitForTerminalReady(sessionId, ui?.startup_attention_markers ?? [], terminalReadyMessages, { provider: history?.provider, selectorAnchors: ui?.selector_anchors ?? [], attentionPatterns: ui?.attention_patterns ?? [] });
     if (startup !== "ready") {
       terminalEverShownRef.current = true;
@@ -1477,6 +1662,8 @@ export function ChatWindow() {
     try {
       await takeoverManagedTerminal(sessionId, 100, 30, resumeOptions);
       terminalRearmRef.current?.();
+      // 接管刚完成同样进入回显验证险区(见 RESUME_VERIFY_WINDOW_MS)。
+      resumedAtRef.current = Date.now();
       setNeedsTakeover(false);
       const startup = await waitForTerminalReady(sessionId, chatUi?.startup_attention_markers ?? [], terminalReadyMessages, attentionGrammar);
       if (startup !== "ready") {
@@ -1533,17 +1720,27 @@ export function ChatWindow() {
     const interjecting = tone === "running";
     const queuedText = bare || t.chat.queuedAttachmentOnly;
     const markQueued = () => {
+      // 水位线快照:此刻已有的最近用户消息与 transcript 尾部条目都算旧证据,消解
+      // 一律不认(见 queuedInterjections 声明处)。
+      const priorItemIds: ReadonlySet<string> = new Set(
+        items.slice(-12).filter((item) => item.type === "user_text").map((item) => item.id),
+      );
       if (interjecting) {
         queuedIdRef.current += 1;
         const id = queuedIdRef.current;
-        // 水位线快照:此刻已有的最近用户消息与 transcript 尾部条目都算旧证据,消解
-        // 一律不认(见 queuedInterjections 声明处)。
-        const priorItemIds: ReadonlySet<string> = new Set(
-          items.slice(-12).filter((item) => item.type === "user_text").map((item) => item.id),
-        );
         setQueuedInterjections((current) => [...current, {
           id,
           text: queuedText,
+          priorUserText: history?.lastUserText ?? null,
+          priorItemIds,
+        }]);
+      } else {
+        // 空闲态：乐观回显（见 pendingEchoes 声明处）。
+        echoIdRef.current += 1;
+        setPendingEchoes((current) => [...current, {
+          id: echoIdRef.current,
+          text: queuedText,
+          at: Date.now(),
           priorUserText: history?.lastUserText ?? null,
           priorItemIds,
         }]);
@@ -1627,6 +1824,29 @@ export function ChatWindow() {
       return next.length === current.length ? current : next;
     });
   }, [tone, items, history?.lastUserText]);
+  // 乐观回显的消解：与排队回执同一套「包含 + 水位线」证据规则，但**不随 tone 清空**——
+  // 空闲态发送后 tone 会变 running，回显此刻正要发挥作用。15s 兜底防证据永不出现。
+  useEffect(() => {
+    setPendingEchoes((current) => {
+      if (current.length === 0) return current;
+      const collapse = (text: string) => text.replace(/\s+/g, " ").trim();
+      const recent = items.slice(-12);
+      const now = Date.now();
+      const next = current.filter(({ text, at, priorUserText, priorItemIds }) => {
+        if (now - at > 15_000) return false;
+        const needle = collapse(text);
+        const seen = (candidate: string | null | undefined) =>
+          !!candidate && collapse(candidate).includes(needle);
+        const lastUserChanged = history?.lastUserText != null
+          && collapse(history.lastUserText) !== collapse(priorUserText ?? "");
+        return !(lastUserChanged && seen(history?.lastUserText))
+          && !recent.some((item) => item.type === "user_text"
+            && !priorItemIds.has(item.id)
+            && seen((item as { text?: string }).text));
+      });
+      return next.length === current.length ? current : next;
+    });
+  }, [items, history?.lastUserText]);
   /// 斜杠命令直通 PTY——CLI 的 composer 收到 "/xxx" + 回车会当命令执行，无需特殊协议。
   const sendSlash = (command: string) => {
     if (sending) return;
@@ -2102,8 +2322,13 @@ export function ChatWindow() {
           dispose + new Terminal()，还要把整个 backlog 重传并让 xterm 重放一遍 ANSI。
           终端侧懒挂载（terminalMounted），纯对话的用户不用白付 xterm 的创建成本。 */}
       <main className="chat-scroll" ref={scrollRef} onScroll={onScroll} hidden={view !== "chat"}>
+        {/* 同步失败降级：已有内容时只挂顶部细横幅继续渲染缓存的对话——650ms 一发的轮询，
+            一次瞬时 IPC 抖动就整屏换错误行，比不提示更吓人。整屏错误只留给「一条都没有」。 */}
+        {failed && items.length > 0 && (
+          <div className="chat-sync-warn" role="status">{t.chat.loadError}</div>
+        )}
         {loading ? <div className="chat-empty">{t.chat.loading}</div>
-          : failed ? <div className="chat-empty is-error">{t.chat.loadError}</div>
+          : failed && items.length === 0 ? <div className="chat-empty is-error">{t.chat.loadError}</div>
           : history && !history.supported ? (
             /* 不提供结构化 transcript 的 agent：hook 落库的最近往来仍然是真实数据，先渲染它，
                「暂未提供结构化对话记录」降为其下的注脚——有什么就展示什么，而不是只报没有。 */
@@ -2127,7 +2352,13 @@ export function ChatWindow() {
                 </button>
               </div>
             )}
-            <Transcript sessionId={sessionId} items={items} />
+            <Transcript sessionId={sessionId} items={displayItems} />
+            {/* 上翻后回到底部的悬浮出口：sticky 钉在滚动视口底缘，贴底时不渲染。 */}
+            {!atBottom && (
+              <button type="button" className="chat-jump-latest" onClick={jumpToLatest}>
+                <ChevronDownIcon />{t.chat.jumpLatest}
+              </button>
+            )}
           </>}
         {/* Agent 自己维护的待办清单。它不属于时间线（会被反复整份改写），故固定在底部
             而不是插进消息流里——否则每改一次待办就多一条历史。 */}
@@ -2280,6 +2511,15 @@ export function ChatWindow() {
       </ApprovalCard>}
       {terminalMounted && (
         <div className={`chat-terminal-pane${view !== "terminal" ? " is-background" : ""}`} aria-hidden={view !== "terminal"}>
+          {/* broker 审批是被 hook 劫走的：终端 TUI 里**不会**出现那个选择框。终端视图下
+              用户既看不到卡片也看不到 TUI 提示，agent 就这么干等到 300s 超时——挂一条
+              常驻横幅把人领回对话页。屏幕识别类提示（TUI 上真有表单的）不挂：表单就在眼前。 */}
+          {view === "terminal" && approval && (
+            <div className="chat-terminal-approval" role="status">
+              <span>{t.chat.terminalApprovalBanner}{approvalCountdown ? ` · ${approvalCountdown}` : ""}</span>
+              <button type="button" onClick={() => setView("chat")}>{t.chat.terminalApprovalGo}</button>
+            </div>
+          )}
           <ManagedTerminal
             key={sessionId}
             sessionId={sessionId}
@@ -2336,7 +2576,8 @@ export function ChatWindow() {
           注意它**没有**「仅收起」:收起等于让 hook 干等到 300s 超时,只能 allow/deny/持久放行。 */}
       {view === "chat" && !terminalAttention && (approval || (!brokerOwnsReview && history?.pendingReview)) && <ApprovalCard
         title={approval ? t.chat.approvalTitle : history?.pendingReview === "question" ? t.chat.questionTitle : history?.pendingReview === "plan" ? t.chat.planTitle : t.chat.approvalTitle}
-        badge={t.chat.approvalPending}
+        // broker 审批 300s 超时回落终端处理——徽章带剩余时间，让「卡片会过期」这件事可见。
+        badge={approval && approvalCountdown ? `${t.chat.approvalPending} · ${approvalCountdown}` : t.chat.approvalPending}
         sideActions={approval
           /* `?? []`：类型上字段恒在（DTO 保证），但旧后端/新前端错配时负载可能缺它——
              一个可选按钮组不值得让整个 ChatWindow 白屏。
@@ -2474,6 +2715,22 @@ export function ChatWindow() {
                 const command = slashMatches[slashActive];
                 if (command) setPrompt(command.name + " ");
                 setSlashIndex(0);
+                return;
+              }
+            }
+            // 审批卡的 Esc 徽章要说话算话：窗口级「Esc=拒绝」监听按 activeElement 白名单
+            // 让开了输入框，而默认焦点几乎总在这里——徽章几乎永远不生效。空输入框时在此
+            // 放行同一语义；有草稿不动（Esc 另有清心流/收 IME 的含义，不能顺手拒了审批）。
+            if (event.key === "Escape" && !prompt.trim() && !event.nativeEvent.isComposing && view === "chat") {
+              const terminalDeny = commandAttention && commandApproval ? commandDeny : null;
+              if (terminalDeny) {
+                event.preventDefault();
+                chooseTerminalOption(terminalDeny);
+                return;
+              }
+              if (!terminalAttention && approval && !resolvingApproval) {
+                event.preventDefault();
+                void decideApproval("deny");
                 return;
               }
             }

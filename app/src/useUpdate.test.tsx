@@ -58,7 +58,7 @@ describe("automatic updater", () => {
   it("关闭自动更新时不进行后台检查或下载", async () => {
     vi.useFakeTimers();
     mocks.enabled = false;
-    render(<Probe />);
+    const view = render(<Probe />);
 
     await act(async () => {
       await Promise.resolve();
@@ -67,6 +67,8 @@ describe("automatic updater", () => {
 
     expect(mocks.check).not.toHaveBeenCalled();
     expect(mocks.download).not.toHaveBeenCalled();
+    // 没检查过就是 unknown，不能谎报 latest（「关于」页会据此显示「已是最新版本」）。
+    expect(view.getByTestId("status").textContent).toBe("unknown");
   });
 
   it("组件卸载早于异步监听注册完成时仍会注销监听", async () => {
