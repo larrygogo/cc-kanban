@@ -68,6 +68,11 @@ jobs:
       # tauri_build 在编译期校验 externalBin 文件存在，编译 meowo-app 前必须先备好 sidecar
       - name: 准备 meowo-reporter sidecar
         run: bun scripts/prepare-sidecar.mjs
+      # 同理：tauri.windows.conf.json 的 resources（打包的 ConPTY）也在编译期校验。
+      # 打包路径由 beforeBuildCommand 自动获取；测试/clippy 不走那个钩子，这里补跑。
+      # 非 Windows 平台脚本自跳过；哈希命中时不重复下载。
+      - name: 准备打包版 ConPTY
+        run: bun scripts/fetch-conpty.mjs
       - name: Rust 测试
         working-directory: app/src-tauri
         run: cargo test --workspace
