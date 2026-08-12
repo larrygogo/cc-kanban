@@ -20,7 +20,7 @@ export const en: Dict = {
     running: "Running",
     full: (what, pct) => `${what} · Context ${pct}% used`,
   },
-  pending: { approval: "Approval", question: "Question", plan: "Review plan" },
+  pending: { approval: "Approval", question: "Question", plan: "Review plan", blocked: "Action needed" },
   empty: {
     allTitle: "No sessions yet",
     allHint: "Run an AI coding session in a terminal and progress shows up here",
@@ -90,6 +90,7 @@ export const en: Dict = {
     reopenConfirm: "The original session is still running. Reopening will end it first to avoid a duplicate session.",
     endAndReopen: "End and reopen",
     reopening: "Reopening…",
+    resuming: "Resuming session…",
     dismiss: "Dismiss",
     // Expand action of the collapsed strip (hover/focus/Enter all trigger it).
     expandBoard: "Expand board",
@@ -171,6 +172,9 @@ export const en: Dict = {
     loadingEarlier: "Loading…",
     loadError: "Could not read the conversation. Retrying…",
     jumpLatest: "Jump to latest",
+    switcherTitle: "Quick session switcher",
+    switcherPlaceholder: "Search and jump to a session (↑↓ to select, Enter to open)",
+    switcherEmpty: "No matching sessions",
     codeCopy: "Copy",
     codeCopied: "Copied",
     questionExpired: "The question card timed out and was dismissed; you can keep answering on the Terminal tab",
@@ -426,7 +430,7 @@ export const en: Dict = {
     "认证失败": "Authentication failed",
   },
   settings: {
-    nav: { general: "General", sessions: "Sessions", appearance: "Appearance", network: "Network", account: "Agents", about: "About" },
+    nav: { general: "General", sessions: "Sessions", appearance: "Appearance", network: "Network", account: "Accounts & usage", about: "About" },
     archivedSessions: "Archived sessions",
     archivedEmpty: "No archived sessions",
     archivedLoadMore: "Load more",

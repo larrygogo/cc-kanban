@@ -51,7 +51,7 @@ import { CardContextMenu } from "./sticker/CardContextMenu";
 import { EmptyState } from "./sticker/EmptyState";
 import { UsageScreen } from "./sticker/UsageScreen";
 
-type FocusNoticeKind = FocusSessionResult | "connecting" | "failed" | "background" | "archived";
+type FocusNoticeKind = FocusSessionResult | "connecting" | "failed" | "background" | "archived" | "resuming";
 
 /** 便签字符上限：与后端 session_command.rs 的 `chars().take(500)` 截断阈值对齐。
  *  前端不设限时超长便签被后端静默截断，用户丢字无感。 */
@@ -330,7 +330,8 @@ export function Sticker({
   } | null>(null);
   useEffect(() => {
     if (!focusNotice || focusNotice.confirming || focusNotice.busy) return;
-    if (["host_focused", "unsupported_terminal", "alive_but_not_found", "process_ended"].includes(focusNotice.kind)) return;
+    // resuming 由 resume_session 的 promise settle 时清（成功清空/失败换 failed），不走定时。
+    if (["host_focused", "unsupported_terminal", "alive_but_not_found", "process_ended", "resuming"].includes(focusNotice.kind)) return;
     const id = window.setTimeout(() => setFocusNotice(null), 4_000);
     return () => window.clearTimeout(id);
   }, [focusNotice]);
@@ -434,7 +435,11 @@ export function Sticker({
       // 静默吞掉的话，用户点了卡片只会看到「什么都没发生」，尤其在把打开方式设成外部终端后，
       // 会直接被理解成设置不生效。走与 focus 相同的提示通道。
       if (!beginOpen(l.session.id)) return;
+      // 恢复链路串行阻塞 1~3s（目录扫描、spawn、1s 秒退探测），卡片置灰之外再给一句
+      // 文字——「点了没反应」是重复点击的最大来源。成功即清（board-changed 会把卡片翻绿）。
+      setFocusNotice({ kind: "resuming", item: l });
       invoke("resume_session", { cwd: l.cwd, sessionId: l.session.cc_session_id, provider: l.provider })
+        .then(() => setFocusNotice((cur) => (cur?.kind === "resuming" && cur.item.session.id === l.session.id ? null : cur)))
         .catch((err) => setFocusNotice({ kind: "failed", item: l, detail: String(err) }))
         .finally(() => endOpen(l.session.id));
     }
@@ -494,6 +499,7 @@ export function Sticker({
           failed: t.sticker.focusFailed,
           background: t.sticker.focusBackground,
           archived: t.sticker.archivedNotice,
+          resuming: t.sticker.resuming,
           focused: "",
         }[focusNotice.kind])
     : "";
@@ -857,10 +863,12 @@ export function Sticker({
                                   closest 匹配）。占位标题（等待首次输入）无截断意义，不挂。 */}
                               <span className="stk-title" data-tip={unnamed ? undefined : title}>{title}</span>
                               {/* 断开的会话不挂交互标签：进程都没了，「待批准」只会催用户去点一个
-                                  点不动的东西。DB 里的 pending_review 是收尾时没清干净的残留。 */}
-                              {l.connected && l.pending_review && (
-                                <span className={"pending-pill pending-" + l.pending_review}>
-                                  {t.pending[l.pending_review]}
+                                  点不动的东西。DB 里的 pending_review 是收尾时没清干净的残留。
+                                  屏幕检测到的 blocked（hook 盲区的审批/提问 UI）也给 pill——
+                                  此前只有琥珀环没有文字，与 waiting 黄仅差色相，读不出「需要操作」。 */}
+                              {l.connected && (l.pending_review || l.screen_state === "blocked") && (
+                                <span className={"pending-pill pending-" + (l.pending_review ?? "blocked")}>
+                                  {l.pending_review ? t.pending[l.pending_review] : t.pending.blocked}
                                 </span>
                               )}
                               <span className={"stk-time" + (tab === "waiting" ? " is-waited" : "")}>

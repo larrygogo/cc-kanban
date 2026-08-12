@@ -1147,6 +1147,40 @@ describe("ChatWindow", () => {
     expect(await screen.findByText("下一条")).toBeTruthy();
   });
 
+  /// Ctrl/Cmd+K 快速切换器：会话上百条时侧栏翻页太慢，这是键盘用户的主通道。
+  it("Ctrl+K 打开快速切换器，↑↓ 选择、Enter 切到目标会话", async () => {
+    window.history.replaceState({}, "", "/?sessionId=7");
+    const histories: Record<number, unknown> = {
+      7: { sessionId: 7, title: "当前会话", status: "ended", provider: "claude", cwd: null, supported: true, offset: 0, reset: false, pendingReview: null, items: [], archived: false },
+      9: { sessionId: 9, title: "目标会话", status: "ended", provider: "claude", cwd: null, supported: true, offset: 0, reset: false, pendingReview: null, items: [], archived: false },
+    };
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_chat_history") return Promise.resolve(histories[args?.sessionId as number]);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      if (command === "get_live_sessions_page") {
+        return Promise.resolve([
+          { session: { id: 7, cc_session_id: "cc-7", status: "ended" }, task_title: "当前会话", project_name: "repo", connected: false, provider: "claude", cwd: null },
+          { session: { id: 9, cc_session_id: "cc-9", status: "ended" }, task_title: "目标会话", project_name: "other", connected: false, provider: "claude", cwd: null },
+        ]);
+      }
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    // 标题与侧栏条目都叫「当前会话」：等标题栏那颗菜单钮（chat-title-menu 内）出现即可。
+    await waitFor(() => expect(screen.getAllByRole("button", { name: /当前会话/ }).length).toBeGreaterThan(0));
+    fireEvent.keyDown(window, { key: "k", code: "KeyK", ctrlKey: true });
+    const input = await screen.findByPlaceholderText("搜索并跳转会话（↑↓ 选择，Enter 打开）");
+    // 首屏（空查询）即列出最近会话
+    const options = await screen.findAllByRole("option");
+    expect(options).toHaveLength(2);
+    // ↓ 移到第二条（目标会话），Enter 切换
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_chat_history", { sessionId: 9, offset: 0 }));
+    // 切换器已关闭
+    expect(screen.queryByPlaceholderText("搜索并跳转会话（↑↓ 选择，Enter 打开）")).toBeNull();
+  });
+
   it("collapses the sidebar into a title-bar toggle and restores it", async () => {
     window.history.replaceState({}, "", "/?sessionId=7");
     respondWithHistory({

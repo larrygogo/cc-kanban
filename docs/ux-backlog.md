@@ -86,7 +86,7 @@
 | # | 问题 | 位置 | 建议 |
 |---|---|---|---|
 | B-1 | 状态槽三种视觉形态（36px 徽标 / 16px 虚线环 / 9px 点），扫读无统一锚线 | `Sticker.tsx:619-635`、`styles.css:572-783` | 统一直径圆形徽标，填充/描边/色相区分 |
-| B-2 | `screen_state==="blocked"` 无 pill 无文案，waiting 黄与 pending 琥珀肉眼难分 | `Sticker.tsx:623,709` | blocked 给通用「需要操作」pill；pending 换形态不只换色 |
+| B-2 | `screen_state==="blocked"` 无 pill 无文案，waiting 黄与 pending 琥珀肉眼难分 | `Sticker.tsx:623,709` | 已修（blocked 也给「待操作」pill，不再只靠琥珀环色相） |
 | B-3 | waiting tab「等最久优先」的倒排无任何 UI 提示，像列表坏了 | `query.rs:203`、`Sticker.tsx:714` | 已修（waiting tab 时间改「已等待 X」+ 警示色，倒排排序自解释） |
 | B-4 | 切 tab/搜索不重置滚动位置；切 tab 中间态先渲染旧数据子集（waiting 的 ASC 到达后整列表翻转） | `App.tsx:351-379`、`Sticker.tsx:377-385` | 部分已修（切 tab/搜索滚动回顶；切换期中间态过渡仍待做） |
 | B-5 | `context` 菜单模式下星标/便签/重命名/归档零可见入口、零提示 | `Sticker.tsx:680-686,728` | hover 时给极淡 ⋯ 提示或一次性引导 |
@@ -122,7 +122,7 @@
 | C-14 | 流式输出 650ms 一批的蹦字观感；切终端再切回强制丢阅读位置（DOM 实为 hidden 未卸载） | `ChatWindow.tsx:1047-1051,1269-1287` | 短期打字机补间；切走前记 scrollTop 切回恢复 |
 | C-15 | 任何发送错误都把占位符改成「尚未接管」（与真实原因无关）；会话结束时 composer 整块卸载藏起草稿 | `ChatWindow.tsx:2443-2449,2374-2390` | 占位符只随 needsTakeover；gate 态禁用而非卸载 |
 | C-16 | 超长粘贴固定 250ms 后回车，TUI 可能没消化完；`sessionLaunchSelections` 无 stale 守卫会把旧会话启动档落到新会话 | `ChatWindow.tsx:405-414,727-730` | 按长度动态间隔/屏幕确认；补 stale 清理 |
-| C-17 | 快捷键体系整体缺位：无切会话/收展侧栏/切视图/新建/查找；侧栏平铺 tabindex 上百次 Tab | `ChatWindow.tsx:1948-1962`、`ChatSidebar.tsx:629-647` | 部分已修（Ctrl+B 收展侧栏 / Ctrl+1/2 切视图 / Ctrl+N 新建 / Ctrl+F 搜索；会话切换 Ctrl+K、? 速查表、侧栏 roving 待做） |
+| C-17 | 快捷键体系整体缺位：无切会话/收展侧栏/切视图/新建/查找；侧栏平铺 tabindex 上百次 Tab | `ChatWindow.tsx:1948-1962`、`ChatSidebar.tsx:629-647` | 大部分已修（Ctrl+K 快速切换器落地：搜索下沉后端 + ↑↓/Enter 键盘导航，测试钉住；? 速查表与侧栏 roving 待做） |
 | C-18 | 断线语言缺失：分不出「agent 进程没了」和「IPC 通道断了」 | `zh.ts:153-160`、`ChatWindow.tsx:565` | IPC 连续失败单列「同步中断」横幅与 tone 解耦 |
 
 ### 托管终端 / 跳转恢复 / 新建会话
@@ -135,7 +135,7 @@
 | T-4 | 链接需 Ctrl+点击但无提示；文件路径（最高频可点内容）一律不可点 | `ManagedTerminal.tsx:200-203`、`settings.rs:556-562` | hover 提示；文件路径独立通道走文件管理器 |
 | T-5 | 操作条 hover 才显形，无 `:focus-within` 无 `hover:none` 兜底；PTY 假死红条只给「关闭」不给「结束并恢复」 | `styles.css:4026-4029`、`pty.rs:1318-1328` | 补 focus-within/hover:none；假死错误内联恢复按钮 |
 | T-6 | attach 成功零正反馈（窗口在别的虚拟桌面时=「点了没反应」）；`permission_denied` 无一键跳系统设置 | `terminal.rs:1900-1904`、`Sticker.tsx:913-923` | 成功 toast「已在 X 打开」；macOS 权限直达按钮 |
-| T-7 | 恢复全程零反馈（后端乐观复活已 emit board-changed，前端没用它做即时态）；重复恢复判重静默 Ok 但 reveal 再跑一遍又开一个镜像标签 | `Sticker.tsx:316-322`、`pty.rs:892-921`、`terminal.rs:1953-1964` | 卡片切「正在恢复…」占位；判重结果冒泡，AlreadyRunning 只聚焦 |
+| T-7 | 恢复全程零反馈（后端乐观复活已 emit board-changed，前端没用它做即时态）；重复恢复判重静默 Ok 但 reveal 再跑一遍又开一个镜像标签 | `Sticker.tsx:316-322`、`pty.rs:892-921`、`terminal.rs:1953-1964` | 已修（卡片 is-opening 置灰 + 「正在恢复会话…」toast，settle 即清；后端判重冒泡仍待做） |
 | T-8 | 秒退探测只盖前 1 秒，banner 后报错的 CLI 探测不到；`waitForTerminalReady` 45s 无进度无取消 | `terminal.rs:2033-2049`、`ChatWindow.tsx:424-458` | 5s 短期观察者 + 失败带 tail 提示；等待显示秒数 + 「去终端页看」 |
 | T-9 | 对话页恢复/接管硬编码 100×30 起 PTY，首屏画完再 resize 重排一遍 | `ChatWindow.tsx:1435,1478` | 读当前 xterm cols/rows |
 | T-10 | 高风险启动档（bypassPermissions）与普通档同视觉零警示；契约无 description/risk 字段；未知 id 直接裸露 | `NewSessionPanel.tsx:336`、`LaunchOption.ts` | 契约加 description/risk，下拉渲染副标题 + 警示色 |
@@ -150,7 +150,7 @@
 
 | # | 问题 | 位置 | 建议 |
 |---|---|---|---|
-| S-1 | 30 项设置零搜索；「Agent」分区承载账号/配额/登录/安装/中转五件事（key 叫 account 显示叫 Agent）；「在贴纸显示配额」埋在已登录账号卡深处 | `About.tsx:26,604-630`、`AccountSection.tsx:624-651` | 顶部 fuzzy 搜索；分区改名「账号与用量」；展示类设置挪外观 |
+| S-1 | 30 项设置零搜索；「Agent」分区承载账号/配额/登录/安装/中转五件事（key 叫 account 显示叫 Agent）；「在贴纸显示配额」埋在已登录账号卡深处 | `About.tsx:26,604-630`、`AccountSection.tsx:624-651` | 部分已修（「Agent」分区改名「账号与用量」；设置搜索与展示项挪位待做） |
 | S-2 | 切分区 `key={sec}` 整树重挂 + 重拉数据（含联网配额查询）；设置窗 620×460 不可缩放，长内容嵌套滚动陷阱 | `About.tsx:643,188-194`、`window.rs:113-115` | CSS 隐藏代替卸载 / 数据提升共享；放开纵向缩放 |
 | S-3 | 通用/会话/外观三分区保存失败完全静默（开关自己弹回去），只有网络分区显示错误 | `About.tsx:129-476` 各 patch 调用 | 已修（useSettingsState 暴露 lastError，三分区渲染统一 SettingsError 行） |
 | S-4 | 设置窗不订阅 settings-changed（现成的 useSettingsEffect 没用），与 Onboarding 同开时整对象写回互相覆盖 | `state.ts:44-66` | 已修（state.ts 订阅 settings-changed） |

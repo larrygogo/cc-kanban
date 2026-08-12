@@ -4010,6 +4010,16 @@ select.ns-input {
 .chat-jump-latest:hover { color: var(--cc-text); background: linear-gradient(var(--cc-surface-hover), var(--cc-surface-hover)), rgb(var(--cc-bg-rgb)); }
 .chat-jump-latest svg { display: block; }
 
+/* Ctrl/Cmd+K 快速切换器：搜索框 + 结果列表（复用 .chat-modal 外壳，加宽定高）。 */
+.chat-switcher { width: min(480px, calc(100vw - 48px)); }
+.chat-switcher-list { display: flex; flex-direction: column; gap: var(--sp-1); max-height: min(46vh, 380px); overflow-y: auto; margin-top: var(--sp-8); }
+.chat-switcher-item { display: flex; align-items: center; gap: var(--sp-8); padding: var(--sp-6) var(--sp-8); border: 0; border-radius: var(--r-6); background: none; color: var(--cc-text); font-size: var(--fs-12); text-align: left; cursor: pointer; }
+.chat-switcher-item.is-active { background: var(--cc-surface-hover); }
+.chat-switcher-item.is-current .chat-switcher-name { color: var(--cc-accent); }
+.chat-switcher-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-switcher-meta { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cc-text-faint); font-size: var(--fs-10-5); }
+.chat-switcher-empty { padding: var(--sp-14); color: var(--cc-text-faint); font-size: var(--fs-11-5); text-align: center; }
+
 /* 代码块外壳：右上角悬浮「语言角标 + 复制」，hover/focus 才显形（阅读时不抢戏）。 */
 .chat-md-pre { position: relative; }
 .chat-md-pre-tools { position: absolute; top: 6px; right: 8px; display: flex; align-items: center; gap: var(--sp-6); opacity: 0; transition: opacity var(--dur-base); }

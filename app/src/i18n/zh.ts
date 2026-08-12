@@ -22,7 +22,8 @@ export const zh = {
     running: "运行中",
     full: (what: string, pct: number) => `${what} · 上下文已用 ${pct}%`,
   },
-  pending: { approval: "待批准", question: "待回答", plan: "待批计划" },
+  // blocked：屏幕检测到 agent 停在审批/提问 UI 上但 hook 无对应事件（说不出具体哪一种）。
+  pending: { approval: "待批准", question: "待回答", plan: "待批计划", blocked: "待操作" },
   empty: {
     allTitle: "还没有会话",
     allHint: "在终端运行 AI 编程会话，进度会自动出现在这里",
@@ -94,6 +95,7 @@ export const zh = {
     reopenConfirm: "原会话仍在运行。重新打开将先结束原进程，以避免重复会话。",
     endAndReopen: "结束并重新打开",
     reopening: "正在重新打开…",
+    resuming: "正在恢复会话…",
     dismiss: "关闭提示",
     // 折叠缩略条的展开动作（悬停/聚焦/Enter 均可触发）。
     expandBoard: "展开看板",
@@ -177,6 +179,9 @@ export const zh = {
     loadingEarlier: "正在加载…",
     loadError: "读取对话失败，正在重试",
     jumpLatest: "回到最新",
+    switcherTitle: "快速切换会话",
+    switcherPlaceholder: "搜索并跳转会话（↑↓ 选择，Enter 打开）",
+    switcherEmpty: "没有匹配的会话",
     codeCopy: "复制",
     codeCopied: "已复制",
     questionExpired: "提问卡等待超时已收起，可回终端页继续作答",
@@ -441,7 +446,9 @@ export const zh = {
     "认证失败": "认证失败",
   } as Record<string, string>,
   settings: {
-    nav: { general: "通用", sessions: "会话", appearance: "外观", network: "网络", account: "Agent", about: "关于" },
+    // account 分区实际内容是账号/配额/登录/安装/中转——曾叫「Agent」，想「看额度还剩多少」
+    // 「退出登录」的用户猜不到该点它（key 名 account 与显示名分裂也是自证）。
+    nav: { general: "通用", sessions: "会话", appearance: "外观", network: "网络", account: "账号与用量", about: "关于" },
     archivedSessions: "已归档会话",
     archivedEmpty: "暂无已归档会话",
     archivedLoadMore: "加载更多",

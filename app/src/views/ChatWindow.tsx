@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { appConfirm } from "../confirm";
-import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, dismissInteractiveQuestion, agentModels, getChatHistory, getLiveSessionsPage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, openProjectDir, pendingInteraction, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type ModeScreenMarker, type PendingApproval } from "../api";
+import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, dismissInteractiveQuestion, agentModels, getChatHistory, getLiveSessionsPage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, openProjectDir, pendingInteraction, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type LiveSession, type ModeScreenMarker, type PendingApproval } from "../api";
 import { useT } from "../i18n";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { reduceChatEvents } from "../chat/reducer";
@@ -335,6 +335,103 @@ function RenameModal({ initial, onSubmit, onClose, t }: {
         <div className="chat-modal-actions">
           <button type="button" className="ns-btn" onClick={onClose}>{t.newSession.cancel}</button>
           <button type="button" className="ns-btn is-primary" disabled={!value.trim() || saving} onClick={() => void submit()}>{t.chat.renameSave}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Ctrl/Cmd+K 快速切换器：搜索 + 键盘导航直达任意会话。会话上百条时侧栏翻页与
+ *  滚动都太慢，这是键盘用户的主通道。查询下沉后端 search（与看板/侧栏同一条 LIKE）。 */
+function QuickSwitcher({ activeId, onPick, onClose }: {
+  activeId: number;
+  onPick: (id: number) => void;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const [query, setQuery] = useState("");
+  const [rows, setRows] = useState<LiveSession[]>([]);
+  const [active, setActive] = useState(0);
+  const seqRef = useRef(0);
+  // 首屏立即取（空查询 = 最近活跃），输入防抖 200ms；旧响应按序号丢弃。
+  useEffect(() => {
+    const seq = ++seqRef.current;
+    const timer = window.setTimeout(() => {
+      getLiveSessionsPage("all", query.trim() || null, null, 30)
+        .then((page) => {
+          if (seqRef.current !== seq) return;
+          setRows(page.items);
+          setActive(0);
+        })
+        .catch(() => {});
+    }, query ? 200 : 0);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+  const pick = (id: number) => {
+    onClose();
+    if (id !== activeId) onPick(id);
+  };
+  return (
+    <div className="chat-modal-overlay" role="presentation" onClick={onClose}>
+      <div
+        className="chat-modal chat-switcher"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t.chat.switcherTitle}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          // Esc 关弹层并截停：窗口级「Esc=拒绝审批」以 defaultPrevented/白名单让路，
+          // 焦点在列表按钮上时不截停就会误拒（与 RenameModal 同一课）。
+          if (event.key === "Escape") {
+            event.stopPropagation();
+            onClose();
+            return;
+          }
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            if (rows.length === 0) return;
+            setActive((cur) => (cur + (event.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length);
+            return;
+          }
+          if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            const row = rows[active];
+            if (row) pick(row.session.id);
+          }
+        }}
+      >
+        <input
+          className="ns-input"
+          autoFocus
+          value={query}
+          placeholder={t.chat.switcherPlaceholder}
+          aria-label={t.chat.switcherTitle}
+          onChange={(event) => {
+            if ((event.nativeEvent as InputEvent).isComposing) return;
+            setQuery(event.target.value);
+          }}
+          onCompositionEnd={(event) => setQuery(event.currentTarget.value)}
+        />
+        <div className="chat-switcher-list" role="listbox" aria-label={t.chat.switcherTitle}>
+          {rows.length === 0 && <div className="chat-switcher-empty">{t.chat.switcherEmpty}</div>}
+          {rows.map((row, index) => {
+            const tone = sessionTone(row.connected, row.session.status, row.pending_review, row.errored);
+            return (
+              <button
+                type="button"
+                key={row.session.id}
+                role="option"
+                aria-selected={index === active}
+                className={"chat-switcher-item" + (index === active ? " is-active" : "") + (row.session.id === activeId ? " is-current" : "")}
+                onMouseEnter={() => setActive(index)}
+                onClick={() => pick(row.session.id)}
+              >
+                <i className={`chat-sidebar-dot is-${tone}`} aria-hidden="true" />
+                <span className="chat-switcher-name">{row.task_title || t.sticker.waitingFirstInput}</span>
+                <span className="chat-switcher-meta">{row.project_name}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -801,10 +898,15 @@ export function ChatWindow() {
   // 此前整个对话窗除 Esc 外零快捷键，收侧栏、切视图、新建全要鼠标。
   const toggleSidebarRef = useRef(toggleSidebar);
   toggleSidebarRef.current = toggleSidebar;
+  // Ctrl/Cmd+K 快速切换器（QuickSwitcher）。
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
-      if (e.code === "KeyB") {
+      if (e.code === "KeyK") {
+        e.preventDefault();
+        setSwitcherOpen(true);
+      } else if (e.code === "KeyB") {
         e.preventDefault();
         toggleSidebarRef.current();
       } else if (e.code === "Digit1") {
@@ -2989,6 +3091,13 @@ export function ChatWindow() {
           onSubmit={renameSession}
           onClose={() => setRenaming(false)}
           t={t}
+        />
+      )}
+      {switcherOpen && (
+        <QuickSwitcher
+          activeId={sessionId}
+          onPick={(id) => resetTo(id)}
+          onClose={() => setSwitcherOpen(false)}
         />
       )}
     </div>
