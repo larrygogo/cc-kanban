@@ -1213,6 +1213,9 @@ export function ChatWindow() {
   // 静默探测进行中：按钮显示为忙，不弹任何终端界面。
   const [modelProbing, setModelProbing] = useState(false);
   const modelProbeTimerRef = useRef<number | undefined>(undefined);
+  // 换会话/卸载必须清掉探测兜底 timer：它的闭包捕获旧 sessionId，12 秒后照样触发
+  // endSilentProbe，往早已离开的会话终端写 Esc（幽灵按键；测试里表现为跨用例的写入泄漏）。
+  useEffect(() => () => window.clearTimeout(modelProbeTimerRef.current), [sessionId]);
   // 这个会话的模型菜单读不到（该 CLI 的菜单形态未取证/输入通道不通）：不再反复空转，
   // 按钮改为「去终端页切」的直达入口。换会话时复位——换个 agent 可能就能读到。
   const [modelProbeFailed, setModelProbeFailed] = useState(false);

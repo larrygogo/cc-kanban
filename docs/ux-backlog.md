@@ -65,7 +65,7 @@
 | U1-13 | 单次轮询失败整屏换成错误行（items 还在 state 里却被盖住），650ms 一发的 IPC 抖动就闪白屏 | `ChatWindow.tsx:1039-1041,2106` | failed 降级为顶部细横幅，连续 N 次才升整屏 | 已修 |
 | U1-14 | 侧栏无搜索（看板有，`getLiveSessionsPage` 已支持 search 位），会话上百条只能滚动翻页找 | `ChatSidebar.tsx:366,731-742` | 接入 search 参数，或做 Ctrl+K 命令面板 | 已修（侧栏搜索框 + Ctrl/Cmd+F 聚焦，下沉后端 search 通道；Ctrl+K 命令面板另议） |
 | U1-15 | 新建面板启动选项零记忆（换 agent 即清空；恢复路径反而有持久化）；工作目录不预填 | `NewSessionPanel.tsx:70,162,339` vs `api.ts:244-251` | `{provider→选择}` 存 settings 回填；无 prefill 时默认 `recent[0]` | 已修 |
-| U1-16 | 切回终端 tab 无条件下发 resize（后端同值也照发），TUI 每次全屏重绘 | `ManagedTerminal.tsx:666-679`、`pty.rs:1331-1350` | 前后端各加同值短路 | 已修 |
+| U1-16 | 切回终端 tab 无条件下发 resize（后端同值也照发），TUI 每次全屏重绘 | `ManagedTerminal.tsx:666-679`、`pty.rs:1331-1350` | 前后端各加同值短路 | 已修（回归修补：以前「切回即回底」是全屏重绘的副作用，短路后上翻的视口停在原地——实拍「终端没有回到底部」。现切回可见与进程退出写提示后均显式 `scrollToBottom()`，测试钉住） |
 | U1-17 | 首帧占位 ≠ 真实默认 ×4：menuMode(`context`→`button`)×2、sticker_style(`elevated`→`flat`)、opacity(94→100)，每次开窗闪一下；`About.tsx` 的 `??` 字面量盖掉了写对的 `SETTINGS_DEFAULTS` | `Sticker.tsx:181`、`ChatSidebar.tsx:476`、`About.tsx:398-400`、`state.ts:11` | 统一读 `SETTINGS_DEFAULTS`；加「与 Rust `Settings::default()` 逐字段一致」的单测 | 已修 |
 | U1-18 | reduced-motion 白名单漏 4 个无限动画 + `scroll-behavior:smooth`；且减动效后 running/waiting/idle 状态点像素级同形 | `styles.css:4033-4047,3247,996-999` | 白名单改兜底通配 + 少数例外；减动效下用形状差异替代动画 | 已修（兜底通配）；减动效下的形状差异归 G-17 状态语言重设计 |
 | U1-19 | `fmtResetIn` 硬编码 24 小时制 + 中文月日顺序直接搬给英文；全仓零 `Intl` | `AccountSection.tsx:64-90` | 换 `Intl.DateTimeFormat(lang, …)` / `Intl.RelativeTimeFormat` | 已修（fmtResetIn 走 Intl + 字典加 locale 字段）；fmtAgo 相对时间暂保留手拼 |

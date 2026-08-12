@@ -637,10 +637,14 @@ export function App() {
         }
         draggingRef.current = true;
         // 记录按下时的窗口位置：松手时按位移区分「真拖动」与「纯点击」（见 handleDragRelease）。
+        // try 包住同步段：窗口桩缺 outerPosition 时会在事件处理器里直接抛（测试环境实测），
+        // 拿不到起点就保持 null——handleDragRelease 对 null 按纯点击处理，行为不变。
         dragStartPosRef.current = null;
-        getCurrentWindow().outerPosition()
-          .then((p) => { dragStartPosRef.current = { x: p.x, y: p.y }; })
-          .catch(() => {});
+        try {
+          getCurrentWindow().outerPosition()
+            .then((p) => { dragStartPosRef.current = { x: p.x, y: p.y }; })
+            .catch(() => {});
+        } catch { /* 见上 */ }
         // 拖拽全程给 <html> 挂 class，驱动拖拽条放大——:active 在 OS 拖动接管后会丢失，不可靠。
         document.documentElement.classList.add("win-dragging");
       }

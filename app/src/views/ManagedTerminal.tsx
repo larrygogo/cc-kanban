@@ -307,6 +307,14 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     };
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
+      // 应用级导航键（Ctrl/Cmd+K 切换器、B 收侧栏、1/2 切视图、N 新建）放行给窗口监听：
+      // xterm 吃掉 keydown 会 stopPropagation，事件到不了 window，这些快捷键在终端视图
+      // 全部失灵。放行 = xterm 不处理也不下发 PTY，事件自然冒泡（与粘贴键同一机制）。
+      // 代价：agent composer 的 readline 编辑键（如 Ctrl+K 删到行尾）在托管终端让位——
+      // 应用内导航的跨视图一致性优先。
+      const appNav = (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey
+        && ["KeyK", "KeyB", "KeyN", "Digit1", "Digit2"].includes(event.code);
+      if (appNav) return false;
       const paste = ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === "KeyV")
         || (event.shiftKey && !event.ctrlKey && !event.metaKey && event.code === "Insert");
       if (paste) return false;
@@ -616,7 +624,8 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       // 进程没了就没有下一帧可等：必须离开初始化态，把退出结果交给遮罩。
       setInitialized(true);
       setExitCode(payload.code);
-      terminal.write(`\r\n\x1b[90m[Meowo: process exited${payload.code == null ? "" : ` (${payload.code})`}]\x1b[0m\r\n`);
+      // 写完滚底：视口若停在上翻位置，退出提示行（和叠在其上的接管卡片语境）都在屏外。
+      terminal.write(`\r\n\x1b[90m[Meowo: process exited${payload.code == null ? "" : ` (${payload.code})`}]\x1b[0m\r\n`, () => terminal.scrollToBottom());
     };
     // 首帧传 0 拿全量（要完整回放历史），补查轮询带 nextOffset 只取增量。
     // writeOutput 本来就按 startOffset 做区间裁剪，增量返回天然兼容。
@@ -880,6 +889,9 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       if (terminal.cols > 1 && terminal.rows > 1) {
         resizeIfChanged(sessionId, terminal.cols, terminal.rows);
       }
+      // 显式滚底：终端是实时视图，切回就该看最新。以前靠「切回必发 resize→TUI 整屏
+      // 重绘」的副作用顺带回底，resize 同值短路后副作用消失，上翻的视口会停在原地。
+      terminal.scrollToBottom();
       terminal.focus();
     });
     return () => cancelAnimationFrame(raf);

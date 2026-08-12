@@ -25,6 +25,8 @@ const writeCallbacks = vi.hoisted(() => ({ manual: false, queue: [] as (() => vo
 const selection = vi.hoisted(() => ({ text: "" }));
 // terminal.paste 的间谍（右键粘贴测试断言剪贴板文本进了 xterm 粘贴通路）。
 const pasteSpy = vi.hoisted(() => vi.fn());
+// terminal.scrollToBottom 的间谍（退出提示写入后必须滚底，否则上翻视口里提示在屏外）。
+const scrollToBottomSpy = vi.hoisted(() => vi.fn());
 vi.mock("@xterm/addon-web-links", () => ({
   WebLinksAddon: class {
     constructor(handler: (event: MouseEvent, uri: string) => void) { linkOpen.current = handler; }
@@ -52,6 +54,7 @@ vi.mock("@xterm/xterm", () => ({
     getSelection = () => selection.text;
     clearSelection = () => { selection.text = ""; };
     paste = (data: string) => pasteSpy(data);
+    scrollToBottom = scrollToBottomSpy;
   },
 }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); } }));
@@ -76,6 +79,7 @@ describe("ManagedTerminal", () => {
     writeCallbacks.manual = false;
     writeCallbacks.queue = [];
     selection.text = "";
+    scrollToBottomSpy.mockReset();
     global.ResizeObserver = class {
       observe = vi.fn();
       disconnect = vi.fn();
@@ -234,6 +238,24 @@ describe("ManagedTerminal", () => {
     expect(screen.getByRole("button", { name: "在 Meowo 中接管" })).toBeTruthy();
     // 遮罩层本体穿透（输出可滚可选），卡片自身可交互
     expect(container.querySelector(".managed-terminal-cover.is-exited")).toBeTruthy();
+  });
+
+  /// 实拍反馈「终端没有回到底部」：进程退出时若视口停在上翻位置，退出提示行与
+  /// 接管卡片的语境都在屏外。写完提示必须显式滚底（不能再依赖 resize 重绘副作用）。
+  it("进程退出时写入提示并滚动到底部", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve({ ...noPty, active: true, data: btoa("running"), endOffset: 7 });
+      }
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(eventHandlers.get("pty-exit")).toBeTruthy());
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    scrollToBottomSpy.mockReset();
+    eventHandlers.get("pty-exit")!({ payload: { sessionId: 163, code: 0 } });
+    await waitFor(() => expect(scrollToBottomSpy).toHaveBeenCalled());
+    expect(write.mock.calls.some(([data]) => typeof data === "string" && data.includes("process exited"))).toBe(true);
   });
 
   it("shows the initializing cover until the managed PTY produces its first output", async () => {
