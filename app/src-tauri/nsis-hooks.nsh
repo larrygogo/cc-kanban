@@ -135,6 +135,40 @@ Var LegacyHadStartMenuLnk
       Goto meowo_wait_dead
     ${EndIf}
   meowo_wait_done:
+
+  ; ── 终极兜底：把待覆盖文件**改名挪开**，杀不死也照装 ──
+  ;
+  ; 上面的清场对两类锁点无能为力（0.5.14 升级实拍仍弹「无法复制」）：
+  ;  1. 内核僵尸——线程卡死在 ConPTY 内核 I/O 的 meowo-app，TerminateProcess 静默
+  ;     无效，等多久都不死；
+  ;  2. 复活竞态——CC 状态行每 ~300ms 拉起一次 meowo-reporter，杀掉的下一秒又有新
+  ;     进程锁住 exe，File 复制的瞬间碰撞概率极高。
+  ; Windows 锁运行中 exe 锁的是**文件内容，不是目录项**：Rename 对运行中的映像合法
+  ; （Chrome/Firefox 更新器的标准做法）。挪开后 File 写全新文件零冲突；老进程继续跑
+  ; 在改名后的映像上自然消亡。临时名用 GetTempFileName 保证唯一（固定 .old 会撞上
+  ; 上一次升级还活着的老进程）；随手 Delete /REBOOTOK——没人占着就当场删，占着就登记
+  ; PendingFileRenameOperations 等重启清理，不留累积残留。
+  ; Rename 自身失败（目录 ACL 等极端）静默放过：File 那步照旧弹重试，不比现状差。
+  !insertmacro MeowoRenameAside "${MAINBINARYNAME}.exe"
+  !insertmacro MeowoRenameAside "meowo-reporter.exe"
+  !insertmacro MeowoRenameAside "OpenConsole.exe"
+  !insertmacro MeowoRenameAside "conpty.dll"
+!macroend
+
+; 把 $INSTDIR 里的一个文件挪到唯一临时名并尽力删除（被锁则重启后删）。
+; 寄存器只用 $R4（PREINSTALL 段内 $R0-$R3 归内置宏、$R6-$R9 归旧品牌清理）。
+!macro MeowoRenameAside FileName
+  ${If} ${FileExists} "$INSTDIR\${FileName}"
+    GetTempFileName $R4 "$INSTDIR"
+    Delete $R4
+    ClearErrors
+    Rename "$INSTDIR\${FileName}" $R4
+    ${If} ${Errors}
+      DetailPrint "Could not move aside ${FileName}; installer will overwrite in place."
+    ${Else}
+      Delete /REBOOTOK $R4
+    ${EndIf}
+  ${EndIf}
 !macroend
 
 ; 把旧品牌的快捷方式按新名字补回来。
