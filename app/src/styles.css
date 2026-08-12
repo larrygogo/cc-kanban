@@ -587,17 +587,14 @@ button.stab {
   overflow: hidden; /* 裁掉旋转亮段的圆角外溢 → 光点贴着圆角矩形边框跑 */
   background: var(--bc-track);
 }
-.run-badge--waiting {
+/* waiting 与 pending 同黄（红绿灯语言，与侧栏状态点同一约定）：颜色只说明「要你」，
+   急不急交给闪烁——待交互静止，待决策/审批闪。旧版给 pending 单配琥珀，两个暖色反而难分。 */
+.run-badge--waiting,
+.run-badge--pending {
   --bc: #e0a23c; /* 主色（亮黄，对应轨道的 224,162,60；同样不随主题变暗） */
   --bc-track: rgba(224, 162, 60, 0.22);
   --bc-fade: rgba(224, 162, 60, 0);
   --bc-text: #2a1d02;
-}
-.run-badge--pending {
-  --bc: #f0883e; /* 琥珀:区别于运行绿/待交互黄/错误红 */
-  --bc-track: rgba(240, 136, 62, 0.22);
-  --bc-fade: rgba(240, 136, 62, 0);
-  --bc-text: #2a1402;
 }
 .run-sweep {
   position: absolute;
@@ -607,16 +604,25 @@ button.stab {
   animation: run-spin 1.5s linear infinite;
 }
 /* 待交互/待审批：AI 已停下等用户操作，边框亮线不再流动（流动是「正在干活」的信号）——
-   改为静态实心圆环，颜色与中心百分比保持不变，一眼区分「在跑」和「等你」。 */
+   改为静态实心边框。待决策/审批在此之上加 1.8s 闪烁（与侧栏 is-pending 同频）：
+   等你打字不闪，要你按钮决策闪。 */
 .run-badge--waiting .run-sweep,
 .run-badge--pending .run-sweep {
   animation: none;
   background: var(--bc);
 }
+.run-badge--pending .run-sweep {
+  animation: run-pending-pulse 1.8s ease-in-out infinite;
+}
 @keyframes run-spin {
   to {
     transform: rotate(360deg);
   }
+}
+/* 只闪透明度：sweep 是铺满层，scale 会露出圆角外溢；中心圆不闪，百分比要可读。 */
+@keyframes run-pending-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 .run-mask {
   position: absolute;
@@ -811,8 +817,8 @@ button.stab {
 
 /* 卡片左侧状态圆点：在线绿 / 断开灰 */
 .sdot { width: calc(9px * var(--cc-ui)); height: calc(9px * var(--cc-ui)); flex: none; border-radius: 50%; }
-/* 在线空闲=空心绿环（形状语义与侧栏/缩略条一致：空心=没在干活）。 */
-.sdot-on { background: transparent; border: 2px solid var(--cc-ok-vivid); }
+/* 在线空闲=绿实心（红绿灯语言，与侧栏/缩略条一致）；压暗一档与「在跑」的呼吸绿区分。 */
+.sdot-on { background: var(--cc-ok-vivid); opacity: 0.55; }
 .sdot-off { background: var(--cc-text-faint); }
 
 /* 卡片右键菜单：星标/便签/重命名/归档（替代原 hover 图标行）。不透明表面同 .dd-menu
@@ -1025,13 +1031,13 @@ button.stab {
 @media (prefers-reduced-motion: reduce) {
   .cstrip-eyes { animation: none; }
 }
-/* 形状是第二信息通道（G-17，与侧栏状态点同一套约定）：实心圆=在跑（脉动），
-   **空心环=停下等你**（在线空闲绿环 / 等输入黄环），**方块=要你按钮决策**（待审批琥珀），
-   红实心=出错。reduced-motion 与色弱场景下不再只剩色相一条通道。 */
-.cstrip-on { background: transparent; border: 2.5px solid var(--cc-ok-vivid); }
+/* 红绿灯语言（G-17 二次决策，与侧栏状态点/贴纸徽标同一套约定）：全部实心圆，
+   颜色说明谁（绿=agent 侧、黄=要你、红=出错），闪烁说明急不急——在跑呼吸、
+   在线空闲与等你打字都静止、要你按钮决策闪。曾用空心环/方块做形状通道，撤了（见侧栏注释）。 */
+.cstrip-on { background: var(--cc-ok-vivid); opacity: 0.55; }
 .cstrip-running { background: var(--cc-ok-vivid); animation: cstrip-pulse 1.2s ease-in-out infinite; }
-.cstrip-waiting { background: transparent; border: 2.5px solid var(--cc-warn-vivid); animation: cstrip-pulse 2.4s ease-in-out infinite; }
-.cstrip-pending { border-radius: 3px; background: #f0883e; animation: cstrip-pulse 1.8s ease-in-out infinite; }
+.cstrip-waiting { background: var(--cc-warn-vivid); }
+.cstrip-pending { background: var(--cc-warn-vivid); animation: cstrip-pulse 1.8s ease-in-out infinite; }
 .cstrip-error { background: var(--cc-err-vivid); }
 @keyframes cstrip-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
@@ -2367,16 +2373,11 @@ button.stab {
   --bc-fade: rgba(15, 143, 111, 0);
   --bc-text: #ffffff;
 }
-:root[data-sticker-style="flat"][data-theme="light"] .run-badge--waiting {
+:root[data-sticker-style="flat"][data-theme="light"] .run-badge--waiting,
+:root[data-sticker-style="flat"][data-theme="light"] .run-badge--pending {
   --bc: #96690f;
   --bc-track: rgba(150, 105, 15, 0.28);
   --bc-fade: rgba(150, 105, 15, 0);
-  --bc-text: #ffffff;
-}
-:root[data-sticker-style="flat"][data-theme="light"] .run-badge--pending {
-  --bc: #b25a15;
-  --bc-track: rgba(178, 90, 21, 0.28);
-  --bc-fade: rgba(178, 90, 21, 0);
   --bc-text: #ffffff;
 }
 /* tab 分段槽 + 滑块：去内凹/凸起立体，改纯色面 */
@@ -3060,9 +3061,9 @@ select.ns-input {
 .chat-live i { width: 6px; height: 6px; border-radius: 50%; background: var(--cc-text-faint); }
 .chat-live.is-running { color: var(--cc-text-dim); }
 .chat-live.is-running i { background: var(--cc-ok-vivid); animation: chat-running-pulse 1.2s ease-in-out infinite; }
-.chat-live.is-waiting i { background: transparent; border: 2px solid var(--cc-warn-vivid); }
+.chat-live.is-waiting i { background: var(--cc-warn-vivid); }
 .chat-live.is-pending { color: color-mix(in srgb, var(--cc-warn-vivid) 60%, var(--cc-text)); }
-.chat-live.is-pending i { border-radius: 3px; background: var(--cc-warn-vivid); animation: chat-running-pulse 1.8s ease-in-out infinite; }
+.chat-live.is-pending i { background: var(--cc-warn-vivid); animation: chat-running-pulse 1.8s ease-in-out infinite; }
 .chat-live.is-error { color: color-mix(in srgb, var(--cc-err-vivid) 70%, var(--cc-text)); }
 .chat-live.is-error i { background: var(--cc-err-vivid); }
 .chat-live.is-offline i, .chat-live.is-ended i { background: var(--cc-text-faint); opacity: .6; }
@@ -3268,12 +3269,9 @@ select.ns-input {
 .chat-sidebar-caret.is-folded { transform: rotate(-90deg); }
 .chat-sidebar-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 组头与 Ctrl+K 切换器的状态点不在 agent 徽标上,没有 presence 定位,这里把 absolute 那套摘掉
-   （切换器行不摘的话，absolute 点会锚到弹层容器右下角，整行看不到状态点）。
-   is-waiting 的环是用 inset box-shadow 画的（见 .chat-sidebar-dot 注释），摘外描边时得单独留下内环。 */
+   （切换器行不摘的话，absolute 点会锚到弹层容器右下角，整行看不到状态点）。 */
 .chat-sidebar-group-head .chat-sidebar-dot,
 .chat-switcher-item .chat-sidebar-dot { position: static; flex: 0 0 auto; box-shadow: none; }
-.chat-sidebar-group-head .chat-sidebar-dot.is-waiting,
-.chat-switcher-item .chat-sidebar-dot.is-waiting { background: transparent; box-shadow: inset 0 0 0 2px var(--cc-warn-vivid); }
 .chat-sidebar-group-count { margin-left: auto; flex: 0 0 auto; color: var(--cc-text-faint); font-weight: 500; font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) { .chat-sidebar-caret { transition: none; } }
 /* 「显示 N 个未运行会话」：缩进对齐组内条目，弱化到接近纯文本——它是一条揭示动作，
@@ -3293,20 +3291,18 @@ select.ns-input {
 .chat-sidebar-agent-icon svg { width: 15px; height: 15px; }
 .chat-sidebar-agent-icon.is-off { color: var(--cc-text-faint); opacity: .5; filter: grayscale(1); }
 /* 会话运行状态点:贴在 agent 徽标右下角(presence 位)。描边用列表底色,压住图标不糊。
-   形状是第二信息通道（G-17）：waiting 与 pending 同为暖色、此前仅靠脉冲区分——
-   色弱用户与 reduced-motion 下双双失效。现约定：实心圆=在跑，**空心环=停下等你说话**，
-   **方块=要你按钮决策**（pending/approval），红实心=出错。颜色降为辅助。 */
-/* 尺寸取 8px：150%（本机常见）/100%/200% 缩放下 8px 与 2px 环均落整物理像素——
-   7px 奇数尺寸在 150% 下取整不对称，is-waiting 的空心环看着像被压扁的椭圆。
-   环用 inset box-shadow 而非 border 画：小圆上 border 四边取整不均，inset 沿圆角裁剪更圆润。 */
+   造型回归红绿灯（G-17 二次决策，2026-08-12）：全部实心圆，颜色说明谁（绿=在跑、黄=要你、
+   红=出错），**闪烁说明急不急**——等你打字不闪，要你按钮决策闪（approval 比 pending 更急）。
+   曾试过空心环/方块做形状通道，小尺寸下渲染毛病多且破坏一排灯的格式塔，撤了；
+   代价是 reduced-motion 下 waiting 与 pending 同为黄圆难分，靠 tooltip/aria-label 兜底。 */
+/* 尺寸取 8px：150%（本机常见）/100%/200% 缩放下落整物理像素——7px 奇数尺寸在 150% 下取整不对称。 */
 .chat-sidebar-dot { position: absolute; right: -3px; bottom: -2px; width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 0 2px var(--cc-bg); }
 .chat-sidebar-dot.is-running { background: var(--cc-ok-vivid); animation: chat-running-pulse 1.2s ease-in-out infinite; }
-/* 环心填底色而非透明：它叠在 agent 徽标右下角，透明圆心会框出徽标图案的一角，看着像环里进了杂质。 */
-.chat-sidebar-dot.is-waiting { background: var(--cc-bg); box-shadow: 0 0 0 2px var(--cc-bg), inset 0 0 0 2px var(--cc-warn-vivid); }
-.chat-sidebar-dot.is-pending { border-radius: 3px; background: var(--cc-warn-vivid); animation: chat-running-pulse 1.8s ease-in-out infinite; }
+.chat-sidebar-dot.is-waiting { background: var(--cc-warn-vivid); }
+.chat-sidebar-dot.is-pending { background: var(--cc-warn-vivid); animation: chat-running-pulse 1.8s ease-in-out infinite; }
 .chat-sidebar-dot.is-error { background: var(--cc-err-vivid); }
-/* 待授权：与 pending 同形（方块）+ 比 1.8s 更急的脉冲——授权在阻塞 agent，召唤强度最高。 */
-.chat-sidebar-dot.is-approval { border-radius: 3px; background: var(--cc-warn-vivid); animation: chat-running-pulse 0.9s ease-in-out infinite; }
+/* 待授权：比 pending 更急的脉冲——授权在阻塞 agent，召唤强度最高。 */
+.chat-sidebar-dot.is-approval { background: var(--cc-warn-vivid); animation: chat-running-pulse 0.9s ease-in-out infinite; }
 /* 文本列吃满剩余宽度：右侧「⋯」按钮靠 margin-left:auto 贴边，文本超长时先截断自己。 */
 .chat-sidebar-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 .chat-sidebar-name { display: flex; align-items: center; gap: var(--sp-4); overflow: hidden; font-size: var(--fs-12); font-weight: 500; line-height: 1.4; }

@@ -17,6 +17,7 @@ export const en: Dict = {
   },
   badge: {
     waiting: "Waiting for input",
+    pending: "Action needed",
     running: "Running",
     full: (what, pct) => `${what} · Context ${pct}% used`,
   },

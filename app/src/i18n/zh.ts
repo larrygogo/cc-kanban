@@ -19,6 +19,7 @@ export const zh = {
   },
   badge: {
     waiting: "等待输入",
+    pending: "待操作",
     running: "运行中",
     full: (what: string, pct: number) => `${what} · 上下文已用 ${pct}%`,
   },
