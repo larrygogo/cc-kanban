@@ -5,8 +5,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1268",
-    "beforeDevCommand": "bun ../scripts/prepare-sidecar.mjs && bun run dev",
-    "beforeBuildCommand": "bun ../scripts/prepare-sidecar.mjs && bun run build"
+    "beforeDevCommand": "bun ../scripts/prepare-sidecar.mjs && bun ../scripts/fetch-conpty.mjs && bun run dev",
+    "beforeBuildCommand": "bun ../scripts/prepare-sidecar.mjs && bun ../scripts/fetch-conpty.mjs && bun run build"
   },
   "app": {
     "macOSPrivateApi": true,
