@@ -42,7 +42,7 @@
 | U0-10 | Windows 上点连接中的托管会话不做 attach 去重（macOS 有），且全程无 in-flight 态防连点：每点一次多开一个镜像终端标签 | `terminal.rs:1855-1904` vs `:1870-1890`、`Sticker.tsx:289-323` | attach 握手已带 pid，按 pid 找已有镜像窗口 `force_foreground`；卡片点击加 pending 态 + 在飞去重 | 已修 |
 | U0-11 | 生产构建下托管终端**无法复制**：Ctrl+C 发 `^C` 中断 agent，Ctrl+Shift+C 被 devtools-guard 吃掉，右键菜单 PROD 全局禁用 | `ManagedTerminal.tsx:232-237`、`devtools-guard.ts:7,14-19` | 有选区时 Ctrl/Cmd+C 走 `getSelection()`+clipboard；devtools-guard 放行 Ctrl+Shift+C；补终端右键菜单 | 大部分已修（复制快捷键已落地；终端右键菜单待做） |
 | U0-12 | 「重启并更新」无确认直接 relaunch，退出时 `exit_ptys.shutdown()` 杀掉全部托管会话；`restartHint` 文案还在说「不会打断当前工作」 | `useUpdate.ts:55-64`、`lib.rs:1175-1177`、`zh.ts:650` | install 前查运行中会话数，n>0 走 `appConfirm`；订正文案 | 已修 |
-| U0-13 | 会话退出遮罩 94% 不透明铺满终端且吃指针事件，文案却说「上方保留了终端输出」——排查退出原因最需要的内容看不见滚不动 | `styles.css:4003`、`zh.ts:253` | 退出态改 banner 或遮罩 `pointer-events:none` + 大降不透明度 | 已修 |
+| U0-13 | 会话退出遮罩 94% 不透明铺满终端且吃指针事件，文案却说「上方保留了终端输出」——排查退出原因最需要的内容看不见滚不动 | `styles.css:4003`、`zh.ts:253` | 退出态改 banner 或遮罩 `pointer-events:none` + 大降不透明度 | 已修（二次迭代：底部横条方案被实拍否掉——TUI 退出清屏后窄条被读成「接管框不见了」；现为居中醒目卡片 + 遮罩层指针穿透，框在熟悉位置、输出仍可滚可选，测试钉住） |
 | U0-14 | 安装 agent 途中切换下拉 = 卡片卸载、`install-done` 监听注销：回来显示「安装」按钮诱导二次安装，失败原因永久丢失（登录已为此把状态提升到页面级，安装没做） | `AccountSection.tsx:197-202,309,1134-1135` | 仿 `useLoginOperations` 抽 `useInstallOperations` 提到 Section 层 | 已修 |
 | U0-15 | 恢复失败直出原始 OS 错误（`os error 2`）：CLI 被卸载 / 目录不存在均无前置校验（新建路径有 `validate_new_session_cwd`，恢复路径没有） | `pty.rs:987-990`、`terminal.rs:1678-1687` | 恢复前校验目录存在与可执行（`path_has_exe` 已有），返回可本地化错误码 + 带动作提示 | 已修 |
 
@@ -100,7 +100,7 @@
 | B-13 | focus toast 无 Esc/点外关闭，带动作类型不自动消失且盖掉小窗列表下半部 | `Sticker.tsx:898-935`、`styles.css:384-393` | 已修（Esc 关闭 toast） |
 | B-14 | 自绘滚动条 4px 且仅悬停贴纸才显形，无点击轨道跳转 | `styles.css:478-490` | 热区扩 12px（视觉不变），溢出时低透明常显 |
 | B-15 | loadMore 的三点 loader 落在底部淡出遮罩里且不计入滚动高度 | `Sticker.tsx:839-845`、`styles.css:357-367` | loader 作为内层容器正常流子元素 |
-| B-16 | tab 滑块宽度硬编码 1/3 与 TAB_KEYS 靠注释同步；星标后卡片瞬移无 FLIP 动画 | `styles.css:265-276`、`Sticker.tsx:863` | 滑块跟随实测 offsetLeft/Width；星标加位移动画 |
+| B-16 | tab 滑块宽度硬编码 1/3 与 TAB_KEYS 靠注释同步；星标后卡片瞬移无 FLIP 动画 | `styles.css:265-276`、`Sticker.tsx:863` | 已修（滑块按选中按钮实测 left/width 定位 + ResizeObserver 重测，1/3 硬编码与 TAB_KEYS 的注释耦合消除；星标 FLIP 动画仍待做） |
 
 ### 对话窗
 
@@ -119,10 +119,10 @@
 | C-11 | 多问题/多选题渲染成 tab 却不能卡内作答，只给「去终端」 | `ChatWindow.tsx:1910-1911,2314` | queuedAnswer 升级 Map；至少单问题多选可点 |
 | C-12 | 切会话整屏清空 + 全屏加载文案三段跳；外部切换时侧栏不 scrollIntoView 当前项 | `ChatWindow.tsx:972-976,2105`、`ChatSidebar.tsx:633` | 骨架屏 + loading 超 150ms 才显示；activeId 变化 scrollIntoView |
 | C-13 | 归档后自动跳转逻辑两份（侧栏用本地 ordered，ChatWindow 另发查询），目标不可预期 | `ChatSidebar.tsx:527-530` vs `ChatWindow.tsx:651-655` | 抽 `useSessionActions` 统一 |
-| C-14 | 流式输出 650ms 一批的蹦字观感；切终端再切回强制丢阅读位置（DOM 实为 hidden 未卸载） | `ChatWindow.tsx:1047-1051,1269-1287` | 短期打字机补间；切走前记 scrollTop 切回恢复 |
+| C-14 | 流式输出 650ms 一批的蹦字观感；切终端再切回强制丢阅读位置（DOM 实为 hidden 未卸载） | `ChatWindow.tsx:1047-1051,1269-1287` | 部分已修（pty-output 驱动 200ms 合流提前刷新，托管会话蹦字节奏从 650ms 压到输出帧粒度；650ms 轮询保留兜底。真·transcript watch push 待做） |
 | C-15 | 任何发送错误都把占位符改成「尚未接管」（与真实原因无关）；会话结束时 composer 整块卸载藏起草稿 | `ChatWindow.tsx:2443-2449,2374-2390` | 占位符只随 needsTakeover；gate 态禁用而非卸载 |
 | C-16 | 超长粘贴固定 250ms 后回车，TUI 可能没消化完；`sessionLaunchSelections` 无 stale 守卫会把旧会话启动档落到新会话 | `ChatWindow.tsx:405-414,727-730` | 按长度动态间隔/屏幕确认；补 stale 清理 |
-| C-17 | 快捷键体系整体缺位：无切会话/收展侧栏/切视图/新建/查找；侧栏平铺 tabindex 上百次 Tab | `ChatWindow.tsx:1948-1962`、`ChatSidebar.tsx:629-647` | 大部分已修（Ctrl+K 快速切换器落地：搜索下沉后端 + ↑↓/Enter 键盘导航，测试钉住；? 速查表与侧栏 roving 待做） |
+| C-17 | 快捷键体系整体缺位：无切会话/收展侧栏/切视图/新建/查找；侧栏平铺 tabindex 上百次 Tab | `ChatWindow.tsx:1948-1962`、`ChatSidebar.tsx:629-647` | 已修（Ctrl+K/B/1/2/N/F + ? 速查表全部落地；侧栏 roving tabindex 归 C-17 后续小项） |
 | C-18 | 断线语言缺失：分不出「agent 进程没了」和「IPC 通道断了」 | `zh.ts:153-160`、`ChatWindow.tsx:565` | IPC 连续失败单列「同步中断」横幅与 tone 解耦 |
 
 ### 托管终端 / 跳转恢复 / 新建会话
@@ -152,17 +152,17 @@
 |---|---|---|---|
 | S-1 | 30 项设置零搜索；「Agent」分区承载账号/配额/登录/安装/中转五件事（key 叫 account 显示叫 Agent）；「在贴纸显示配额」埋在已登录账号卡深处 | `About.tsx:26,604-630`、`AccountSection.tsx:624-651` | 部分已修（「Agent」分区改名「账号与用量」；设置搜索与展示项挪位待做） |
 | S-2 | 切分区 `key={sec}` 整树重挂 + 重拉数据（含联网配额查询）；设置窗 620×460 不可缩放，长内容嵌套滚动陷阱 | `About.tsx:643,188-194`、`window.rs:113-115` | CSS 隐藏代替卸载 / 数据提升共享；放开纵向缩放 |
-| S-3 | 通用/会话/外观三分区保存失败完全静默（开关自己弹回去），只有网络分区显示错误 | `About.tsx:129-476` 各 patch 调用 | 已修（useSettingsState 暴露 lastError，三分区渲染统一 SettingsError 行） |
+| S-3 | 通用/会话/外观三分区保存失败完全静默（开关自己弹回去），只有网络分区显示错误 | `About.tsx:129-476` 各 patch 调用 | 已修（useSettingsState 暴露 lastError；通用/会话/外观/账号四分区渲染错误行，网络分区原有） |
 | S-4 | 设置窗不订阅 settings-changed（现成的 useSettingsEffect 没用），与 Onboarding 同开时整对象写回互相覆盖 | `state.ts:44-66` | 已修（state.ts 订阅 settings-changed） |
 | S-5 | 调不透明度/字号时设置窗自己纹丝不动（密度只在贴纸窗生效），等于闭眼调 | `appearance.ts:78-80`、`About.tsx:446-478` | 行旁放迷你贴纸预览（Onboarding 已有 obm-card 组件） |
 | S-6 | 配额无「更新于 X 分钟前」，设置页不自动刷新（贴纸 5 分钟刷）；对未登录 provider 也发配额查询 | `AccountSection.tsx:632-646,1082` | 已修（设置页 5 分钟自动刷新 + 「更新于 HH:MM」；挂载刷新过滤对齐贴纸——未登录/中转不再发请求） |
 | S-7 | 登录 pending 态零指引（不说在哪个终端开了窗、等多久）；「取消等待」英文译成裸 Cancel 生歧义 | `AccountSection.tsx:464-466`、`en.ts:569` | pending 显示「已在 {终端} 打开…最长 5 分钟」；en 改 Stop waiting |
-| S-8 | 安装是不可中断黑盒（无进度/耗时/取消）；失败日志路径纯文本不可点；「修复连接」按钮凭空出现零解释；修复失败指向不存在的「运行终端」 | `AccountSection.tsx:436-452,568-573,495-505`、`zh.ts:118` | 加计时与预期；日志改按钮；修复前加说明；文案指向具体文件 |
-| S-9 | 切账号不说明「仅对新会话生效」（后端注释明确，UI 无一字）；后端错误硬编码中文直出（英文界面显示中文） | `profile/mod.rs:337-339,312-443`、`AccountSection.tsx:999` | 加覆盖面说明行；错误改结构化 reason 码前端映射 |
-| S-10 | `listAgents()` 失败静默吞错 → Agent 分区整页空白，分不清空态和故障 | `AccountSection.tsx:1030-1032,1093-1094` | 区分 null 骨架 / [] 空态 / error 重试条 |
+| S-8 | 安装是不可中断黑盒（无进度/耗时/取消）；失败日志路径纯文本不可点；「修复连接」按钮凭空出现零解释；修复失败指向不存在的「运行终端」 | `AccountSection.tsx:436-452,568-573,495-505`、`zh.ts:118` | 部分已修（安装中 ≥5s 显示已耗时；失败日志改可点按钮与预下载体量说明待做） |
+| S-9 | 切账号不说明「仅对新会话生效」（后端注释明确，UI 无一字）；后端错误硬编码中文直出（英文界面显示中文） | `profile/mod.rs:337-339,312-443`、`AccountSection.tsx:999` | 部分已修（账号列表补「切换仅对之后新建/恢复的会话生效」说明行；后端错误结构化 reason 码待做） |
+| S-10 | `listAgents()` 失败静默吞错 → Agent 分区整页空白，分不清空态和故障 | `AccountSection.tsx:1030-1032,1093-1094` | 已修（检测中/失败重试/名单空三态区分，不再整页空白） |
 | S-11 | 引导 6 步无一步讲装 agent/登录（走完看板还是空的）；宣称有「已归档」tab（实际没有）；reopen 提示只在最后一步（跳过者永远看不到） | `Onboarding.tsx:345-352,402`、`zh.ts:686` | 加「连接你的 AI CLI」一步；订正文案；reopen 提示挪到跳过路径 |
 | S-12 | hooks 静默改写 `~/.claude/settings.json` 全程零告知；首启自动导入 7 天历史会话零说明 | `lib.rs:1151-1152`、`watch.rs:793-820` | 引导加「Meowo 如何读到进度」一步（明写备份与移除方式）；导入完成给一次性提示 |
-| S-13 | 打开「关于」10s 空窗（delayMs=10000），checking/error 态不渲染（文案已有但零引用）；更新窗无「稍后/跳过此版本/更新日志」，下载不可取消 | `useUpdate.ts:11`、`About.tsx:519`、`Updater.tsx:97-133` | 接上 checking 文案；补稍后/日志链接/取消 |
+| S-13 | 打开「关于」10s 空窗（delayMs=10000），checking/error 态不渲染（文案已有但零引用）；更新窗无「稍后/跳过此版本/更新日志」，下载不可取消 | `useUpdate.ts:11`、`About.tsx:519`、`Updater.tsx:97-133` | 大部分已修（checking/error 态、unknown 初值、「稍后」按钮、完整更新日志链接；下载取消待做） |
 | S-14 | 确认框主按钮通用「确定」不说后果；可逆登出与不可逆删除同用 danger 红（严重度拉平）；confirm 打不开静默当取消 | `ConfirmWindow.tsx:116-119`、`AccountSection.tsx:358-793`、`confirm.tsx:16` | appConfirm 加 confirmLabel；danger 只留删除/合并；catch 上报可见错误 |
 | S-15 | 12 个死文案键（含 5.2 需要的 about.checking 和已有样式的 proxy `*Why` 解释）；`usageUnavailable` 在已登录分支说「请确认已登录」自相矛盾 | `zh.ts:513-658` 各处 | 该接的接上，其余删除；错误文案立「发生了什么+能做什么（指向可见控件）」规则 |
 
@@ -170,10 +170,10 @@
 
 | # | 问题 | 位置 | 建议 |
 |---|---|---|---|
-| W-1 | 吸附阈值 20 物理像素（150% 缩放下等效 13 逻辑像素），高 DPI 手感随机；条厚度却按逻辑值乘 scale，两处口径不一 | `snap.rs:5,150-152` | 阈值改 `20*scale_factor` |
+| W-1 | 吸附阈值 20 物理像素（150% 缩放下等效 13 逻辑像素），高 DPI 手感随机；条厚度却按逻辑值乘 scale，两处口径不一 | `snap.rs:5,150-152` | 已修（阈值按 scale_factor 换算，与 STRIP_W_LOGICAL 同口径） |
 | W-2 | 吸附预览只有窗口自身 4px 发光条，无落点预览 | `App.tsx:705`、`styles.css:1003-1015` | 屏幕边缘画缩略条幽灵轮廓 |
-| W-3 | 展开态点一下拖拽条（不移动）即意外折叠（陈旧 lastEdgeRef） | `App.tsx:557-558,462-484` | 记起始坐标，位移超阈值才判定 |
-| W-4 | 折叠态启动闪「细条内容装在 360×440 大框」；展开过渡期看板在 28px 宽窗口内布局抖动 | `App.tsx:157-162,663-667`、`useShowWhenReady.ts:20-22` | show() 推迟到 snap_collapse resolve；expanding 期渲染占位 |
+| W-3 | 展开态点一下拖拽条（不移动）即意外折叠（陈旧 lastEdgeRef） | `App.tsx:557-558,462-484` | 已修（松手时位移 < 4px 视为纯点击，不做吸附/还原判定） |
+| W-4 | 折叠态启动闪「细条内容装在 360×440 大框」；展开过渡期看板在 28px 宽窗口内布局抖动 | `App.tsx:157-162,663-667`、`useShowWhenReady.ts:20-22` | 部分已修（折叠启动的 show 推迟到 snap_collapse 落地，闪帧消除；展开过渡占位待做） |
 | W-5 | 缩略条主轴无上限（60 会话超 1080p 工作区，溢出被裁无提示）；DPI/显示器变化不重算 | `App.tsx:55-57`、`snap.rs:251`、`CollapsedStrip.tsx:47-54` | 上限 + `+N` 徽章；collapsed 态监听 onScaleChanged 重跑 |
 | W-6 | pin 状态折叠态不可见不可操作；「找回贴纸」强行永久改写 pin 偏好 | `Sticker.tsx:995-1005`、`App.tsx:415` | 缩略条加 pin 标记；找回改临时置顶 |
 | W-7 | 贴纸首显走普通 `show()` 可能抢焦点（`show_window_no_activate` 已有只给对话窗用） | `useShowWhenReady.ts:25`、`window.rs:34-38,437-449` | 改走 no_activate 路径 |
@@ -198,18 +198,18 @@
 | G-3 | 确认/弹窗三种壳（原生小窗/页内 modal/行内编辑），页内 modal 无焦点陷阱无 inert（aria-modal 承诺落空） | `ChatWindow.tsx:308-330`、`ConfirmWindow.tsx` | 抽带焦点陷阱的 AppModal 或改行内 |
 | G-4 | `card_menu_mode=button` 贴纸常显、侧栏 hover 才显——同一设置两种表现 | `styles.css:825-843` vs `:3234-3239` | button 模式两处都常显 |
 | G-5 | 原生 title 残留 17 处与 Tooltip 混用（不止 backlog 认可的 dd-menu 内） | `ChatWindow.tsx:2069`、`Message.tsx:161` 等 | 逐处换 data-tip |
-| G-6 | Esc 层级三种让路约定（preventDefault / 捕获 stopPropagation / tagName 白名单）+ Tooltip 第四种；独立窗口 Esc 关闭只实现 1/6 | `menu.tsx:117`、`Message.tsx:76`、`ChatWindow.tsx:1949`、`Tooltip.tsx:74` | 部分已修（useEscClose 抽取并接入设置/更新/新建/引导四窗，ConfirmWindow 原有——五窗齐了；escStack 本体待做） |
+| G-6 | Esc 层级三种让路约定（preventDefault / 捕获 stopPropagation / tagName 白名单）+ Tooltip 第四种；独立窗口 Esc 关闭只实现 1/6 | `menu.tsx:117`、`Message.tsx:76`、`ChatWindow.tsx:1949`、`Tooltip.tsx:74` | 已修（escLayers 层栈落地：菜单/右键菜单/弹层/灯箱/切换器/补全全部注册，窗口级「Esc=拒绝审批」按栈让位；各层自己的截停约定保留为双保险） |
 | G-7 | focus ring 仅 1 处自定义，`.slider` 等 outline:none 无替代（WCAG 2.4.7 失败） | `styles.css:2002-2011,2269` | 已修（--dur token 同批；data-im=kbd 下全局 :focus-visible 兜底环 + .slider 放开 outline） |
 | G-8 | 动效零 token：13 个时长值、3 个缓动散落，同类元素有的渐变有的瞬变 | `styles.css` 全文 | 已修（--dur-fast/base/slow 三档 token，45 处 transition 收敛；0.4s 长淡入与具名动画保留） |
 | G-9 | 用量读数屏文字四种主题组合全部 <4.5:1（最低 3.28）——绕过已校准 token 写死 alpha；7 处文本再叠 opacity 击穿基线（最低 2.81） | `styles.css:441-449,1728,3731` 等 | 已修（用量读数回 --cc-text-dim 保留雕刻 text-shadow；6 处文本 opacity 叠加删除） |
-| G-10 | 终端页强制深色的变量覆盖漏整个状态色族（浅色用户切终端页 err/warn 只有 3.3-4:1）；flat 主题逐条硬抄已漏 `.run-mask`（flat+浅色下运行卡片是纯黑块） | `styles.css:3785-3809,2287-2363,597-604` | 深色调色板抽共用块整套套用；flat 改材质 token 驱动 |
+| G-10 | 终端页强制深色的变量覆盖漏整个状态色族（浅色用户切终端页 err/warn 只有 3.3-4:1）；flat 主题逐条硬抄已漏 `.run-mask`（flat+浅色下运行卡片是纯黑块） | `styles.css:3785-3809,2287-2363,597-604` | 已修（--ind-face token：.stk-ind 与 .run-mask 同底色，flat+浅色不再有纯黑块；浅面徽标配色整组压暗一档、文字改白。近似色留视觉验证轮微调） |
 | G-11 | 「密度」实为字号缩放且只作用于贴纸窗（设置文案与 token 注释两张皮）；`--sp-*`/`--fs-*` 全定值，46 处 calc 之外的间距不缩放致版式失衡；`.stk-ind`/`.cstrip-*`/`.tip` 等完全不吃密度 | `appearance.ts:78-80`、`styles.css:26,85-105` | 已修（--sp/--fs 阶梯整梯乘 --cc-ui，非贴纸窗恒 1 零回归；.stk-ind/.run-core/.ring-stop/.sdot/.needs-error/.ctx-menu 一并参数化；设置项改名「界面缩放」并注明只作用于贴纸窗。--cc-ui 下发给 chat 窗口仍待做；.cstrip-* 刻意不缩放——细条厚度固定，点放大会溢出） |
 | G-12 | 英文约 2.2× 宽无省略保护：`.stab`/`.seg-btn` nowrap 无 overflow 处理，窄窗+英文+大密度直接溢出 | `styles.css:293-309,1918-1937` | 补 ellipsis；`.seg` 允许 shrink |
 | G-13 | 零 Intl：24 小时制硬编码、英文月日顺序错、相对时间手拼 | `AccountSection.tsx:64-90`、`helpers.ts:14-21` | 见 U1-19 |
 | G-14 | 「本周」实为「近 7 天」，与日历应用语义不同 | `ChatSidebar.tsx:95-110` | 文案改「近 7 天」（成本最低） |
-| G-15 | 悬停是若干功能唯一入口且无 hover:none 兜底（终端操作条、自绘滚动条）；Tooltip 无触摸/长按路径而它承载完整路径、账号全名等唯一信息 | `styles.css:4026-4029,478-490`、`Tooltip.tsx:77-79` | `.is-hover-reveal` 工具类 + hover:none 常显；Tooltip 加长按分支 |
+| G-15 | 悬停是若干功能唯一入口且无 hover:none 兜底（终端操作条、自绘滚动条）；Tooltip 无触摸/长按路径而它承载完整路径、账号全名等唯一信息 | `styles.css:4026-4029,478-490`、`Tooltip.tsx:77-79` | 已修（终端操作条 focus-within/hover:none + TooltipLayer 触屏长按 500ms 显示、抬手保留 1.2s） |
 | G-16 | 每个会话状态点都是 `role="status"` live region（N 条会话 = N 个播报源，状态秒级跳变播报风暴）；审批卡 `role="alert"` 包裹交互按钮打断朗读且焦点不入 | `ChatSidebar.tsx:663,794` 等、`ApprovalCard.tsx:22` | 状态点改 `role="img"` 只留 1 个播报；审批卡改 alertdialog + 移焦 |
-| G-17 | 状态三色灰度值几乎相同（159/160/169），waiting↔pending 对比 1.13:1，reduced-motion 下动效通道也没了——无第三通道 | `styles.css:566-591,3207-3212` | 引入形状维度（实心/空心/方形/缺口），颜色降为辅助 |
+| G-17 | 状态三色灰度值几乎相同（159/160/169），waiting↔pending 对比 1.13:1，reduced-motion 下动效通道也没了——无第三通道 | `styles.css:566-591,3207-3212` | 大部分已修（形状语义落地：实心=在跑、空心环=等你说话、方块=要你决策——侧栏点/标题栏徽标/缩略条/卡片在线点四处统一；RunBadge 已有 pill 文字+流动差异不再加形状。视觉需真机复核） |
 | G-18 | `.stk-utab` 未选中 opacity 0.42 实测对比 1.90:1，看不出可点 | `styles.css:466-472` | 已修（0.42 → 0.6） |
 | G-19 | 设置分区不记忆（每次开窗回 general，最常用的外观永远多点一次） | `About.tsx:594` | 已修（分区选择落 localStorage） |
 

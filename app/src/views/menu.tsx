@@ -8,6 +8,7 @@
 // - 对话窗模型/模式菜单：CSS 绝对定位 + 互斥状态在父组件，受控复用 `useMenuPopup`；
 // - RelayAccess 的 ModelPicker 是 combobox（输入过滤 + aria-activedescendant），模式不同，不并入。
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from "react";
+import { pushEscLayer } from "../escLayers";
 import { CheckIcon, ChevronDownIcon } from "./sticker/icons";
 
 /** 菜单定位坐标（仅 fixed 模式；`cssPositioned` 时恒为空对象，定位交给 CSS）。
@@ -97,6 +98,8 @@ export function useMenuPopup({
 
   useEffect(() => {
     if (!open) return;
+    // 注册 Esc 层（见 escLayers.ts）：菜单开着期间，窗口级「Esc=拒绝审批」一律让位。
+    const popLayer = pushEscLayer();
     const setOpen = setOpenRef.current;
     // pointerdown + 捕获段，而不是 mousedown 冒泡：窗口拖拽区（data-tauri-drag-region，
     // 如侧栏头部/标题栏）的 mousedown 会被拖拽逻辑消费、到不了 document 冒泡段——
@@ -130,6 +133,7 @@ export function useMenuPopup({
       window.addEventListener("scroll", closeOnOutsideScroll, true);
     }
     return () => {
+      popLayer();
       document.removeEventListener("pointerdown", onDoc, true);
       document.removeEventListener("keydown", onKey);
       if (!cssPositioned) {

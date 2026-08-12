@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
+import { pushEscLayer } from "../../escLayers";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useT } from "../../i18n";
 import { zh } from "../../i18n/zh";
@@ -71,15 +72,20 @@ function Lightbox({ src, name, onClose }: { src: string; name: string; onClose: 
   const reset = () => { setScale(1); setOffset({ x: 0, y: 0 }); };
 
   // Esc 关灯箱。挂捕获段并拦住传播：ChatWindow 有一个全局 Esc=拒绝审批的监听，
-  // 用户按 Esc 只想关图，不能顺手把审批拒了。
+  // 用户按 Esc 只想关图，不能顺手把审批拒了。同时注册 Esc 层（escLayers.ts）——
+  // 层栈是全局监听的统一让位判据，捕获段截停是本层自己的双保险。
   useEffect(() => {
+    const popLayer = pushEscLayer();
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.stopPropagation();
       onClose();
     };
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    return () => {
+      popLayer();
+      window.removeEventListener("keydown", onKey, true);
+    };
   }, [onClose]);
 
   // 滚轮缩放。React 的 onWheel 在根容器上是 passive 监听，preventDefault 无效
@@ -265,6 +271,20 @@ export const Message = memo(function Message({ item }: { item: ChatItem }) {
       <article className={"chat-message is-user" + (images.length ? " has-images" : "")}>
         {images.length > 0 && <ImageRow images={images} />}
         {body && <div className="chat-text">{body}</div>}
+      </article>
+    );
+  }
+  if (item.type === "turn_error") {
+    // 回合错误（API Error 等，CC 以 model=<synthetic> 写盘的系统插入文案）：这不是模型
+    // 说的话，套错误皮而不是正文皮——红标签一眼可辨故障，原文保留供排查。原文是固定
+    // 短句不是 markdown，直接平铺。
+    return (
+      <article className="chat-message is-turn-error" role="alert">
+        <div className="chat-turn-error-label">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 8v5M12 16.5v.5" /></svg>
+          {item.label}
+        </div>
+        <div className="chat-text">{item.text}</div>
       </article>
     );
   }

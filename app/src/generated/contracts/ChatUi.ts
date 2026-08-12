@@ -44,6 +44,11 @@ attention_patterns: Array<AttentionPattern>,
  */
 interrupt_input: string | null, 
 /**
+ * Ctrl/Shift+Enter 在 composer 插入换行的注入序列(如 claude 的 ESC+CR)。
+ * None = 未声明,前端保持终端原生语义(带修饰的 Enter 与裸 Enter 同码 `\r`)。
+ */
+newline_input: string | null, 
+/**
  * 当前会话支持 runtime 命令自发现、但权威清单尚未写入 transcript。前端据此继续随
  * transcript 增量重试；一旦为 false 就停止探测，避免稳态轮询反复扫描文件。
  */

@@ -23,6 +23,8 @@ const dataHandler = vi.hoisted(() => ({ current: null as ((data: string) => void
 const writeCallbacks = vi.hoisted(() => ({ manual: false, queue: [] as (() => void)[] }));
 // 终端选区：复制快捷键测试用（有选区的 Ctrl+C=复制不发 ^C，无选区照旧发）。
 const selection = vi.hoisted(() => ({ text: "" }));
+// terminal.paste 的间谍（右键粘贴测试断言剪贴板文本进了 xterm 粘贴通路）。
+const pasteSpy = vi.hoisted(() => vi.fn());
 vi.mock("@xterm/addon-web-links", () => ({
   WebLinksAddon: class {
     constructor(handler: (event: MouseEvent, uri: string) => void) { linkOpen.current = handler; }
@@ -48,6 +50,8 @@ vi.mock("@xterm/xterm", () => ({
     attachCustomKeyEventHandler = (handler: (event: KeyboardEvent) => boolean) => { keyHandler.current = handler; };
     hasSelection = () => selection.text.length > 0;
     getSelection = () => selection.text;
+    clearSelection = () => { selection.text = ""; };
+    paste = (data: string) => pasteSpy(data);
   },
 }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); } }));
@@ -56,7 +60,7 @@ vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); } }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ confirm: vi.fn(), open: vi.fn() }));
 const confirmAnswer = vi.hoisted(() => ({ ok: true }));
 
-import { findFakeCaret, ManagedTerminal, stripTerminalReplies } from "./ManagedTerminal";
+import { findFakeCaret, ManagedTerminal, STREAM_STALL_MS, stripTerminalReplies, terminalStreamStalled } from "./ManagedTerminal";
 
 const noPty = { sessionId: 163, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null };
 
@@ -212,6 +216,24 @@ describe("ManagedTerminal", () => {
     render(<ManagedTerminal sessionId={163} status="ended" background />);
     expect(await screen.findByText(/这个后台会话已结束/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "重新接入" })).toBeNull();
+  });
+
+  /// 会话结束后「接管的框」必须清晰地在（实拍反馈：曾降成底部窄横条，TUI 退出清屏后
+  /// 黑屏 + 窄条被读成「框不见了」）。现约定：居中卡片 + 层背景穿透（输出仍可滚可选）。
+  it("会话退出后显示居中接管卡片（层穿透保留输出可达），按钮可点", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve({ ...noPty, exited: true, exitCode: 1 });
+      }
+      return Promise.resolve();
+    });
+    const { container } = render(<ManagedTerminal sessionId={163} status="ended" />);
+    // 居中卡片出现，带退出说明与接管按钮
+    await waitFor(() => expect(container.querySelector(".managed-terminal-exit-card")).toBeTruthy());
+    expect(screen.getByText(/Agent 进程已退出（退出码 1）/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "在 Meowo 中接管" })).toBeTruthy();
+    // 遮罩层本体穿透（输出可滚可选），卡片自身可交互
+    expect(container.querySelector(".managed-terminal-cover.is-exited")).toBeTruthy();
   });
 
   it("shows the initializing cover until the managed PTY produces its first output", async () => {
@@ -440,6 +462,143 @@ describe("ManagedTerminal", () => {
     await waitFor(() => expect(painted()).toBe("ABCDEFGHI"));
   });
 
+  it("右键:有选区复制并清选区,无选区读剪贴板走 paste 通路(仅 Windows 惯例)", async () => {
+    // WebView 默认右键菜单被 devtools-guard 封死,封死后右键此前没有任何替代行为
+    // (实拍反馈"右键复制没生效")。约定与 Windows 终端一致:右键=复制或粘贴;
+    // macOS 的右键是菜单语义,组件按 platform 门控——测试环境显式装成 Windows。
+    Object.defineProperty(navigator, "platform", { value: "Win32", configurable: true });
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2 });
+      if (command === "clipboard_text") return Promise.resolve("from-clipboard");
+      return Promise.resolve();
+    });
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.assign(navigator, { clipboard: { writeText } });
+    pasteSpy.mockClear();
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    const host = document.querySelector(".managed-terminal-host")!;
+    // 有选区:复制选区、清选区,不碰剪贴板读取。
+    selection.text = "picked";
+    fireEvent.contextMenu(host);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("picked"));
+    expect(selection.text).toBe("");
+    expect(invoke).not.toHaveBeenCalledWith("clipboard_text");
+    // 无选区:读后端剪贴板,文本进 xterm 的 paste 通路(bracketed paste + onData 下发)。
+    fireEvent.contextMenu(host);
+    await waitFor(() => expect(pasteSpy).toHaveBeenCalledWith("from-clipboard"));
+  });
+
+  it("Ctrl+Enter / Shift+Enter 按插件声明的换行序列注入,不落成提交", async () => {
+    // 终端传统编码里带修饰的 Enter 与裸 Enter 同码(\r):用户按「换行」,CC 收到「提交」。
+    // WT 的 /terminal-setup 把 Shift+Enter 配成发 \x1b\r(meta+return,ink 认作换行);
+    // 注入序列由插件声明经 chatUi 下发(newlineInput prop),未声明的 agent 不注入。
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2 });
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" newlineInput={"\x1b\r"} />);
+    await waitFor(() => expect(keyHandler.current).toBeTruthy());
+    for (const init of [{ ctrlKey: true }, { shiftKey: true }] as KeyboardEventInit[]) {
+      invoke.mockClear();
+      const handled = keyHandler.current!(new KeyboardEvent("keydown", { key: "Enter", ...init }));
+      expect(handled).toBe(false); // xterm 不再自己编码(那会发裸 \r = 提交)
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 163, data: "\x1b\r" }));
+    }
+    // 裸 Enter 照常放行给 xterm(正常提交语义不变)。
+    expect(keyHandler.current!(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(true);
+  });
+
+  it("输出流停滞判定:只在「托管 + running + 超时无字节」时报警,空闲/后台/外部不误报", () => {
+    const base = { active: true, background: false, status: "running" as string | undefined, lastByteAt: 0, now: STREAM_STALL_MS + 1 };
+    expect(terminalStreamStalled(base)).toBe(true);
+    // 阈值之内不报——CC 干活时 TUI 百毫秒级重绘,30s 零字节才是僵死的指纹。
+    expect(terminalStreamStalled({ ...base, now: STREAM_STALL_MS - 1 })).toBe(false);
+    // waiting/idle 时终端安静是常态;后台会话没有实时帧通道;非托管本就无流。
+    expect(terminalStreamStalled({ ...base, status: "waiting" })).toBe(false);
+    expect(terminalStreamStalled({ ...base, status: undefined })).toBe(false);
+    expect(terminalStreamStalled({ ...base, background: true })).toBe(false);
+    expect(terminalStreamStalled({ ...base, active: false })).toBe(false);
+  });
+
+  it("挂载即注册「正在看」,卸载时注销——后端 emitter 只喂被观看的会话", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2 });
+      }
+      return Promise.resolve();
+    });
+    const view = render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("register_terminal_viewer", { sessionId: 163 }));
+    view.unmount();
+    expect(invoke).toHaveBeenCalledWith("unregister_terminal_viewer", { sessionId: 163 });
+  });
+
+  it("重对齐增量过大时跳尾:reset 后只回放尾部,不全量灌 xterm", async () => {
+    // 落后 256KB+ 时全量写 xterm 是数秒的渲染卡死,期间事件继续堆积、可能永远追不上。
+    // 终端是实时视图:落后就该直接看最新画面(尾部一段),截断的半截 ANSI 由 TUI 的
+    // 下一次全屏重绘自愈。
+    const big = "A".repeat(300_000) + "TAIL-MARKER";
+    let snapshots = 0;
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        snapshots += 1;
+        if (snapshots === 1) return Promise.resolve({ ...noPty, active: true, data: btoa("ABC"), endOffset: 3 });
+        // 重对齐(since=3):落后的增量一次性到齐,远超跳尾阈值。
+        return Promise.resolve({ ...noPty, active: true, data: btoa(big), startOffset: 3, endOffset: 3 + big.length });
+      }
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    // 偏移洞触发重对齐;洞后的实时帧与快照末尾正好衔接。
+    eventHandlers.get("pty-output")!({ payload: { sessionId: 163, offset: 3 + big.length, data: btoa("!") } });
+    await waitFor(() => expect(resetSpy).toHaveBeenCalled());
+    await waitFor(() => {
+      const texts = write.mock.calls
+        .map((call) => (typeof call[0] === "string" ? call[0] : new TextDecoder().decode(call[0])));
+      // 尾段上屏且带着结尾标记;任何一次写入都不得是全量(证明没把 300KB 灌进 xterm)。
+      expect(texts.some((text) => text.endsWith("TAIL-MARKER"))).toBe(true);
+      expect(Math.max(...texts.map((text) => text.length))).toBeLessThanOrEqual(64 * 1024);
+      // 回放基线:截断点之前的 ?25l 已丢,跳尾必须先藏硬件光标(防「输入框两个光标」)。
+      expect(texts.some((text) => text.includes("\x1b[?25l"))).toBe(true);
+    });
+    // 跳尾后偏移已对齐到快照末尾:洞后的实时帧原样续写,不重复不再触发重对齐。
+    await waitFor(() => {
+      const texts = write.mock.calls
+        .map((call) => (typeof call[0] === "string" ? call[0] : new TextDecoder().decode(call[0])));
+      expect(texts.at(-1)).toBe("!");
+    });
+  });
+
+  it("快照与回放之间再次丢帧:缓冲里仍有洞时继续补拉,不跨洞直写", async () => {
+    // 回归:重对齐快照落地后,缓冲的实时帧之间可能**又**出现洞(持续重输出时后端连续
+    // 丢帧)。旧逻辑对缓冲一律直写——洞两侧被拼成「看似连续」的字节流,终端花屏
+    // (多帧内容交错重叠,实拍)。现在遇洞停下再拉一次快照,画面无缺无重。
+    let snapshots = 0;
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        snapshots += 1;
+        if (snapshots === 1) return Promise.resolve({ ...noPty, active: true, data: btoa("ABC"), endOffset: 3 });
+        // 第一次重对齐(since=3):只补到 6——缓冲里 offset=12 的帧仍隔着 9..12 的洞。
+        if (snapshots === 2) return Promise.resolve({ ...noPty, active: true, data: btoa("DEF"), startOffset: 3, endOffset: 6 });
+        // 第二次重对齐(since=9):补齐剩余全部。
+        return Promise.resolve({ ...noPty, active: true, data: btoa("JKLMNO"), startOffset: 9, endOffset: 15 });
+      }
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    // 洞 1(3..6 被丢)触发重对齐;重对齐期间又到达 offset=12 的帧(9..12 也被丢,洞 2)。
+    eventHandlers.get("pty-output")!({ payload: { sessionId: 163, offset: 6, data: btoa("GHI") } });
+    eventHandlers.get("pty-output")!({ payload: { sessionId: 163, offset: 12, data: btoa("MNO") } });
+    await waitFor(() => expect(snapshots).toBeGreaterThanOrEqual(3));
+    const painted = () =>
+      write.mock.calls
+        .map((call) => (typeof call[0] === "string" ? call[0] : new TextDecoder().decode(call[0])))
+        .join("");
+    await waitFor(() => expect(painted()).toBe("ABCDEFGHIJKLMNO"));
+  });
+
   it("缺口段已被 backlog 淘汰时 reset 后按现存起点重画,不无限重试", async () => {
     let snapshots = 0;
     invoke.mockImplementation((command: string) => {
@@ -458,13 +617,14 @@ describe("ManagedTerminal", () => {
     eventHandlers.get("pty-output")!({ payload: { sessionId: 163, offset: 1002, data: btoa("!") } });
     await waitFor(() => expect(snapshots).toBe(2));
     await waitFor(() => expect(resetSpy).toHaveBeenCalled());
-    // reset 后以 startOffset=1000 为新起点:快照内容 YZ 上屏,缓冲的实时帧 "!" 紧随其后。
+    // reset 后以 startOffset=1000 为新起点:先落回放基线(藏硬件光标,截断点之前的
+    // ?25l 已随淘汰丢失,不藏会双光标),再画快照内容 YZ,缓冲的实时帧 "!" 紧随其后。
     const paintedAfterReset = () =>
       write.mock.calls
         .slice(1)
         .map((call) => (typeof call[0] === "string" ? call[0] : new TextDecoder().decode(call[0])))
         .join("");
-    await waitFor(() => expect(paintedAfterReset()).toBe("YZ!"));
+    await waitFor(() => expect(paintedAfterReset()).toBe("\x1b[?25lYZ!"));
     // 不再有第三次快照:淘汰是终局,不能拿重试打转。
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(snapshots).toBe(2);

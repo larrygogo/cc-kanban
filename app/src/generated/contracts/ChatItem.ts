@@ -5,7 +5,11 @@ import type { SubagentRef } from "./SubagentRef";
 /**
  * Provider 日志经插件解析后交给聊天归一化层的稳定消息单元。
  */
-export type ChatItem = { "type": "user_text", id: string, timestamp: string | null, text: string, } | { "type": "assistant_text", id: string, timestamp: string | null, text: string, } | { "type": "assistant_delta", id: string, timestamp: string | null, text: string, } | { "type": "reasoning", id: string, timestamp: string | null, text: string, } | { "type": "reasoning_delta", id: string, timestamp: string | null, text: string, } | { "type": "tool_use", id: string, timestamp: string | null, name: string, summary: string, 
+export type ChatItem = { "type": "user_text", id: string, timestamp: string | null, text: string, } | { "type": "assistant_text", id: string, timestamp: string | null, text: string, } | { "type": "assistant_delta", id: string, timestamp: string | null, text: string, } | { "type": "turn_error", id: string, timestamp: string | null, 
+/**
+ * 短中文标签（与看板卡片的 error_label 同源，见 claude 插件 classify_error）。
+ */
+label: string, text: string, } | { "type": "reasoning", id: string, timestamp: string | null, text: string, } | { "type": "reasoning_delta", id: string, timestamp: string | null, text: string, } | { "type": "tool_use", id: string, timestamp: string | null, name: string, summary: string, 
 /**
  * Some = 这条是子任务委派（claude/kimi 的 `Agent` 工具）。委派出去的工作记在主
  * transcript 之外的侧车流里，前端据此渲染成可展开条目，展开时才按需拉取。

@@ -1,5 +1,6 @@
 // 卡片右键/菜单按钮弹出的操作菜单：置顶/便签/重命名/归档/新建会话/打开目录。
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { pushEscLayer } from "../../escLayers";
 import { useT } from "../../i18n";
 import { ArchiveIcon, FolderIcon, NoteIcon, PencilIcon, PlusIcon, StopIcon, TopIcon } from "./icons";
 
@@ -79,12 +80,15 @@ export function CardContextMenu({
       if (ref.current && e.target instanceof Node && ref.current.contains(e.target)) return;
       onClose();
     };
+    // 注册 Esc 层（见 escLayers.ts）：菜单开着期间，窗口级「Esc=拒绝审批」一律让位。
+    const popLayer = pushEscLayer();
     document.addEventListener("click", clickAway, true);
     document.addEventListener("contextmenu", ctxAway, true);
     document.addEventListener("keydown", key);
     window.addEventListener("blur", onClose);
     window.addEventListener("scroll", closeOnScroll, true);
     return () => {
+      popLayer();
       document.removeEventListener("click", clickAway, true);
       document.removeEventListener("contextmenu", ctxAway, true);
       document.removeEventListener("keydown", key);

@@ -10,12 +10,16 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
  *
  * `focus: false` 给贴纸主窗口：它配置了 focus:false（开机自启不能抢焦点），显示时同样不能。
  * `enabled: false` 给 macOS 面板模式的贴纸：显隐归 menubar 管，前端不得越权 show。
+ * `ready`（默认 true）是**响应式**的额外闸门：贴纸以折叠态启动时要等 snap_collapse
+ *   落地再显示——窗口此刻还是 360×440 的默认尺寸，先 show 会闪一帧「大框里挂几个圆点、
+ *   随后骤缩成条」。false → true 的那次翻转触发显示；后端 show_after_grace 兜底不变。
  */
-export function useShowWhenReady(opts?: { focus?: boolean; enabled?: boolean }): void {
+export function useShowWhenReady(opts?: { focus?: boolean; enabled?: boolean; ready?: boolean }): void {
   const focus = opts?.focus ?? true;
   const enabled = opts?.enabled ?? true;
+  const ready = opts?.ready ?? true;
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !ready) return;
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => {
@@ -34,7 +38,7 @@ export function useShowWhenReady(opts?: { focus?: boolean; enabled?: boolean }):
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
     };
-    // focus/enabled 是挂载时刻的一次性配置，不做响应式依赖。
+    // focus/enabled 是挂载时刻的一次性配置；ready 是响应式闸门，翻 true 才 show。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [ready]);
 }

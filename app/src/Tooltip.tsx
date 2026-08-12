@@ -74,15 +74,43 @@ export function TooltipLayer() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") hide();
     };
+    // 触屏无 hover：长按 500ms 显示——data-tip 承载着完整路径/账号全名等**唯一**信息，
+    // 无鼠标场景下此前等于信息丢失。抬手后保留 1.2s 供阅读再自动收起；抬手时浏览器会
+    // 补发合成 mousedown，用时间戳抑制它触发的立即收起。
+    let touchHoldUntil = 0;
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.pointerType !== "touch") return;
+      const el = tipEl(e.target);
+      if (!el) return;
+      anchor.current = el;
+      clear();
+      timer.current = window.setTimeout(() => {
+        if (anchor.current !== el) return;
+        setTip({ text: el.getAttribute("data-tip") || "", rect: el.getBoundingClientRect() });
+      }, 500);
+    };
+    const onPointerEnd = (e: PointerEvent) => {
+      if (e.pointerType !== "touch") return;
+      clear(); // 长按未满即抬手：取消待显示
+      touchHoldUntil = Date.now() + 1_200;
+      timer.current = window.setTimeout(hide, 1_200);
+    };
+    const onMouseDown = () => {
+      if (Date.now() < touchHoldUntil) return; // 抬手的合成 mousedown 不收（阅读窗口）
+      hide();
+    };
     document.addEventListener("mouseover", onOver);
     document.addEventListener("mouseout", onOut);
     document.addEventListener("focusin", onFocusIn);
     document.addEventListener("focusout", onFocusOut);
     document.addEventListener("keydown", onKey);
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("pointerup", onPointerEnd);
+    document.addEventListener("pointercancel", onPointerEnd);
     // 位置是一次性测量的：滚动/点击/窗口失焦后会与锚点错位，直接收起。
     window.addEventListener("scroll", hide, true);
     window.addEventListener("blur", hide);
-    document.addEventListener("mousedown", hide);
+    document.addEventListener("mousedown", onMouseDown);
     return () => {
       clear();
       document.removeEventListener("mouseover", onOver);
@@ -90,9 +118,12 @@ export function TooltipLayer() {
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", onFocusOut);
       document.removeEventListener("keydown", onKey);
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("pointerup", onPointerEnd);
+      document.removeEventListener("pointercancel", onPointerEnd);
       window.removeEventListener("scroll", hide, true);
       window.removeEventListener("blur", hide);
-      document.removeEventListener("mousedown", hide);
+      document.removeEventListener("mousedown", onMouseDown);
     };
   }, []);
 

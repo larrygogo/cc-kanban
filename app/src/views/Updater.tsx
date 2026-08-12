@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getVersion } from "@tauri-apps/api/app";
@@ -157,9 +158,19 @@ export function Updater() {
             ) : (
               <>
                 <div className="up-status">{t.updater.ready}</div>
-                <button className="sbtn primary" disabled={installing} onClick={() => void restartAndInstall()}>{t.updater.restart}</button>
+                {/* 「稍后」语义化关窗：此前关窗是唯一的推迟方式，但右上角 ✕ 读不出
+                    「更新还在、随时可装」——并排给出两条路，主次分明。 */}
+                <div className="up-actions">
+                  <button className="sbtn" onClick={close}>{t.updater.later}</button>
+                  <button className="sbtn primary" disabled={installing} onClick={() => void restartAndInstall()}>{t.updater.restart}</button>
+                </div>
               </>
             )}
+            {/* manifest 的 notes 缺失/过简时，完整改动去 Releases 看——想先读改动再决定的
+                用户此前要绕道设置页才能找到这个链接。 */}
+            <button className="up-changelog" onClick={() => void invoke("open_url", { url: "https://github.com/larrygogo/meowo/releases" }).catch(() => {})}>
+              {t.updater.fullChangelog}
+            </button>
           </>
         )}
       </div>

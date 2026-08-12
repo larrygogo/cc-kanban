@@ -191,6 +191,8 @@ export function chatUi(provider: string, custom: SlashCommand[] = []): ChatUi | 
       : [],
     // 与后端同源:五家都用 Esc 中断(claude/codex 确证,其余约定推断,见插件注释)。
     interrupt_input: "",
+    // 与后端同源:换行注入序列只有 claude 声明(ESC+CR,见其插件的取证注释)。
+    newline_input: provider === "claude" ? "\u001b\r" : null,
     runtime_commands_pending: false,
     // 与后端同源:claude/gemini(提交时原生附加)与 kimi(@ 是它自己的文本级一等语法)
     // 声明 true。测试桩模拟「已探测到版本」的常态,故不做 version 门控。

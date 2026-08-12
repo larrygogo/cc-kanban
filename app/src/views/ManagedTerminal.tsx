@@ -8,15 +8,18 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import {
   attachBackgroundSession,
+  clipboardText,
   confirmStopSession,
   getSettings,
   isExternallyHeld,
   managedTerminalSnapshot,
   openAttachedTerminal,
   openLink,
+  registerTerminalViewer,
   resizeManagedTerminal,
   startManagedTerminal,
   takeoverManagedTerminal,
+  unregisterTerminalViewer,
   writeManagedTerminal,
   type Settings,
 } from "../api";
@@ -65,6 +68,25 @@ function hasVisibleOutput(bytes: Uint8Array): boolean {
 
 /// TUI 迟迟不画东西时的保底：宁可把黑屏交给用户，也不要让 spinner 永远转下去。
 const INITIALIZING_TIMEOUT_MS = 25_000;
+
+/// 重对齐增量超过它就跳尾（base64 字符数，≈256KB 原始字节）：落后这么多时把全量灌给
+/// xterm 是数秒级的渲染卡死，而终端是实时视图——落后就该直接看最新画面。
+const JUMP_TAIL_B64_CHARS = 350_000;
+/// 跳尾后回放的尾部字节数：远超一屏，足以重建可见画面与提示识别所需的尾部文本。
+const TAIL_KEEP_BYTES = 64 * 1024;
+
+/// 输出流停滞阈值。CC 干活时 TUI 以百毫秒级持续重绘（spinner/计时都在动），
+/// running 状态下 30 秒零字节几乎只有一种解释：ConPTY 管道内核僵死（conhost 死锁，
+/// reader 永远读不到字节）。那是微软侧的内核对象故障，用户态无法自愈——能做的是
+/// 明确告知并指路重启，而不是让用户对着静止画面猜。
+export const STREAM_STALL_MS = 30_000;
+
+/// 输出流停滞判定（纯函数，供组件定时评估与单测）。只对「本 GUI 托管、transcript
+/// 说 agent 正在跑」的会话生效：后台会话没有实时帧通道、外部占用/已退出本就无流，
+/// waiting/idle 时 TUI 安静是常态，都不参与判定——宁可漏报，不可把正常空闲谎报成卡死。
+export function terminalStreamStalled(args: { active: boolean; background: boolean; status: string | undefined; lastByteAt: number; now: number }): boolean {
+  return args.active && !args.background && args.status === "running" && args.now - args.lastByteAt > STREAM_STALL_MS;
+}
 
 /// 行高预设 → xterm lineHeight。normal 即历史硬编码的 1.22（改它会让老用户画面变样）。
 const LINE_HEIGHTS: Record<string, number> = { compact: 1.1, normal: 1.22, relaxed: 1.45 };
@@ -139,6 +161,9 @@ type ManagedTerminalProps = {
   /// 识别文法(provider 门控 + 插件声明的选择器锚点)。缺省按 Claude 处理(兼容旧调用),
   /// 生产路径由 ChatWindow 从 chatUi 显式组装传入。
   grammar?: AttentionGrammar;
+  /// Ctrl/Shift+Enter「插入换行」的注入序列,插件声明经 chatUi 下发(claude 为 ESC+CR)。
+  /// 缺省/null = 该 agent 未声明,带修饰的 Enter 保持终端原生语义(与裸 Enter 同码)。
+  newlineInput?: string | null;
   onAttention?: (attention: TerminalAttention | null) => void;
   /// 供父组件在自己重启 PTY 后触发偏移复位（对话页发送/切模式也会重启 PTY，
   /// 不止组件内部的 start/takeover 按钮）。
@@ -150,7 +175,7 @@ type ManagedTerminalProps = {
   takeoverExtra?: ReactNode;
 };
 
-export function ManagedTerminal({ sessionId, status, background = false, onBackgroundInput, visible = true, onUserSubmit, attentionMarkers = [], interactivePrompt = false, expectMenu = false, grammar, onAttention, rearmRef: externalRearmRef, resumeOptions, takeoverExtra }: ManagedTerminalProps) {
+export function ManagedTerminal({ sessionId, status, background = false, onBackgroundInput, visible = true, onUserSubmit, attentionMarkers = [], interactivePrompt = false, expectMenu = false, grammar, newlineInput = null, onAttention, rearmRef: externalRearmRef, resumeOptions, takeoverExtra }: ManagedTerminalProps) {
   const t = useT();
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -167,6 +192,14 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
   // state 供渲染 / ref 供同步判定：onData 闭包里要同步判「进程是否已退出」。
   const exitedRef = useRef(false);
   exitedRef.current = exitCode !== undefined;
+  // 输出流停滞检测(terminalStreamStalled):水位由 effect 闭包里的写入路径推进,
+  // 判定由 5s 节拍读取——两头都要组件级 ref;status/active 同为镜像(节拍闭包不重建)。
+  const [stalled, setStalled] = useState(false);
+  const lastByteAtRef = useRef(Date.now());
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  const activeRef = useRef(false);
+  activeRef.current = active;
   // 最近一次下发给 PTY 的尺寸：同值跳过。切回终端 tab 时曾无条件重发 resize，后端照样
   // 调 master.resize → agent 收到 SIGWINCH 整屏重排，对话↔终端来回切一次闪一次。
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
@@ -191,6 +224,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
   const interactivePromptRef = useRef(interactivePrompt);
   const expectMenuRef = useRef(expectMenu);
   const grammarRef = useRef(grammar);
+  const newlineInputRef = useRef(newlineInput);
   const onAttentionRef = useRef(onAttention);
   const visibleRef = useRef(visible);
   const attentionTailRef = useRef("");
@@ -203,6 +237,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
   interactivePromptRef.current = interactivePrompt;
   expectMenuRef.current = expectMenu;
   grammarRef.current = grammar;
+  newlineInputRef.current = newlineInput;
   onAttentionRef.current = onAttention;
   visibleRef.current = visible;
 
@@ -280,6 +315,21 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
         copyTerminalSelection();
         return false;
       }
+      // composer 的换行:终端传统编码里 Ctrl+Enter / Shift+Enter 与裸 Enter 同码(都是
+      // \r,修饰键信息根本不存在)——用户按「换行」,TUI 收到的却是「提交」。Alt+Enter
+      // 能换行纯属 xterm 默认给 Alt 加 ESC 前缀;WT 的 /terminal-setup 正是把 Shift+Enter
+      // 配置成发同一序列。注入序列由插件声明经 chatUi 下发(claude=ESC+CR;未声明的
+      // agent 不注入——ESC 前缀在 crossterm 系可能被拆成裸 Esc = 中断回合,不能乱发)。
+      const newlineSeq = newlineInputRef.current;
+      const newlineCombo = event.key === "Enter" && (event.ctrlKey || event.shiftKey) && !event.altKey && !event.metaKey;
+      if (newlineCombo && newlineSeq) {
+        if (backgroundRef.current) {
+          onBackgroundInputRef.current?.();
+        } else if (!exitedRef.current) {
+          void writeManagedTerminal(sessionId, newlineSeq).catch((e) => setError(String(e)));
+        }
+        return false;
+      }
       return true;
     });
     // 上面的放行有个盲区：剪贴板是**图片**时 paste 事件没有文本数据，xterm 的 paste 监听
@@ -293,6 +343,31 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       void writeManagedTerminal(sessionId, "\x16").catch((e) => setError(String(e)));
     };
     host.addEventListener("paste", pasteImageFallback);
+    // 右键 = Windows 终端惯例:有选区复制(并清选区),无选区粘贴。WebView 默认菜单在
+    // 生产构建被 devtools-guard 封死(window 捕获段 preventDefault),封死之后右键此前
+    // **没有任何替代行为**——「右键复制没生效」的实拍反馈即源于此。guard 只拦默认菜单
+    // 不拦传播,这里照常收到事件。粘贴读后端剪贴板(readText 在 WebView2 要权限弹窗,
+    // arboard 零打扰),经 terminal.paste 走 bracketed paste 与 onData 既有下发通路。
+    const onContextMenu = () => {
+      // 右键=复制/粘贴是 Windows 终端的惯例(实拍确认);macOS 终端的右键是菜单语义,
+      // Cmd+C/Cmd+V 已由上面的按键通道覆盖,这里不越俎代庖。
+      if (!/win/i.test(navigator.platform) && !/Windows/.test(navigator.userAgent)) return;
+      if (exitedRef.current) return;
+      if (terminal.hasSelection()) {
+        copyTerminalSelection();
+        terminal.clearSelection();
+        return;
+      }
+      // 后台会话只读:粘贴无接收方,交给宿主把用户领到对话页(与打字同一动线)。
+      if (backgroundRef.current) {
+        onBackgroundInputRef.current?.();
+        return;
+      }
+      void clipboardText().then((text) => {
+        if (text) terminal.paste(text);
+      }).catch(() => {});
+    };
+    host.addEventListener("contextmenu", onContextMenu);
     // ── IME 锚点校正 ──
     // 实测（capture_ime_cursor 探针）：kimi 启动即 `?25l` 隐藏硬件光标、从不恢复，输入框里的
     // 光标是自绘的反显空格；帧尾硬件光标停在最后绘制行的行尾。而 xterm 的组合输入锚点就是
@@ -355,6 +430,22 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       // 静默吞掉的话，粘贴无声消失，终端画面纹丝不动。
       void writeManagedTerminal(sessionId, payload).catch((e) => setError(String(e)));
     });
+    // 声明「正在看」:后端 emitter 只对已注册的会话推 pty-output 实时帧,其余托管会话
+    // 不再白付 base64 与 IPC(N 会话齐跑时那正是压垮前端的部分)。失败静默——快照轮询
+    // 兜底,最多退化为无实时帧;卸载时注销走后端 CAS,重挂竞态下不会误清新实例的注册。
+    void registerTerminalViewer(sessionId).catch(() => {});
+    // 输出流停滞检测节拍(判据见 terminalStreamStalled):挂载即重置水位——上一个
+    // 会话/进程的旧水位不作数。
+    lastByteAtRef.current = Date.now();
+    const stallTimer = window.setInterval(() => {
+      setStalled(terminalStreamStalled({
+        active: activeRef.current,
+        background: backgroundRef.current,
+        status: statusRef.current,
+        lastByteAt: lastByteAtRef.current,
+        now: Date.now(),
+      }));
+    }, 5_000);
     let unOutput: (() => void) | undefined;
     let unExit: (() => void) | undefined;
     let cancelled = false;
@@ -503,6 +594,9 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       if (visible.length === 0) return;
       hasWrittenOutput = true;
       nextOffset = end;
+      // 停滞水位:有真实字节抵达就推进并立即收横幅(同值 setState 被 React 短路,无代价)。
+      lastByteAtRef.current = Date.now();
+      setStalled(false);
       inspectAttention(visible);
       markPainted(visible);
       terminal.write(visible, () => {
@@ -538,6 +632,11 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
         terminal.reset();
         nextOffset = snapshot.startOffset;
         replayingHistory = true;
+        // 回放基线:先藏硬件光标。裁剪起点之前的 `?25l`(claude/kimi 启动即发、此后
+        // 自绘光标)已随淘汰丢失,reset 又把可见性归位成「显示」——TUI 的自绘反显块
+        // 旁边于是多出一个 xterm 硬件光标(实拍「输入框两个光标」)。历史里若真有
+        // `?25h`,回放会照常把它盖回来,不误伤想显示光标的 TUI。
+        terminal.write("\x1b[?25l");
       }
       if (snapshot.data) {
         // 首次全量回放(重连/重开窗口)才拦应答:里面全是答过的旧查询。增量补查是准实时
@@ -545,15 +644,46 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
         // 曾在此按回放内容补答过,但临时 id→真实 id 的重挂会重扫同一段 backlog,同一个
         // 查询被答两次,多出的应答落进 composer 成杂字符;现在由后端 reader 单趟代答
         // (pty.rs StartupProbeScanner),回放路径只负责「不放行 xterm 的重复应答」。
-        if (!hasWrittenOutput) replayingHistory = true;
-        writeOutput({
-          sessionId,
-          offset: Number.isFinite(snapshot.startOffset) ? snapshot.startOffset : 0,
-          data: snapshot.data,
-        });
-        // writeOutput 可能因区间裁剪空转(没写就没有清位回调):hasWrittenOutput 仍为
-        // false 说明确实没写,标志必须当场收回,否则实时应答被永久拦截。
-        replayingHistory = replayingHistory && hasWrittenOutput;
+        if (!hasWrittenOutput) {
+          replayingHistory = true;
+          // 首挂载的回放起点若已被 1MiB backlog 裁剪(start > 0),截断点之前的 ?25l
+          // 同样丢了——与重对齐 reset 同款基线,防双光标。完整历史(start=0)自带
+          // TUI 的光标指令,写不写都会被覆盖,不多此一举。
+          if (Number.isFinite(snapshot.startOffset) && snapshot.startOffset > 0) {
+            terminal.write("\x1b[?25l");
+          }
+        }
+        if (hasWrittenOutput && snapshot.data.length > JUMP_TAIL_B64_CHARS && Number.isFinite(snapshot.endOffset)) {
+          // 跳尾降级:重对齐拿到的增量太大(UI 卡顿/长时间切走期间的持续重输出),全量
+          // 写 xterm 是数秒的渲染卡死,期间事件继续堆积、可能永远追不上。reset 后只回放
+          // 尾部一段——终端是实时视图,落后就看最新;截断处的半截 ANSI 序列由 TUI 的
+          // 下一次全屏重绘自愈。回放属历史,照拦 xterm 的重复应答(replayingHistory)。
+          // 首次全量回放(hasWrittenOutput=false)刻意不跳:那是重开窗口的历史重建,
+          // 完整的 scrollback 正是它的价值。
+          const tail = decodeBase64(snapshot.data).slice(-TAIL_KEEP_BYTES);
+          terminal.reset();
+          replayingHistory = true;
+          nextOffset = snapshot.endOffset;
+          // 回放基线同上(截断点之前的 ?25l 已丢):先藏硬件光标,防双光标。
+          terminal.write("\x1b[?25l");
+          lastByteAtRef.current = Date.now();
+          setStalled(false);
+          inspectAttention(tail);
+          markPainted(tail);
+          terminal.write(tail, () => {
+            replayingHistory = false;
+            scheduleAttentionScan();
+          });
+        } else {
+          writeOutput({
+            sessionId,
+            offset: Number.isFinite(snapshot.startOffset) ? snapshot.startOffset : 0,
+            data: snapshot.data,
+          });
+          // writeOutput 可能因区间裁剪空转(没写就没有清位回调):hasWrittenOutput 仍为
+          // false 说明确实没写,标志必须当场收回,否则实时应答被永久拦截。
+          replayingHistory = replayingHistory && hasWrittenOutput;
+        }
       }
       // data 是从 startOffset 起的增量，兜底算末尾要从 startOffset 加起，
       // 直接拿长度当绝对末尾会把偏移算小，之后的事件会被重复写一遍。
@@ -625,6 +755,9 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       nextOffset = 0;
       hasWrittenOutput = false;
       painted = false;
+      // 新 PTY 重新计停滞水位:旧进程的静默期不该记在新进程头上。
+      lastByteAtRef.current = Date.now();
+      setStalled(false);
       attentionReportedRef.current = null;
       attentionTailRef.current = "";
       lastScreenRef.current = "";
@@ -693,6 +826,8 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     observer.observe(host);
     return () => {
       cancelled = true;
+      void unregisterTerminalViewer(sessionId).catch(() => {});
+      window.clearInterval(stallTimer);
       window.clearTimeout(snapshotTimer);
       window.clearTimeout(resyncTimer);
       window.clearTimeout(giveUpTimer);
@@ -701,6 +836,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       observer.disconnect();
       imeObserver.disconnect();
       host.removeEventListener("paste", pasteImageFallback);
+      host.removeEventListener("contextmenu", onContextMenu);
       helperTextarea?.removeEventListener("compositionstart", startComposition);
       helperTextarea?.removeEventListener("compositionend", endComposition);
       input.dispose();
@@ -841,11 +977,13 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
         </div>
       )}
       {!initializing && !active && (
-        // 拿到退出码 = 屏幕上留着最后的输出（报错原因多半就在那里）——此时降级为底部
-        // 横条，不再整屏遮罩：文案承诺「上方保留了终端输出」，94% 不透明的全屏遮罩会把
-        // 它盖到既看不见也滚不动。其余状态（未启动/外部占用/旁路没接上）没有画面可看，
-        // 维持整屏居中。
+        // 拿到退出码 = 屏幕上留着最后的输出（报错原因多半就在那里）——此时不整屏遮罩：
+        // 内容收进居中的醒目卡片（用户心智里的「接管框」），卡片外指针穿透，输出照样
+        // 可滚可选。曾试过降成底部窄横条：TUI 退出常清屏，黑屏 + 一条不起眼的窄条 =
+        // 用户以为「接管的框不见了」（实拍反馈）。其余状态（未启动/外部占用/旁路没接上）
+        // 没有画面可看，维持整屏遮罩居中。
         <div className={"managed-terminal-cover" + (exitCode !== undefined ? " is-exited" : "")}>
+          <div className={exitCode !== undefined ? "managed-terminal-exit-card" : "managed-terminal-cover-inner"}>
           {/* 后台会话的「没画面」有两种截然不同的成因，此前一律说成「已结束」：worker 明明
               还在跑、只是旁路没接上时，那句话是错的，而且不给任何出路。只有拿到退出码
               （worker 真的退了）才说结束，否则说「没接上」并给一次重接。 */}
@@ -870,6 +1008,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
                 </button>
               </div>
             )}
+          </div>
         </div>
       )}
       {active && (
@@ -887,6 +1026,14 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
         <div className="managed-terminal-error" role="alert">
           <span>{error}</span>
           <button type="button" aria-label={t.chat.close} onClick={() => setError("")}>×</button>
+        </div>
+      )}
+      {active && stalled && !error && (
+        // 输出流停滞(ConPTY 管道疑似内核僵死,判据见 terminalStreamStalled):用户态无法
+        // 自愈,能做的是把「画面永远不会自己回来」说清楚并指路重启——否则用户只能对着
+        // 静止画面猜是卡了还是在思考。新字节抵达即自动收起(误报自愈)。
+        <div className="managed-terminal-error is-stalled" role="alert">
+          <span>{t.chat.terminalStreamStalled}</span>
         </div>
       )}
     </div>

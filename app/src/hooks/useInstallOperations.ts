@@ -3,7 +3,8 @@ import { installAgent, type AgentId, type InstallDone } from "../api";
 import { useTauriEvent } from "./useTauriEvent";
 
 export type InstallOperationState =
-  | { phase: "installing" }
+  /** startedAt：安装动辄一两分钟且无进度事件，卡片显示已耗时，别让用户对着静止转圈猜死活。 */
+  | { phase: "installing"; startedAt: number }
   /** 脚本跑完（install-done 到达）：失败原因在 logPath 指向的日志里。 */
   | { phase: "done"; ok: boolean; logPath: string | null }
   /** 后端在 spawn 之前就失败（取不到脚本 / 被 CF 拦）：message 是后端的本地化诊断，此时没有日志文件。 */
@@ -31,7 +32,7 @@ export function useInstallOperations(onDone?: (event: InstallDone) => void) {
   const start = (provider: AgentId) => {
     if (installingRef.current.has(provider)) return;
     installingRef.current.add(provider);
-    setStates((current) => new Map(current).set(provider, { phase: "installing" }));
+    setStates((current) => new Map(current).set(provider, { phase: "installing", startedAt: Date.now() }));
     installAgent(provider).catch((error) => {
       installingRef.current.delete(provider);
       setStates((current) => new Map(current).set(provider, { phase: "error", message: String(error) }));

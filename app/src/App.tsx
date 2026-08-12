@@ -114,9 +114,16 @@ function totalFor(filter: Tab, counts: LiveSessionCounts): number {
 
 
 export function App() {
+  // 折叠态启动的显示闸门：窗口此刻还是 360×440 默认尺寸，snap_collapse 落地前 show 会
+  // 闪一帧「大框里挂几个圆点、随后骤缩成条」。非折叠启动无此问题，直接放行。
+  const [bootReady, setBootReady] = useState(() => {
+    if (isMacPanel()) return true;
+    const s = localStorage.getItem(SNAP_KEY);
+    return !(s === "left" || s === "right" || s === "top");
+  });
   // 贴纸窗口以 visible:false 创建（tauri.conf.json），首帧渲染后再显示，消除启动瞬间的白框闪烁。
   // 不抢焦点（窗口配置 focus:false，开机自启同理）；macOS 面板模式显隐归 menubar 管，这里不越权。
-  useShowWhenReady({ focus: false, enabled: !isMacPanel() });
+  useShowWhenReady({ focus: false, enabled: !isMacPanel(), ready: bootReady });
   const [items, setItems] = useState<Item[]>([]);
   const [counts, setCounts] = useState<LiveSessionCounts>({
     total: 0,
@@ -201,6 +208,7 @@ export function App() {
   const countRef = useRef(connectedCount);
   countRef.current = connectedCount;
   const draggingRef = useRef(false); // 是否正在拖拽窗口（mousedown 命中拖拽区）
+  const dragStartPosRef = useRef<{ x: number; y: number } | null>(null); // 按下时的窗口位置（物理像素）
   const lastEdgeRef = useRef<Edge | null>(null); // 最近一次 Moved 检测到的边
   const settleRef = useRef<number | null>(null);
   const preResizeEdgeRef = useRef<Edge | null>(null); // 拖角缩放前的吸附边，缩放结束后据此恢复
@@ -470,6 +478,20 @@ export function App() {
       settleRef.current = null;
     }
     setGlow(null);
+    // 纯点击守卫：按住拖拽区但没真拖动（想「抓住窗口」的第一下、或单纯点了下标题区）。
+    // lastEdgeRef 里可能躺着 snap_collapse/expand 自己 set_position 触发的陈旧边——
+    // 不判位移的话，展开态点一下拖拽条就被当场折叠回去（实拍过的困惑）。
+    // 位移 < 4 物理像素视为点击，不做任何吸附/还原判定。
+    try {
+      const start = dragStartPosRef.current;
+      dragStartPosRef.current = null;
+      if (start) {
+        const p = await getCurrentWindow().outerPosition();
+        if (Math.abs(p.x - start.x) + Math.abs(p.y - start.y) < 4) return;
+      }
+    } catch {
+      /* 非 Tauri 环境：按发生过位移处理（旧行为） */
+    }
     const d = lastEdgeRef.current;
     const m = modeRef.current;
     if (d) {
@@ -614,6 +636,11 @@ export function App() {
           return;
         }
         draggingRef.current = true;
+        // 记录按下时的窗口位置：松手时按位移区分「真拖动」与「纯点击」（见 handleDragRelease）。
+        dragStartPosRef.current = null;
+        getCurrentWindow().outerPosition()
+          .then((p) => { dragStartPosRef.current = { x: p.x, y: p.y }; })
+          .catch(() => {});
         // 拖拽全程给 <html> 挂 class，驱动拖拽条放大——:active 在 OS 拖动接管后会丢失，不可靠。
         document.documentElement.classList.add("win-dragging");
       }
@@ -645,7 +672,10 @@ export function App() {
     if (e) {
       doCollapse(e)
         .then(() => setMode("collapsed"))
-        .catch((err) => console.error("[snap] 启动沿用折叠失败：", err));
+        .catch((err) => console.error("[snap] 启动沿用折叠失败：", err))
+        // 成功失败都放行显示：失败时窗口留在默认尺寸，藏着不显示只会更糟
+        // （后端 show_after_grace 迟早也会把它亮出来）。
+        .finally(() => setBootReady(true));
       return;
     }
     // 非吸附态启动：main 窗口尺寸由 localStorage(SIZE_KEY) 单一持有——window-state 已配置为不恢复尺寸

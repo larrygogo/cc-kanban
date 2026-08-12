@@ -115,6 +115,10 @@
   --dur-fast: 0.12s;
   --dur-base: 0.16s;
   --dur-slow: 0.24s;
+  /* 卡片状态槽（.stk-ind）与 RunBadge 内遮罩（.run-mask）共用的底面色。
+     默认（elevated）深浅主题都是黑色小屏；flat 风格按主题重定义（见 flat 段）——
+     两者必须同色，否则环形错觉破功、环中心浮出一块异色。 */
+  --ind-face: #000;
 }
 
 /* ===== 浅色主题：覆盖调色板 + 少量硬编码深色值（其余走 --cc-* 自动适配）。
@@ -276,19 +280,17 @@ html, body {
   background: rgba(0, 0, 0, 0.24);
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3); /* 槽的内凹感 */
 }
-/* 选中态立体按钮(滑块)：凸起阴影+顶部高光，translateX 平滑滑到当前 tab。 */
+/* 选中态立体按钮(滑块)：凸起阴影+顶部高光，left/width 由 Sticker 按选中按钮实测注入
+   （曾是 CSS 硬编码 1/3 宽 + translateX——tab 数与文字宽度的变化都要靠人肉同步）。 */
 .tabseg-slider {
   position: absolute;
   top: 3px;
   bottom: 3px;
-  left: 3px;
-  /* 与 TAB_KEYS 的 tab 数保持一致（改 tab 数要同步这里）。 */
-  width: calc((100% - 6px) / 3);
   border-radius: var(--r-7);
   background: rgba(255, 255, 255, 0.12);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 2px 6px -2px rgba(0, 0, 0, 0.45),
     inset 0 1px 0 rgba(255, 255, 255, 0.12);
-  transition: transform var(--dur-slow) cubic-bezier(0.34, 1.2, 0.5, 1); /* 轻微回弹，强化「移动」 */
+  transition: left var(--dur-slow) cubic-bezier(0.34, 1.2, 0.5, 1), width var(--dur-slow) cubic-bezier(0.34, 1.2, 0.5, 1); /* 轻微回弹，强化「移动」 */
   z-index: 0;
 }
 /* tab 与底栏操作钮由 span 改为 button（键盘可达）：重置 UA 默认外观，视觉与原 span 一致。
@@ -622,7 +624,7 @@ button.stab {
      拐角圆润度与外框一致（旧值 inset 1.6 / r 11.5 非整数，拐角发胖且小数在非整 DPI 下渲染发糊）。 */
   inset: 2px;
   border-radius: 11px;
-  background: #000; /* 与 .stk-ind 黑底一致，只留外圈 2px 边框可见 */
+  background: var(--ind-face); /* 与 .stk-ind 底面同 token（flat 段重定义），只留外圈 2px 边框可见 */
 }
 .run-core {
   position: absolute;
@@ -809,7 +811,8 @@ button.stab {
 
 /* 卡片左侧状态圆点：在线绿 / 断开灰 */
 .sdot { width: calc(9px * var(--cc-ui)); height: calc(9px * var(--cc-ui)); flex: none; border-radius: 50%; }
-.sdot-on { background: var(--cc-ok-vivid); }
+/* 在线空闲=空心绿环（形状语义与侧栏/缩略条一致：空心=没在干活）。 */
+.sdot-on { background: transparent; border: 2px solid var(--cc-ok-vivid); }
 .sdot-off { background: var(--cc-text-faint); }
 
 /* 卡片右键菜单：星标/便签/重命名/归档（替代原 hover 图标行）。不透明表面同 .dd-menu
@@ -1022,12 +1025,13 @@ button.stab {
 @media (prefers-reduced-motion: reduce) {
   .cstrip-eyes { animation: none; }
 }
-/* 在线/闲置=绿实心，运行中=绿脉动，等待确认=警告黄(慢脉动——它在等用户,静止黄点召唤力不够)，
-   待审批=琥珀(快脉动——agent 被审批卡住，比"等输入"更急；色值与卡片 run-badge--pending 一致) */
-.cstrip-on { background: var(--cc-ok-vivid); }
+/* 形状是第二信息通道（G-17，与侧栏状态点同一套约定）：实心圆=在跑（脉动），
+   **空心环=停下等你**（在线空闲绿环 / 等输入黄环），**方块=要你按钮决策**（待审批琥珀），
+   红实心=出错。reduced-motion 与色弱场景下不再只剩色相一条通道。 */
+.cstrip-on { background: transparent; border: 2.5px solid var(--cc-ok-vivid); }
 .cstrip-running { background: var(--cc-ok-vivid); animation: cstrip-pulse 1.2s ease-in-out infinite; }
-.cstrip-waiting { background: var(--cc-warn-vivid); animation: cstrip-pulse 2.4s ease-in-out infinite; }
-.cstrip-pending { background: #f0883e; animation: cstrip-pulse 1.8s ease-in-out infinite; }
+.cstrip-waiting { background: transparent; border: 2.5px solid var(--cc-warn-vivid); animation: cstrip-pulse 2.4s ease-in-out infinite; }
+.cstrip-pending { border-radius: 3px; background: #f0883e; animation: cstrip-pulse 1.8s ease-in-out infinite; }
 .cstrip-error { background: var(--cc-err-vivid); }
 @keyframes cstrip-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
@@ -1440,6 +1444,12 @@ button.stab {
 .up-status.up-err { color: var(--cc-err); }
 .up-status.up-new { color: var(--cc-text); font-weight: 600; }
 .up-body .sbtn { margin-top: var(--sp-8); min-width: 108px; }
+/* 「稍后 + 重启并更新」并排：主次分明，稍后收窄。 */
+.up-actions { display: flex; gap: var(--sp-8); justify-content: center; }
+.up-actions .sbtn { min-width: 88px; }
+/* 完整更新日志：链接样弱化按钮，不与主操作抢视线。 */
+.up-changelog { margin-top: var(--sp-10); border: 0; background: none; color: var(--cc-text-faint); font-size: var(--fs-11); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.up-changelog:hover { color: var(--cc-text-dim); }
 /* 更新说明：滚动区吃掉剩余高度，按钮/进度恒在底部可见 */
 .up-notes {
   flex: 1;
@@ -2334,14 +2344,41 @@ button.stab {
 }
 /* 卡片 hover 不再上浮 */
 :root[data-sticker-style="flat"] .stk-card:hover { transform: none; }
-/* 状态徽标黑块：去渐变/凹陷阴影，改半透明纯色面 + 描边（RunBadge 仍铺满其上，运行态不受影响）。 */
+/* 状态槽底面 token（--ind-face）：.stk-ind 与 .run-mask 必须同底色——run-mask 是
+   RunBadge 环形错觉的内遮罩，两者不同色时环中心是一块突兀的异色块（flat+浅色下曾是
+   纯黑方块杵在浅灰面上，G-17 审计的实锤）。取**不透明**近似值而非原来的 rgba 叠加：
+   遮罩必须完全盖住 conic 渐变。近似基于深/浅卡面实测合成色，视觉验证轮可微调。 */
+:root[data-sticker-style="flat"] { --ind-face: #191a1c; }
+:root[data-sticker-style="flat"][data-theme="light"] { --ind-face: #e3e3e6; }
+/* 状态徽标块：去渐变/凹陷阴影，改 token 纯色面 + 描边（RunBadge 仍铺满其上）。 */
 :root[data-sticker-style="flat"] .stk-ind,
 :root[data-sticker-style="flat"][data-theme="light"] .stk-ind {
-  background: rgba(0, 0, 0, 0.22);
+  background: var(--ind-face);
   border: 1px solid var(--cc-border);
   box-shadow: none;
 }
-:root[data-sticker-style="flat"][data-theme="light"] .stk-ind { background: rgba(0, 0, 0, 0.08); }
+:root[data-sticker-style="flat"] .run-mask,
+:root[data-sticker-style="flat"][data-theme="light"] .run-mask { background: var(--ind-face); }
+/* 浅面上的徽标配色整组压暗一档（与浅色主题全局压暗同一策略）：亮绿/亮黄的环与
+   track 在 #e3e3e6 上对比不足，百分比文字改白底深色核。 */
+:root[data-sticker-style="flat"][data-theme="light"] .run-badge {
+  --bc: #0f8f6f;
+  --bc-track: rgba(15, 143, 111, 0.28);
+  --bc-fade: rgba(15, 143, 111, 0);
+  --bc-text: #ffffff;
+}
+:root[data-sticker-style="flat"][data-theme="light"] .run-badge--waiting {
+  --bc: #96690f;
+  --bc-track: rgba(150, 105, 15, 0.28);
+  --bc-fade: rgba(150, 105, 15, 0);
+  --bc-text: #ffffff;
+}
+:root[data-sticker-style="flat"][data-theme="light"] .run-badge--pending {
+  --bc: #b25a15;
+  --bc-track: rgba(178, 90, 21, 0.28);
+  --bc-fade: rgba(178, 90, 21, 0);
+  --bc-text: #ffffff;
+}
 /* tab 分段槽 + 滑块：去内凹/凸起立体，改纯色面 */
 :root[data-sticker-style="flat"] .tabseg,
 :root[data-sticker-style="flat"][data-theme="light"] .tabseg {
@@ -3019,12 +3056,13 @@ select.ns-input {
 /* 标题栏状态徽标:原「Live sync」恒亮绿点改为状态驱动(is-<tone> 由 sessionTone 派生)。
    running 用脉冲区别于静态点——「在动 = 在跑」与贴纸 RunBadge 的视觉语言一致。 */
 .chat-live { display: inline-flex; align-items: center; gap: var(--sp-6); color: var(--cc-text-faint); font-size: var(--fs-9); white-space: nowrap; }
+/* 形状语义与侧栏状态点一致（G-17）：实心=在跑，空心环=等你说话，方块=要你决策。 */
 .chat-live i { width: 6px; height: 6px; border-radius: 50%; background: var(--cc-text-faint); }
 .chat-live.is-running { color: var(--cc-text-dim); }
 .chat-live.is-running i { background: var(--cc-ok-vivid); animation: chat-running-pulse 1.2s ease-in-out infinite; }
-.chat-live.is-waiting i { background: var(--cc-warn-vivid); }
+.chat-live.is-waiting i { background: transparent; border: 2px solid var(--cc-warn-vivid); }
 .chat-live.is-pending { color: color-mix(in srgb, var(--cc-warn-vivid) 60%, var(--cc-text)); }
-.chat-live.is-pending i { background: var(--cc-warn-vivid); animation: chat-running-pulse 1.8s ease-in-out infinite; }
+.chat-live.is-pending i { border-radius: 3px; background: var(--cc-warn-vivid); animation: chat-running-pulse 1.8s ease-in-out infinite; }
 .chat-live.is-error { color: color-mix(in srgb, var(--cc-err-vivid) 70%, var(--cc-text)); }
 .chat-live.is-error i { background: var(--cc-err-vivid); }
 .chat-live.is-offline i, .chat-live.is-ended i { background: var(--cc-text-faint); opacity: .6; }
@@ -3154,9 +3192,12 @@ select.ns-input {
 .chat-sidebar-head { padding: 0 1px var(--sp-4) var(--sp-8); display: flex; align-items: center; gap: var(--sp-6); flex: 0 0 auto; }
 /* 侧栏搜索行（Ctrl/Cmd+F 聚焦）：安静的行内输入，聚焦才亮描边。 */
 .chat-sidebar-search { position: relative; flex: 0 0 auto; padding: 0 var(--sp-8) var(--sp-6); }
-.chat-sidebar-search input { width: 100%; padding: var(--sp-4) var(--sp-22) var(--sp-4) var(--sp-8); border: 1px solid var(--cc-border); border-radius: var(--r-6); background: var(--cc-surface); color: var(--cc-text); font-size: var(--fs-11-5); outline: none; }
+/* 幽灵形态(标题栏幽灵按钮同款设计语言):平时融入侧栏底色不抢戏——一圈实边框在一列
+   无边框条目里像个突兀的方盒(实拍反馈"与整体样式不符");hover 微亮、聚焦才显边。 */
+.chat-sidebar-search input { width: 100%; padding: var(--sp-4) var(--sp-22) var(--sp-4) var(--sp-8); border: 1px solid transparent; border-radius: var(--r-md); background: color-mix(in srgb, var(--cc-text) 5%, transparent); color: var(--cc-text); font-size: var(--fs-11-5); outline: none; }
+.chat-sidebar-search input:hover { background: color-mix(in srgb, var(--cc-text) 8%, transparent); }
 .chat-sidebar-search input::placeholder { color: var(--cc-text-faint); }
-.chat-sidebar-search input:focus { border-color: var(--cc-accent-border, var(--cc-accent)); }
+.chat-sidebar-search input:focus { border-color: var(--cc-border); background: var(--cc-surface); }
 .chat-sidebar-search-x { position: absolute; top: 50%; right: calc(var(--sp-8) + 4px); transform: translateY(calc(-50% - 3px)); border: 0; background: none; color: var(--cc-text-faint); font-size: var(--fs-13); line-height: 1; cursor: pointer; padding: var(--sp-2); }
 .chat-sidebar-search-x:hover { color: var(--cc-text); }
 /* macOS：维持 52px 行高与右列标题栏对齐（红绿灯垂直居中在这条带里）。 */
@@ -3226,8 +3267,13 @@ select.ns-input {
 .chat-sidebar-caret { flex: 0 0 auto; transition: transform var(--dur-fast) ease; }
 .chat-sidebar-caret.is-folded { transform: rotate(-90deg); }
 .chat-sidebar-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 组头的汇总点不在 agent 徽标上,没有 presence 定位,这里把 absolute 那套摘掉。 */
-.chat-sidebar-group-head .chat-sidebar-dot { position: static; flex: 0 0 auto; box-shadow: none; }
+/* 组头与 Ctrl+K 切换器的状态点不在 agent 徽标上,没有 presence 定位,这里把 absolute 那套摘掉
+   （切换器行不摘的话，absolute 点会锚到弹层容器右下角，整行看不到状态点）。
+   is-waiting 的环是用 inset box-shadow 画的（见 .chat-sidebar-dot 注释），摘外描边时得单独留下内环。 */
+.chat-sidebar-group-head .chat-sidebar-dot,
+.chat-switcher-item .chat-sidebar-dot { position: static; flex: 0 0 auto; box-shadow: none; }
+.chat-sidebar-group-head .chat-sidebar-dot.is-waiting,
+.chat-switcher-item .chat-sidebar-dot.is-waiting { background: transparent; box-shadow: inset 0 0 0 2px var(--cc-warn-vivid); }
 .chat-sidebar-group-count { margin-left: auto; flex: 0 0 auto; color: var(--cc-text-faint); font-weight: 500; font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) { .chat-sidebar-caret { transition: none; } }
 /* 「显示 N 个未运行会话」：缩进对齐组内条目，弱化到接近纯文本——它是一条揭示动作，
@@ -3246,15 +3292,21 @@ select.ns-input {
 .chat-sidebar-agent-icon { position: relative; flex: 0 0 auto; margin-top: var(--sp-1); display: inline-flex; align-items: center; }
 .chat-sidebar-agent-icon svg { width: 15px; height: 15px; }
 .chat-sidebar-agent-icon.is-off { color: var(--cc-text-faint); opacity: .5; filter: grayscale(1); }
-/* 会话运行状态点:贴在 agent 徽标右下角(presence 位)。running 脉冲=在动=在跑,
-   waiting 静止黄,pending 琥珀慢脉冲召唤操作。描边用列表底色,压住图标不糊。 */
-.chat-sidebar-dot { position: absolute; right: -3px; bottom: -2px; width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 0 2px var(--cc-bg); }
+/* 会话运行状态点:贴在 agent 徽标右下角(presence 位)。描边用列表底色,压住图标不糊。
+   形状是第二信息通道（G-17）：waiting 与 pending 同为暖色、此前仅靠脉冲区分——
+   色弱用户与 reduced-motion 下双双失效。现约定：实心圆=在跑，**空心环=停下等你说话**，
+   **方块=要你按钮决策**（pending/approval），红实心=出错。颜色降为辅助。 */
+/* 尺寸取 8px：150%（本机常见）/100%/200% 缩放下 8px 与 2px 环均落整物理像素——
+   7px 奇数尺寸在 150% 下取整不对称，is-waiting 的空心环看着像被压扁的椭圆。
+   环用 inset box-shadow 而非 border 画：小圆上 border 四边取整不均，inset 沿圆角裁剪更圆润。 */
+.chat-sidebar-dot { position: absolute; right: -3px; bottom: -2px; width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 0 2px var(--cc-bg); }
 .chat-sidebar-dot.is-running { background: var(--cc-ok-vivid); animation: chat-running-pulse 1.2s ease-in-out infinite; }
-.chat-sidebar-dot.is-waiting { background: var(--cc-warn-vivid); }
-.chat-sidebar-dot.is-pending { background: var(--cc-warn-vivid); animation: chat-running-pulse 1.8s ease-in-out infinite; }
+/* 环心填底色而非透明：它叠在 agent 徽标右下角，透明圆心会框出徽标图案的一角，看着像环里进了杂质。 */
+.chat-sidebar-dot.is-waiting { background: var(--cc-bg); box-shadow: 0 0 0 2px var(--cc-bg), inset 0 0 0 2px var(--cc-warn-vivid); }
+.chat-sidebar-dot.is-pending { border-radius: 3px; background: var(--cc-warn-vivid); animation: chat-running-pulse 1.8s ease-in-out infinite; }
 .chat-sidebar-dot.is-error { background: var(--cc-err-vivid); }
-/* 待授权：琥珀色 + 比 pending(1.8s) 更急的脉冲——授权在阻塞 agent，召唤强度最高。 */
-.chat-sidebar-dot.is-approval { background: var(--cc-warn-vivid); animation: chat-running-pulse 0.9s ease-in-out infinite; }
+/* 待授权：与 pending 同形（方块）+ 比 1.8s 更急的脉冲——授权在阻塞 agent，召唤强度最高。 */
+.chat-sidebar-dot.is-approval { border-radius: 3px; background: var(--cc-warn-vivid); animation: chat-running-pulse 0.9s ease-in-out infinite; }
 /* 文本列吃满剩余宽度：右侧「⋯」按钮靠 margin-left:auto 贴边，文本超长时先截断自己。 */
 .chat-sidebar-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 .chat-sidebar-name { display: flex; align-items: center; gap: var(--sp-4); overflow: hidden; font-size: var(--fs-12); font-weight: 500; line-height: 1.4; }
@@ -4010,10 +4062,18 @@ select.ns-input {
 .chat-jump-latest:hover { color: var(--cc-text); background: linear-gradient(var(--cc-surface-hover), var(--cc-surface-hover)), rgb(var(--cc-bg-rgb)); }
 .chat-jump-latest svg { display: block; }
 
+/* ? 快捷键速查表：双列 dl（组合键 / 描述）。 */
+.chat-shortcuts { width: min(420px, calc(100vw - 48px)); }
+.chat-shortcuts-list { display: flex; flex-direction: column; gap: var(--sp-6); margin: var(--sp-8) 0 0; }
+.chat-shortcuts-row { display: flex; align-items: baseline; gap: var(--sp-12); }
+.chat-shortcuts-row dt { flex: 0 0 148px; margin: 0; text-align: right; }
+.chat-shortcuts-row dd { flex: 1; margin: 0; color: var(--cc-text-dim); font-size: var(--fs-12); }
+.chat-shortcuts-row kbd { padding: 1px var(--sp-5); border: 1px solid var(--cc-border); border-bottom-width: 2px; border-radius: var(--r-5); background: var(--cc-surface); color: var(--cc-text); font-size: var(--fs-10-5); font-family: inherit; }
+
 /* Ctrl/Cmd+K 快速切换器：搜索框 + 结果列表（复用 .chat-modal 外壳，加宽定高）。 */
 .chat-switcher { width: min(480px, calc(100vw - 48px)); }
 .chat-switcher-list { display: flex; flex-direction: column; gap: var(--sp-1); max-height: min(46vh, 380px); overflow-y: auto; margin-top: var(--sp-8); }
-.chat-switcher-item { display: flex; align-items: center; gap: var(--sp-8); padding: var(--sp-6) var(--sp-8); border: 0; border-radius: var(--r-6); background: none; color: var(--cc-text); font-size: var(--fs-12); text-align: left; cursor: pointer; }
+.chat-switcher-item { display: flex; align-items: center; gap: var(--sp-8); padding: var(--sp-6) var(--sp-8); border: 0; border-radius: var(--r-md); background: none; color: var(--cc-text); font-size: var(--fs-12); text-align: left; cursor: pointer; }
 .chat-switcher-item.is-active { background: var(--cc-surface-hover); }
 .chat-switcher-item.is-current .chat-switcher-name { color: var(--cc-accent); }
 .chat-switcher-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4032,15 +4092,15 @@ select.ns-input {
 
 /* 同步中断的顶部细横幅：正文继续渲染缓存内容，只在上缘提示（整屏错误留给空列表）。
    基座同样取不透明 rgb(--cc-bg-rgb)——--cc-bg 带窗口不透明度，sticky 浮层会被穿透。 */
-.chat-sync-warn { position: sticky; top: 0; z-index: 5; margin: 0 var(--sp-14) var(--sp-8); padding: var(--sp-4) var(--sp-10); border: 1px solid color-mix(in srgb, var(--cc-warn) 40%, transparent); border-radius: var(--r-6); background: color-mix(in srgb, var(--cc-warn) 12%, rgb(var(--cc-bg-rgb))); color: color-mix(in srgb, var(--cc-warn) 75%, var(--cc-text)); font-size: var(--fs-11); text-align: center; }
+.chat-sync-warn { position: sticky; top: 0; z-index: 5; margin: 0 var(--sp-14) var(--sp-8); padding: var(--sp-4) var(--sp-10); border: 1px solid color-mix(in srgb, var(--cc-warn) 40%, transparent); border-radius: var(--r-md); background: color-mix(in srgb, var(--cc-warn) 12%, rgb(var(--cc-bg-rgb))); color: color-mix(in srgb, var(--cc-warn) 75%, var(--cc-text)); font-size: var(--fs-11); text-align: center; }
 
 /* 终端面板：与对话视图同为 chat-main 的 flex 子项，隐藏时彻底退出布局
    （[hidden] 默认的 display:none 会被 flex 覆盖，这里显式压回去）。 */
 .chat-terminal-pane { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 /* 终端视图下的 broker 审批横幅：hook 劫走的审批在 TUI 里不显示，这里是唯一提示。
    悬浮在终端上缘居中，琥珀 = 与待审批状态色一致。 */
-.chat-terminal-approval { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 6; display: flex; align-items: center; gap: var(--sp-10); max-width: calc(100% - 40px); padding: var(--sp-6) var(--sp-12); border: 1px solid rgba(240, 136, 62, 0.55); border-radius: var(--r-8); background: rgba(30, 24, 18, 0.94); color: #f0b27e; font-size: var(--fs-11-5); }
-.chat-terminal-approval button { flex: none; padding: var(--sp-3) var(--sp-10); border: 1px solid rgba(240, 136, 62, 0.6); border-radius: var(--r-6); background: rgba(240, 136, 62, 0.16); color: #f5c9a3; font-size: var(--fs-11); cursor: pointer; }
+.chat-terminal-approval { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 6; display: flex; align-items: center; gap: var(--sp-10); max-width: calc(100% - 40px); padding: var(--sp-6) var(--sp-12); border: 1px solid rgba(240, 136, 62, 0.55); border-radius: var(--r-lg); background: rgba(30, 24, 18, 0.94); color: #f0b27e; font-size: var(--fs-11-5); }
+.chat-terminal-approval button { flex: none; padding: var(--sp-3) var(--sp-10); border: 1px solid rgba(240, 136, 62, 0.6); border-radius: var(--r-md); background: rgba(240, 136, 62, 0.16); color: #f5c9a3; font-size: var(--fs-11); cursor: pointer; }
 .chat-terminal-approval button:hover { background: rgba(240, 136, 62, 0.28); }
 .chat-scroll[hidden] { display: none; }
 .chat-terminal-pane.is-background { position: fixed; left: -12000px; top: 0; width: 1000px; height: 700px; opacity: 0; pointer-events: none; }
@@ -4110,10 +4170,22 @@ select.ns-input {
 }
 .managed-terminal-cover { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--sp-14); padding: var(--sp-30); color: #9ba19e; background: rgba(21,22,23,.94); font-size: var(--fs-12); text-align: center; }
 .managed-terminal-cover.is-initializing { gap: var(--sp-12); background: #151617; }
-/* 已退出态：降级为底部横条，把终端最后的画面留给用户看/滚（文案承诺「上方保留了终端输出」）。
-   横向排布，文案与动作按钮同行；窄窗允许换行。 */
-.managed-terminal-cover.is-exited { top: auto; flex-direction: row; flex-wrap: wrap; gap: var(--sp-10); padding: var(--sp-10) var(--sp-14); background: rgba(21,22,23,.9); border-top: 1px solid rgba(255,255,255,.08); }
-.managed-terminal-cover.is-exited .managed-terminal-cover-msg { max-width: none; line-height: 1.4; }
+/* 已退出态：整层透明 + 指针穿透（终端最后的输出可滚可选），内容收进居中的醒目卡片
+   ——「接管的框」要在用户熟悉的位置出现（曾降成底部窄横条：TUI 退出常清屏，黑屏 +
+   不起眼的窄条被读成「框不见了」，实拍反馈）。 */
+.managed-terminal-cover.is-exited { pointer-events: none; background: transparent; }
+.managed-terminal-cover-inner { display: contents; } /* 非退出态无额外布局，纯占位包装 */
+.managed-terminal-exit-card {
+  pointer-events: auto;
+  display: flex; flex-direction: column; align-items: center; gap: var(--sp-12);
+  max-width: min(420px, calc(100% - 40px));
+  padding: var(--sp-14) var(--sp-18);
+  border: 1px solid color-mix(in srgb, var(--cc-warn) 32%, rgba(255, 255, 255, 0.14));
+  border-radius: var(--r-12);
+  background: rgba(21, 22, 23, 0.96);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  text-align: center;
+}
 /* 说明文字限宽换行：一整句横贯终端宽度时，与下方窄小的控件比例失衡。 */
 .managed-terminal-cover-msg { max-width: 380px; line-height: 1.6; }
 /* 权限下拉与动作按钮排成一行并等高（dd-btn 28px），窄窗允许换行仍居中。 */
@@ -4124,6 +4196,7 @@ select.ns-input {
    只限直接子级——权限 Dropdown 的 dd-btn/dd-item 也是 button 且嵌在封面 DOM 里，
    面板级 `button` 选择器会把下拉菜单的每一项都刷成带框小盒子（真实翻车过）。 */
 .managed-terminal-cover > button,
+.managed-terminal-exit-card > button,
 .managed-terminal-cover-actions > button { padding: var(--sp-8) var(--sp-14); border: 1px solid rgba(255,255,255,.16); border-radius: var(--r-7); color: #e7e9e8; background: rgba(255,255,255,.06); cursor: pointer; font-size: var(--fs-11-5); }
 /* 行内按钮等高对齐 dd-btn；排在基础规则之后靠源序取胜。 */
 .managed-terminal-cover-actions > button { height: 28px; padding: 0 var(--sp-14); }
@@ -4132,13 +4205,24 @@ select.ns-input {
 .managed-terminal-cover-actions .dd-btn { border-radius: var(--r-7); font-size: var(--fs-11-5); background: rgba(255,255,255,.06); }
 .managed-terminal-cover-actions .dd-btn:not(.open) { border-color: rgba(255,255,255,.16); }
 .managed-terminal-cover > button:hover,
+.managed-terminal-exit-card > button:hover,
 .managed-terminal-cover-actions > button:hover { background: rgba(255,255,255,.11); }
 .managed-terminal-cover > button:disabled,
+.managed-terminal-exit-card > button:disabled,
 .managed-terminal-cover-actions > button:disabled { opacity: .55; cursor: default; }
 .managed-terminal-actions { position: absolute; top: 8px; right: 20px; z-index: 4; display: flex; gap: var(--sp-6); opacity: 0; transition: opacity var(--dur-base); }
 .managed-terminal-error { position: absolute; left: 20px; right: 20px; bottom: 10px; z-index: 4; padding: var(--sp-6) var(--sp-10); border: 1px solid color-mix(in srgb, var(--cc-err) 40%, transparent); border-radius: var(--r-md); color: color-mix(in srgb, var(--cc-err) 70%, var(--cc-text)); background: rgba(21,22,23,.92); font-size: var(--fs-11); line-height: 1.35; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+/* 输出流停滞警示（ConPTY 管道疑似僵死，见 ManagedTerminal 的 terminalStreamStalled）：
+   警示黄与错误红区分——它是诊断提示不是操作失败，且常驻到重启终端为止。 */
+.managed-terminal-error.is-stalled { border-color: color-mix(in srgb, var(--cc-warn, #d9a03f) 45%, transparent); color: color-mix(in srgb, var(--cc-warn, #d9a03f) 75%, var(--cc-text)); cursor: default; }
 .managed-terminal-actions button { padding: var(--sp-4) var(--sp-8); border: 1px solid rgba(255,255,255,.12); border-radius: var(--r-5); color: #a7adaa; background: rgba(21,22,23,.82); font-size: var(--fs-10); cursor: pointer; }
 .managed-terminal:hover .managed-terminal-actions { opacity: 1; }
+/* 键盘焦点落上去也要显形（hover 之外唯一的抵达方式）；无 hover 环境（触屏）常显——
+   「在外部终端打开 / 结束终端」曾对键盘与触屏用户完全隐形。 */
+.managed-terminal:focus-within .managed-terminal-actions { opacity: 1; }
+@media (hover: none) {
+  .managed-terminal-actions { opacity: 1; }
+}
 
 /* 全局减动效：兜底通配，杀掉全部动画/过渡/平滑滚动。
    曾用白名单逐条列选择器——每加一个动画都要记得回来补，实测漏了 4 个无限旋转

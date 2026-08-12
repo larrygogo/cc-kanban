@@ -955,8 +955,13 @@ describe("ChatWindow", () => {
     // 就位后条目才换装——findByRole 的重试恰好吸收这次异步。
     await screen.findByRole("menuitem", { name: "权限：沿用原设置" });
     fireEvent.click(screen.getByRole("menuitem", { name: "跳过权限确认" }));
-    // 选择只落状态：不向终端写任何字节（不发 cycle 键、不发命令）。
-    expect(invoke.mock.calls.some(([command]) => command === "write_managed_terminal")).toBe(false);
+    // 选择只落状态:不发 cycle 键、不发模式命令。不断言「零写入」——前序用例
+    // submitToTerminal 的延迟回车(\r)/撤销键(\x15)在慢机上会跨用例落进共享的
+    // invoke 记录(sessionId 16 用例注释记载过同一竞态),按内容过滤只盯本用例的字节。
+    const modeWrites = invoke.mock.calls.filter(([command, args]) =>
+      command === "write_managed_terminal"
+      && !["\r", "\x15"].includes(String((args as { data?: string } | undefined)?.data ?? "")));
+    expect(modeWrites).toEqual([]);
     // 胶囊显示所选档（启动档位词「跳过权限确认」，非运行时模式词「跳过权限检查」）。
     expect(await screen.findByText("跳过权限确认")).toBeTruthy();
     // 下一次发送把它作为启动选项带给 start_managed_terminal。

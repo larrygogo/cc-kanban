@@ -172,6 +172,10 @@ export function savePastedAttachment(fileName: string, dataBase64: string): Prom
 export function clipboardImageFingerprint(): Promise<string | null> {
   return invoke("clipboard_image_fingerprint");
 }
+/** 读剪贴板文本(终端右键粘贴)。readText 在 WebView2 要权限弹窗,走后端 arboard 零打扰。 */
+export function clipboardText(): Promise<string | null> {
+  return invoke("clipboard_text");
+}
 
 /**
  * 会话是否可能仍由**外部**终端持有——即托管前需要先接管（杀掉旧进程）而非直接恢复。
@@ -267,6 +271,14 @@ export function resizeManagedTerminal(sessionId: number, cols: number, rows: num
 }
 export function stopManagedTerminal(sessionId: number): Promise<void> {
   return invoke("stop_managed_terminal", { sessionId });
+}
+/** 声明 chat 窗终端视图「正在看」的会话——后端 emitter 只对它推送 pty-output 实时帧。 */
+export function registerTerminalViewer(sessionId: number): Promise<void> {
+  return invoke("register_terminal_viewer", { sessionId });
+}
+/** 注销「正在看」(后端 CAS,只清自己的注册,重挂竞态安全)。 */
+export function unregisterTerminalViewer(sessionId: number): Promise<void> {
+  return invoke("unregister_terminal_viewer", { sessionId });
 }
 
 /**

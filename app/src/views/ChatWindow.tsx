@@ -5,6 +5,8 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { appConfirm } from "../confirm";
 import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, dismissInteractiveQuestion, agentModels, getChatHistory, getLiveSessionsPage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, openProjectDir, pendingInteraction, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type LiveSession, type ModeScreenMarker, type PendingApproval } from "../api";
+import { hasEscLayers, pushEscLayer } from "../escLayers";
+import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useT } from "../i18n";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { reduceChatEvents } from "../chat/reducer";
@@ -291,6 +293,8 @@ function RenameModal({ initial, onSubmit, onClose, t }: {
   const [value, setValue] = useState(initial);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 注册 Esc 层：弹层存续期间窗口级「Esc=拒绝审批」让位（容器 stopPropagation 是双保险）。
+  useEffect(() => pushEscLayer(), []);
   const submit = async () => {
     const title = value.trim();
     if (!title || saving) return;
@@ -353,6 +357,9 @@ function QuickSwitcher({ activeId, onPick, onClose }: {
   const [rows, setRows] = useState<LiveSession[]>([]);
   const [active, setActive] = useState(0);
   const seqRef = useRef(0);
+  const listRef = useRef<HTMLDivElement>(null);
+  // 注册 Esc 层：切换器开着期间窗口级「Esc=拒绝审批」让位。
+  useEffect(() => pushEscLayer(), []);
   // 首屏立即取（空查询 = 最近活跃），输入防抖 200ms；旧响应按序号丢弃。
   useEffect(() => {
     const seq = ++seqRef.current;
@@ -362,6 +369,7 @@ function QuickSwitcher({ activeId, onPick, onClose }: {
           if (seqRef.current !== seq) return;
           setRows(page.items);
           setActive(0);
+          if (listRef.current) listRef.current.scrollTop = 0;
         })
         .catch(() => {});
     }, query ? 200 : 0);
@@ -390,7 +398,11 @@ function QuickSwitcher({ activeId, onPick, onClose }: {
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
             event.preventDefault();
             if (rows.length === 0) return;
-            setActive((cur) => (cur + (event.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length);
+            const next = (active + (event.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length;
+            setActive(next);
+            // 只在键盘导航时跟滚：mouseEnter 的 setActive 不滚——悬停在半可见项上
+            // 会「滚动↔悬停」互相触发抖起来。jsdom 无 scrollIntoView，可选调用兜底。
+            (listRef.current?.children[next] as HTMLElement | undefined)?.scrollIntoView?.({ block: "nearest" });
             return;
           }
           if (event.key === "Enter" && !event.nativeEvent.isComposing) {
@@ -412,7 +424,7 @@ function QuickSwitcher({ activeId, onPick, onClose }: {
           }}
           onCompositionEnd={(event) => setQuery(event.currentTarget.value)}
         />
-        <div className="chat-switcher-list" role="listbox" aria-label={t.chat.switcherTitle}>
+        <div className="chat-switcher-list" ref={listRef} role="listbox" aria-label={t.chat.switcherTitle}>
           {rows.length === 0 && <div className="chat-switcher-empty">{t.chat.switcherEmpty}</div>}
           {rows.map((row, index) => {
             const tone = sessionTone(row.connected, row.session.status, row.pending_review, row.errored);
@@ -433,6 +445,54 @@ function QuickSwitcher({ activeId, onPick, onClose }: {
             );
           })}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** `?` 唤出的快捷键速查表：快捷键体系逐步长出来了（Ctrl+K/B/1/2/N/F…），
+ *  没有一张总表就等于只有装了肌肉记忆的人用得上。纯静态展示，Esc/点外关闭。 */
+function ShortcutSheet({ onClose }: { onClose: () => void }) {
+  const t = useT();
+  useEffect(() => pushEscLayer(), []);
+  const rows: Array<[string, string]> = [
+    ["Ctrl+K", t.chat.shortcutSwitcher],
+    ["Ctrl+B", t.chat.shortcutSidebar],
+    ["Ctrl+1 / Ctrl+2", t.chat.shortcutViews],
+    ["Ctrl+N", t.chat.shortcutNewSession],
+    ["Ctrl+F", t.chat.shortcutSearch],
+    ["Enter", t.chat.shortcutSend],
+    ["Shift+Enter", t.chat.shortcutNewline],
+    ["Ctrl+Enter", t.chat.shortcutInterruptSend],
+    ["Esc", t.chat.shortcutDeny],
+    ["?", t.chat.shortcutSheet],
+  ];
+  return (
+    <div className="chat-modal-overlay" role="presentation" onClick={onClose}>
+      <div
+        className="chat-modal chat-shortcuts"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t.chat.shortcutsTitle}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.stopPropagation();
+            onClose();
+          }
+        }}
+      >
+        <div className="chat-modal-title">{t.chat.shortcutsTitle}</div>
+        <dl className="chat-shortcuts-list">
+          {rows.map(([keys, desc]) => (
+            <div className="chat-shortcuts-row" key={keys}>
+              <dt>{keys.split(" / ").map((combo, i) => (
+                <span key={combo}>{i > 0 && " / "}<kbd>{combo}</kbd></span>
+              ))}</dt>
+              <dd>{desc}</dd>
+            </div>
+          ))}
+        </dl>
       </div>
     </div>
   );
@@ -900,8 +960,17 @@ export function ChatWindow() {
   toggleSidebarRef.current = toggleSidebar;
   // Ctrl/Cmd+K 快速切换器（QuickSwitcher）。
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  // ? 打开快捷键速查表（输入框内的 ? 是正文，不拦）。
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const el = document.activeElement;
+        if (el instanceof HTMLElement && (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.isContentEditable)) return;
+        e.preventDefault();
+        setShortcutsOpen(true);
+        return;
+      }
       if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
       if (e.code === "KeyK") {
         e.preventDefault();
@@ -1098,6 +1167,12 @@ export function ChatWindow() {
     : [];
   // 候选变少时高亮可能越界（如退格删字后），钳回最后一项；无候选时无高亮。
   const slashActive = slashMatches.length ? Math.min(slashIndex, slashMatches.length - 1) : -1;
+  // 补全菜单开着 = 一个 Esc 消费层（textarea 的 onKeyDown 会用 Esc 收起它）。
+  const slashOpen = slashMatches.length > 0;
+  useEffect(() => {
+    if (!slashOpen) return;
+    return pushEscLayer();
+  }, [slashOpen]);
   // 键盘把高亮移出可视区时滚回来（菜单限高、内部滚动）。jsdom 没有 scrollIntoView，判一下再调。
   useEffect(() => {
     const selected = slashMenuRef.current?.querySelector('[aria-selected="true"]');
@@ -1283,6 +1358,23 @@ export function ChatWindow() {
     const timer = window.setInterval(() => void refresh(), 650);
     return () => window.clearInterval(timer);
   }, [refresh]);
+
+  // 事件驱动的提前刷新（C-14 务实版）：托管会话的 pty-output 一到就在 200ms 合流窗口后
+  // 拉一次增量——agent 打印输出时 transcript 多半同步在写，把「流式蹦字」的感知节奏从
+  // 固定 650ms 压到输出帧粒度。650ms 轮询保留：外部终端会话没有 pty-output，事件也可能
+  // 在窗口重挂间隙丢失，轮询是兜底。真·后端 push（按 transcript 文件 watch）留作后续。
+  const outputRefreshTimerRef = useRef(0);
+  useTauriEvent<{ sessionId: number }>("pty-output", (event) => {
+    if (event.payload.sessionId !== activeSessionRef.current) return;
+    if (outputRefreshTimerRef.current) return; // 合流：高频输出下最多 200ms 一次
+    outputRefreshTimerRef.current = window.setTimeout(() => {
+      outputRefreshTimerRef.current = 0;
+      void refreshRef.current?.();
+    }, 200);
+  });
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  useEffect(() => () => window.clearTimeout(outputRefreshTimerRef.current), []);
 
   useEffect(() => {
     if (sessionId >= 0) return;
@@ -2273,6 +2365,9 @@ export function ChatWindow() {
     if (!terminalDeny && !brokerDeny) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
+      // 层栈让位（escLayers.ts）：任何浮层（菜单/弹层/灯箱/切换器/补全）开着时，
+      // 这次 Esc 属于它们——统一判据，不再依赖各浮层「记得」用哪种截停约定。
+      if (hasEscLayers()) return;
       const active = document.activeElement;
       if (active instanceof HTMLElement && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable)) return;
       event.preventDefault();
@@ -2640,6 +2735,7 @@ export function ChatWindow() {
             interactivePrompt={terminalInteractivePrompt}
             expectMenu={menuWatching}
             grammar={attentionGrammar}
+            newlineInput={chatUi?.newline_input ?? null}
             onAttention={revealTerminalAttention}
             rearmRef={terminalRearmRef}
           />
@@ -3100,6 +3196,7 @@ export function ChatWindow() {
           onClose={() => setSwitcherOpen(false)}
         />
       )}
+      {shortcutsOpen && <ShortcutSheet onClose={() => setShortcutsOpen(false)} />}
     </div>
   );
 }

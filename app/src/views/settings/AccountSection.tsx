@@ -238,6 +238,17 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
   const [apiKeyMsg, setApiKeyMsg] = useState<string | null>(null);
   // 刚装完（本次会话内）→ 把「登录」按钮标为下一步，把「装完 → 登录」串成一条链路。
   const [justInstalled, setJustInstalled] = useState(false);
+  // 安装耗时 tick：无进度事件的一两分钟里，秒数是「还活着」的唯一证据。仅安装中运转。
+  const [installNow, setInstallNow] = useState(0);
+  useEffect(() => {
+    if (installOp?.phase !== "installing") return;
+    setInstallNow(Date.now());
+    const timer = window.setInterval(() => setInstallNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [installOp]);
+  const installElapsed = installOp?.phase === "installing"
+    ? Math.max(0, Math.floor((installNow - installOp.startedAt) / 1000))
+    : 0;
 
   useEffect(() => {
     let cancelled = false;
@@ -432,7 +443,10 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
           (installState === "installing" ? (
             <div className="agent-install-progress" data-testid={"agent-installing-" + provider}>
               <RefreshIcon spinning />
-              <span className="agent-install-step">{t.account.installing}</span>
+              {/* 带耗时：官方安装脚本动辄一两分钟且无进度事件，静止的「安装中…」看不出死活。 */}
+              <span className="agent-install-step">
+                {installElapsed >= 5 ? t.account.installingFor(installElapsed) : t.account.installing}
+              </span>
             </div>
           ) : (
             <button
@@ -998,6 +1012,8 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
       )}
 
       <div className="profile-hint">{t.account.addProfileHint}</div>
+      {/* 覆盖面明示：切换只影响此后拉起的会话（后端 profile/mod.rs 的既定行为，此前 UI 零提示）。 */}
+      <div className="profile-hint">{t.account.switchCoverage}</div>
       {err && <div className="agent-install-error">{err}</div>}
     </div>
   );
@@ -1008,8 +1024,9 @@ const SELECTED_AGENT_KEY = "meowo-account-agent";
 
 export function AccountSection() {
   const t = useT();
-  // 读取/写入应用设置（用于贴纸配额开关）
-  const [settings, patchSettings] = useSettingsState();
+  // 读取/写入应用设置（用于贴纸配额开关）。patchError 与其它分区同款：保存被拒时
+  // 开关会被回读弹回去，必须有一行说明（S-3）。
+  const [settings, patchSettings, patchError] = useSettingsState();
   // 顶部下拉选中的 agent id。模型一多，全部竖排要滚半天——改为一次只看一张卡。
   // 记进 localStorage，跨次打开设置页仍停在上次那个。
   const [selectedAgent, setSelectedAgent] = useState<string | null>(() => {
@@ -1028,10 +1045,17 @@ export function AccountSection() {
   // agents: 后端下发的 agent 名单（含展示名与安装态）。前端不再自己维护这份名单。
   // 初值 null = 检测中：首帧不判定任何一张卡为未安装，避免 listAgents() resolve 前误闪「未安装 + 安装按钮」。
   const [agents, setAgents] = useState<AgentDescriptor[] | null>(null);
+  // 首次名单查询失败标记：null + 失败曾直接渲染整页空白，分不清「没装任何 agent」和「坏了」。
+  const [agentsError, setAgentsError] = useState(false);
   const installed = agents === null ? null : new Set(agents.filter((a) => a.installed).map((a) => a.id));
   // 重查 agent 名单（安装态会变）。挂载、窗口聚焦、后台安装成功各处复用。
   const refreshInstalled = () => {
-    listAgents().then(setAgents).catch(() => {});
+    listAgents()
+      .then((list) => {
+        setAgents(list);
+        setAgentsError(false);
+      })
+      .catch(() => setAgentsError(true));
   };
   useEffect(() => { refreshInstalled(); }, []);
   // 窗口聚焦：重查安装态 + 账号态。用户常在外部终端完成登录后切回来——此前只查安装态，
@@ -1130,9 +1154,22 @@ export function AccountSection() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 检测中（agents===null）先不渲染，避免下拉框空跳一帧。
-  const rawList = agents ?? [];
-  if (rawList.length === 0) return null;
+  // 三态区分（曾一律 return null 整页空白）：检测中给文案占位；失败给重试；
+  // 名单真空（registry 恒非空，纯保底）给空态说明。
+  if (agents === null) {
+    return agentsError ? (
+      <div className="sec-hint" role="alert">
+        {t.account.agentsLoadFailed}
+        <button type="button" className="provider-card-action" style={{ marginLeft: 8 }} onClick={refreshInstalled}>
+          {t.sticker.retry}
+        </button>
+      </div>
+    ) : (
+      <div className="sec-hint">{t.newSession.detectingAgents}</div>
+    );
+  }
+  const rawList = agents;
+  if (rawList.length === 0) return <div className="sec-hint">{t.newSession.noAgents}</div>;
 
   // 下拉里**已安装的排前面**，未安装的沉底——用户多半只装了一两个，没装的不该混在中间碍事。
   // 用分区而非 sort：分区天然稳定，同组内保持后端注册顺序，不依赖引擎的 sort 稳定性。
@@ -1201,6 +1238,7 @@ export function AccountSection() {
         onToggleQuota={() => toggleQuotaProvider(cur.id)}
         usageRefreshedAt={usageRefreshedAt[cur.id] ?? null}
       />
+      {patchError && <div className="sec-hint proxy-err" role="alert">{patchError}</div>}
     </>
   );
 }

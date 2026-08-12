@@ -1,6 +1,7 @@
 import {
   type MouseEvent as ReactMouseEvent,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -177,6 +178,10 @@ export function Sticker({
     onFilterChange?.(t);
     closeSearch(); // 切 tab 即退出搜索，避免 tab 高亮与过滤结果不一致
   };
+
+  // tab 滑块按选中按钮实测定位（effect 在 counts 声明后注册，见下方 useLayoutEffect）。
+  const tabsegRef = useRef<HTMLDivElement>(null);
+  const [sliderStyle, setSliderStyle] = useState<{ left: number; width: number } | undefined>(undefined);
 
   // 会话搜索：激活时底栏整条变成输入框；搜索词经 onSearchChange 交给父组件下沉到后端
   // （当前 tab 内全库搜，覆盖未加载数据），本组件不再持有搜索词、不做客户端过滤。
@@ -582,6 +587,28 @@ export function Sticker({
     return c;
   }, [countsProp, data]);
 
+  // tab 滑块按选中按钮实测定位：等分假设（1/3 宽 + translateX(index*100%)）在 tab 文字
+  // 宽度不等或 tab 数变化时都会错位，且 CSS 里的 1/3 要靠注释与 TAB_KEYS 手工同步。
+  // 计数变化（99+ 徽章出现/消失）会改按钮宽度，故依赖 counts 一并重测；窗口缩放由
+  // ResizeObserver 兜住（jsdom 无该构造时静默跳过，测量值恒 0 无意义）。
+  useLayoutEffect(() => {
+    const seg = tabsegRef.current;
+    if (!seg) return;
+    const measure = () => {
+      const btn = seg.querySelectorAll<HTMLElement>('[role="tab"]')[TAB_KEYS.indexOf(tab)];
+      if (!btn) return;
+      setSliderStyle((prev) =>
+        prev?.left === btn.offsetLeft && prev?.width === btn.offsetWidth
+          ? prev
+          : { left: btn.offsetLeft, width: btn.offsetWidth });
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(seg);
+    return () => observer.disconnect();
+  }, [tab, counts]);
+
   // 自绘 overlay 滚动条：原生滚动条全程隐藏(不占布局→无抖动)，这里按滚动位置算出
   // thumb 的高度/位置，浮在内容右侧。null = 内容未超出、不需要滚动条。
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -701,12 +728,11 @@ export function Sticker({
     <div className="sticker">
       {!isMacPanel() && <div className="drag" data-tauri-drag-region />}
       <div className="tabs">
-        <div className="tabseg" role="tablist">
-          {/* 选中态立体滑块：切换时平滑滑到目标 tab(translateX 动画) */}
-          <span
-            className="tabseg-slider"
-            style={{ transform: `translateX(${TAB_KEYS.indexOf(tab) * 100}%)` }}
-          />
+        <div className="tabseg" role="tablist" ref={tabsegRef}>
+          {/* 选中态立体滑块：切换时平滑滑到目标 tab。位置/宽度按选中按钮**实测**（见
+              slider effect）——曾用 translateX(index*100%) + CSS 硬编码 1/3 宽，tab 数
+              与 CSS 靠注释同步，且各 tab 文字宽度不等时滑块与视觉中心不重合。 */}
+          <span className="tabseg-slider" style={sliderStyle} />
           {TAB_KEYS.map((k) => {
             const n = counts[k];
             return (
