@@ -20,7 +20,7 @@
 
 | 平台 | 安装包 | 说明 |
 |------|--------|------|
-| **Windows** | [最新版 x64 安装包](https://github.com/larrygogo/meowo/releases/latest)（`Meowo_x.y.z_x64-setup.exe`） | NSIS 安装包 |
+| **Windows** | [最新版 x64 安装包](https://github.com/larrygogo/meowo/releases/latest)（`Meowo_x.y.z_x64-installer.exe`，老版本为 `-setup.exe`） | 一键安装；无 WebView2 环境自动回退经典安装界面 |
 | **macOS** | [最新版 universal DMG](https://github.com/larrygogo/meowo/releases/latest)（`Meowo_x.y.z_universal.dmg`） | Intel / Apple Silicon 通用，需 macOS ≥ 14 Sonoma；已签名公证 |
 
 下载对应安装包，双击安装即可。应用内支持检查更新。

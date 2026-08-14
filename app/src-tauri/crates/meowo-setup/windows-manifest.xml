@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- 壳安装器 manifest：Common-Controls v6（与 app 的 windows-manifest.xml 同款）
+     + PerMonitorV2 DPI 感知（app 侧由 tauri 运行时处理 DPI，壳没有 tauri，必须
+     自己声明，否则 wry/tao 在 150% 缩放下整窗模糊）。由 build.rs 经
+     /MANIFEST:EMBED 嵌进所有链接产物。 -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+  <asmv3:application xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+    <asmv3:windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </asmv3:windowsSettings>
+  </asmv3:application>
+</assembly>

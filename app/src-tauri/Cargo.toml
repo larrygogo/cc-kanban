@@ -11,6 +11,7 @@ members = [
     "crates/meowo-agent",
     "crates/meowo-protocol",
     "crates/meowo-reporter",
+    "crates/meowo-setup",
 ]
 resolver = "2"
 

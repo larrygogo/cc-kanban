@@ -1,0 +1,422 @@
+<!doctype html>
+<!-- Meowo 安装器壳 UI：单文件四态状态机（home / installing / done / error）。
+     设计 tokens 与应用 dark 主题一致（app/src/styles.css :root）；组件观感对齐
+     .sbtn / .ns-input / .winclose。业务真相在 Rust 侧：目录显示的是 normalize
+     回推结果，JS 不实现任何路径规则。__LOGO_B64__ 由 ui.rs 注入。 -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #1c1c1e;
+  --accent: #2dd4a7;
+  --accent-soft: rgba(45, 212, 167, 0.16);
+  --accent-border: rgba(45, 212, 167, 0.4);
+  --on-accent: #06281f;
+  --text: #eef1ef;
+  --dim: #a7afab;
+  --faint: #8b918c;
+  --surface: rgba(255, 255, 255, 0.05);
+  --surface-hover: rgba(255, 255, 255, 0.09);
+  --border: rgba(255, 255, 255, 0.09);
+  --err: #e0584c;
+  --r-lg: 8px;
+  --r-md: 6px;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; height: 100%; overflow: hidden;
+  background: var(--bg); color: var(--text);
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 13px; user-select: none; cursor: default;
+}
+.app { display: flex; flex-direction: column; height: 100vh; }
+
+/* ── 标题栏：整条可拖，按钮自行 stopPropagation ── */
+.bar { height: 40px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 8px; }
+/* 返回钮与关闭钮同款幽灵样式；只在主页可见（语言页是第一步，装机中/装完不可回）。
+   用 visibility 而不是 display：占位不变，关闭钮不会跳位。 */
+.winback {
+  width: 30px; height: 30px; display: grid; place-items: center; appearance: none;
+  background: transparent; border: none; border-radius: var(--r-md);
+  color: var(--faint); cursor: pointer; transition: background .16s, color .16s;
+  visibility: hidden;
+}
+body[data-view="home"] .winback { visibility: visible; }
+.winback:hover { background: rgba(255, 255, 255, 0.1); color: var(--text); }
+.winclose {
+  width: 30px; height: 30px; display: grid; place-items: center; appearance: none;
+  background: transparent; border: none; border-radius: var(--r-md);
+  color: var(--faint); cursor: pointer; transition: background .16s, color .16s;
+}
+.winclose:hover { background: rgba(255, 255, 255, 0.1); color: var(--text); }
+.winclose:disabled { opacity: .35; cursor: default; }
+.winclose:disabled:hover { background: transparent; color: var(--faint); }
+
+main { flex: 1; display: flex; flex-direction: column; align-items: center; padding: 0 48px; }
+section { display: none; width: 100%; flex-direction: column; align-items: center; animation: fade .22s ease; }
+body[data-view="lang"] #view-lang,
+body[data-view="home"] #view-home,
+body[data-view="installing"] #view-installing,
+body[data-view="done"] #view-done,
+body[data-view="error"] #view-error { display: flex; }
+@keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+.logo { width: 96px; height: 96px; margin-top: 8px; -webkit-user-drag: none; }
+h1 { margin: 14px 0 4px; font-size: 30px; font-weight: 650; letter-spacing: .5px; }
+.tagline { color: var(--dim); font-size: 13px; }
+.note { color: var(--faint); font-size: 12px; margin-top: 10px; min-height: 16px; }
+
+/* ── 主按钮（.sbtn.primary 同款，加大） ── */
+.cta {
+  appearance: none; border: none; cursor: pointer; margin-top: 22px;
+  width: 300px; height: 46px; border-radius: var(--r-lg);
+  background: var(--accent); color: var(--on-accent);
+  font-size: 15px; font-weight: 600; font-family: inherit;
+  transition: filter .16s, transform .08s;
+}
+.cta:hover { filter: brightness(1.08); }
+.cta:active { transform: scale(.985); }
+
+/* ── 高级选项折叠 ── */
+.adv-toggle {
+  appearance: none; background: none; border: none; cursor: pointer;
+  margin-top: 16px; color: var(--faint); font-size: 12px; font-family: inherit;
+  display: inline-flex; align-items: center; gap: 4px; border-radius: var(--r-md); padding: 4px 8px;
+  transition: color .16s, background .16s;
+}
+.adv-toggle:hover { color: var(--text); background: var(--surface); }
+.adv-toggle .chev { transition: transform .2s; font-size: 10px; }
+.adv-toggle.open .chev { transform: rotate(180deg); }
+.adv { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .25s ease; width: 100%; max-width: 480px; }
+.adv.open { grid-template-rows: 1fr; }
+/* min-height:0 必不可少：grid item 默认 min-height:auto 会撑住行高，0fr 折叠失效（实拍）。 */
+.adv > div { overflow: hidden; min-height: 0; }
+.adv-inner { padding: 10px 2px 4px; display: flex; flex-direction: column; gap: 10px; }
+
+.row { display: flex; align-items: center; gap: 8px; }
+.row-label { color: var(--dim); font-size: 12px; flex: none; width: 62px; }
+.ns-input {
+  flex: 1; min-width: 0; padding: 7px 10px; border-radius: var(--r-md);
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  font-size: 12px; font-family: inherit; outline: none;
+  transition: border-color .12s, background .12s;
+}
+.ns-input:focus { border-color: var(--accent-border); background: var(--surface-hover); }
+.sbtn {
+  flex: none; appearance: none; font-size: 12px; color: var(--text); font-family: inherit;
+  background: var(--surface-hover); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 7px 14px; cursor: pointer; transition: background .16s;
+}
+.sbtn:hover { background: rgba(255, 255, 255, 0.13); }
+.dir-err { color: var(--err); font-size: 11.5px; min-height: 14px; margin: -4px 0 0 70px; }
+
+/* ── 开关行（应用 Switch 同款观感） ── */
+.opt { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
+.opt input { display: none; }
+.sw {
+  flex: none; width: 34px; height: 20px; border-radius: 999px; margin-top: 1px;
+  background: var(--surface-hover); border: 1px solid var(--border);
+  position: relative; transition: background .16s, border-color .16s;
+}
+.sw::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--dim); transition: transform .16s, background .16s;
+}
+.opt input:checked + .sw { background: var(--accent); border-color: transparent; }
+.opt input:checked + .sw::after { transform: translateX(14px); background: var(--on-accent); }
+.opt-text { display: flex; flex-direction: column; gap: 2px; }
+.opt-title { font-size: 12.5px; }
+.opt-hint { font-size: 11.5px; color: var(--faint); }
+
+/* ── 语言选择（首屏；选项文案各自语言自表，不走 i18n）──
+   地球图标 + **自绘**下拉（原生 select 的弹出菜单跟随系统亮色主题渲染，
+   选项白字白底隐形——实拍翻车，配色必须归我们管）+ 继续按钮。 */
+.lang-globe { color: var(--dim); margin-top: 30px; }
+.lang-wrap { position: relative; margin-top: 12px; width: 300px; }
+.lang-select {
+  width: 100%; padding: 9px 32px 9px 12px; text-align: left;
+  border-radius: var(--r-md); border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font-size: 13px; font-family: inherit;
+  appearance: none; outline: none; cursor: pointer;
+  transition: border-color .12s, background-color .12s;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23847f78' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center;
+}
+.lang-select:hover { background-color: var(--surface-hover); }
+.lang-select:focus { border-color: var(--accent-border); }
+.lang-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 10;
+  background: #2e2e2c; border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 4px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  animation: fade .12s ease;
+}
+.lang-item {
+  display: block; width: 100%; text-align: left; padding: 8px 10px;
+  border: none; background: none; color: var(--text); font-family: inherit; font-size: 13px;
+  border-radius: 4px; cursor: pointer;
+}
+.lang-item:hover { background: var(--surface-hover); }
+.lang-item.on { color: var(--accent); }
+.lang-continue { margin-top: 18px; width: 300px; height: 42px; font-size: 14px; }
+
+/* ── 安装中 ── */
+.spin-title { font-size: 16px; color: var(--text); margin-top: 26px; }
+.pbar { width: 320px; height: 4px; border-radius: 999px; background: var(--surface-hover); overflow: hidden; margin-top: 18px; position: relative; }
+.pbar::after {
+  content: ""; position: absolute; top: 0; left: 0; width: 40%; height: 100%;
+  border-radius: 999px; background: var(--accent); animation: slide 1.2s ease-in-out infinite;
+}
+@keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(350%); } }
+.spin-hint { color: var(--faint); font-size: 12px; margin-top: 14px; }
+
+/* ── 完成 / 错误 ── */
+.big-ico { font-size: 40px; margin-top: 10px; }
+.done-title { font-size: 20px; font-weight: 600; margin-top: 10px; }
+.ghost {
+  appearance: none; background: none; border: none; cursor: pointer; font-family: inherit;
+  color: var(--faint); font-size: 12px; margin-top: 14px; text-decoration: underline;
+  text-underline-offset: 3px; border-radius: var(--r-md); padding: 4px 8px;
+}
+.ghost:hover { color: var(--text); }
+.err-detail {
+  margin-top: 10px; max-width: 460px; color: var(--faint); font-size: 11.5px;
+  word-break: break-all; user-select: text; cursor: text;
+}
+.err-actions { display: flex; gap: 10px; margin-top: 18px; }
+</style>
+</head>
+<body data-view="lang">
+<div class="app">
+  <div class="bar" id="dragbar">
+    <button class="winback" id="btn-back" title="">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+    </button>
+    <button class="winclose" id="btn-close" title="">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><line x1="1.5" y1="1.5" x2="10.5" y2="10.5"/><line x1="10.5" y1="1.5" x2="1.5" y2="10.5"/></svg>
+    </button>
+  </div>
+  <main>
+    <section id="view-lang">
+      <img class="logo" alt="" src="data:image/png;base64,__LOGO_B64__">
+      <h1>Meowo</h1>
+      <svg class="lang-globe" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18z"/></svg>
+      <div class="lang-wrap">
+        <button class="lang-select" id="lang-btn" aria-haspopup="listbox"><span id="lang-cur">简体中文</span></button>
+        <div class="lang-menu" id="lang-menu" hidden>
+          <button class="lang-item" data-lang="zh">简体中文</button>
+          <button class="lang-item" data-lang="en">English</button>
+        </div>
+      </div>
+      <button class="cta lang-continue" id="btn-lang-ok">继续</button>
+    </section>
+
+    <section id="view-home">
+      <img class="logo" alt="" src="data:image/png;base64,__LOGO_B64__">
+      <h1>Meowo <span id="ver" style="font-size:13px;color:var(--faint);font-weight:400"></span></h1>
+      <div class="tagline" data-i18n="tagline"></div>
+      <div class="note" id="existing-note"></div>
+      <button class="cta" id="btn-install" data-i18n="install"></button>
+      <button class="adv-toggle" id="btn-adv"><span data-i18n="advanced"></span><span class="chev">▼</span></button>
+      <div class="adv" id="adv">
+        <div><div class="adv-inner">
+          <div class="row">
+            <span class="row-label" data-i18n="path"></span>
+            <input class="ns-input" id="dir" spellcheck="false">
+            <button class="sbtn" id="btn-browse" data-i18n="browse"></button>
+          </div>
+          <div class="dir-err" id="dir-err"></div>
+          <label class="opt">
+            <input type="checkbox" id="opt-chat" checked><span class="sw"></span>
+            <span class="opt-text">
+              <span class="opt-title" data-i18n="chatFeature"></span>
+              <span class="opt-hint" data-i18n="chatHint"></span>
+            </span>
+          </label>
+          <label class="opt">
+            <input type="checkbox" id="opt-desktop" checked><span class="sw"></span>
+            <span class="opt-text"><span class="opt-title" data-i18n="desktopLnk"></span></span>
+          </label>
+        </div></div>
+      </div>
+    </section>
+
+    <section id="view-installing">
+      <img class="logo" alt="" src="data:image/png;base64,__LOGO_B64__">
+      <div class="spin-title" data-i18n="installing"></div>
+      <div class="pbar"></div>
+      <div class="spin-hint" data-i18n="installingHint"></div>
+    </section>
+
+    <section id="view-done">
+      <img class="logo" alt="" src="data:image/png;base64,__LOGO_B64__">
+      <div class="done-title" data-i18n="doneTitle"></div>
+      <button class="cta" id="btn-launch" data-i18n="launch"></button>
+      <button class="ghost" id="btn-finish" data-i18n="finish"></button>
+    </section>
+
+    <section id="view-error">
+      <div class="big-ico">⚠️</div>
+      <div class="done-title" id="err-title"></div>
+      <div class="err-detail" id="err-detail"></div>
+      <div class="err-actions">
+        <button class="sbtn" id="btn-retry" data-i18n="retry"></button>
+        <button class="ghost" id="btn-quit" style="margin-top:0" data-i18n="quit"></button>
+      </div>
+    </section>
+  </main>
+</div>
+<script>
+"use strict";
+const I18N = {
+  zh: {
+    tagline: "AI 会话贴纸看板",
+    install: "立即安装", installing: "正在安装…",
+    installingHint: "安装过程中请勿关闭窗口",
+    advanced: "自定义安装", path: "安装位置", browse: "浏览…",
+    chatFeature: "对话窗口功能（完整模式）",
+    chatHint: "关闭则为轻量模式：只保留贴纸，之后可在设置中随时开启",
+    desktopLnk: "创建桌面快捷方式",
+    doneTitle: "安装完成", launch: "立即体验", finish: "关闭",
+    retry: "重试", quit: "退出",
+    noteUpgrade: "检测到已安装 v{v}，将覆盖升级",
+    noteSame: "检测到相同版本已安装，将原地重新安装",
+    noteDowngrade: "检测到更新的 v{v}，安装前会先将其卸载",
+    errNotWritable: "该位置不可写，请换一个目录",
+    errExtract: "写入临时文件失败，可能被杀毒软件拦截",
+    errUninstall: "卸载旧版本失败",
+    errInner: "安装未能完成",
+    dirEmpty: "请填写安装位置", dirRelative: "请输入本地绝对路径（如 D:\\Apps）",
+    dirForbidden: "该目录受系统保护，请换一个位置", dirInvalid: "路径包含不允许的字符",
+  },
+  en: {
+    tagline: "Your AI session sticker board",
+    install: "Install Now", installing: "Installing…",
+    installingHint: "Please keep this window open during installation",
+    advanced: "Custom install", path: "Install to", browse: "Browse…",
+    chatFeature: "Chat window (full mode)",
+    chatHint: "Turn off for sticker-only lite mode; enable later in Settings anytime",
+    desktopLnk: "Create desktop shortcut",
+    doneTitle: "All set", launch: "Launch Meowo", finish: "Close",
+    retry: "Retry", quit: "Quit",
+    noteUpgrade: "v{v} is installed — it will be upgraded in place",
+    noteSame: "This version is already installed — it will be reinstalled",
+    noteDowngrade: "Newer v{v} is installed — it will be uninstalled first",
+    errNotWritable: "This location is not writable — pick another folder",
+    errExtract: "Failed to write temp files — possibly blocked by antivirus",
+    errUninstall: "Failed to uninstall the previous version",
+    errInner: "Installation did not complete",
+    dirEmpty: "Please enter an install location", dirRelative: "Enter a local absolute path (e.g. D:\\Apps)",
+    dirForbidden: "That folder is system-protected — pick another one", dirInvalid: "Path contains invalid characters",
+  },
+};
+const state = { locale: "zh", view: "lang", installing: false, existing: null };
+const $ = (id) => document.getElementById(id);
+const t = (k) => (I18N[state.locale] || I18N.zh)[k] || k;
+const send = (o) => window.ipc.postMessage(JSON.stringify(o));
+
+function applyI18n() {
+  document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
+}
+function setView(v) {
+  state.view = v;
+  state.installing = v === "installing";
+  document.body.dataset.view = v;
+  $("btn-close").disabled = state.installing;
+}
+const DIR_ERR = { empty: "dirEmpty", relative: "dirRelative", forbidden: "dirForbidden", invalid_chars: "dirInvalid" };
+const PHASE_ERR = { not_writable: "errNotWritable", extract_failed: "errExtract", uninstall_failed: "errUninstall", inner_failed: "errInner" };
+
+function renderNote() {
+  if (!state.existing) return;
+  const key = { upgrade: "noteUpgrade", same: "noteSame", downgrade: "noteDowngrade" }[state.existing.relation];
+  $("existing-note").textContent = t(key).replace("{v}", state.existing.version);
+}
+
+window.__push = (msg) => {
+  if (msg.type === "init") {
+    // 停在语言选择首屏：只记录数据并把下拉预选为系统语言，用户点「继续」才进主页。
+    state.locale = msg.locale;
+    state.existing = msg.existing;
+    setLangChoice(msg.locale);
+    $("ver").textContent = "v" + msg.version;
+    $("dir").value = msg.defaultDir;
+  } else if (msg.type === "dir") {
+    $("dir").value = msg.value;
+    $("dir-err").textContent = "";
+  } else if (msg.type === "dirError") {
+    // 目录问题回到主页就地提示（安装尚未开始）。
+    setView("home");
+    if (!$("adv").classList.contains("open")) $("btn-adv").click();
+    $("dir-err").textContent = t(DIR_ERR[msg.code] || "dirInvalid");
+  } else if (msg.type === "phase") {
+    if (msg.value === "installing") setView("installing");
+    else if (msg.value === "done") setView("done");
+    else if (msg.value === "error") {
+      setView("error");
+      $("err-title").textContent = t(PHASE_ERR[msg.code] || "errInner");
+      $("err-detail").textContent = msg.detail || "";
+    }
+  }
+};
+
+// ── 交互接线 ──
+// 自绘语言下拉：选中项即时反映到触发钮与「继续」按钮文案（选英文立刻见 Continue）。
+let langChoice = "zh";
+const LANG_NAMES = { zh: "简体中文", en: "English" };
+const setLangChoice = (v) => {
+  langChoice = v;
+  $("lang-cur").textContent = LANG_NAMES[v] || v;
+  $("btn-lang-ok").textContent = v === "zh" ? "继续" : "Continue";
+  document.querySelectorAll(".lang-item").forEach((el) => {
+    el.classList.toggle("on", el.dataset.lang === v);
+  });
+};
+$("lang-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  $("lang-menu").hidden = !$("lang-menu").hidden;
+});
+document.querySelectorAll(".lang-item").forEach((el) => {
+  el.addEventListener("click", () => {
+    setLangChoice(el.dataset.lang);
+    $("lang-menu").hidden = true;
+  });
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".lang-wrap")) $("lang-menu").hidden = true;
+});
+$("btn-lang-ok").addEventListener("click", () => {
+  state.locale = langChoice;
+  applyI18n();
+  renderNote();
+  setView("home");
+});
+$("dragbar").addEventListener("mousedown", (e) => {
+  if (e.target.closest("button")) return;
+  if (e.button === 0) send({ cmd: "drag" });
+});
+$("btn-close").addEventListener("click", () => send({ cmd: "close" }));
+// 主页 → 返回语言选择（路径/勾选等表单状态原样保留，DOM 不销毁）。
+$("btn-back").addEventListener("click", () => setView("lang"));
+$("btn-adv").addEventListener("click", () => {
+  $("adv").classList.toggle("open");
+  $("btn-adv").classList.toggle("open");
+});
+$("btn-browse").addEventListener("click", () => send({ cmd: "browse", dir: $("dir").value }));
+const doInstall = () => send({
+  cmd: "install",
+  dir: $("dir").value,
+  chat: $("opt-chat").checked,
+  desktop: $("opt-desktop").checked,
+});
+$("btn-install").addEventListener("click", doInstall);
+$("btn-retry").addEventListener("click", doInstall);
+$("btn-launch").addEventListener("click", () => send({ cmd: "launch" }));
+$("btn-finish").addEventListener("click", () => send({ cmd: "close" }));
+$("btn-quit").addEventListener("click", () => send({ cmd: "close" }));
+
+send({ cmd: "ready" });
+</script>
+</body>
+</html>

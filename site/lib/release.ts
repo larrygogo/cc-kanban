@@ -46,6 +46,13 @@ export type ReleaseNote = {
 const pick = (assets: Asset[], ext: string) =>
   assets.find((a) => a.name.toLowerCase().endsWith(ext)) ?? null;
 
+// Windows 资产两级匹配：`-installer.exe` 是 WebView2 壳（人类下载入口，现代 UI），
+// `-setup.exe` 是 NSIS 芯（updater 的 latest.json 指向它，同时兼作老 release 的回退
+// ——壳是后加的，旧版本 release 里没有）。**不能**笼统按 ".exe" 取第一个：release
+// 里两个 exe 并存后，命中哪个取决于 GitHub API 返回的资产顺序。
+const pickWindows = (assets: Asset[]) =>
+  pick(assets, "-installer.exe") ?? pick(assets, "-setup.exe") ?? pick(assets, ".exe");
+
 // 站点是静态导出，下面这些请求都发生在构建时。发新版后要重新部署站点内容才会更新——
 // deploy-pages.yml 挂了 release: published 触发，你在 GitHub 上点 Publish 时会自动跑。
 async function gh<T>(path: string): Promise<T | null> {
@@ -140,7 +147,7 @@ export const getLatestRelease = cache(async (): Promise<Release | null> => {
   return {
     tag: json.tag_name,
     version: json.tag_name.replace(/^v/, ""),
-    windows: pick(assets, ".exe"),
+    windows: pickWindows(assets),
     macos: pick(assets, ".dmg"),
   };
 });

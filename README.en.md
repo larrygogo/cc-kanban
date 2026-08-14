@@ -20,7 +20,7 @@ Website: **[meowo.io](https://meowo.io)** — it hands you the installer for you
 
 | Platform | Installer | Notes |
 |----------|-----------|-------|
-| **Windows** | [Latest x64 installer](https://github.com/larrygogo/meowo/releases/latest) (`Meowo_x.y.z_x64-setup.exe`) | NSIS installer |
+| **Windows** | [Latest x64 installer](https://github.com/larrygogo/meowo/releases/latest) (`Meowo_x.y.z_x64-installer.exe`; older releases: `-setup.exe`) | One-click install; falls back to the classic installer UI without WebView2 |
 | **macOS** | [Latest universal DMG](https://github.com/larrygogo/meowo/releases/latest) (`Meowo_x.y.z_universal.dmg`) | Universal (Intel / Apple Silicon), requires macOS ≥ 14 Sonoma; signed & notarized |
 
 Download the installer for your platform and double-click to install. The app supports in-app update checks.

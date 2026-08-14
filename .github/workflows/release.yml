@@ -101,3 +101,26 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      # WebView2 壳安装器（人类下载入口）：wry 现代 UI 包着 NSIS 芯静默跑。
+      # 必须在 tauri-action 之后——壳的 build.rs 要 include_bytes! 嵌入 NSIS 产物。
+      # updater 链路不经过壳：latest.json 仍指向 -setup.exe（NSIS 芯），零影响；
+      # 官网下载页（site/lib/release.ts）优先取 -installer.exe。
+      - name: 构建并上传 WebView2 安装器壳 (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          inner="app/src-tauri/target/release/bundle/nsis/Meowo_${ver}_x64-setup.exe"
+          if [ ! -f "$inner" ]; then
+            echo "::error::NSIS 产物不存在: $inner"
+            exit 1
+          fi
+          export MEOWO_INNER_SETUP="$(cygpath -m "$PWD/$inner")"
+          (cd app/src-tauri && cargo build --release -p meowo-setup)
+          out="Meowo_${ver}_x64-installer.exe"
+          cp app/src-tauri/target/release/meowo-setup.exe "$out"
+          # draft release 可按 tag 名寻址；--clobber 让失败重试幂等。
+          gh release upload "$GITHUB_REF_NAME" "$out" --clobber
