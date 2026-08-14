@@ -30,6 +30,23 @@ pub(crate) fn meowo_dir() -> std::path::PathBuf {
         .unwrap_or_default()
 }
 
+/// 自动接线开关：release 恒开；debug 默认关（dev 不抢 `~/.claude/settings.json` 等
+/// 全局 hook 槽位与 statusline.sh——那是单槽位，后启动者会静默改指自己的 sidecar，
+/// 安装版的接线随即失效）。调试 hook 链路时设 `MEOWO_DEV_WIRE=1` 恢复自动接线；
+/// 手动「修复连接」（apply_provider）不经此门，显式动作永远可用。安装版重启后经
+/// wiring 的 `bundled.or(claimed)` 自动抢回槽位。
+pub(crate) fn auto_wire_enabled() -> bool {
+    auto_wire_enabled_from(
+        cfg!(debug_assertions),
+        std::env::var("MEOWO_DEV_WIRE").ok().as_deref(),
+    )
+}
+
+/// 纯函数可测：release（debug=false）恒 true；debug 仅 `MEOWO_DEV_WIRE=1` 时 true。
+fn auto_wire_enabled_from(debug: bool, flag: Option<&str>) -> bool {
+    !debug || flag == Some("1")
+}
+
 /// 接线一个 agent。`reporter` 由调用方预解析，避免 apply_all 里逐个重复查 sidecar。
 fn wire(plugin: &dyn meowo_agent::AgentPlugin, reporter: Option<&str>) -> Option<RepairReason> {
     let dir = meowo_dir();
@@ -140,4 +157,23 @@ pub fn apply_provider(id: AgentId) -> Option<RepairReason> {
         return Some(RepairReason::NotDetected);
     };
     wire(p, sibling_reporter().as_deref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auto_wire_enabled_from;
+
+    /// 自动接线门控的三分支：release 无条件接；debug 默认不接（不抢全局 hook 槽位）；
+    /// debug 且 MEOWO_DEV_WIRE=1 时恢复接线。纯函数传参，不改进程 env。
+    #[test]
+    fn auto_wire_gate_branches() {
+        // release：flag 无论是什么都接线。
+        assert!(auto_wire_enabled_from(false, None));
+        assert!(auto_wire_enabled_from(false, Some("0")));
+        // debug 默认关；只认字面 "1"。
+        assert!(!auto_wire_enabled_from(true, None));
+        assert!(!auto_wire_enabled_from(true, Some("0")));
+        assert!(!auto_wire_enabled_from(true, Some("true")));
+        assert!(auto_wire_enabled_from(true, Some("1")));
+    }
 }

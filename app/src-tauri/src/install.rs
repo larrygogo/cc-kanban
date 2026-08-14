@@ -39,6 +39,12 @@ pub(crate) struct InstallDone {
 /// 也就是说 kimi 只有登录后才接得上；claude/codex 装完可能还没目录，但登录必然会创建它
 /// （写凭据）。故两处都调一次。
 pub(crate) fn wire_hooks_best_effort(id: meowo_agent::AgentId, occasion: &str) {
+    // 与启动时的 apply_all 同一道门：dev 构建不自动抢全局 hook 槽位（五个调用点
+    // 收敛在此一处）。手动「修复连接」走 repair_provider_hooks→apply_provider，不经此门。
+    if !setup::auto_wire_enabled() {
+        eprintln!("Meowo repair[{id}]: dev 构建跳过{occasion}后自动接线");
+        return;
+    }
     match setup::apply_provider(id) {
         None => eprintln!("Meowo repair[{id}]: {occasion}后已自动接线"),
         Some(reason) => {

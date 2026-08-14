@@ -390,6 +390,66 @@ pub(crate) fn migrate_legacy_data() {
     }
 }
 
+/// dev(debug)构建的默认库路径:`<home>/.meowo-dev/board.db`。home 解析链与
+/// [`db_path`] 完全一致(USERPROFILE → HOME → ".")。独立成纯函数是为了可测——
+/// 先例是 reporter 的 `db_path_under`:测试传参,不改进程环境变量。
+fn dev_db_path_under(userprofile: Option<&str>, home: Option<&str>) -> PathBuf {
+    let home = userprofile.or(home).unwrap_or(".");
+    PathBuf::from(home).join(".meowo-dev").join("board.db")
+}
+
+/// dev/安装版并行隔离的落点设定:`MEOWO_DB` 未显式设置时把它设成 dev 默认库,
+/// 返回「是否由本函数设定」(首启 seed 据此判断)。数据目录的六个独立解析点
+/// (app 侧 db_path/migrate/usage_cache、agent 侧 transcript/telemetry、reporter)
+/// 全部 env 优先,在此一处设定即全体跟随;托管 PTY 子进程另由 `pty` 显式注入。
+/// 只允许 run() 在**单线程早期**调用:set_var 是进程级副作用(edition 2021 下
+/// 非 unsafe;workspace 升 2024 时此处要包 unsafe 块);测试进程不走 run(),不受污染。
+fn apply_dev_default_db() -> bool {
+    if std::env::var_os("MEOWO_DB").is_some() {
+        return false;
+    }
+    let dev_db = dev_db_path_under(
+        std::env::var("USERPROFILE").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    );
+    std::env::set_var("MEOWO_DB", &dev_db);
+    eprintln!("Meowo dev: 数据目录隔离生效,库落 {}", dev_db.display());
+    true
+}
+
+/// dev 首启种子:`~/.meowo-dev` 尚不存在时,从安装版目录拷 `settings.json` 与
+/// `relay-secrets.json`(存在才拷),让中转、语言等设置开箱即用。刻意不拷
+/// board.db(会话数据正是要隔离的东西)与 profiles/——settings 里的 profiles
+/// 元数据没有对应目录时,`wire_all_profiles` 有缺目录即跳过的守卫,至多短暂
+/// 显示待登录的账号。只在 [`apply_dev_default_db`] 返回 true 时调用:用户显式
+/// 把 MEOWO_DB 指向别处的话,那个目录的内容轮不到我们猜。
+fn seed_dev_dir_from_release() {
+    let Some(dev_dir) = db_path().parent().map(std::path::Path::to_path_buf) else {
+        return;
+    };
+    if dev_dir.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(&dev_dir) {
+        eprintln!("Meowo dev: 创建数据目录失败: {e}");
+        return;
+    }
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    let release_dir = PathBuf::from(home).join(".meowo");
+    for name in ["settings.json", "relay-secrets.json"] {
+        let src = release_dir.join(name);
+        if !src.is_file() {
+            continue;
+        }
+        match std::fs::copy(&src, dev_dir.join(name)) {
+            Ok(_) => eprintln!("Meowo dev: 已从安装版拷贝 {name}"),
+            Err(e) => eprintln!("Meowo dev: 拷贝 {name} 失败: {e}"),
+        }
+    }
+}
+
 fn open_store(path: &std::path::Path) -> Result<Store, String> {
     Store::open(path).map_err(|e| e.to_string())
 }
@@ -887,6 +947,13 @@ pub fn run() {
             }
         );
     }
+    // dev/安装版并行隔离:debug 构建默认数据目录 ~/.meowo-dev(显式 MEOWO_DB 仍最
+    // 优先),首启并从安装版 seed 一份 settings/relay 密钥。必须先于任何线程创建
+    // (下方 PtyBroker/attach server)与任何 db_path() 读取——set_var 要在单线程期完成。
+    // cfg! 而非 #[cfg]:与 single-instance 同款理由,两个分支都要过编译。
+    if cfg!(debug_assertions) && apply_dev_default_db() {
+        seed_dev_dir_from_release();
+    }
     migrate_legacy_data();
     let path = db_path();
     let tx_cache: Arc<Mutex<meowo_agent::TranscriptCache>> =
@@ -1201,7 +1268,14 @@ pub fn run() {
                 }
             }
             // 无感适配：幂等把 meowo-reporter 接入各 AI CLI（claude: hooks+statusLine；codex/kimi: hooks）。后台跑，失败不影响启动。
-            std::thread::spawn(setup::apply_all);
+            // dev 构建默认不自动接线：hook/statusline 是全局单槽位（~/.claude/settings.json 等），
+            // 后启动者必然静默抢线（wiring 的 bundled.or(claimed)），dev 一开安装版的接线就被
+            // 改指 target/debug——把槽位留给安装版。手动「修复连接」不经此门，仍可显式接线。
+            if setup::auto_wire_enabled() {
+                std::thread::spawn(setup::apply_all);
+            } else {
+                eprintln!("Meowo dev: 跳过启动自动接线(hooks/statusline)；需要时用设置页「修复连接」或设 MEOWO_DEV_WIRE=1");
+            }
             // 先起合流线程：其余几个 spawn_* 都经 emit_board_changed 发事件，晚起会让它们的
             // 首批事件退化成直接 emit。
             spawn_board_notifier(app.handle().clone());
@@ -1247,6 +1321,23 @@ mod tests {
         is_viewing_session, pending_fingerprint, screen_blocked_fingerprint, should_notify,
         suppressed_by_viewing, waiting_fingerprint, NotifyKind,
     };
+
+    /// dev 默认库路径的推导：home 解析链必须与 db_path() 完全一致
+    /// （USERPROFILE 优先 → HOME 兜底 → 双缺回 "."），目录名固定 `.meowo-dev`。
+    /// 纯函数传参而不改进程 env——同进程并行单测互踩环境变量是本仓明文禁区
+    /// （先例：reporter 的 db_path_under 测试）。
+    #[test]
+    fn dev_db_path_derivation() {
+        use std::path::PathBuf;
+        let expect = |root: &str| PathBuf::from(root).join(".meowo-dev").join("board.db");
+        assert_eq!(
+            crate::dev_db_path_under(Some("C:/up"), Some("C:/home")),
+            expect("C:/up"),
+            "USERPROFILE 应优先于 HOME"
+        );
+        assert_eq!(crate::dev_db_path_under(None, Some("C:/home")), expect("C:/home"));
+        assert_eq!(crate::dev_db_path_under(None, None), expect("."));
+    }
 
     /// 通知抑制的非对称：用户正看着某会话时不弹它的「等待你回复」（他就在屏幕前），
     /// 但要人做决定的通知（错误/待审批/屏幕阻塞）**永不抑制**——抑制它等于把需要

@@ -1056,6 +1056,12 @@ impl PtyBroker {
         for (key, value) in env {
             command.env(key, value);
         }
+        // 数据落点由拉起者显式决定，不靠环境继承：dev GUI（~/.meowo-dev）与安装版
+        // （~/.meowo）并行时，各自托管会话内的 hook/reporter 必须写各自的库——托管会话
+        // 写了别的库，GUI 将永远认领不到它。放在 caller env 循环之后 = 覆盖任何外来
+        // MEOWO_DB；release 下值即默认路径，行为不变。外部终端会话无此注入，reporter
+        // 按默认落 ~/.meowo，归安装版——正是期望的归属。
+        command.env("MEOWO_DB", crate::db_path().as_os_str());
         // 所有托管会话（新建和恢复）都必须把本机鉴权通道传给 hook 子进程；此前只有
         // start_pending 注入，导致历史会话恢复后 PermissionRequest 无法抵达 GUI。
         if let Ok(endpoint) = self.attach.endpoint.lock() {
