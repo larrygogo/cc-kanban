@@ -48,7 +48,9 @@ fn git_diff_summary_blocking(cwd: &str) -> Result<GitDiffSummaryDto, String> {
         .map(|o| stdout_text(&o.stdout).trim().to_string())
         .filter(|name| !name.is_empty() && name != "HEAD");
     // --no-renames：-z 格式下重命名条目会带两个路径，禁掉后每个条目恒为「XY <path>\0」。
-    let status = git_output(dir, &["status", "--porcelain", "-z", "--no-renames"])
+    // -uall：整个目录都未跟踪时默认只报一条「?? dir/」，前端会把它当文件渲染
+    //（尾斜杠让文件名为空、点开按文件读目录直接报错）；展开成具体文件才是「更改」的语义。
+    let status = git_output(dir, &["status", "--porcelain", "-z", "--no-renames", "-uall"])
         .map_err(|e| e.to_string())?;
     if !status.status.success() {
         return Err("git status 执行失败".into());
@@ -173,7 +175,9 @@ fn parse_porcelain_z(bytes: &[u8]) -> Vec<GitChangedFileDto> {
         let y = entry[1];
         // entry[2] 是空格分隔符；路径原样保留（porcelain 用正斜杠，前端按它展示）。
         let path = String::from_utf8_lossy(&entry[3..]).into_owned();
-        if path.is_empty() {
+        // 目录条目(尾斜杠,如 -uall 缺席时的「?? dir/」)不是文件:渲染出来是一行空名,
+        // 点开按文件读目录必报错。防御性跳过——正常路径下 -uall 已把目录展开成文件。
+        if path.is_empty() || path.ends_with('/') {
             continue;
         }
         let status: String = if x == b'?' && y == b'?' {
@@ -218,6 +222,15 @@ mod tests {
                 ("src/new.rs", "U"),
             ]
         );
+    }
+
+    #[test]
+    fn porcelain_z_skips_untracked_directory_entries() {
+        // -uall 缺席或旧输出里的目录条目(尾斜杠):不是文件,不能进「更改」清单。
+        let raw = b"?? target-check/\0?? src/new.rs\0";
+        let files = parse_porcelain_z(raw);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "src/new.rs");
     }
 
     #[test]

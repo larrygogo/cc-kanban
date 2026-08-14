@@ -1,6 +1,8 @@
 .superpowers/
 node_modules/
 target/
+# 隔离校验用 cargo target(dev 实例占用 target/ 的 exe 时,CARGO_TARGET_DIR=target-check 跑测试)
+target-check/
 dist/
 # 本项目用 bun(bun.lock)。npm 的 package-lock.json 只会是误跑 npm/npx 的产物,不入库。
 package-lock.json
