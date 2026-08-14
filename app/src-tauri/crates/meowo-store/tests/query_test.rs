@@ -615,3 +615,51 @@ fn hidden_sessions_are_subtracted_with_the_same_rule_as_totals() {
     // 一个都不隐藏时不该误伤。
     assert_eq!(store.live_totals_for(&[]).unwrap(), (0, 0));
 }
+
+// ===== 跨 provider 接续链的看板折叠 =====
+
+/// A 被 B 接替后必须从**所有** tab 与全部角标口径里消失——列表、totals、totals_for、
+/// candidates 四处谓词同生共死,漏一处角标就和列表打架(角标 2、列表 1)。
+/// None(测试取证的全量读法)不折叠,被接替段仍可见。
+#[test]
+fn superseded_sessions_fold_from_all_board_scopes() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (a, _) = store.start_session(pid, "cc-a", 100).unwrap();
+    store.on_user_prompt(a, "旧段", 110).unwrap();
+    let (b, _) = store.start_session(pid, "cc-b", 200).unwrap();
+    store.on_user_prompt(b, "新段", 210).unwrap();
+    assert_eq!(store.live_sessions_totals().unwrap().0, 2);
+
+    store.set_session_lineage(b, a).unwrap();
+
+    for tab in ["all", "running", "waiting", "archived"] {
+        let live = store
+            .live_sessions(Some(tab), None, None, None, 1000)
+            .unwrap();
+        assert!(
+            live.iter().all(|l| l.session.id != a),
+            "{tab} tab 不应出现被接替的 a"
+        );
+    }
+    let all = store
+        .live_sessions(Some("all"), None, None, None, 1000)
+        .unwrap();
+    assert!(all.iter().any(|l| l.session.id == b), "链尾 b 应照常在列表");
+
+    // 角标三处与列表同口径。
+    assert_eq!(store.live_sessions_totals().unwrap().0, 1);
+    let both = ["cc-a", "cc-b"].map(String::from);
+    assert_eq!(
+        store.live_totals_for(&both).unwrap().0,
+        1,
+        "被接替段即使被报进隐藏集合也不计"
+    );
+    let candidates = store.live_count_candidates().unwrap();
+    assert!(candidates.iter().all(|c| c.id != a));
+    assert!(candidates.iter().any(|c| c.id == b));
+
+    // None 全量读法不折叠——测试/取证要能看到链上所有段。
+    let raw = store.live_sessions(None, None, None, None, 1000).unwrap();
+    assert!(raw.iter().any(|l| l.session.id == a));
+}

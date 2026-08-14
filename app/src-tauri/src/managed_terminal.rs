@@ -239,7 +239,7 @@ fn background_endpoint(
     meowo_agent::resolve(Some(&provider))
         .and_then(|agent| agent.runtime())
         .and_then(|runtime| runtime.background_endpoint(&session.cc_session_id))
-        .ok_or_else(|| "这个后台会话已经不在 Agent 的花名册里了".to_string())
+        .ok_or_else(|| "后台会话已结束或被 Agent 收回".to_string())
 }
 
 /// 查花名册 → 连上去。阻塞（读文件 + 连 socket），只在 spawn_blocking 里调。

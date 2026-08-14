@@ -208,6 +208,8 @@ fn load_chat_history(
         archived: header.archived,
         last_user_text: header.last_user_text.clone(),
         last_ai_text: header.last_ai_text.clone(),
+        predecessor_id: header.predecessor_id,
+        superseded_by: header.superseded_by,
     };
     // errored 与侧栏/贴纸走同一入口(session_query::analyze_transcript,同口径由代码保证)。
     // 5s 节流:agent 流式输出期间 transcript 每轮都在变,650ms 全采样会对同一批新增字节
@@ -519,12 +521,75 @@ fn save_pasted_attachment_blocking(
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// 读系统剪贴板**图像**的指纹(尺寸 + RGBA 内容);剪贴板里不是图像时为 None。只读不写。
-///
-/// 用途:发送粘贴图片附件前,判断「剪贴板里还是不是刚才粘贴进 meowo 的那张图」——
-/// 匹配才敢向 CLI 的 PTY 发 Ctrl-V,让 TUI 自己读剪贴板、走它的原生图片附加
-/// (claude 的 `[Image #N]`、kimi 的 `[image:…]`);不匹配(用户中途复制过别的东西)
-/// 绝不能发,否则会把错的图附给 agent。
+/// 原生图片附加的剪贴板快照。发送时逐张把附件写进系统剪贴板（Ctrl-V 让 TUI 自己读、
+/// 走它的原生图片附加），这会顶掉用户剪贴板里原有的内容——首次写入前快照，发送结束
+/// （成功/失败/回退）由 `clipboard_restore` 还原。发送路径串行，单槽足够。
+struct ClipboardSnapshot {
+    text: Option<String>,
+    image: Option<arboard::ImageData<'static>>,
+}
+static CLIPBOARD_SNAPSHOT: std::sync::Mutex<Option<ClipboardSnapshot>> =
+    std::sync::Mutex::new(None);
+
+/// 把本地图片文件写进系统剪贴板（供紧随其后的 Ctrl-V 原生附加）。首次写入前自动快照
+/// 现有剪贴板内容。读文件/解码/写剪贴板任一步失败都报错——调用方据此回退指令文本，
+/// 绝不能照常发 Ctrl-V（那会把剪贴板里别人的内容附给 agent）。
+#[tauri::command]
+pub(crate) async fn clipboard_set_image(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let rgba = image::load_from_memory(&bytes)
+            .map_err(|e| e.to_string())?
+            .to_rgba8();
+        let (width, height) = rgba.dimensions();
+        let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        {
+            let mut slot = CLIPBOARD_SNAPSHOT.lock().map_err(|e| e.to_string())?;
+            if slot.is_none() {
+                *slot = Some(ClipboardSnapshot {
+                    text: clipboard.get_text().ok().filter(|t| !t.is_empty()),
+                    image: clipboard.get_image().ok().map(|img| arboard::ImageData {
+                        width: img.width,
+                        height: img.height,
+                        bytes: std::borrow::Cow::Owned(img.bytes.into_owned()),
+                    }),
+                });
+            }
+        }
+        clipboard
+            .set_image(arboard::ImageData {
+                width: width as usize,
+                height: height as usize,
+                bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+            })
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 还原 `clipboard_set_image` 快照下来的剪贴板内容；没有快照时为空操作。
+#[tauri::command]
+pub(crate) async fn clipboard_restore() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let snapshot = CLIPBOARD_SNAPSHOT
+            .lock()
+            .map_err(|e| e.to_string())?
+            .take();
+        let Some(snapshot) = snapshot else { return Ok(()) };
+        let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        if let Some(image) = snapshot.image {
+            clipboard.set_image(image).map_err(|e| e.to_string())?;
+        } else if let Some(text) = snapshot.text {
+            clipboard.set_text(text).map_err(|e| e.to_string())?;
+        } else {
+            clipboard.clear().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 /// 读剪贴板文本（终端右键粘贴用，见 ManagedTerminal 的 contextmenu 处理）。
 /// navigator.clipboard.readText 在 WebView2 里要站点权限弹窗，走后端 arboard 零打扰；
 /// 剪贴板无文本内容（空/图片）回 None，调用方静默跳过。
@@ -533,24 +598,6 @@ pub(crate) async fn clipboard_text() -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
         Ok(clipboard.get_text().ok().filter(|text| !text.is_empty()))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub(crate) async fn clipboard_image_fingerprint() -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-        let Ok(image) = clipboard.get_image() else {
-            return Ok(None);
-        };
-        use meowo_agent::codec::{fnv1a, FNV1A_OFFSET};
-        let mut hash = FNV1A_OFFSET;
-        fnv1a(&mut hash, &(image.width as u64).to_le_bytes());
-        fnv1a(&mut hash, &(image.height as u64).to_le_bytes());
-        fnv1a(&mut hash, &image.bytes);
-        Ok(Some(format!("{hash:016x}")))
     })
     .await
     .map_err(|e| e.to_string())?

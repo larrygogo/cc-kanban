@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { confirmStopSession, getLiveSessionsPage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LiveSession, type SessionTone } from "../api";
+import { confirmStopSession, getLiveSessionsPage, getSessionLineage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LineageEntry, type LiveSession, type SessionTone } from "../api";
 import { useBoardRefresh } from "../hooks/useBoardRefresh";
 import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
@@ -11,6 +11,7 @@ import { editorKeyDown, useStarred } from "./sticker/helpers";
 import { UNNAMED_SESSION_SENTINEL } from "./sticker/types";
 import { CheckIcon, ChevronDownIcon, MoreIcon, NoteIcon, TopIcon } from "./sticker/icons";
 import { useT } from "../i18n";
+import { formatBackendError } from "../i18n/errors";
 import { isMac } from "../platform";
 import type { Dict } from "../i18n/zh";
 
@@ -44,6 +45,71 @@ const TONE_RANK: Record<SessionTone, number> = {
 };
 
 type DirGroup = { key: string; cwd: string | null; label: string; items: LiveSession[] };
+
+/** 接续链弹层：列出跨 provider 切换链上的各段（provider 图标 + 模型 + 起始日期），
+ *  尾段标「当前」，点旧段回看。定位/关闭纪律与 CardContextMenu 同款：fixed + 视口钳位、
+ *  点外关闭（click 捕获相拦截，防顺手触发卡片点击）、Escape 关闭。 */
+function LineagePopover({ x, y, entries, onPick, onClose }: {
+  x: number;
+  y: number;
+  entries: LineageEntry[];
+  onPick: (id: number) => void;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ left: x, top: y });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const pad = 4;
+    setPos({
+      left: Math.max(pad, Math.min(x, window.innerWidth - el.offsetWidth - pad)),
+      top: Math.max(pad, Math.min(y, window.innerHeight - el.offsetHeight - pad)),
+    });
+  }, [x, y]);
+  useEffect(() => {
+    const clickAway = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) {
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("click", clickAway, true);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("click", clickAway, true);
+      document.removeEventListener("keydown", key);
+    };
+  }, [onClose]);
+  const last = entries[entries.length - 1];
+  return (
+    <div ref={ref} className="dd-menu chat-sidebar-lineage-menu" role="menu" style={{ position: "fixed", left: pos.left, top: pos.top }}>
+      {entries.map((entry) => {
+        const { Icon } = agentAssets(entry.provider);
+        const current = entry === last;
+        return (
+          <button
+            type="button"
+            key={entry.id}
+            role="menuitem"
+            className="dd-item"
+            onClick={() => { onClose(); onPick(entry.id); }}
+          >
+            <span className="chat-sidebar-lineage-ico" style={tintStyle(entry.provider)}><Icon /></span>
+            <span className="dd-label">
+              {entry.model ?? entry.provider}
+              {" · "}
+              {new Date(entry.startedAt).toLocaleDateString()}
+            </span>
+            {current && <span className="chat-sidebar-lineage-now">{t.chat.lineageCurrent}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 /** 就地编辑输入框。草稿是**本组件的**局部状态：此前草稿放在 ChatSidebar 里，每次按键
  *  setState 都让整个侧栏（无虚拟化，几百条全在 DOM）重渲染一遍——重命名逐字卡顿的根因。
@@ -129,22 +195,26 @@ function groupByState(items: LiveSession[], t: Dict): DirGroup[] {
   }));
 }
 
-/** 侧栏的筛选/分组弹层（Linear 式）：头部一个图标钮，面板每行「标签 · 当前值 ›」，
- *  点行进入对应选项列表，选中即应用并收起。取代先前并排撑满一行的两个下拉。 */
-function SidebarFilterMenu({ dirValue, dirOptions, groupMode, groupLabels, sortMode, sortLabels, onDir, onGroup, onSort, t }: {
+/** 侧栏的筛选/分组弹层：单面板扁平化——「分组」「排序」的选项直接内联为 radio 行,
+ *  选中即应用并收起(旧版是 根→子面板→选项 三级,改一项要 3 击);仅「目录」因列表
+ *  无上限保留子面板。 */
+function SidebarFilterMenu({ dirValue, dirOptions, groupMode, groupLabels, sortMode, sortLabels, archived, onDir, onGroup, onSort, onArchived, t }: {
   dirValue: string | null;
   dirOptions: { value: string; label: string }[];
   groupMode: GroupMode;
   groupLabels: Record<GroupMode, string>;
   sortMode: SortMode;
   sortLabels: Record<SortMode, string>;
+  /** 已归档视图：与归档动作(卡片菜单 2 击)对称的取回入口——此前唯一入口埋在设置页深处。 */
+  archived: boolean;
   onDir: (value: string | null) => void;
   onGroup: (mode: GroupMode) => void;
   onSort: (mode: SortMode) => void;
+  onArchived: (value: boolean) => void;
   t: Dict;
 }) {
   const { open, setOpen, pos, ref, btnRef, menuRef, toggle, onKeyDown, relayout } = useMenuPopup({});
-  const [view, setView] = useState<"root" | "dir" | "group" | "sort">("root");
+  const [view, setView] = useState<"root" | "dir">("root");
   // 关闭即回根视图：下次打开不该停在上次翻到的子面板。
   useEffect(() => { if (!open) setView("root"); }, [open]);
   // 子视图切换后（根↔目录/分组）：
@@ -198,76 +268,79 @@ function SidebarFilterMenu({ dirValue, dirOptions, groupMode, groupLabels, sortM
                 <span className="sf-val"><span className="sf-val-text">{dirLabel}</span>{chevron}</span>
               </button>
               <div className="sf-sep" role="separator" />
-              <button type="button" role="menuitem" className="dd-item sf-row" onClick={() => setView("group")}>
-                <span>{t.chat.sidebarFilterGroup}</span>
-                <span className="sf-val"><span className="sf-val-text">{groupLabels[groupMode]}</span>{chevron}</span>
-              </button>
+              <div className="sf-caption">{t.chat.sidebarFilterGroup}</div>
+              {(["none", "dir", "date", "state"] as const).map((mode) => {
+                const selected = groupMode === mode;
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    className={"dd-item" + (selected ? " sel" : "")}
+                    onClick={() => pick(() => onGroup(mode))}
+                  >
+                    <span className="dd-label">{groupLabels[mode]}</span>
+                    {selected && check}
+                  </button>
+                );
+              })}
               <div className="sf-sep" role="separator" />
-              <button type="button" role="menuitem" className="dd-item sf-row" onClick={() => setView("sort")}>
-                <span>{t.chat.sidebarFilterSort}</span>
-                <span className="sf-val"><span className="sf-val-text">{sortLabels[sortMode]}</span>{chevron}</span>
+              <div className="sf-caption">{t.chat.sidebarFilterSort}</div>
+              {(["recent", "created", "name"] as const).map((mode) => {
+                const selected = sortMode === mode;
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    className={"dd-item" + (selected ? " sel" : "")}
+                    onClick={() => pick(() => onSort(mode))}
+                  >
+                    <span className="dd-label">{sortLabels[mode]}</span>
+                    {selected && check}
+                  </button>
+                );
+              })}
+              <div className="sf-sep" role="separator" />
+              <button
+                type="button"
+                role="option"
+                aria-selected={archived}
+                className={"dd-item" + (archived ? " sel" : "")}
+                onClick={() => pick(() => onArchived(!archived))}
+              >
+                <span className="dd-label">{t.settings.archivedSessions}</span>
+                {archived && check}
               </button>
             </>
           ) : (
             <>
               <button type="button" role="menuitem" className="dd-item sf-back" onClick={() => setView("root")}>
                 {back}
-                <span>{view === "dir" ? t.chat.sidebarFilterDir : view === "sort" ? t.chat.sidebarFilterSort : t.chat.sidebarFilterGroup}</span>
+                <span>{t.chat.sidebarFilterDir}</span>
               </button>
               <div className="sf-sep" role="separator" />
-              {view === "dir"
-                ? [{ value: "", label: t.chat.sidebarDirAll }, ...dirOptions].map((option) => {
-                    const selected = (dirValue ?? "") === option.value;
-                    return (
-                      <button
-                        key={option.value}
-                        type="button"
-                        role="option"
-                        aria-selected={selected}
-                        className={"dd-item" + (selected ? " sel" : "")}
-                        // 菜单内刻意用原生 title：TooltipLayer 对 .dd-menu 区域静默
-                        // （自绘提示会糊在菜单上，见 Tooltip.tsx tipEl 的注释）。
-                        title={option.value || undefined}
-                        onClick={() => pick(() => onDir(option.value || null))}
-                      >
-                        <span className="dd-label">{option.label}</span>
-                        {selected && check}
-                      </button>
-                    );
-                  })
-                : view === "sort"
-                  ? (["recent", "created", "name"] as const).map((mode) => {
-                      const selected = sortMode === mode;
-                      return (
-                        <button
-                          key={mode}
-                          type="button"
-                          role="option"
-                          aria-selected={selected}
-                          className={"dd-item" + (selected ? " sel" : "")}
-                          onClick={() => pick(() => onSort(mode))}
-                        >
-                          <span className="dd-label">{sortLabels[mode]}</span>
-                          {selected && check}
-                        </button>
-                      );
-                    })
-                  : (["none", "dir", "date", "state"] as const).map((mode) => {
-                    const selected = groupMode === mode;
-                    return (
-                      <button
-                        key={mode}
-                        type="button"
-                        role="option"
-                        aria-selected={selected}
-                        className={"dd-item" + (selected ? " sel" : "")}
-                        onClick={() => pick(() => onGroup(mode))}
-                      >
-                        <span className="dd-label">{groupLabels[mode]}</span>
-                        {selected && check}
-                      </button>
-                    );
-                  })}
+              {[{ value: "", label: t.chat.sidebarDirAll }, ...dirOptions].map((option) => {
+                const selected = (dirValue ?? "") === option.value;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    className={"dd-item" + (selected ? " sel" : "")}
+                    // 菜单内刻意用原生 title：TooltipLayer 对 .dd-menu 区域静默
+                    // （自绘提示会糊在菜单上，见 Tooltip.tsx tipEl 的注释）。
+                    title={option.value || undefined}
+                    onClick={() => pick(() => onDir(option.value || null))}
+                  >
+                    <span className="dd-label">{option.label}</span>
+                    {selected && check}
+                  </button>
+                );
+              })}
             </>
           )}
         </div>
@@ -303,6 +376,8 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   const t = useT();
   // null = 首次加载尚未完成：与「真空」区分，避免首帧误闪「暂无会话」。
   const [sessions, setSessions] = useState<LiveSession[] | null>(null);
+  // 接续链弹层（跨 provider 切换的回看入口）：点链徽标时惰性取链上各段。
+  const [lineageMenu, setLineageMenu] = useState<{ x: number; y: number; entries: LineageEntry[] } | null>(null);
   // 翻页用「从头取 limit 条」而不是游标续传：整段重取让 board-changed 刷新走同一条
   // 路径，不必维护「已加载的页」这份额外状态。到底与否看后端带回的 next_cursor。
   const [limit, setLimit] = useState(PAGE_LIMIT);
@@ -320,6 +395,11 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   const [dirFilter, setDirFilter] = useState<string | null>(null);
   const dirFilterRef = useRef(dirFilter);
   dirFilterRef.current = dirFilter;
+  // 已归档视图:数据走后端现成的 "archived" 过滤(与设置页 ArchivedSessions 同一通道),
+  // 条目菜单里自然出现「取消归档」——归档(卡片菜单)与取回自此对称。不落盘:临时视图。
+  const [archivedView, setArchivedView] = useState(false);
+  const archivedViewRef = useRef(archivedView);
+  archivedViewRef.current = archivedView;
   const [dirs, setDirs] = useState<string[]>([]);
   // 目录筛选下拉的显示名：同名目录（路径不同）带上上一级目录消歧——不消歧时用户面对
   // 一排「codebase」无从分辨（实拍反馈）。上一级仍同名的（祖父级才不同）极罕见，不再加深。
@@ -372,12 +452,14 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
     // 搜索走 search 参数(标题/cwd/项目名 LIKE,与看板同一条后端通道):会话上百条时
     // 靠滚动翻页找会话的路是断的,此前只能退回看板去搜。
     const q = searchRef.current.trim() || null;
-    return getLiveSessionsPage("all", q, null, lim, dir)
+    const arch = archivedViewRef.current;
+    return getLiveSessionsPage(arch ? "archived" : "all", q, null, lim, dir)
       .then((page) => {
         if (!mountedRef.current) return;
-        // 切目录/改搜索词期间发出的旧请求回来了:它装的是旧条件的会话,原样落盘会让
-        // 列表与筛选状态对不上。丢弃。
+        // 切目录/改搜索词/切归档视图期间发出的旧请求回来了:它装的是旧条件的会话,
+        // 原样落盘会让列表与筛选状态对不上。丢弃。
         if (dirFilterRef.current !== dir) return;
+        if (archivedViewRef.current !== arch) return;
         if ((searchRef.current.trim() || null) !== q) return;
         setReachedEnd(page.next_cursor === null);
         if (mode === "grow") {
@@ -473,6 +555,21 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
     setGrowing(false);
     void loadRef.current("refresh");
   }, [dirFilter]);
+
+  // 切换已归档视图 = 换数据源:与切目录同一套重置语义。
+  const prevArchRef = useRef(false);
+  useEffect(() => {
+    if (prevArchRef.current === archivedView) return;
+    prevArchRef.current = archivedView;
+    prevLimitRef.current = PAGE_LIMIT;
+    limitRef.current = PAGE_LIMIT;
+    setLimit(PAGE_LIMIT);
+    setReachedEnd(false);
+    setSessions(null);
+    growingRef.current = false;
+    setGrowing(false);
+    void loadRef.current("refresh");
+  }, [archivedView]);
 
   // 搜索词变化:防抖 300ms 重取首页(翻页状态清回首页,与切目录同一套语义)。
   // 不清 sessions——保留旧列表到新结果落地,避免每敲一个字闪一次加载占位。
@@ -579,7 +676,7 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   };
   const endSession = (item: LiveSession) => {
     void confirmStopSession(item.session.id, { title: t.chat.endSession, message: t.chat.endSessionConfirm })
-      .catch((error) => setActionError(String(error)));
+      .catch((error) => setActionError(formatBackendError(error, t.locale)));
   };
   const openMenuAt = (item: LiveSession, x: number, y: number) => setCtxMenu({ sid: item.session.id, x, y });
 
@@ -724,6 +821,24 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
                   裸文本节点是匿名 flex item，容器上的 text-overflow 对它不生效——
                   长标题会溢出而不出省略号（实拍反馈）。 */}
               <span className="chat-sidebar-name-text">{item.task_title || t.sticker.waitingFirstInput}</span>
+              {/* 跨 provider 接续链徽标：点开列出链上各段（回看旧引擎的对话）。 */}
+              {item.predecessor_id != null && (
+                <button
+                  type="button"
+                  className="chat-sidebar-lineage"
+                  aria-label={t.chat.lineageBadge}
+                  data-tip={t.chat.lineageBadge}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    void getSessionLineage(item.session.id)
+                      .then((entries) => setLineageMenu({ x: rect.left, y: rect.bottom + 4, entries }))
+                      .catch(() => {});
+                  }}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
+                </button>
+              )}
             </span>
           )}
           {/* 按目录分组时每条再重复一遍目录名是噪声——组头已经写着了（按日期/状态分组时目录仍有用）。 */}
@@ -779,9 +894,11 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
           groupLabels={{ none: t.chat.groupNone, dir: t.chat.groupByDir, date: t.chat.groupByDate, state: t.chat.groupByState }}
           sortMode={sortMode}
           sortLabels={{ recent: t.chat.sortRecent, created: t.chat.sortCreated, name: t.chat.sortName }}
+          archived={archivedView}
           onDir={setDirFilter}
           onGroup={changeGroupMode}
           onSort={changeSortMode}
+          onArchived={setArchivedView}
           t={t}
         />
         {/* macOS 专用：折叠钮留在侧栏头部（无独立顶栏）。Windows/Linux 的折叠/展开
@@ -897,6 +1014,15 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
       </nav>
       {/* 动作失败的唯一出口（重命名/便签/归档）：4s 后自动消失。 */}
       {actionError && <div className="chat-sidebar-error" role="status">{actionError}</div>}
+      {lineageMenu && (
+        <LineagePopover
+          x={lineageMenu.x}
+          y={lineageMenu.y}
+          entries={lineageMenu.entries}
+          onPick={onSelect}
+          onClose={() => setLineageMenu(null)}
+        />
+      )}
       {ctxMenu && ctxItem && (
         <CardContextMenu
           x={ctxMenu.x}

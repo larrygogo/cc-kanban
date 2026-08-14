@@ -27,7 +27,8 @@ export function ContextMeter({ pct, window, t }: { pct: number; window: number |
             strokeDashoffset={C * (1 - clamped / 100)} transform="rotate(-90 10 10)"
           />
         </svg>
-        <span className="chat-context-pct">{pct}</span>
+        {/* 「100」三位数在 20px 环内会溢出贴边(实拍反馈),缩号收距才装得下。 */}
+        <span className={"chat-context-pct" + (clamped >= 100 ? " is-wide" : "")}>{clamped}</span>
       </span>
       {usage && <span className="chat-context-usage">{usage}</span>}
     </span>

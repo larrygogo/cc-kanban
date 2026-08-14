@@ -1,7 +1,9 @@
 import { memo, useCallback, useEffect, useState } from "react";
 import { getSubagentTranscript, type ChatItem, type SubagentRun } from "../../api";
 import { useT } from "../../i18n";
+import { formatBackendError } from "../../i18n/errors";
 import { reduceChatEvents } from "../../chat/reducer";
+import { TodoBadge } from "./TodoBadge";
 import { Transcript } from "./Transcript";
 import { type ToolUseItem } from "./shared";
 
@@ -14,11 +16,12 @@ function statusText(status: string, t: ReturnType<typeof useT>): string {
   return t.chat.subagentRunning;
 }
 
-/// 状态徽标。进行中带一个脉冲圆点——静态文字看不出「还在动」，而这正是用户盯着它的原因。
+/// 状态徽标。图标与标题栏进度面板同一套徽章(TodoBadge,用户指定):进行中是旋转的
+/// 绿色缺口圆环——静态文字看不出「还在动」，而这正是用户盯着它的原因。
 function StatusBadge({ tone, text }: { tone: string; text: string }) {
   return (
     <span className={"chat-subagent-status is-" + tone}>
-      {tone === "running" && <i className="chat-subagent-pulse" aria-hidden="true" />}
+      <TodoBadge status={tone === "running" ? "in_progress" : tone} small />
       {text}
     </span>
   );
@@ -81,7 +84,7 @@ export const SubagentBlock = memo(function SubagentBlock({ sessionId, item, outc
     if (runs || loading) return;
     setLoading(true);
     setError("");
-    fetchRuns().then(setRuns).catch((e) => setError(String(e))).finally(() => setLoading(false));
+    fetchRuns().then(setRuns).catch((e) => setError(formatBackendError(e, t.locale))).finally(() => setLoading(false));
   };
   // 展开着且还有分支在跑时定期重取：子任务边跑边写，静态快照会一直停在打开那一刻。
   // 收起或全部结束就停——不给已完结的子任务留一个永动的轮询。

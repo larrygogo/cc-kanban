@@ -1,4 +1,4 @@
-use meowo_store::{TodoInput, TodoStatus};
+use meowo_store::{TodoDelta, TodoInput, TodoStatus};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -18,6 +18,10 @@ pub struct HookEvent {
     pub tool_name: Option<String>,
     #[serde(default)]
     pub tool_input: Option<serde_json::Value>,
+    /// PostToolUse 携带的工具结果。目前只有增量待办要读它——TaskCreate 分配的任务编号
+    /// 不在 tool_input 里，只出现在结果文本 `Task #N created successfully: …` 中。
+    #[serde(default)]
+    pub tool_response: Option<serde_json::Value>,
     /// Claude PermissionRequest 提供的“本次允许之外”的原生选项（例如写入项目/用户权限规则）。
     /// 其他 Agent 没有该字段时保持空列表。
     #[serde(default)]
@@ -71,6 +75,47 @@ impl HookEvent {
             .collect()
     }
 
+    /// 从增量待办工具（claude 的 TaskCreate/TaskUpdate）的调用中提取一条 TodoDelta。
+    ///
+    /// 不看工具名、靠字段区分：带 `taskId` 的是更新，带 `subject` 无 `taskId` 的是新建
+    /// ——与 `RawTodo` 用 alias 收束各家字段名同一思路，将来别家的增量工具字段对得上
+    /// 就直接复用。解析不出（拿不到编号/字段缺失）返回 None，调用方降级为无操作。
+    pub fn todo_delta(&self) -> Option<TodoDelta> {
+        let input = self.tool_input.as_ref()?;
+        // taskId 可能是字符串 "1" 也可能是数字 1，统一成字符串存。
+        let task_id = input.get("taskId").and_then(|v| match v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        });
+        let subject = input
+            .get("subject")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Some(external_id) = task_id {
+            let status_raw = input.get("status").and_then(|v| v.as_str());
+            // "deleted" 是删行而不是一种状态；TodoStatus::from_str 会把它降级成 Pending，
+            // 必须在映射前截住。
+            let deleted = status_raw == Some("deleted");
+            return Some(TodoDelta::Update {
+                external_id,
+                content: subject,
+                status: status_raw
+                    .filter(|_| !deleted)
+                    .map(TodoStatus::from_str),
+                deleted,
+            });
+        }
+        let content = subject?;
+        // 新建的编号只在结果文本里；结果还没来（PreToolUse）或格式变了 → 放弃这条，
+        // 宁可少一条待办也不造一个错误编号。
+        let external_id = task_number(&response_text(self.tool_response.as_ref()?)?)?;
+        Some(TodoDelta::Create {
+            external_id,
+            content,
+        })
+    }
+
     /// 把用户输入规整成纯文本：Claude 的字符串原样；kimi 的内容块数组拼接各 text 块（忽略图片等非文本块）。
     pub fn prompt_text(&self) -> Option<String> {
         match self.prompt.as_ref()? {
@@ -95,4 +140,33 @@ impl HookEvent {
             .as_str()
             .map(|s| s.to_string())
     }
+}
+
+/// 把 tool_response 摊平成文本。hook 的结果字段形状不统一：可能是裸字符串、内容块数组
+/// `[{"type":"text","text":…}]`，或再包一层 `{"content": …}`——三种都见过，逐层剥。
+fn response_text(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(arr) => {
+            let s = arr
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!s.is_empty()).then_some(s)
+        }
+        serde_json::Value::Object(o) => o
+            .get("content")
+            .and_then(response_text)
+            .or_else(|| o.get("text").and_then(|t| t.as_str()).map(String::from)),
+        _ => None,
+    }
+}
+
+/// 从 `Task #N created successfully: …` 里抠出编号 N。手写扫描而非正则——本 crate 是
+/// hook 热路径，不为一个模式引 regex 依赖。
+fn task_number(text: &str) -> Option<String> {
+    let rest = &text[text.find("Task #")? + "Task #".len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    (!digits.is_empty()).then_some(digits)
 }

@@ -156,6 +156,28 @@ pub struct TodoInput {
     pub status: TodoStatus,
 }
 
+/// 增量式待办操作（claude 现版本的 `TaskCreate`/`TaskUpdate`：单条创建/改状态，
+/// 不带整份快照）。与 `sync_todos` 的覆盖写互斥，走 `apply_todo_delta` 逐条累积。
+///
+/// `external_id` 是 agent 自己的任务编号（claude 为会话内递增的 "1"/"2"…），
+/// 存进 todos.external_id 列，Update 靠它定位 Create 落下的那一行。
+#[derive(Debug, Clone, PartialEq)]
+pub enum TodoDelta {
+    Create {
+        external_id: String,
+        content: String,
+    },
+    Update {
+        external_id: String,
+        /// 改标题（TaskUpdate 可带 subject）；None = 不动。
+        content: Option<String>,
+        /// 改状态；None = 不动（如只改标题/依赖关系的更新）。
+        status: Option<TodoStatus>,
+        /// status="deleted"：整行删除，而不是又一种 TodoStatus——表里不存已删项。
+        deleted: bool,
+    },
+}
+
 /// 默认 agent provider 名，与 sessions.provider 列的 SQL DEFAULT 'claude'
 /// （migrations.rs 建表 + store.rs ALTER）必须保持一致。此常量改动时下方测试会变红、
 /// 提醒同步 SQL 字面量，但若只改 SQL 而不改此常量则无法被发现（单向绊线）。

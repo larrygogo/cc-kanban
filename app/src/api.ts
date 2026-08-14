@@ -19,9 +19,32 @@ import type { SlashCommand } from "./generated/contracts/SlashCommand";
 import type { ChatItem as GeneratedChatItem } from "./generated/contracts/ChatItem";
 import type { SubagentRun as GeneratedSubagentRun } from "./generated/contracts/SubagentRun";
 import type { ManagedTerminalSnapshotDto } from "./generated/contracts/ManagedTerminalSnapshotDto";
+import type { LineageEntryDto } from "./generated/contracts/LineageEntryDto";
 import type { PendingApprovalDto } from "./generated/contracts/PendingApprovalDto";
+import type { SwitchStartedDto } from "./generated/contracts/SwitchStartedDto";
 import type { PendingInteractionDto } from "./generated/contracts/PendingInteractionDto";
 import type { LoginDoneEvent } from "./generated/contracts/LoginDoneEvent";
+import type { GitDiffSummaryDto } from "./generated/contracts/GitDiffSummaryDto";
+import type { GitFileDiffDto } from "./generated/contracts/GitFileDiffDto";
+import type { DirEntryDto } from "./generated/contracts/DirEntryDto";
+import type { FileTextDto } from "./generated/contracts/FileTextDto";
+import type { FileOpenerDto } from "./generated/contracts/FileOpenerDto";
+import type { ImagePreviewDto } from "./generated/contracts/ImagePreviewDto";
+import type { SearchFileHitDto } from "./generated/contracts/SearchFileHitDto";
+import type { SearchLineHitDto } from "./generated/contracts/SearchLineHitDto";
+import type { SearchResultDto } from "./generated/contracts/SearchResultDto";
+
+export type {
+  GitDiffSummaryDto,
+  GitFileDiffDto,
+  DirEntryDto,
+  FileTextDto,
+  FileOpenerDto,
+  ImagePreviewDto,
+  SearchFileHitDto,
+  SearchLineHitDto,
+  SearchResultDto,
+};
 
 /**
  * agent 身份串（`"claude"` / `"kimi"` / …），与 Rust 侧 `meowo_agent::AgentId` 同值。
@@ -97,6 +120,12 @@ export type LiveSession = Omit<LiveSessionDto, "session" | "todos" | "column" | 
   preview: string | null;
   /** 所属账号的展示名（profile 已删时回退 id 本身）；null = 默认账号，不显示徽章。 */
   profile_name: string | null;
+  /**
+   * 来自另一个实例的库（dev 构建只读聚合安装版 ~/.meowo/board.db 的会话）。
+   * 该会话的 PTY/审批/收尾归安装版，本实例只有观察权：卡片标注来源，全部操作入口收起。
+   * id 已被后端加高位偏移防撞——即使漏禁某个入口，本库无此行，命令落空成 no-op。
+   */
+  foreign: boolean;
 };
 
 export type { LiveSessionCounts };
@@ -165,12 +194,17 @@ export function savePastedAttachment(fileName: string, dataBase64: string): Prom
 }
 
 /**
- * 读系统剪贴板**图像**的指纹(只读不写);剪贴板里不是图像时为 null。
- * 用途:发送粘贴图片前比对「剪贴板里还是不是刚粘贴的那张图」,匹配才向 PTY 发 Ctrl-V
- * 走 TUI 自己的原生图片附加——不匹配绝不能发,否则附给 agent 的是错的图。
+ * 把本地图片文件写进系统剪贴板，供紧随其后的 Ctrl-V 走 TUI 原生图片附加（支持多张：
+ * 逐张写入、逐张等占位符）。首次写入前后端自动快照现有剪贴板内容；发送结束（无论
+ * 成败）必须调 clipboardRestore 还原。失败会 reject——调用方据此回退指令文本，
+ * 绝不能照常发 Ctrl-V（那会把剪贴板里别人的内容附给 agent）。
  */
-export function clipboardImageFingerprint(): Promise<string | null> {
-  return invoke("clipboard_image_fingerprint");
+export function clipboardSetImage(path: string): Promise<void> {
+  return invoke("clipboard_set_image", { path });
+}
+/** 还原 clipboardSetImage 快照下来的剪贴板内容；没有快照时为空操作。 */
+export function clipboardRestore(): Promise<void> {
+  return invoke("clipboard_restore");
 }
 /** 读剪贴板文本(终端右键粘贴)。readText 在 WebView2 要权限弹窗,走后端 arboard 零打扰。 */
 export function clipboardText(): Promise<string | null> {
@@ -353,6 +387,52 @@ export function openProjectDir(cwd: string): Promise<void> {
   return invoke("open_project_dir", { cwd });
 }
 
+/** 工作目录的 git 改动摘要；`isRepo` 为 false 时前端不显示「Diff」入口。 */
+export function getGitDiffSummary(cwd: string): Promise<GitDiffSummaryDto> {
+  return invoke("git_diff_summary", { cwd });
+}
+
+/** 单个文件的 diff（untracked=true 时由后端读盘合成伪 diff，见 GitFileDiffDto 注释）。 */
+export function getGitFileDiff(cwd: string, path: string, untracked: boolean): Promise<GitFileDiffDto> {
+  return invoke("git_file_diff", { cwd, path, untracked });
+}
+
+/** 「文件」页签：列出 cwd 下 rel 目录的直接子条目（目录在前，后端已排序并跳过 .git）。 */
+export function listDirEntries(cwd: string, rel: string): Promise<DirEntryDto[]> {
+  return invoke("list_dir_entries", { cwd, rel });
+}
+
+/** 「文件」页签：读取 cwd 下 rel 文件的文本（后端封顶 200KB、嗅探二进制，见 FileTextDto 注释）。 */
+export function readFileText(cwd: string, rel: string): Promise<FileTextDto> {
+  return invoke("read_file_text", { cwd, rel });
+}
+
+/** 「文件」页签：图片预览（后端按扩展名识别、读盘转 data URL，超 8MB 回 tooLarge）。 */
+export function readImagePreview(cwd: string, rel: string): Promise<ImagePreviewDto> {
+  return invoke("read_image_preview", { cwd, rel });
+}
+
+/** 「文件」页签：cwd 下按文件/目录名与文本内容搜索（大小写不敏感，后端带命中/扫描上限）。 */
+export function searchProjectFiles(cwd: string, query: string): Promise<SearchResultDto> {
+  return invoke("search_project_files", { cwd, query });
+}
+
+/** 文件面板「打开」菜单：能打开该文件的应用清单（Windows 为系统「打开方式」推荐列表，
+ *  含图标；其余平台为探测到的编辑器）。目录返回空；系统默认应用不在其中，前端恒列。 */
+export function listFileOpeners(cwd: string, rel: string): Promise<FileOpenerDto[]> {
+  return invoke("list_file_openers", { cwd, rel });
+}
+
+/** 用指定应用（opener=清单里的 id）或系统默认应用（opener="default"）打开 cwd 内的文件/目录。 */
+export function openPathWith(cwd: string, rel: string, opener: string): Promise<void> {
+  return invoke("open_path_with", { cwd, rel, opener });
+}
+
+/** 在系统文件管理器里定位（选中）cwd 内的文件/目录。 */
+export function revealPathInFileManager(cwd: string, rel: string): Promise<void> {
+  return invoke("reveal_path_in_file_manager", { cwd, rel });
+}
+
 /** 打开「新建会话」独立窗；带 prefill 时预选目录与 agent。 */
 export function openNewSessionWindow(prefill?: { cwd?: string | null; provider?: string | null }): Promise<void> {
   return prefill
@@ -382,7 +462,10 @@ export function getLiveSessionsPage(
   limit: number,
   /** 目录筛选:斜杠归一的精确匹配(后端做),与 search 的子串搜索语义分开——
       同一目录的两种斜杠写法都命中,兄弟目录/标题命中不漏进来。 */
-  cwd: string | null = null
+  cwd: string | null = null,
+  /** 附带外库(安装版)会话——只有贴纸看板传 true(dev 构建的监控视野补全);
+      对话侧栏/归档页按 id 加载详情,外库卡点开必落空,从源头不给。 */
+  includeForeign = false
 ): Promise<LiveSessionsPage> {
   return invoke<unknown>("get_live_sessions_page", {
     filter,
@@ -393,6 +476,7 @@ export function getLiveSessionsPage(
     beforeLastEventAt: cursor?.last_event_at ?? null,
     beforeId: cursor?.id ?? null,
     limit,
+    includeForeign,
   }).then((res) => {
     // 旧后端 / demo mock 仍返回裸数组：给不满 limit 视作到底，满页时按旧约定用末项续查
     // （旧后端本就只有这套语义）。undefined = 后端没有该命令，静默降级为空列表。
@@ -665,6 +749,27 @@ export function newSession(cwd: string, provider: AgentId, options?: Record<stri
 /** 最近使用过的工作目录（新建面板快捷选择）。 */
 export function recentCwds(limit: number): Promise<string[]> {
   return invoke("recent_cwds", { limit });
+}
+
+export type SwitchStarted = SwitchStartedDto;
+export type LineageEntry = LineageEntryDto;
+
+/**
+ * 跨 provider 切换：结束当前会话进程，把结构化历史导出成交接文件，在同一目录用
+ * 目标 agent 起新会话（返回临时负 id，走既有 binding 轮询换真 id）。接续链由后端
+ * 在 claim 认领时落库——目标 CLI 起不来时旧会话不会被标记为已接替。
+ */
+export function switchSessionProvider(
+  sessionId: number,
+  targetProvider: AgentId,
+  options?: Record<string, string>,
+): Promise<SwitchStarted> {
+  return invoke("switch_session_provider", { sessionId, targetProvider, options });
+}
+
+/** 接续链回看（按时间升序）。不在链上的会话返回仅含自身的单段。 */
+export function getSessionLineage(sessionId: number): Promise<LineageEntry[]> {
+  return invoke("get_session_lineage", { sessionId });
 }
 
 /** 检测某 provider 的 meowo-reporter hooks 是否已接入（决定新建后会不会入库）。 */

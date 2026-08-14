@@ -181,7 +181,7 @@ describe("ManagedTerminal", () => {
     render(<ManagedTerminal sessionId={163} status="running" />);
     // 没有托管 PTY 的运行中会话必须给出接管入口，而不是把用户丢在一块黑屏上。
     expect(await screen.findByRole("button", { name: "结束外部进程并接管" })).toBeTruthy();
-    expect(screen.getByText(/会话仍在外部终端运行/)).toBeTruthy();
+    expect(screen.getByText(/会话在外部终端运行/)).toBeTruthy();
   });
 
   it("offers a plain start for a disconnected session", async () => {
@@ -201,8 +201,8 @@ describe("ManagedTerminal", () => {
       return Promise.resolve();
     });
     render(<ManagedTerminal sessionId={163} status="running" background />);
-    expect(await screen.findByText(/没能接上这个后台会话的画面/)).toBeTruthy();
-    expect(screen.queryByText(/这个后台会话已结束/)).toBeNull();
+    expect(await screen.findByText(/没接上后台会话的画面/)).toBeTruthy();
+    expect(screen.queryByText(/后台会话已结束/)).toBeNull();
     // 接管/启动对后台会话必然失败，不给；能做的只有再接一次。
     expect(screen.queryByRole("button", { name: /接管/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "重新接入" }));
@@ -218,7 +218,7 @@ describe("ManagedTerminal", () => {
       return Promise.resolve();
     });
     render(<ManagedTerminal sessionId={163} status="ended" background />);
-    expect(await screen.findByText(/这个后台会话已结束/)).toBeTruthy();
+    expect(await screen.findByText(/后台会话已结束/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "重新接入" })).toBeNull();
   });
 
@@ -531,7 +531,7 @@ describe("ManagedTerminal", () => {
   });
 
   it("输出流停滞判定:只在「托管 + running + 超时无字节」时报警,空闲/后台/外部不误报", () => {
-    const base = { active: true, background: false, status: "running" as string | undefined, lastByteAt: 0, now: STREAM_STALL_MS + 1 };
+    const base = { active: true, background: false, status: "running" as string | undefined, reviewPending: false, lastByteAt: 0, now: STREAM_STALL_MS + 1 };
     expect(terminalStreamStalled(base)).toBe(true);
     // 阈值之内不报——CC 干活时 TUI 百毫秒级重绘,30s 零字节才是僵死的指纹。
     expect(terminalStreamStalled({ ...base, now: STREAM_STALL_MS - 1 })).toBe(false);
@@ -540,6 +540,9 @@ describe("ManagedTerminal", () => {
     expect(terminalStreamStalled({ ...base, status: undefined })).toBe(false);
     expect(terminalStreamStalled({ ...base, background: true })).toBe(false);
     expect(terminalStreamStalled({ ...base, active: false })).toBe(false);
+    // 等审批/屏幕提示时回合没结束,status 仍是 running,但 TUI 画完表单后零输出是
+    // 「在等人」的常态——不豁免就是实拍过的误报(审批框在屏却弹「疑似卡死」)。
+    expect(terminalStreamStalled({ ...base, reviewPending: true })).toBe(false);
   });
 
   it("挂载即注册「正在看」,卸载时注销——后端 emitter 只喂被观看的会话", async () => {
@@ -683,40 +686,22 @@ describe("ManagedTerminal", () => {
     expect(invoke.mock.calls.some(([command]) => command === "takeover_managed_terminal")).toBe(false);
   });
 
-  it("结束终端需 confirm 确认后才调用 stop_managed_terminal", async () => {
-    // 回归：结束终端是破坏性操作（直接杀 Agent 进程），此前一点就杀、没有任何确认。
+  it("终端操作条不再有「结束终端」——结束入口统一为标题栏的「结束会话」", async () => {
+    // 曾并存两个入口(同一条 confirmStopSession 流程),终端页这份是纯冗余,已撤下。
     invoke.mockImplementation((command: string) => {
       if (command === "managed_terminal_snapshot") {
         return Promise.resolve({ ...noPty, active: true, data: btoa("ready"), endOffset: 5 });
       }
-      if (command === "confirm_dialog") return Promise.resolve(confirmAnswer.ok);
       return Promise.resolve();
     });
     render(<ManagedTerminal sessionId={163} status="running" />);
-    const button = await screen.findByRole("button", { name: "结束终端" });
-    button.click();
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("confirm_dialog", expect.anything()));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("stop_managed_terminal", { sessionId: 163 }));
-  });
-
-  it("结束终端的 confirm 被取消时不杀进程", async () => {
-    confirmAnswer.ok = false;
-    invoke.mockImplementation((command: string) => {
-      if (command === "managed_terminal_snapshot") {
-        return Promise.resolve({ ...noPty, active: true, data: btoa("ready"), endOffset: 5 });
-      }
-      if (command === "confirm_dialog") return Promise.resolve(confirmAnswer.ok);
-      return Promise.resolve();
-    });
-    render(<ManagedTerminal sessionId={163} status="running" />);
-    const button = await screen.findByRole("button", { name: "结束终端" });
-    button.click();
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("confirm_dialog", expect.anything()));
-    expect(invoke.mock.calls.some(([command]) => command === "stop_managed_terminal")).toBe(false);
+    // 等操作条渲染出来(以仍保留的「在外部终端同步打开」为锚)再断言。
+    await screen.findByRole("button", { name: "在外部终端同步打开" });
+    expect(screen.queryByRole("button", { name: "结束终端" })).toBeNull();
   });
 
   it("realigns the output offset when the PTY is restarted in place", async () => {
-    // 结束终端 → 再接管：新 PTY 的 output_end 从 0 重新计数。若沿用上一个进程的
+    // 结束会话 → 再接管：新 PTY 的 output_end 从 0 重新计数。若沿用上一个进程的
     // nextOffset（这里是 7），新输出会被判成「已写过」而整段丢弃，终端定格在旧内容上。
     let snapshots = 0;
     invoke.mockImplementation((command: string) => {

@@ -8,6 +8,9 @@ mod detect;
 #[cfg(target_os = "windows")]
 mod envpath;
 mod fsutil;
+mod git;
+#[cfg(target_os = "windows")]
+mod openwith;
 mod ports;
 mod pty;
 mod relay;
@@ -26,6 +29,7 @@ mod wezterm;
 
 // 由原 lib.rs 巨石按职责拆出的功能模块（详见各文件头部说明）。
 // lib.rs 现只保留：托管状态、数据查询命令、会话读写命令、agent 解析 helper 与 run() 装配。
+mod handoff;
 mod install;
 mod managed_terminal;
 mod proc;
@@ -41,9 +45,15 @@ mod window;
 
 // run() 的 generate_handler 以裸标识符登记这些命令，须在 crate 根作用域可见。
 use chat::{
-    clipboard_image_fingerprint, clipboard_text, get_chat_history, get_subagent_transcript,
-    refresh_session_model, refresh_session_todos, save_pasted_attachment,
+    clipboard_restore, clipboard_set_image, clipboard_text, get_chat_history,
+    get_subagent_transcript, refresh_session_model, refresh_session_todos, save_pasted_attachment,
 };
+use handoff::{get_session_lineage, switch_session_provider};
+use fsutil::{
+    list_dir_entries, list_file_openers, open_path_with, read_file_text, read_image_preview,
+    reveal_path_in_file_manager, search_project_files,
+};
+use git::{git_diff_summary, git_file_diff};
 use install::{
     add_agent_to_user_path, agent_path_gap, api_key_login, cancel_login, check_provider_hooks,
     install_agent, login_agent, logout_agent, repair_provider_hooks,
@@ -204,7 +214,7 @@ async fn check_update(
         let mut slot = state
             .downloaded_update
             .lock()
-            .map_err(|_| "更新状态锁已损坏".to_string())?;
+            .map_err(|_| "内部状态异常，请重启 Meowo".to_string())?;
         if slot
             .as_ref()
             .is_some_and(|downloaded| downloaded.update.version != update.version)
@@ -233,7 +243,7 @@ async fn check_update(
     *state
         .update
         .lock()
-        .map_err(|_| "更新状态锁已损坏".to_string())? = update;
+        .map_err(|_| "内部状态异常，请重启 Meowo".to_string())? = update;
     Ok(result)
 }
 
@@ -245,13 +255,13 @@ async fn download_update(
     let update = state
         .update
         .lock()
-        .map_err(|_| "更新状态锁已损坏".to_string())?
+        .map_err(|_| "内部状态异常，请重启 Meowo".to_string())?
         .clone()
         .ok_or("请先检查更新")?;
     if state
         .downloaded_update
         .lock()
-        .map_err(|_| "更新状态锁已损坏".to_string())?
+        .map_err(|_| "内部状态异常，请重启 Meowo".to_string())?
         .as_ref()
         .is_some_and(|downloaded| downloaded.update.version == update.version)
     {
@@ -289,7 +299,7 @@ async fn download_update(
             *state
                 .downloaded_update
                 .lock()
-                .map_err(|_| "更新状态锁已损坏".to_string())? =
+                .map_err(|_| "内部状态异常，请重启 Meowo".to_string())? =
                 Some(DownloadedUpdate { update, bytes });
             let _ = app.emit(
                 "update-download-finished",
@@ -315,14 +325,14 @@ async fn install_downloaded_update(app: tauri::AppHandle) -> Result<(), String> 
         let downloaded = state
             .downloaded_update
             .lock()
-            .map_err(|_| "更新状态锁已损坏".to_string())?
+            .map_err(|_| "内部状态异常，请重启 Meowo".to_string())?
             .take()
             .ok_or("更新尚未下载完成")?;
         if let Err(error) = downloaded.update.install(&downloaded.bytes) {
             let mut slot = state
                 .downloaded_update
                 .lock()
-                .map_err(|_| "更新状态锁已损坏".to_string())?;
+                .map_err(|_| "内部状态异常，请重启 Meowo".to_string())?;
             if slot.is_none() {
                 *slot = Some(downloaded);
             }
@@ -1041,7 +1051,8 @@ pub fn run() {
             refresh_session_model,
             refresh_session_todos,
             save_pasted_attachment,
-            clipboard_image_fingerprint,
+            clipboard_set_image,
+            clipboard_restore,
             clipboard_text,
             open_chat_window,
             snap_layout::set_caption_overlay_rects,
@@ -1069,6 +1080,15 @@ pub fn run() {
             resume_session,
             restart_session_supported,
             open_project_dir,
+            git_diff_summary,
+            git_file_diff,
+            list_dir_entries,
+            read_file_text,
+            read_image_preview,
+            search_project_files,
+            list_file_openers,
+            open_path_with,
+            reveal_path_in_file_manager,
             rename_session,
             set_archived,
             set_session_note,
@@ -1111,6 +1131,8 @@ pub fn run() {
             profile::delete_profile,
             profile::merge_profile_into_default,
             new_session,
+            switch_session_provider,
+            get_session_lineage,
             install_agent,
             agent_path_gap,
             add_agent_to_user_path,

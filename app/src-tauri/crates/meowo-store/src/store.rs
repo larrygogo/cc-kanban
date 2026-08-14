@@ -31,6 +31,23 @@ pub struct SessionHeader {
     /// 已归档（与看板 `LiveSession.archived` 同一列）。对话窗标题栏据此在「归档 / 取消
     /// 归档」之间切换——归档态只影响看板可见性，不影响会话本身能否继续对话。
     pub archived: bool,
+    /// 跨 provider 接续链：本会话接替的上一段会话 id。None = 非切换产生。
+    pub predecessor_id: Option<i64>,
+    /// 本会话已被哪个后继接替。Some 时对话窗渲染「已切换至…」横幅并禁发——
+    /// 向被接替的会话续话会让链分叉（set_session_lineage 拒绝分叉与之呼应）。
+    pub superseded_by: Option<i64>,
+}
+
+/// 接续链上的一段会话（session_lineage_chain 的行）。model 来自 session_context
+/// 的 statusline 快照，provider 不支持或首帧未到时为 None。
+#[derive(Debug, Clone)]
+pub struct LineageEntry {
+    pub id: i64,
+    pub cc_session_id: String,
+    pub provider: String,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    pub model: Option<String>,
 }
 
 /// statusline 写入的单会话上下文快照。字段各自可能缺失（provider 不支持 / 首帧未到）。
@@ -98,6 +115,34 @@ impl Store {
         Ok(Store { conn })
     }
 
+    /// 只读打开一个**别的实例**拥有的库（dev 构建聚合展示安装版的会话）。
+    ///
+    /// 与 [`Store::open`] 的差别是刻意的，一条都不能少：
+    /// - `SQLITE_OPEN_READ_ONLY`：绝不迁移/写入对方的库——dev 的新 schema 若把生产库
+    ///   `execute_batch(SCHEMA)`+bump，安装版旧二进制就会按旧 SQL 读写新库，正是要根治的互踩；
+    /// - 不建父目录、不 `init()`、不切 WAL（只读连接改不了 journal_mode，对方开着 WAL 时
+    ///   本连接照常能读，同用户下 `-shm`/`-wal` 可读）。
+    ///
+    /// 调用方在查询前必须用 [`Store::user_version`] 核对版本：本方法不做任何 schema
+    /// 假设，对旧版库跑新 SELECT 会直接报「no such column」。
+    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Store, StoreError> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.pragma_update(None, "busy_timeout", 3000)?;
+        Ok(Store { conn })
+    }
+
+    /// 库的 `PRAGMA user_version`。配合 [`Store::open_readonly`] 做跨版本险闸：
+    /// 与 [`Store::CURRENT_USER_VERSION`] 不一致就别拿本版本的 SQL 去查它。
+    pub fn user_version(&self) -> Result<i64, StoreError> {
+        Ok(self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+    }
+
+    /// 本二进制认识的 schema 版本（对外只读暴露，险闸比对用）。
+    pub const CURRENT_USER_VERSION: i64 = Self::USER_VERSION;
+
     /// schema 版本：升 schema/加迁移时 +1。
     /// v2: 新增 session_notes 表（会话便签）。旧库 version<2 时 init 会重跑
     /// `CREATE TABLE IF NOT EXISTS` 把新表补上，再 bump。
@@ -110,7 +155,11 @@ impl Store {
     ///     报错中断，cwd/pid 全丢（对话窗识别不到工作区的根因）。
     /// v8: sessions 加 launch_args 列（新建时选的启动选项，resume/接管时回放——
     ///     权限模式是启动参数，不回放每次重启都重置成 CLI 默认）。
-    const USER_VERSION: i64 = 8;
+    /// v9: todos 加 external_id 列（claude 新版 TaskCreate/TaskUpdate 增量待办的
+    ///     agent 侧编号，apply_todo_delta 靠它定位行）。
+    /// v10: sessions 加 predecessor_id / superseded_by 两列（跨 provider 切换的接续链，
+    ///     成对写入；superseded_by 非 NULL 的行从看板折叠隐藏）。
+    const USER_VERSION: i64 = 10;
 
     /// 一次性建表 + 迁移 + 建索引，用 `PRAGMA user_version` 门控：已是最新版直接返回，
     /// 避免 statusline/hook 每次 open 都重跑 DDL 与注定失败的 ALTER（hot-path 浪费）。
@@ -125,7 +174,7 @@ impl Store {
         }
         conn.execute_batch(SCHEMA)?;
         // 给旧库补列（新库 SCHEMA 已含这些列 → ALTER 必报 duplicate，忽略即可）。
-        const ALTERS: [&str; 11] = [
+        const ALTERS: [&str; 14] = [
             "ALTER TABLE sessions ADD COLUMN pid INTEGER",
             "ALTER TABLE sessions ADD COLUMN cwd TEXT",
             "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
@@ -141,6 +190,11 @@ impl Store {
             "ALTER TABLE sessions ADD COLUMN profile TEXT",
             // 启动选项回放（v8）：NULL = 没选任何选项，恢复时不追加 flag。
             "ALTER TABLE sessions ADD COLUMN launch_args TEXT",
+            // 增量待办的 agent 侧编号（v9）：快照路径不写，恒 NULL。
+            "ALTER TABLE todos ADD COLUMN external_id TEXT",
+            // 跨 provider 接续链（v10）：老库补齐后全是 NULL = 普通会话，正是我们要的。
+            "ALTER TABLE sessions ADD COLUMN predecessor_id INTEGER",
+            "ALTER TABLE sessions ADD COLUMN superseded_by INTEGER",
         ];
         for sql in ALTERS {
             if let Err(e) = conn.execute(sql, []) {
@@ -566,6 +620,126 @@ impl Store {
         tx.commit()
     }
 
+    /// 应用一条增量待办操作（claude 新版 TaskCreate/TaskUpdate）。与 `sync_todos` 的
+    /// 覆盖写互斥：增量按到达顺序逐条累积，Update 靠 external_id 定位 Create 落下的行。
+    ///
+    /// 不做 `sync_todos` 那样的乱序挡写：增量事件天然有序（PostToolUse 按调用顺序发出），
+    /// 且状态只会单调前进（pending → in_progress → completed），迟到一条顶多让状态晚一拍，
+    /// 挡写反而会把真实增量整条丢掉。
+    pub fn apply_todo_delta(
+        &self,
+        session_id: i64,
+        delta: &crate::models::TodoDelta,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        use crate::models::TodoDelta;
+        let tid = self.task_id_of_session(session_id)?;
+        // 与 sync_todos 同理：BEGIN IMMEDIATE 开局取写锁，避免 WAL 下升级写事务
+        // SQLITE_BUSY_SNAPSHOT 直接失败丢事件。
+        let tx = ImmediateTx::begin(&self.conn)?;
+        match delta {
+            TodoDelta::Create {
+                external_id,
+                content,
+            } => {
+                // hook 重放/重复投递时同编号会再来一次 Create——更新内容而不是长出重复行。
+                let updated = self.conn.execute(
+                    "UPDATE todos SET content = ?1 WHERE task_id = ?2 AND external_id = ?3",
+                    rusqlite::params![content, tid, external_id],
+                )?;
+                if updated == 0 {
+                    self.conn.execute(
+                        "INSERT INTO todos (task_id, content, status, order_idx, external_id)
+                         VALUES (?1, ?2, 'pending',
+                                 COALESCE((SELECT MAX(order_idx) + 1 FROM todos WHERE task_id = ?1), 0),
+                                 ?3)",
+                        rusqlite::params![tid, content, external_id],
+                    )?;
+                }
+            }
+            TodoDelta::Update {
+                external_id,
+                content,
+                status,
+                deleted,
+            } => {
+                if *deleted {
+                    self.conn.execute(
+                        "DELETE FROM todos WHERE task_id = ?1 AND external_id = ?2",
+                        rusqlite::params![tid, external_id],
+                    )?;
+                } else {
+                    let updated = self.conn.execute(
+                        "UPDATE todos SET status = COALESCE(?1, status), content = COALESCE(?2, content)
+                         WHERE task_id = ?3 AND external_id = ?4",
+                        rusqlite::params![
+                            status.map(|s| s.as_str()),
+                            content.as_deref(),
+                            tid,
+                            external_id
+                        ],
+                    )?;
+                    // 行不存在（meowo 半途装上、错过了 Create）且这次带了标题 → 补建自愈；
+                    // 只带状态没有文字则跳过——不造一行空待办。
+                    if updated == 0 {
+                        if let Some(content) = content.as_deref() {
+                            self.conn.execute(
+                                "INSERT INTO todos (task_id, content, status, order_idx, external_id)
+                                 VALUES (?1, ?2, ?3,
+                                         COALESCE((SELECT MAX(order_idx) + 1 FROM todos WHERE task_id = ?1), 0),
+                                         ?4)",
+                                rusqlite::params![
+                                    tid,
+                                    content,
+                                    status.unwrap_or(TodoStatus::Pending).as_str(),
+                                    external_id
+                                ],
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        // 尾部与 sync_todos 一致：未锁定时按最新全量推导看板列，刷新任务/会话时钟。
+        let snapshot: Vec<TodoInput> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT content, status FROM todos WHERE task_id = ?1 ORDER BY order_idx",
+            )?;
+            let rows = stmt.query_map([tid], |r| {
+                Ok(TodoInput {
+                    content: r.get(0)?,
+                    status: TodoStatus::from_str(&r.get::<_, String>(1)?),
+                })
+            })?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let locked: bool = self.conn.query_row(
+            "SELECT column_locked FROM tasks WHERE id = ?1",
+            [tid],
+            |r| Ok(r.get::<_, i64>(0)? != 0),
+        )?;
+        if !locked {
+            let col = derive_column(&snapshot);
+            self.conn.execute(
+                "UPDATE tasks SET column_name = ?1, updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![col.as_str(), now_ms, tid],
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE tasks SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![now_ms, tid],
+            )?;
+        }
+        self.conn.execute(
+            "UPDATE sessions
+             SET last_event_at = ?1,
+                 status = CASE WHEN status IN ('waiting','stale') THEN 'running' ELSE status END
+             WHERE id = ?2 AND last_event_at <= ?1",
+            rusqlite::params![now_ms, session_id],
+        )?;
+        tx.commit()
+    }
+
     pub fn list_todos(&self, task_id: i64) -> Result<Vec<Todo>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, content, status, order_idx FROM todos WHERE task_id = ?1 ORDER BY order_idx",
@@ -890,7 +1064,7 @@ impl Store {
             .query_row(
                 "SELECT s.cc_session_id, s.status, s.cwd, s.provider, s.pending_review, \
                         t.title, t.current_activity, s.last_user_text, s.last_ai_text, \
-                        s.pid, s.last_event_at, s.archived \
+                        s.pid, s.last_event_at, s.archived, s.predecessor_id, s.superseded_by \
                  FROM sessions s LEFT JOIN tasks t ON t.session_id = s.id \
                  WHERE s.id = ?1 LIMIT 1",
                 [session_id],
@@ -916,6 +1090,8 @@ impl Store {
                         pid: row.get(9)?,
                         last_event_at: row.get(10)?,
                         archived: row.get::<_, i64>(11)? != 0,
+                        predecessor_id: row.get(12)?,
+                        superseded_by: row.get(13)?,
                     })
                 },
             )
@@ -993,6 +1169,89 @@ impl Store {
             rusqlite::params![provider, session_id],
         )?;
         Ok(())
+    }
+
+    /// 把 `new_sid` 登记为 `old_sid` 的接替者（跨 provider 切换的接续链）。
+    /// 两列在同一 IMMEDIATE 事务里成对写入，链在数据层永远双向一致。
+    ///
+    /// 拒绝两种破坏链形的写法：自环（old == new）与分叉（old 已有 superseded_by）。
+    /// 分叉检查放在 UPDATE 的 WHERE 里而不是先 SELECT：并发下两个后继同时认领
+    /// 同一个前驱时，只有先到者改到行，后到者按「已被接替」失败——不产生双头链。
+    pub fn set_session_lineage(&self, new_sid: i64, old_sid: i64) -> Result<(), StoreError> {
+        if new_sid == old_sid {
+            return Err(StoreError::InvalidInput(
+                "接续链不允许自环（new_sid == old_sid）".into(),
+            ));
+        }
+        let tx = ImmediateTx::begin(&self.conn)?;
+        let claimed = self.conn.execute(
+            "UPDATE sessions SET superseded_by = ?1 \
+             WHERE id = ?2 AND superseded_by IS NULL",
+            rusqlite::params![new_sid, old_sid],
+        )?;
+        if claimed == 0 {
+            return Err(StoreError::InvalidInput(format!(
+                "会话 {old_sid} 不存在或已被接替，拒绝分叉接续链"
+            )));
+        }
+        let linked = self.conn.execute(
+            "UPDATE sessions SET predecessor_id = ?1 WHERE id = ?2",
+            rusqlite::params![old_sid, new_sid],
+        )?;
+        if linked == 0 {
+            return Err(StoreError::InvalidInput(format!(
+                "接替会话 {new_sid} 不存在"
+            )));
+        }
+        tx.commit()
+    }
+
+    /// 返回 `session_id` 所在接续链的全部段，按 started_at 升序（链头最早）。
+    /// 冷路径（回看弹层用），递归 CTE 先沿 predecessor_id 走到根、再沿 superseded_by
+    /// 走到尾；链长实际只有几跳，无需索引。不在任何链上的会话返回仅含自身的单段。
+    pub fn session_lineage_chain(&self, session_id: i64) -> Result<Vec<LineageEntry>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "WITH RECURSIVE
+             back(id) AS (
+                 SELECT id FROM sessions WHERE id = ?1
+                 UNION
+                 SELECT s.predecessor_id FROM sessions s JOIN back b ON s.id = b.id
+                 WHERE s.predecessor_id IS NOT NULL
+             ),
+             chain(id) AS (
+                 -- 锚点 = 链上最早的**仍存在**的段：predecessor 为 NULL，或指向已被
+                 -- 驱逐的行（链断头时从断口处开始，而不是整链查空）。
+                 SELECT s.id FROM sessions s JOIN back b ON s.id = b.id
+                 WHERE s.predecessor_id IS NULL
+                    OR s.predecessor_id NOT IN (SELECT id FROM sessions)
+                 UNION
+                 SELECT s.superseded_by FROM sessions s JOIN chain c ON s.id = c.id
+                 WHERE s.superseded_by IS NOT NULL
+             )
+             SELECT s.id, s.cc_session_id, s.provider, s.started_at, s.ended_at, sc.model
+             FROM sessions s
+             JOIN chain c ON s.id = c.id
+             LEFT JOIN session_context sc ON sc.cc_session_id = s.cc_session_id
+             ORDER BY s.started_at ASC, s.id ASC",
+        )?;
+        let rows = stmt.query_map([session_id], |row| {
+            let provider: Option<String> = row.get(2)?;
+            Ok(LineageEntry {
+                id: row.get(0)?,
+                cc_session_id: row.get(1)?,
+                provider: provider
+                    .filter(|p| !p.trim().is_empty())
+                    .unwrap_or_else(|| crate::DEFAULT_PROVIDER.to_string()),
+                started_at: row.get(3)?,
+                ended_at: row.get(4)?,
+                model: row.get(5)?,
+            })
+        })?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row?);
+        }
+        Ok(entries)
     }
 
     /// 记下该会话跑在哪个账号（profile）上。`None` = 默认账号，**写成 NULL**。

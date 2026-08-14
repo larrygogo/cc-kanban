@@ -271,11 +271,21 @@ impl AgentPlugin for Claude {
     fn permission_hook_decides(&self) -> bool {
         true
     }
-    /// 旧版 Claude Code 的 `TodoWrite` 带整份快照。**当前版本已换成增量的
-    /// `TaskCreate`/`TaskUpdate`**（单条创建/改状态，不是快照），那条路要靠累积增量才能
-    /// 还原列表，不属于这个槽——留着 `TodoWrite` 只为兼容仍在用旧版的用户。
+    /// TUI 权限框与 PermissionRequest hook 并行显示、两边竞速（官方 hooks 文档明载 +
+    /// 实测确认）：用户可直接在终端作答，hook 的决策随之被丢弃。终端视图因此不挂引导横幅。
+    fn permission_prompt_races_hook(&self) -> bool {
+        true
+    }
+    /// 旧版 Claude Code 的 `TodoWrite` 带整份快照。当前版本已换成增量的
+    /// `TaskCreate`/`TaskUpdate`（见下方 delta 槽）——留着 `TodoWrite` 只为兼容旧版用户。
     fn todo_snapshot_tools(&self) -> &'static [&'static str] {
         &["TodoWrite"]
+    }
+    /// 现版本的增量任务工具：`TaskCreate` 单条新建（编号在结果文本
+    /// `Task #N created successfully: …` 里），`TaskUpdate` 按 `taskId` 改状态/标题。
+    /// 形状为真实 transcript 取证（2026-08，autopilot 仓的会话记录）。
+    fn todo_delta_tools(&self) -> &'static [&'static str] {
+        &["TaskCreate", "TaskUpdate"]
     }
     fn variants(&self) -> &'static [Variant] {
         &VARIANTS
@@ -545,6 +555,23 @@ impl AgentPlugin for Claude {
                 patterns: &["this command requires approval", r"do you want to proceed\?"],
                 last: true,
                 details: crate::chat_ui::AttentionDetails::ProceedBox,
+            },
+            crate::chat_ui::AttentionPattern {
+                id: "claude:plan-approval",
+                // 计划模式的批准提示（claude 2.1.227 实拍取证，plan-file 流程）：
+                //   Claude has written up a plan and is ready to execute. Would you like to proceed?
+                //   ❯ 1. Yes, and bypass permissions / 2. Yes, manually approve edits / 3. Tell Claude what to change
+                // 该提示**不触发** PreToolUse:ExitPlanMode 与 PermissionRequest hook（上游
+                // 回归，官方文档明载两者都应触发；同版本普通工具的 PermissionRequest 正常）,
+                // hook 系的 pendingReview/broker 卡整条链落空，屏幕识别是唯一的出口——
+                // 因此这条 pattern 不能挂靠 interactivePrompt 门控（那个门控以 pendingReview
+                // 为前置，正是缺失的一环）。
+                // 词间用 \s+ 连接：窄终端把整句折行时中间是换行符，字面空格会匹配不上。
+                // 不单独匹配 "would you like to proceed?"——正文引用该句（讨论审批流程）
+                // 会误弹卡片锁住输入框，首句的「代笔完计划」措辞才是计划审批的独有指纹。
+                patterns: &[r"written\s+up\s+a\s+plan\s+and\s+is\s+ready\s+to\s+execute"],
+                last: true,
+                details: crate::chat_ui::AttentionDetails::None,
             },
         ]
     }

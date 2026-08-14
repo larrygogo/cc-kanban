@@ -313,9 +313,8 @@ describe("ChatSidebar", () => {
     // 默认关：一个像素都不改，没有组头。
     expect(screen.queryByRole("button", { name: /^scratch/ })).toBeNull();
 
-    // 分组入口在筛选弹层里：图标钮 → 「分组」行（根视图显示当前档「不分组」）→ 选「按目录」。
+    // 分组入口在筛选弹层里：单面板扁平化后选项直接内联,图标钮 → 选「按目录」。
     fireEvent.click(screen.getByRole("button", { name: "筛选与分组" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: /^分组/ }));
     fireEvent.click(screen.getByRole("option", { name: "按目录" }));
     const list = screen.getByRole("navigation");
     const heads = within(list).getAllByRole("button").filter((b) => b.className.includes("group-head"));
@@ -381,7 +380,6 @@ describe("ChatSidebar", () => {
     expect(itemNames()).toEqual(["beta", "alpha", "等待首次输入"]);
 
     fireEvent.click(screen.getByRole("button", { name: "筛选与分组" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: /^排序/ }));
     fireEvent.click(screen.getByRole("option", { name: "按名称" }));
     expect(itemNames()).toEqual(["alpha", "beta", "等待首次输入"]);
     expect(localStorage.getItem("meowo-chat-sidebar-sort-mode")).toBe("name");
@@ -512,7 +510,7 @@ describe("ChatSidebar", () => {
     it("置顶与看板共用同一份存储（键沿用 meowo-starred）", async () => {
       await renderList();
       fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
-      fireEvent.click(await screen.findByRole("menuitem", { name: "星标置顶" }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "置顶" }));
       expect(JSON.parse(localStorage.getItem("meowo-starred") ?? "[]")).toEqual(["cc-2"]);
     });
 
@@ -524,7 +522,7 @@ describe("ChatSidebar", () => {
         .map((b) => b.textContent ?? "");
       expect(names()[0]).toContain("改侧栏");
       fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
-      fireEvent.click(await screen.findByRole("menuitem", { name: "星标置顶" }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "置顶" }));
       await waitFor(() => expect(names()[0]).toContain("旧任务"));
       expect(names()[1]).toContain("改侧栏");
     });
@@ -546,5 +544,41 @@ describe("ChatSidebar", () => {
     invoke.mockResolvedValue(undefined);
     render(<ChatSidebar activeId={1} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
     expect(await screen.findByText("暂无会话")).toBeTruthy();
+  });
+
+  /// 跨 provider 接续链：predecessor_id 非空的卡片带链徽标，点开列出链上各段
+  ///（惰性调 get_session_lineage），点旧段回看、不触发卡片自身的切会话。
+  it("接续链徽标:点开弹层列出链上各段,点旧段回看", async () => {
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_live_sessions_page") {
+        return Promise.resolve([
+          session(21, "换过引擎的", { predecessor_id: 20, provider: "codex" } as Partial<LiveSession>),
+          session(9, "普通会话"),
+        ]);
+      }
+      if (command === "get_session_lineage") {
+        expect(args).toEqual({ sessionId: 21 });
+        return Promise.resolve([
+          { id: 20, provider: "claude", startedAt: 1_700_000_000_000, endedAt: 1_700_003_600_000, model: "Opus" },
+          { id: 21, provider: "codex", startedAt: 1_700_003_600_000, endedAt: null, model: null },
+        ]);
+      }
+      return Promise.resolve();
+    });
+    const onSelect = vi.fn();
+    render(<ChatSidebar activeId={21} approvalAwaitingIds={new Set()} onSelect={onSelect} onCollapse={() => {}} />);
+    await screen.findByRole("button", { name: /换过引擎的/ });
+    // 普通会话没有徽标；接续会话有。
+    const badges = screen.getAllByRole("button", { name: "引擎切换历史" });
+    expect(badges.length).toBe(1);
+
+    fireEvent.click(badges[0]);
+    // 弹层列出两段：旧段显示模型名，尾段标「当前」。
+    const old = await screen.findByRole("menuitem", { name: /Opus/ });
+    expect(screen.getByText("当前")).toBeTruthy();
+    // 点旧段回看；卡片自身的 onSelect(21) 不该被这次点击顺手触发。
+    fireEvent.click(old);
+    expect(onSelect).toHaveBeenCalledWith(20);
+    expect(onSelect).not.toHaveBeenCalledWith(21);
   });
 });

@@ -896,6 +896,114 @@ fn migrate_adds_profile_column_to_v6_database() {
     }
 }
 
+/// v9 老库（没有 lineage 两列）open 后必须能写读接续链——与 profile 列同款事故的预防：
+/// ALTER 加了但 USER_VERSION 没 bump 的话，老库被门控早退，列永远补不上。
+#[test]
+fn migrate_adds_lineage_columns_to_v9_database() {
+    let path = std::env::temp_dir().join(format!("meowo-mig-v9-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id    INTEGER NOT NULL,
+                cc_session_id TEXT NOT NULL UNIQUE,
+                status        TEXT NOT NULL,
+                started_at    INTEGER NOT NULL,
+                last_event_at INTEGER NOT NULL,
+                ended_at      INTEGER,
+                pid           INTEGER,
+                cwd           TEXT,
+                archived      INTEGER NOT NULL DEFAULT 0,
+                archived_at   INTEGER,
+                pending_review TEXT,
+                last_ai_text   TEXT,
+                last_user_text TEXT,
+                provider       TEXT NOT NULL DEFAULT 'claude',
+                profile        TEXT,
+                launch_args    TEXT);
+             PRAGMA user_version = 9;",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 1).unwrap();
+    let (a, _) = store.start_session(pid, "old", 1).unwrap();
+    let (b, _) = store.start_session(pid, "new", 2).unwrap();
+    store
+        .set_session_lineage(b, a)
+        .expect("v9 老库 open 后 lineage 两列应已补上");
+    let header = store.session_header(a).unwrap();
+    assert_eq!(header.superseded_by, Some(b));
+
+    drop(store);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+// == 跨 provider 接续链 ==
+
+#[test]
+fn set_session_lineage_writes_both_directions() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (a, _) = store.start_session(pid, "a", 100).unwrap();
+    let (b, _) = store.start_session(pid, "b", 200).unwrap();
+
+    store.set_session_lineage(b, a).unwrap();
+
+    let old = store.session_header(a).unwrap();
+    let new = store.session_header(b).unwrap();
+    assert_eq!(old.superseded_by, Some(b));
+    assert_eq!(old.predecessor_id, None);
+    assert_eq!(new.predecessor_id, Some(a));
+    assert_eq!(new.superseded_by, None);
+}
+
+#[test]
+fn set_session_lineage_rejects_self_loop_and_fork() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (a, _) = store.start_session(pid, "a", 100).unwrap();
+    let (b, _) = store.start_session(pid, "b", 200).unwrap();
+    let (c, _) = store.start_session(pid, "c", 300).unwrap();
+
+    assert!(store.set_session_lineage(a, a).is_err(), "自环必须被拒");
+    store.set_session_lineage(b, a).unwrap();
+    assert!(
+        store.set_session_lineage(c, a).is_err(),
+        "a 已被 b 接替，c 再认领是分叉"
+    );
+    // 分叉失败必须原子：c 的 predecessor 不能留下半截写入。
+    assert_eq!(store.session_header(c).unwrap().predecessor_id, None);
+    // 不存在的前驱同样拒绝。
+    assert!(store.set_session_lineage(c, 9999).is_err());
+}
+
+#[test]
+fn session_lineage_chain_returns_full_chain_from_any_node() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (a, _) = store.start_session(pid, "a", 100).unwrap();
+    let (b, _) = store.start_session(pid, "b", 200).unwrap();
+    let (c, _) = store.start_session(pid, "c", 300).unwrap();
+    store.set_session_lineage(b, a).unwrap();
+    store.set_session_lineage(c, b).unwrap();
+
+    for node in [a, b, c] {
+        let chain = store.session_lineage_chain(node).unwrap();
+        let ids: Vec<i64> = chain.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![a, b, c], "从节点 {node} 查询应得完整有序链");
+    }
+    // 不在链上的会话返回仅含自身的单段。
+    let (d, _) = store.start_session(pid, "d", 400).unwrap();
+    let solo = store.session_lineage_chain(d).unwrap();
+    assert_eq!(solo.len(), 1);
+    assert_eq!(solo[0].id, d);
+}
+
 #[test]
 fn backfill_session_cwd_only_fills_null_and_keeps_clock() {
     let store = Store::open_in_memory().unwrap();

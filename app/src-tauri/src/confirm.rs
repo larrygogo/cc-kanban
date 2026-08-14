@@ -136,24 +136,28 @@ pub(crate) async fn confirm_dialog(
     // macOS:无边框窗口不自动圆角,设透明由前端 .app-confirm.is-window 的 border-radius
     // 呈现(同设置/更新窗口)。
     #[cfg(target_os = "macos")]
-    let mut builder = builder.transparent(true);
+    let builder = builder.transparent(true);
     // 非 macOS:原生底色对齐主题,show 瞬间合成帧未上屏也不露白(见 window_background_color)。
     #[cfg(not(target_os = "macos"))]
-    let mut builder = builder.background_color(crate::window::window_background_color(&app));
-    // 居中于请求窗口(物理坐标折算逻辑坐标);任一项拿不到就交给系统默认落点。
+    let builder = builder.background_color(crate::window::window_background_color(&app));
+    let confirm_window = builder.build().map_err(|error| {
+        confirms.remove(id);
+        error.to_string()
+    })?;
+    // 居中于请求窗口:建成后用**物理坐标** set_position(与 snap.rs 等处同款)。曾在
+    // builder 上给逻辑坐标,而建窗期的逻辑→物理换算按**主屏** DPI——父窗在缩放不同的
+    // 副屏上时落点整体偏移(实拍:双屏下确认框弹到莫名其妙的位置,用户根本没察觉)。
+    // 物理坐标是全桌面唯一坐标系,不经任何换算;此刻窗口还没 show,挪动不可见。
+    // 任一项拿不到就留在系统默认落点。
     if let (Ok(pos), Ok(size), Ok(scale)) = (
         window.outer_position(),
         window.outer_size(),
         window.scale_factor(),
     ) {
-        let x = (pos.x as f64 + (size.width as f64 - WIDTH * scale) / 2.0) / scale;
-        let y = (pos.y as f64 + (size.height as f64 - HEIGHT * scale) / 2.0) / scale;
-        builder = builder.position(x, y);
+        let x = pos.x + ((size.width as f64 - WIDTH * scale) / 2.0).round() as i32;
+        let y = pos.y + ((size.height as f64 - HEIGHT * scale) / 2.0).round() as i32;
+        let _ = confirm_window.set_position(tauri::PhysicalPosition::new(x, y));
     }
-    let confirm_window = builder.build().map_err(|error| {
-        confirms.remove(id);
-        error.to_string()
-    })?;
     // Win11:无边框不可缩放窗口 DWM 不自动圆角,显式声明(见 round_window_corners)。
     crate::window::round_window_corners(&confirm_window);
     // 兜底显示:前端没起来(加载失败/崩溃)时到点强制 show。此前缺这个兜底只是悬窗;

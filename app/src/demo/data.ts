@@ -65,5 +65,9 @@ export function makeSession(p: {
     // demo 会话都在默认账号下（无徽章场景）。
     profile: null,
     profile_name: null,
+    // demo 无外库聚合场景（dev 构建才有安装版会话卡）。
+    foreign: false,
+    // demo 无跨 provider 接续链（不渲染链徽标）。
+    predecessor_id: null,
   };
 }

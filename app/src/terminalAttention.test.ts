@@ -396,6 +396,33 @@ describe("terminalAttention", () => {
     ]);
   });
 
+  /// 计划模式批准提示(claude 2.1.227 plan-file 流程,实拍取证)。该提示不触发
+  /// PreToolUse:ExitPlanMode / PermissionRequest hook(上游回归),pendingReview 门控的
+  /// 选择器识别接不到它——整句识别必须在 interactivePrompt=false 时也出卡。
+  it("认得计划批准提示并给出三个原生选项(无 hook、无 pendingReview 门控)", () => {
+    const prompt = [
+      "\x1b[2JClaude has written up a plan and is ready to execute. Would you like to proceed?",
+      "",
+      "❯ 1. Yes, and bypass permissions",
+      "  2. Yes, manually approve edits",
+      "  3. Tell Claude what to change",
+      "     shift+tab to approve with this feedback",
+      "",
+      "ctrl+g to edit in Notepad · ~\\.claude\\plans\\compiled-wiggling-papert.md",
+    ].join("\r\n");
+    const attention = terminalAttention(prompt, []);
+    expect(attention?.id).toBe("claude:plan-approval");
+    expect(attention?.options?.map((option) => option.label)).toEqual([
+      "Yes, and bypass permissions",
+      "Yes, manually approve edits",
+      "Tell Claude what to change",
+    ]);
+    // 焦点在第 1 项:选项按钮必须从 ❯ 光标做相对移动(2→↓+回车)。
+    expect(attention?.options?.[1].input).toBe("\x1b[B\r");
+    // 规则随文法按 provider 门控:别家会话引用同一句不弹 Claude 的计划卡。
+    expect(terminalAttention(prompt, [], false, false, { provider: "kimi", selectorAnchors: [] })).toBeNull();
+  });
+
   /// kimi 审批面板(ApprovalPanel):面板形态与按键语义为官方源码取证
   /// (apps/kimi-code/src/tui/components/dialogs/approval-panel.ts @ 0.29)。
   /// PermissionRequest hook 是 observation-only,屏幕识别是 GUI 审批的唯一通道。

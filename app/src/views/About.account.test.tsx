@@ -315,25 +315,18 @@ describe("AccountSection agent 卡", () => {
     expect(screen.queryByTestId("profiles-claude")).toBeNull();
   });
 
-  it("官方账号可确认退出，成功后重新读取账号状态", async () => {
+  it("退出登录免确认直接执行（可逆操作），成功后重新读取账号状态", async () => {
     api.getAccounts
       .mockResolvedValueOnce([{ provider: "claude", account: { email: "a@b.c" }, usage: null, usage_supported: true }])
       .mockResolvedValue([{ provider: "claude", account: null, usage: null, usage_supported: false }]);
     render(<AccountSection />);
 
     fireEvent.click(await screen.findByTestId("agent-logout-claude"));
-    await waitFor(() => expect(dialog.confirm).toHaveBeenCalled());
     await waitFor(() => expect(api.logoutAgent).toHaveBeenCalledWith("claude"));
+    // 可逆操作不再弹确认小窗。
+    expect(dialog.confirm).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByTestId("agent-logout-claude")).toBeNull());
     expect(screen.getByTestId("agent-login-claude")).toBeTruthy();
-  });
-
-  it("取消退出确认时不清除官方凭据", async () => {
-    dialog.confirm.mockResolvedValue(false);
-    render(<AccountSection />);
-    fireEvent.click(await screen.findByTestId("agent-logout-claude"));
-    await waitFor(() => expect(dialog.confirm).toHaveBeenCalled());
-    expect(api.logoutAgent).not.toHaveBeenCalled();
   });
 
   /**
@@ -1037,8 +1030,9 @@ describe("AccountSection 退出登录 vs 删除账号", () => {
 
     fireEvent.click(await screen.findByTestId("profile-menu-claude-work"));
     fireEvent.click(screen.getByTestId("profile-menu-claude-work-logout"));
-    await waitFor(() => expect(dialog.confirm).toHaveBeenCalled());
+    // 退出登录可逆,不再弹确认,直接执行。
     await waitFor(() => expect(api.logoutAgent).toHaveBeenCalledWith("claude", "work"));
+    expect(dialog.confirm).not.toHaveBeenCalled();
   });
 
   /**

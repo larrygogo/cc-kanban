@@ -1,6 +1,8 @@
-import { memo, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import { openLink } from "../api";
 import { useT } from "../i18n";
 
@@ -140,6 +142,76 @@ const components: Components = {
 export const ChatMarkdown = memo(function ChatMarkdown({ text }: { text: string }) {
   return (
     <ReactMarkdown remarkPlugins={PLUGINS} components={components}>
+      {text}
+    </ReactMarkdown>
+  );
+});
+
+/* ——以下是「文件」面板 markdown 预览专用形态,对话渲染绝不共用这套(见上方注释)。—— */
+
+/** 文件预览的 sanitize 白名单：defaultSchema（GitHub 风）基础上补 README 生态
+ *  常用的展示属性（img 尺寸/对齐、div/p 的 align）。脚本、事件属性、iframe
+ *  仍被整体剥除——rehype-raw 先解析、sanitize 再过滤，顺序不可颠倒。 */
+const FILE_SCHEMA = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    img: [...(defaultSchema.attributes?.img ?? []), "alt", "width", "height", "align"],
+    div: [...(defaultSchema.attributes?.div ?? []), "align"],
+    p: [...(defaultSchema.attributes?.p ?? []), "align"],
+  },
+};
+// 数组常量提出来：内联字面量每次渲染都是新引用，react-markdown 会重建处理管线。
+const FILE_REHYPE: import("react-markdown").Options["rehypePlugins"] = [
+  rehypeRaw,
+  [rehypeSanitize, FILE_SCHEMA],
+];
+
+/** 预览里的图片：http(s) 直用（CSP img-src 已放行 https:）；相对路径交给调用方
+ *  解析成 data URL（仓库文件走后端读盘，webview 里没有文件系统 base 可依赖）。 */
+function PreviewImage({ src, alt, width, height, resolve }: {
+  src?: string;
+  alt?: string;
+  width?: string | number;
+  height?: string | number;
+  resolve: (src: string) => Promise<string | null>;
+}) {
+  const remote = !!src && /^https?:/i.test(src);
+  const [url, setUrl] = useState<string | null>(remote ? src! : null);
+  useEffect(() => {
+    if (remote || !src) return;
+    let alive = true;
+    resolve(src)
+      .then((resolved) => {
+        if (alive && resolved) setUrl(resolved);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [src, remote, resolve]);
+  if (!url) return alt ? <span className="chat-md-img-broken">{alt}</span> : null;
+  return <img src={url} alt={alt ?? ""} width={width} height={height} loading="lazy" />;
+}
+
+/**
+ * 「文件」面板的 markdown 预览：与对话版的两点差异——
+ * 1) 渲染内嵌 HTML（README 生态大量用 <img>/<div align> 排版），但过 FILE_SCHEMA
+ *    白名单，与 GitHub 渲染 README 同策略；
+ * 2) 相对路径图片经 resolve 回调转 data URL（GitDiffView 里接 read_image_preview）。
+ */
+export const FileMarkdown = memo(function FileMarkdown({ text, resolveImage }: {
+  text: string;
+  resolveImage: (src: string) => Promise<string | null>;
+}) {
+  const fileComponents: Components = {
+    ...components,
+    img: ({ src, alt, width, height }) => (
+      <PreviewImage src={src} alt={alt} width={width} height={height} resolve={resolveImage} />
+    ),
+  };
+  return (
+    <ReactMarkdown remarkPlugins={PLUGINS} rehypePlugins={FILE_REHYPE} components={fileComponents}>
       {text}
     </ReactMarkdown>
   );

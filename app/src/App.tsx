@@ -179,8 +179,9 @@ export function App() {
   const stripRowCacheRef = useRef<RowCache>(new Map());
   const loadStrip = useCallback(() => {
     Promise.all([
-      getLiveSessionsPage("running", null, null, 200),
-      getLiveSessionsPage("waiting", null, null, 200),
+      // includeForeign:折叠条与主列表同视野——dev 构建下安装版的连接中会话也计入。
+      getLiveSessionsPage("running", null, null, 200, null, true),
+      getLiveSessionsPage("waiting", null, null, 200, null, true),
     ])
       .then(([r, w]) => {
         const map = new Map<number, Item>();
@@ -234,7 +235,9 @@ export function App() {
       try {
         const [countsRes, res] = await Promise.all([
           needCounts ? getLiveSessionsCounts() : Promise.resolve(null),
-          getLiveSessionsPage(filter, search, cursor, limit),
+          // includeForeign:贴纸看板是监控视野的主入口,dev 构建下聚合安装版的会话
+          // (外库卡只读展示,后端仅在首页附加,翻页游标不受影响)。
+          getLiveSessionsPage(filter, search, cursor, limit, null, true),
         ]);
         const page = res.items;
         const applied = seq === refreshSeqRef.current;

@@ -172,6 +172,11 @@ pub(crate) struct LiveItem {
     /// （见 pty.rs 的 ScreenProbe）。None = 非托管会话 / 无规则集 / 启动宽限内。
     /// 在组页尾部统一填充（get_live_sessions），enrich 不经手。
     screen_state: Option<&'static str>,
+    /// 来自**另一个实例的库**（dev 构建只读聚合安装版 `~/.meowo/board.db` 的会话，
+    /// 见 [`foreign_live_items`]）。前端据此标注来源并收起全部操作入口——这些会话的
+    /// PTY/审批/收尾都归安装版，本实例只有观察权。id 已加 [`FOREIGN_ID_OFFSET`] 防撞：
+    /// 即使某个操作入口漏禁，本库也无此行，落空成 no-op 而不是改错会话。
+    foreign: bool,
 }
 
 /// profile id → 展示名。查不到（profile 已删）回退 id 本身。纯函数便于单测。
@@ -219,70 +224,111 @@ pub(crate) async fn get_live_sessions_counts(
         let alive = snapshots.snapshot();
         let runtimes = runtimes.snapshot();
         let store = super::open_store(&db_path)?;
-        let (mut total, mut archived) = store.live_sessions_totals().map_err(|e| e.to_string())?;
-        // 列表把后台会话整个藏了（见 hidden_background），总数也得同口径扣掉。不能只在
-        // 下面的候选循环里扣：候选集只含「未归档 + 未结束 + running/waiting」，而一条**已
-        // 结束**但有标题的后台会话照样计进 total、列表里却永远看不到——那正是「角标数出
-        // 一条用户找不到的会话」。所以按 id 直接向 DB 问一次，用与 totals 逐字相同的口径。
-        let hidden: Vec<String> = runtimes
-            .values()
-            .flat_map(|sessions| sessions.iter())
-            .filter(|(_, runtime)| runtime.background)
-            .map(|(id, _)| id.clone())
-            .collect();
-        if !hidden.is_empty() {
-            let (n, a) = store.live_totals_for(&hidden).map_err(|e| e.to_string())?;
-            total -= n;
-            archived -= a;
+        let mut counts = counts_for_store(&store, &alive, &pty_live, &runtimes)?;
+        // 外库(安装版)会话也计入角标——列表并入了外库卡(get_live_sessions_page 的
+        // include_foreign),数字必须与列表同视野,否则出现「待交互 0 但列表挂着一排
+        // 待交互卡」的打架现场(实拍反馈)。险闸与失败降级同 foreign_live_items:
+        // 聚合不上就只数本库,宁可少数不报错。
+        if let Some(foreign) = foreign_counts(&db_path, &alive, &runtimes) {
+            counts.total += foreign.total;
+            counts.running += foreign.running;
+            counts.waiting += foreign.waiting;
+            counts.archived += foreign.archived;
         }
-        let candidates = store.live_count_candidates().map_err(|e| e.to_string())?;
-        let now = super::now_ms();
-        let (mut running, mut waiting) = (0i64, 0i64);
-        for candidate in candidates {
-            // 后台会话列表里看不到（enrich 无条件丢弃），running/waiting 也不能数——
-            // 否则用户会对着一个找不到对应卡片的数字发懵。total 已在上面按同一口径扣过。
-            if hidden_background(
-                &runtimes,
-                candidate.provider.as_deref().unwrap_or_default(),
-                &candidate.cc_session_id,
-            ) {
-                continue;
-            }
-            let connected = session_connected(
-                &candidate.status,
-                candidate.pid,
-                process_alive(candidate.pid, &alive, pty_live.contains(&candidate.id)),
-                candidate.last_event_at,
-                now,
-            );
-            // 这里**刻意不做** pending_review 的存活校正（pending_review_live）：tab 归属由
-            // SQL 谓词决定（running 要求 `pending_review IS NULL`、waiting 收下所有非 NULL，
-            // 见 query.rs 的 live_sessions），角标必须与那条谓词同源。只在这一端校正的话，
-            // 一条「已放行但标记滞留」的 running 会话会被数进 running、却因 SQL 仍看得见那
-            // 一位而进不了 running 列表——数字与列表当场打架，正是这套口径最忌讳的事。
-            // 校正只作用于**展示**（卡片 pill / 对话页 / 托盘通知），不参与分类。
-            match tab_class(
-                connected,
-                &candidate.status,
-                candidate.pending_review.as_deref(),
-            ) {
-                Some("waiting") => waiting += 1,
-                Some("running") => running += 1,
-                _ => {}
-            }
-        }
-        Ok(meowo_store::query::LiveSessionCounts {
-            total,
-            running,
-            waiting,
-            archived,
-        })
+        Ok(counts)
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
+/// 单个库的角标统计(总数/运行中/待交互/归档)。本库与外库共用同一口径——外库把
+/// `pty_live` 传空集(那是本实例 broker 的事实,对外库会话无意义),其余判定
+/// (进程表、fleet 后台隐藏)观察的是全局事实,两库通用。
+fn counts_for_store(
+    store: &meowo_store::Store,
+    alive: &std::collections::HashSet<i64>,
+    pty_live: &std::collections::HashSet<i64>,
+    runtimes: &SessionRuntimeIndex,
+) -> Result<meowo_store::query::LiveSessionCounts, String> {
+    let (mut total, mut archived) = store.live_sessions_totals().map_err(|e| e.to_string())?;
+    // 列表把后台会话整个藏了（见 hidden_background），总数也得同口径扣掉。不能只在
+    // 下面的候选循环里扣：候选集只含「未归档 + 未结束 + running/waiting」，而一条**已
+    // 结束**但有标题的后台会话照样计进 total、列表里却永远看不到——那正是「角标数出
+    // 一条用户找不到的会话」。所以按 id 直接向 DB 问一次，用与 totals 逐字相同的口径。
+    let hidden: Vec<String> = runtimes
+        .values()
+        .flat_map(|sessions| sessions.iter())
+        .filter(|(_, runtime)| runtime.background)
+        .map(|(id, _)| id.clone())
+        .collect();
+    if !hidden.is_empty() {
+        let (n, a) = store.live_totals_for(&hidden).map_err(|e| e.to_string())?;
+        total -= n;
+        archived -= a;
+    }
+    let candidates = store.live_count_candidates().map_err(|e| e.to_string())?;
+    let now = super::now_ms();
+    let (mut running, mut waiting) = (0i64, 0i64);
+    for candidate in candidates {
+        // 后台会话列表里看不到（enrich 无条件丢弃），running/waiting 也不能数——
+        // 否则用户会对着一个找不到对应卡片的数字发懵。total 已在上面按同一口径扣过。
+        if hidden_background(
+            runtimes,
+            candidate.provider.as_deref().unwrap_or_default(),
+            &candidate.cc_session_id,
+        ) {
+            continue;
+        }
+        let connected = session_connected(
+            &candidate.status,
+            candidate.pid,
+            process_alive(candidate.pid, alive, pty_live.contains(&candidate.id)),
+            candidate.last_event_at,
+            now,
+        );
+        // 这里**刻意不做** pending_review 的存活校正（pending_review_live）：tab 归属由
+        // SQL 谓词决定（running 要求 `pending_review IS NULL`、waiting 收下所有非 NULL，
+        // 见 query.rs 的 live_sessions），角标必须与那条谓词同源。只在这一端校正的话，
+        // 一条「已放行但标记滞留」的 running 会话会被数进 running、却因 SQL 仍看得见那
+        // 一位而进不了 running 列表——数字与列表当场打架，正是这套口径最忌讳的事。
+        // 校正只作用于**展示**（卡片 pill / 对话页 / 托盘通知），不参与分类。
+        match tab_class(
+            connected,
+            &candidate.status,
+            candidate.pending_review.as_deref(),
+        ) {
+            Some("waiting") => waiting += 1,
+            Some("running") => running += 1,
+            _ => {}
+        }
+    }
+    Ok(meowo_store::query::LiveSessionCounts {
+        total,
+        running,
+        waiting,
+        archived,
+    })
+}
+
+/// 外库的角标贡献。打开/险闸/查询任何一步失败都返回 None(只数本库)。
+fn foreign_counts(
+    own_db: &Path,
+    alive: &std::collections::HashSet<i64>,
+    runtimes: &SessionRuntimeIndex,
+) -> Option<meowo_store::query::LiveSessionCounts> {
+    let path = foreign_db_path(own_db)?;
+    let store = meowo_store::Store::open_readonly(&path).ok()?;
+    if store.user_version().ok()? != meowo_store::Store::CURRENT_USER_VERSION {
+        return None;
+    }
+    let empty = std::collections::HashSet::new();
+    counts_for_store(&store, alive, &empty, runtimes).ok()
+}
+
 #[tauri::command]
+// 参数形状即前端 invoke 的调用契约(Tauri 按 camelCase 逐名匹配),合并成 struct 会
+// 破坏旧前端兼容;第 8 个参数为外库聚合开关,与 terminal.rs 的同款豁免一个理由。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn get_live_sessions_page(
     state: State<'_, super::AppState>,
     filter: String,
@@ -291,6 +337,9 @@ pub(crate) async fn get_live_sessions_page(
     before_last_event_at: Option<i64>,
     before_id: Option<i64>,
     limit: usize,
+    // 是否附带外库(安装版)会话。只有贴纸看板传 true——对话侧栏/归档页按 id 加载
+    // 会话详情,外库卡点开必然落空,不如从源头不给。None 当 false(旧前端兼容)。
+    include_foreign: Option<bool>,
 ) -> Result<LiveSessionsPage, String> {
     let db_path = state.db_path.clone();
     let tx_cache = state.tx_cache.clone();
@@ -322,7 +371,30 @@ pub(crate) async fn get_live_sessions_page(
                 limit,
             },
         )?;
+        // 外库聚合只做首页(无游标):外库不参与翻页,一次全并入;后续页的游标语义
+        // 始终属于本库。稳定排序把外库卡排到各 connected 组的尾部——观察性信息不与
+        // 本库的活动卡抢位置。counts 刻意**不**聚合:外库卡带来源徽标自解释,角标继续
+        // 只数本库,避免「数字里有、翻页翻不到」的口径悖论(外库不分页)。
+        if include_foreign.unwrap_or(false)
+            && before_id.is_none()
+            && before_last_event_at.is_none()
+        {
+            let foreign = foreign_live_items(
+                &db_path,
+                &tx_cache,
+                &alive,
+                &runtimes,
+                &filter,
+                search.as_deref(),
+                cwd.as_deref(),
+            );
+            if !foreign.is_empty() {
+                page.items.extend(foreign);
+                page.items.sort_by_key(|item| std::cmp::Reverse(item.connected));
+            }
+        }
         // 屏幕状态与 profile_name 同一套路：组页尾部按 id 回填，不搅进 enrich 的丢弃判定。
+        // 外库卡的偏移 id 在本地 broker 状态表里必然查空,天然 None。
         for item in &mut page.items {
             item.screen_state = screen_states.get(&item.inner.session.id).copied();
         }
@@ -641,7 +713,108 @@ fn enrich(
         profile_name: None,
         // 屏幕状态在 get_live_sessions 尾部统一填充（broker 状态表不进 LiveContext）。
         screen_state: None,
+        // 外库标记由 foreign_live_items 在聚合时置真，本库路径恒为 false。
+        foreign: false,
     })
+}
+
+// ---------------------------------------------------------------------------
+// 外库只读聚合（dev 构建的监控视野补全）
+// ---------------------------------------------------------------------------
+
+/// 外库会话的 id 偏移。两个库的 id 是独立自增序列必然相撞，而前端的行缓存、
+/// 事件路由、后端的 pty_live/approvals/screen_states 全按 i64 id 索引——偏移到
+/// 高位段一次性避开（2^40 远超任何真实自增值，且在 JS Number 的 2^53 精度内）。
+/// 副作用即防线：偏移后的 id 在本库无对应行，漏禁的操作命令落空成 no-op。
+const FOREIGN_ID_OFFSET: i64 = 1 << 40;
+
+/// 外库单次拉取上限。外库只在列表**首页**聚合、不参与翻页游标（游标语义属于本库的
+/// SQL 扫描位置，双库双游标不值得为一个观察视图付出的复杂度）；活跃会话远小于此数，
+/// 截断只可能发生在深归档的 all 列表里，且截的是最旧的部分。
+const FOREIGN_SCAN_LIMIT: usize = 200;
+
+/// 安装版生产库的路径（仅 debug 构建返回 Some）。dev 隔离后本库在 `~/.meowo-dev`，
+/// 监控视野却不该跟着变窄——机器上跑着哪些会话是客观事实，这里把生产库的会话
+/// **只读**并回看板。显式 `MEOWO_DB` 指回生产库（共享模式）时两者同库，返回 None。
+fn foreign_db_path(own: &Path) -> Option<std::path::PathBuf> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()?;
+    let path = std::path::PathBuf::from(home).join(".meowo").join("board.db");
+    if !path.is_file() {
+        return None;
+    }
+    // canonicalize 双方都成功才可比；任一失败退回字面比较——误判成同库只是少聚合，安全侧。
+    let same = match (path.canonicalize(), own.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => path == own,
+    };
+    (!same).then_some(path)
+}
+
+/// 只读拉取外库会话并整形成外库卡。任何失败（打开失败/版本不一致/查询报错）一律
+/// 返回空集：观察视图挂了不能连累本库列表整页报错。
+///
+/// 与本库路径的口径差异，各有理由：
+/// - `pty_live`/`approvals` 恒空——那是**本实例** broker 的事实，对外库会话无意义；
+///   审批校正传 false 等于以 DB 快照为准，与安装版对外部终端会话的口径一致。
+/// - `alive` 进程表与 fleet 运行时索引照用——它们观察的是全局事实（进程、~/.claude），
+///   与哪个库无关；后台会话的隐藏规则因此对外库同样生效。
+/// - 版本险闸：外库 `user_version` 与本二进制不一致（dev 正在开发 schema 变更）就
+///   整体跳过——绝不拿新 SQL 查旧库，也绝不迁移对方的库（open_readonly 已从根上锁死）。
+fn foreign_live_items(
+    own_db: &Path,
+    tx_cache: &Mutex<meowo_agent::TranscriptCache>,
+    alive: &std::collections::HashSet<i64>,
+    runtimes: &SessionRuntimeIndex,
+    filter: &str,
+    search: Option<&str>,
+    cwd: Option<&str>,
+) -> Vec<LiveItem> {
+    let Some(path) = foreign_db_path(own_db) else {
+        return Vec::new();
+    };
+    let Ok(store) = meowo_store::Store::open_readonly(&path) else {
+        return Vec::new();
+    };
+    if store.user_version().ok() != Some(meowo_store::Store::CURRENT_USER_VERSION) {
+        return Vec::new();
+    }
+    let Ok(sessions) =
+        store.live_sessions_filtered(Some(filter), search, cwd, None, None, FOREIGN_SCAN_LIMIT)
+    else {
+        return Vec::new();
+    };
+    let now = super::now_ms();
+    let connectivity_filtered = matches!(filter, "waiting" | "running");
+    sessions
+        .into_iter()
+        .filter_map(|mut session| {
+            session.pending_review =
+                pending_review_live(&session.provider, session.pending_review.as_deref(), false)
+                    .map(str::to_string);
+            let connected = session_connected(
+                &session.session.status,
+                session.pid,
+                process_alive(session.pid, alive, false),
+                session.session.last_event_at,
+                now,
+            );
+            if connectivity_filtered && !connected {
+                return None;
+            }
+            let runtime = runtime_of(runtimes, &session.provider, &session.session.cc_session_id);
+            let mut item = enrich(tx_cache, session, connected, false, &runtime)?;
+            item.foreign = true;
+            item.inner.session.id += FOREIGN_ID_OFFSET;
+            // 接续链的 id 指向外库行，本库的 get_session_lineage 解析不了；清掉，当普通卡展示。
+            item.inner.predecessor_id = None;
+            Some(item)
+        })
+        .collect()
 }
 
 #[cfg(test)]

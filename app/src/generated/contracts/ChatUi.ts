@@ -39,6 +39,13 @@ selector_anchors: Array<SelectorAnchor>,
  */
 attention_patterns: Array<AttentionPattern>, 
 /**
+ * 该 agent 的 TUI 在 PermissionRequest hook 阻塞期间会**并行**显示自己的权限选择框，
+ * 与 GUI 审批竞速——用户先在终端作答则 hook 结果被丢弃（claude 官方 hooks 文档明载，
+ * 实测同现）。true = 终端视图不挂「回对话页处理」横幅：授权框就在用户眼前，横幅反成
+ * 误导。false（默认）= 未取证，按「终端不显示」保守处理，横幅照挂。
+ */
+permission_prompt_races_hook: boolean, 
+/**
  * 中断当前回合的按键序列(如 Esc)。运行中「强制插话」= 先写它停掉当前回合,
  * CLI 随即处理排队消息/接受新输入。None = 该 agent 的中断键未经取证,GUI 不提供入口。
  */

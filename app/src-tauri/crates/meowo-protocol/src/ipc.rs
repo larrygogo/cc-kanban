@@ -225,6 +225,43 @@ pub struct ChatHistoryDto {
     /// 前端用它们渲染临时时间线——「会话已在工作」不该显示成一片空白。
     pub last_user_text: Option<String>,
     pub last_ai_text: Option<String>,
+    /// 跨 provider 接续链：本会话接替的上一段会话 id。Some 时对话页时间线头部
+    /// 渲染「由上一段会话接续」的提示。
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub predecessor_id: Option<i64>,
+    /// 本会话已被哪个后继接替。Some 时对话页渲染「已切换至…」横幅并禁发——
+    /// 向被接替的会话续话会让接续链分叉。
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub superseded_by: Option<i64>,
+}
+
+/// `switch_session_provider` 的返回：新会话的临时负 id（前端拿它走既有的 binding
+/// 轮询换真 id）+ 交接文件路径（注入 prompt 时引用；注入失败落回输入框当草稿）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchStartedDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub temp_id: i64,
+    pub handoff_path: String,
+}
+
+/// 接续链上的一段会话（`get_session_lineage` 的行，按时间升序）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct LineageEntryDto {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub id: i64,
+    pub provider: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub started_at: i64,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub ended_at: Option<i64>,
+    /// statusline 快照里的模型展示名；provider 不支持或首帧未到时缺失。
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +334,146 @@ pub struct ManagedTerminalSnapshotDto {
     pub end_offset: u64,
     pub exited: bool,
     pub exit_code: Option<u32>,
+}
+
+/// 工作区里有改动的一个文件（git status --porcelain 的一行归一化结果）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct GitChangedFileDto {
+    /// 相对仓库根的路径（正斜杠形式，与 porcelain 输出一致）。
+    pub path: String,
+    /// 归一化状态字母：M/A/D/T 取自 porcelain 的 X 或 Y；未跟踪（??）记为 "U"。
+    pub status: String,
+}
+
+/// 对话页「Diff」按钮的可见性与弹层文件列表的数据源。
+/// `git_available`/`is_repo` 任一为 false 时前端不显示入口，其余字段无意义。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffSummaryDto {
+    /// git 可执行文件能否启动（未安装/被杀软拦下时为 false）。
+    pub git_available: bool,
+    /// cwd 是否在某个 git 工作树内。
+    pub is_repo: bool,
+    /// 当前分支名；detached HEAD 或查询失败时为 None。
+    pub branch: Option<String>,
+    pub files: Vec<GitChangedFileDto>,
+}
+
+/// 单个文件的统一 diff 文本。未跟踪文件的 `diff` 是合成的伪 diff
+/// （`--- /dev/null` / `+++ b/<path>` 头 + 每行加 `+` 前缀）；二进制文件只有
+/// 一行占位 "(binary file)"。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileDiffDto {
+    pub path: String,
+    pub status: String,
+    pub diff: String,
+    /// diff 文本超过上限被截断时为 true（前端据此显示截断提示）。
+    pub truncated: bool,
+}
+
+/// 「文件」页签目录树的一个条目（list_dir_entries 的返回元素）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct DirEntryDto {
+    /// 条目名（不含路径）。
+    pub name: String,
+    /// 相对会话 cwd 的路径（正斜杠形式），展开/读取时回传给后端。
+    pub rel_path: String,
+    pub is_dir: bool,
+}
+
+/// 「文件」页签单文件文本内容（read_file_text 的返回）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct FileTextDto {
+    /// 相对会话 cwd 的路径（正斜杠形式），原样回显请求参数。
+    pub rel_path: String,
+    /// 文件文本；binary 为 true 时为空串（前端显示二进制占位）。
+    pub text: String,
+    /// 文本超过上限被截断时为 true（前端据此显示截断提示）。
+    pub truncated: bool,
+    /// 前 8KB 嗅探到 NUL 时为 true（按二进制处理，不返回文本）。
+    pub binary: bool,
+}
+
+/// 「文件」页签搜索里一个文件内的单行内容命中。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct SearchLineHitDto {
+    /// 行号（1 起）。
+    pub line: u32,
+    /// 命中行文本：窗口对准首个命中处（左侧截掉时带 … 前缀）、超长截断。
+    pub preview: String,
+}
+
+/// 「文件」页签搜索的一个条目（按文件/目录分组，search_project_files 的返回元素）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFileHitDto {
+    /// 相对会话 cwd 的路径（正斜杠形式）。
+    pub rel_path: String,
+    /// 目录条目为 true（目录只有名称命中，lines 恒空）。
+    pub is_dir: bool,
+    /// 文件/目录名本身命中了关键字。
+    pub name_match: bool,
+    /// 展示用的内容命中行（每文件封顶若干条）。
+    pub lines: Vec<SearchLineHitDto>,
+    /// 该文件内容命中的**总**行数（可大于 lines.len()，前端角标显示全量）。
+    pub total_line_matches: u32,
+}
+
+/// 「文件」页签搜索结果（名称命中条目在前、内容命中在后，各按路径排序）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResultDto {
+    pub files: Vec<SearchFileHitDto>,
+    /// 命中数/扫描量到达上限提前收兵时为 true（前端提示细化关键词）。
+    pub truncated: bool,
+}
+
+/// 「文件」页签的图片预览（read_image_preview 的返回）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct ImagePreviewDto {
+    /// `data:<mime>;base64,…` 形式的图片数据；too_large 时为 None。
+    pub data_url: Option<String>,
+    /// 超出预览上限（base64 过大会卡 IPC/渲染），前端显示「过大」占位。
+    pub too_large: bool,
+}
+
+/// 检测到的本地打开方式（文件面板「打开」按钮/菜单用，list_file_openers 的返回元素）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct FileOpenerDto {
+    /// 回传 open_path_with 的标识：Windows 是系统关联处理器的名字（exe 路径），
+    /// 其余平台是探测表里的编辑器 id（"vscode"/"cursor"…）。
+    pub id: String,
+    /// 菜单展示名（"Visual Studio Code"…）。
+    pub name: String,
+    /// 应用图标 PNG data URL；拿不到（UWP 资源图标/非 Windows 平台）为 None，前端用通用图标兜底。
+    pub icon: Option<String>,
 }
 
 impl From<crate::broker::ApprovalRequest> for PendingApprovalDto {

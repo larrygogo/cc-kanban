@@ -1,6 +1,6 @@
 [package]
 name = "meowo-app"
-version = "0.5.14"
+version = "0.5.15"
 edition = "2021"
 
 # 全部 Rust 都住在 app/src-tauri 下:本包既是 Tauri 应用 crate,也是 workspace 根
@@ -74,9 +74,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 notify = { workspace = true }
 sysinfo = "0.32"
-# 只读剪贴板图像指纹(发送附件时判断「剪贴板里还是不是刚粘贴的那张图」),绝不写剪贴板。
-# image-data 提供 get_image;关默认特性是去掉 Linux 的 wayland-data-control 附带依赖。
+# 剪贴板图像读写(原生图片附加:把附件写进剪贴板让 TUI 自己 Ctrl-V 读;发完还原快照)。
+# image-data 提供 get_image/set_image;关默认特性是去掉 Linux 的 wayland-data-control 附带依赖。
 arboard = { version = "3", default-features = false, features = ["image-data"] }
+# 附件文件(图片)解码成 RGBA 喂给 arboard::set_image。tauri 的图标栈已引入该 crate,
+# 这里只补声明、不新增依赖树。关默认特性只留常见剪贴板格式,控制编译面。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 percent-encoding = "2"
 url = "2"
 base64 = "0.22"
@@ -105,7 +108,16 @@ uiautomation = "0.25"
 tauri-winrt-notification = "0.7"
 # 点击 toast 后从"通知中心"移除本应用的已投递通知（tauri-winrt-notification 本身不暴露历史清除）。
 # 版本与 tauri-winrt-notification 内部的 windows 0.61 对齐，避免拉入第二份 windows 副本。
-windows = { version = "0.61", features = ["UI_Notifications"] }
+# Win32_* 特性给 openwith.rs（「打开方式」枚举 + 图标提取）：COM/Shell/GDI/图标。
+windows = { version = "0.61", features = [
+  "UI_Notifications",
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Graphics_Gdi",
+] }
 # 修正 auto-launch 写 Run 项时路径不加引号的问题（含空格路径会失败）：enable 后重写为带引号路径。
 winreg = "0.55"
 

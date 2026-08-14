@@ -6,7 +6,9 @@
 //! 的 `event.part.text` 里（`part.type="think"` 是思考过程：聊天窗口展示，但不计入最终 AI 正文）。
 //! 用户输入则是 `type="turn.prompt"`
 //! 或 `type="context.append_message"` 且 `message.role="user"`——遇到即清空缓冲，使最终缓冲恰为
-//! 「最后一条用户输入之后的 AI 文本」。
+//! 「最后一条用户输入之后的 AI 文本」。用户消息里的 `image_url` part（粘贴图片，blobref 指向
+//! wire.jsonl 旁的 `blobs/<sha>`，或内嵌 data: URL）由 [`user_message_text`] 落盘后补
+//! `[Image: source: …]` 引用行，与 claude 侧形制一致。
 
 use std::path::{Path, PathBuf};
 
@@ -35,7 +37,128 @@ fn value_text(value: &serde_json::Value) -> String {
     }
 }
 
-fn parse_transcript_events(line: &str) -> Vec<TranscriptEvent> {
+/// 图片 mime → 扩展名。渲染端按扩展名认图（Message.tsx 的 IMAGE_EXTENSIONS），未知类型不落盘。
+fn image_ext(mime: &str) -> Option<&'static str> {
+    match mime {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        _ => None,
+    }
+}
+
+/// 用户消息里 image_url part 的 url（kimi 实测是 camelCase 的 `imageUrl`，snake 形态兼容）。
+fn image_part_url(part: &serde_json::Value) -> Option<&str> {
+    if part.get("type").and_then(|t| t.as_str()) != Some("image_url") {
+        return None;
+    }
+    part.get("imageUrl")
+        .or_else(|| part.get("image_url"))
+        .and_then(|u| u.get("url"))
+        .or_else(|| part.get("url"))
+        .and_then(|u| u.as_str())
+}
+
+/// 把用户消息里的图片 part 落成本地文件，返回可写进 `[Image: source: …]` 引用的绝对路径。
+/// 两种 url 形态（kimi-code 0.2x 实测）：
+///
+/// - `blobref:<mime>;<sha256>`：正文在 wire.jsonl 旁的 `blobs/<sha256>`（无扩展名），读出复制
+/// - `data:<mime>;base64,<data>`：内嵌 base64，解码落盘（同 claude 排队插图的处理）
+///
+/// 统一落在 `paste_root()/queued/`（asset 协议 scope 内，前端才能渲染缩略图），按内容 sha /
+/// 行 id 命名做幂等——增量解析 reset 时会重放同一行。任何失败返回 None：正文照常显示，
+/// 这张图退化为不显示。
+fn persist_image_url(
+    wire_dir: Option<&Path>,
+    base_id: &str,
+    index: usize,
+    url: &str,
+) -> Option<PathBuf> {
+    use crate::fsutil::PASTE_MAX_BYTES;
+    if let Some(rest) = url.strip_prefix("blobref:") {
+        let (mime, sha) = rest.split_once(';')?;
+        let ext = image_ext(mime)?;
+        // sha 直接拼进文件名与路径，过滤成 hex，挡掉脏数据里的路径分隔符。
+        let sha: String = sha
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .take(128)
+            .collect();
+        if sha.is_empty() {
+            return None;
+        }
+        let src = wire_dir?.join("blobs").join(&sha);
+        let len = std::fs::metadata(&src).ok()?.len();
+        if len == 0 || len > PASTE_MAX_BYTES as u64 {
+            return None;
+        }
+        let bytes = std::fs::read(&src).ok()?;
+        return crate::fsutil::persist_paste_bytes(&format!("kimi-{sha}"), ext, &bytes);
+    }
+    if let Some(rest) = url.strip_prefix("data:") {
+        let (mime, data) = rest.split_once(";base64,")?;
+        let ext = image_ext(mime)?;
+        let safe_id: String = base_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .take(64)
+            .collect();
+        if safe_id.is_empty() {
+            return None;
+        }
+        // 编码后长度 ≈ 4/3 原始大小：先按编码长度挡超大 payload，再解码（同粘贴附件的写法）。
+        if data.len() > PASTE_MAX_BYTES / 3 * 4 + 4 {
+            return None;
+        }
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data.as_bytes())
+            .ok()?;
+        return crate::fsutil::persist_paste_bytes(
+            &format!("kimi-{safe_id}-{index}"),
+            ext,
+            &bytes,
+        );
+    }
+    None
+}
+
+/// 用户消息正文 + 图片。kimi 把粘贴的图片记成 `image_url` part（blobref 指向 wire.jsonl 旁
+/// 的 `blobs/<sha>`，或内嵌 data: URL），而 `value_text` 只拼 text part——图片被静默丢掉，
+/// 纯图消息整条消失（实拍反馈：对话里看不到 kimi 会话的图）。这里把图片落盘后补
+/// `[Image: source: …]` 行，与 claude 记录粘贴图片的形制一致，前端现成的缩略图链路直接接住。
+fn user_message_text(
+    value: Option<&serde_json::Value>,
+    wire_dir: Option<&Path>,
+    base_id: &str,
+) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    let Some(parts) = value.as_array() else {
+        return value_text(value);
+    };
+    let mut text = parts
+        .iter()
+        .filter_map(|part| part.get("text").and_then(|text| text.as_str()))
+        .collect::<Vec<_>>()
+        .join("");
+    for (index, part) in parts.iter().enumerate() {
+        let Some(url) = image_part_url(part) else {
+            continue;
+        };
+        if let Some(path) = persist_image_url(wire_dir, base_id, index, url) {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&format!("[Image: source: {}]", path.display()));
+        }
+    }
+    text
+}
+
+fn parse_events(line: &str, wire_dir: Option<&Path>) -> Vec<TranscriptEvent> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
         return Vec::new();
     };
@@ -45,15 +168,18 @@ fn parse_transcript_events(line: &str) -> Vec<TranscriptEvent> {
         .map(str::to_string);
     match value.get("type").and_then(|v| v.as_str()).unwrap_or("") {
         "turn.prompt" => {
-            let text = value
-                .get("input")
-                .or_else(|| value.get("prompt"))
-                .or_else(|| value.get("message"))
-                .map(value_text)
-                .unwrap_or_default();
+            let id = chat_id("user", line);
+            let text = user_message_text(
+                value
+                    .get("input")
+                    .or_else(|| value.get("prompt"))
+                    .or_else(|| value.get("message")),
+                wire_dir,
+                &id,
+            );
             (!text.trim().is_empty())
-                .then(|| TranscriptEvent::UserMessage {
-                    id: chat_id("user", line),
+                .then_some(TranscriptEvent::UserMessage {
+                    id,
                     timestamp,
                     text,
                 })
@@ -80,14 +206,15 @@ fn parse_transcript_events(line: &str) -> Vec<TranscriptEvent> {
             {
                 return Vec::new();
             }
-            let text = message
-                .get("content")
-                .or_else(|| message.get("text"))
-                .map(value_text)
-                .unwrap_or_default();
+            let id = chat_id("user", line);
+            let text = user_message_text(
+                message.get("content").or_else(|| message.get("text")),
+                wire_dir,
+                &id,
+            );
             (!text.trim().is_empty())
-                .then(|| TranscriptEvent::UserMessage {
-                    id: chat_id("user", line),
+                .then_some(TranscriptEvent::UserMessage {
+                    id,
                     timestamp,
                     text,
                 })
@@ -207,7 +334,12 @@ fn parse_transcript_events(line: &str) -> Vec<TranscriptEvent> {
 
 #[cfg(test)]
 fn parse_chat_items(line: &str) -> Vec<ChatItem> {
-    parse_transcript_events(line)
+    parse_chat_items_in(None, line)
+}
+
+#[cfg(test)]
+fn parse_chat_items_in(wire_dir: Option<&Path>, line: &str) -> Vec<ChatItem> {
+    parse_events(line, wire_dir)
         .into_iter()
         .map(ChatItem::from)
         .collect()
@@ -538,8 +670,9 @@ impl SubagentSpec for KimiSubagents {
     }
 
     fn parse_stream_line(&self, line: &str) -> Vec<TranscriptEvent> {
-        // 子 agent 的 wire.jsonl 与主流同格式，直接复用。
-        parse_transcript_events(line)
+        // 子 agent 的 wire.jsonl 与主流同格式，直接复用。子任务的「用户消息」是编排方
+        // 的 prompt，不含粘贴图片，无需 blobref 的目录上下文。
+        parse_events(line, None)
     }
 
     fn detect_result(&self, output: &str) -> Option<SubagentOutcome> {
@@ -598,7 +731,12 @@ impl TranscriptSpec for KimiTranscript {
     }
 
     fn parse_transcript_line(&self, line: &str) -> Vec<TranscriptEvent> {
-        parse_transcript_events(line)
+        parse_events(line, None)
+    }
+
+    fn parse_transcript_line_in(&self, path: &Path, line: &str) -> Vec<TranscriptEvent> {
+        // wire.jsonl 旁的 blobs/ 目录是用户图片 blobref 的解析基准。
+        parse_events(line, path.parent())
     }
 
     fn agent_modes_from_line(&self, line: &str) -> Vec<crate::AgentMode> {
@@ -1194,6 +1332,115 @@ mod tests {
         ));
         assert!(parse_chat_items(assistant).is_empty());
         assert!(parse_chat_items(injected).is_empty());
+    }
+
+    /// 用户粘贴的图片在 wire.jsonl 里是 `image_url` part：blobref 指向 wire 旁的
+    /// `blobs/<sha>`（无扩展名）。修复前只拼 text part——图片静默丢失、纯图消息整条消失
+    /// （实拍反馈：kimi 会话的图在对话里看不到）。落盘到 paste_root/queued/（asset scope
+    /// 内），以 `[Image: source: …]` 行并入正文，前端现成的缩略图链路直接接住。
+    #[test]
+    fn user_message_blobref_images_are_persisted_and_referenced() {
+        let root = std::env::temp_dir().join(format!("kimi-img-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let wire_dir = root.join("agents").join("main");
+        std::fs::create_dir_all(wire_dir.join("blobs")).unwrap();
+        let sha1 = format!("{:064x}", std::process::id());
+        let sha2 = format!("{:064x}", std::process::id() as u64 + 1);
+        std::fs::write(wire_dir.join("blobs").join(&sha1), b"png-bytes-1").unwrap();
+        std::fs::write(wire_dir.join("blobs").join(&sha2), b"png-bytes-2").unwrap();
+
+        let line = format!(
+            r#"{{"type":"turn.prompt","input":[{{"type":"image_url","imageUrl":{{"url":"blobref:image/png;{sha1}"}}}},{{"type":"image_url","imageUrl":{{"url":"blobref:image/png;{sha2}"}}}},{{"type":"text","text":" 做成类似这样的"}}]}}"#
+        );
+        let queued = crate::fsutil::paste_root().join("queued");
+        let path1 = queued.join(format!("kimi-{sha1}.png"));
+        let path2 = queued.join(format!("kimi-{sha2}.png"));
+        let _ = std::fs::remove_file(&path1);
+        let _ = std::fs::remove_file(&path2);
+
+        let items = parse_chat_items_in(Some(&wire_dir), &line);
+        let ChatItem::UserText { text, .. } = &items[0] else {
+            panic!("应解析成用户消息");
+        };
+        assert_eq!(
+            text,
+            &format!(
+                " 做成类似这样的\n[Image: source: {}]\n[Image: source: {}]",
+                path1.display(),
+                path2.display()
+            )
+        );
+        assert_eq!(std::fs::read(&path1).unwrap(), b"png-bytes-1");
+        assert_eq!(std::fs::read(&path2).unwrap(), b"png-bytes-2");
+
+        // 无目录上下文（旧调用形态）时图片解析不出、退化不显示，但文字不丢。
+        let items = parse_chat_items(&line);
+        assert!(
+            matches!(&items[0], ChatItem::UserText { text, .. } if text == " 做成类似这样的")
+        );
+
+        let _ = std::fs::remove_file(&path1);
+        let _ = std::fs::remove_file(&path2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 纯图消息（没有 text part）也要产出用户消息——修复前被空文本检查整条吞掉。
+    #[test]
+    fn pure_image_user_message_survives() {
+        let root = std::env::temp_dir().join(format!("kimi-imgonly-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let wire_dir = root.join("agents").join("main");
+        std::fs::create_dir_all(wire_dir.join("blobs")).unwrap();
+        let sha = format!("{:064x}", std::process::id() as u64 + 2);
+        std::fs::write(wire_dir.join("blobs").join(&sha), b"only-image").unwrap();
+
+        let line = format!(
+            r#"{{"type":"context.append_message","message":{{"role":"user","content":[{{"type":"image_url","imageUrl":{{"url":"blobref:image/png;{sha}"}}}}]}}}}"#
+        );
+        let path = crate::fsutil::paste_root()
+            .join("queued")
+            .join(format!("kimi-{sha}.png"));
+        let _ = std::fs::remove_file(&path);
+
+        let items = parse_chat_items_in(Some(&wire_dir), &line);
+        assert!(
+            matches!(&items[0], ChatItem::UserText { text, .. } if text == &format!("[Image: source: {}]", path.display())),
+            "实际：{:?}",
+            items
+        );
+
+        // blob 已被清理的旧会话：解析不出图也没有文字，消息照旧不出现（与 claude 一致）。
+        let missing = line.replace(&sha, &"f".repeat(64));
+        assert!(parse_chat_items_in(Some(&wire_dir), &missing).is_empty());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// data: URL 形态（内嵌 base64）：解码落盘，与 claude 排队插图同一条路径。
+    #[test]
+    fn user_message_data_url_image_is_decoded() {
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD.encode(b"inline-png-bytes");
+        let line = format!(
+            r#"{{"type":"turn.prompt","input":[{{"type":"image_url","imageUrl":{{"url":"data:image/png;base64,{data}"}}}},{{"type":"text","text":"看图"}}]}}"#
+        );
+        let path = crate::fsutil::paste_root()
+            .join("queued")
+            .join(format!("kimi-{}-0.png", chat_id("user", &line)));
+        let _ = std::fs::remove_file(&path);
+
+        let items = parse_chat_items(&line);
+        let ChatItem::UserText { text, .. } = &items[0] else {
+            panic!("应解析成用户消息");
+        };
+        assert_eq!(
+            text,
+            &format!("看图\n[Image: source: {}]", path.display())
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"inline-png-bytes");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

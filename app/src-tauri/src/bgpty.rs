@@ -149,7 +149,7 @@ pub(crate) fn connect(sock: &str) -> Result<Wire, String> {
         .map_err(|e| format!("连接后台会话 PTY 失败（{sock}）：{e}"))?;
     let reader = file
         .try_clone()
-        .map_err(|e| format!("复制 PTY 管道句柄失败：{e}"))?;
+        .map_err(|e| format!("连接后台会话失败：{e}"))?;
     Ok((Box::new(reader), Box::new(file)))
 }
 
@@ -236,7 +236,7 @@ fn with_timeout<T: Send + 'static>(
     });
     match rx.recv_timeout(std::time::Duration::from_millis(SEND_PROMPT_TIMEOUT_MS)) {
         Ok(result) => result,
-        Err(_) => Err(format!("{what}超时：后台会话守护进程未响应")),
+        Err(_) => Err(format!("{what}超时：后台会话无响应")),
     }
 }
 
@@ -420,7 +420,7 @@ pub(crate) fn send_prompt(
     });
     match rx.recv_timeout(std::time::Duration::from_millis(SEND_PROMPT_TIMEOUT_MS)) {
         Ok(result) => result,
-        Err(_) => Err("后台会话没有回执（守护进程可能无响应），消息未确认送达。".to_string()),
+        Err(_) => Err("后台会话未确认收到消息，请稍后重试。".to_string()),
     }
 }
 

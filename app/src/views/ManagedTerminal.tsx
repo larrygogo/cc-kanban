@@ -9,7 +9,6 @@ import "@xterm/xterm/css/xterm.css";
 import {
   attachBackgroundSession,
   clipboardText,
-  confirmStopSession,
   getSettings,
   isExternallyHeld,
   managedTerminalSnapshot,
@@ -24,6 +23,7 @@ import {
   type Settings,
 } from "../api";
 import { useT } from "../i18n";
+import { formatBackendError } from "../i18n/errors";
 import type { PtyExitEvent as ExitEvent } from "../generated/contracts/PtyExitEvent";
 import type { PtyOutputEvent as OutputEvent } from "../generated/contracts/PtyOutputEvent";
 import { terminalAttention, visibleTerminalText, type AttentionGrammar, type TerminalAttention } from "../terminalAttention";
@@ -84,8 +84,13 @@ export const STREAM_STALL_MS = 30_000;
 /// 输出流停滞判定（纯函数，供组件定时评估与单测）。只对「本 GUI 托管、transcript
 /// 说 agent 正在跑」的会话生效：后台会话没有实时帧通道、外部占用/已退出本就无流，
 /// waiting/idle 时 TUI 安静是常态，都不参与判定——宁可漏报，不可把正常空闲谎报成卡死。
-export function terminalStreamStalled(args: { active: boolean; background: boolean; status: string | undefined; lastByteAt: number; now: number }): boolean {
-  return args.active && !args.background && args.status === "running" && args.now - args.lastByteAt > STREAM_STALL_MS;
+/// reviewPending（待审批/屏幕提示在场）同为豁免：回合没结束 status 仍是 running，但
+/// TUI 画完权限框/表单后就一个字节都不再输出，静止正是「在等人」的常态而非僵死
+/// （实拍误报：审批横幅与 TUI 授权框同屏时，30s 一到就弹「ConPTY 疑似卡死」）。
+/// 注意本函数只看状态位；组件节拍上还有第二级判据——画面停在输入提示符（唯一自绘
+/// 假光标）时同样豁免，因为 status 管线在 kimi 这类 TUI 上会滞后/漏翻成 waiting。
+export function terminalStreamStalled(args: { active: boolean; background: boolean; status: string | undefined; reviewPending: boolean; lastByteAt: number; now: number }): boolean {
+  return args.active && !args.background && args.status === "running" && !args.reviewPending && args.now - args.lastByteAt > STREAM_STALL_MS;
 }
 
 /// 行高预设 → xterm lineHeight。normal 即历史硬编码的 1.22（改它会让老用户画面变样）。
@@ -152,6 +157,9 @@ type ManagedTerminalProps = {
   onBackgroundInput?: () => void;
   sessionId: number;
   status?: string;
+  /// 有待审批/屏幕提示在等用户（broker 审批、pendingReview、屏幕识别的表单）。
+  /// 停滞检测的豁免位：这时 TUI 静止是「在等人」，不是 ConPTY 僵死。
+  reviewPending?: boolean;
   visible?: boolean;
   onUserSubmit?: () => void;
   attentionMarkers?: string[];
@@ -175,7 +183,7 @@ type ManagedTerminalProps = {
   takeoverExtra?: ReactNode;
 };
 
-export function ManagedTerminal({ sessionId, status, background = false, onBackgroundInput, visible = true, onUserSubmit, attentionMarkers = [], interactivePrompt = false, expectMenu = false, grammar, newlineInput = null, onAttention, rearmRef: externalRearmRef, resumeOptions, takeoverExtra }: ManagedTerminalProps) {
+export function ManagedTerminal({ sessionId, status, reviewPending = false, background = false, onBackgroundInput, visible = true, onUserSubmit, attentionMarkers = [], interactivePrompt = false, expectMenu = false, grammar, newlineInput = null, onAttention, rearmRef: externalRearmRef, resumeOptions, takeoverExtra }: ManagedTerminalProps) {
   const t = useT();
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -184,9 +192,6 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
   const [snapshotReady, setSnapshotReady] = useState(false);
   const [initialized, setInitialized] = useState(false);
   const [starting, setStarting] = useState(false);
-  // 结束终端是异步的（杀进程 + 等 pty-exit 回传，Windows 上有几百毫秒延迟）。
-  // 没有这个状态，按钮点完毫无变化，用户以为没反应。
-  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState("");
   const [exitCode, setExitCode] = useState<number | null | undefined>(undefined);
   // state 供渲染 / ref 供同步判定：onData 闭包里要同步判「进程是否已退出」。
@@ -198,6 +203,8 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
   const lastByteAtRef = useRef(Date.now());
   const statusRef = useRef(status);
   statusRef.current = status;
+  const reviewPendingRef = useRef(reviewPending);
+  reviewPendingRef.current = reviewPending;
   const activeRef = useRef(false);
   activeRef.current = active;
   // 最近一次下发给 PTY 的尺寸：同值跳过。切回终端 tab 时曾无条件重发 resize，后端照样
@@ -213,7 +220,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     });
   };
   const externalRunning = isExternallyHeld(status);
-  /// 就地重启（结束终端 → 再接管）后重新对齐输出偏移。新 PTY 的 output_end 从 0 重新计数，
+  /// 就地重启（结束会话 → 再接管）后重新对齐输出偏移。新 PTY 的 output_end 从 0 重新计数，
   /// 而 nextOffset 还停在上一个进程的高位，writeOutput 会把新输出全部当成「已写过」丢掉，
   /// 终端就永远定格在旧内容上。effect 内部把重置逻辑挂到这里，供 start/takeover 调用。
   const rearmRef = useRef<(() => void) | null>(null);
@@ -249,7 +256,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     // 显示出来，不许无声吞掉——「点了没反应」正是这类问题最难排查的形态。
     const openTerminalLink = (event: MouseEvent, uri: string) => {
       if (!event.ctrlKey && !event.metaKey) return;
-      void openLink(uri).catch((e) => setError(String(e)));
+      void openLink(uri).catch((e) => setError(formatBackendError(e, t.locale)));
     };
     const terminal = new Terminal({
       // OSC 8 超链接（TUI 显式声明的链接）由这里接住；纯文本 URL 的识别在 WebLinksAddon。
@@ -334,7 +341,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
         if (backgroundRef.current) {
           onBackgroundInputRef.current?.();
         } else if (!exitedRef.current) {
-          void writeManagedTerminal(sessionId, newlineSeq).catch((e) => setError(String(e)));
+          void writeManagedTerminal(sessionId, newlineSeq).catch((e) => setError(formatBackendError(e, t.locale)));
         }
         return false;
       }
@@ -348,7 +355,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       const data = event.clipboardData;
       if (!data || data.getData("text") || data.files.length === 0) return;
       event.preventDefault();
-      void writeManagedTerminal(sessionId, "\x16").catch((e) => setError(String(e)));
+      void writeManagedTerminal(sessionId, "\x16").catch((e) => setError(formatBackendError(e, t.locale)));
     };
     host.addEventListener("paste", pasteImageFallback);
     // 右键 = Windows 终端惯例:有选区复制(并清选区),无选区粘贴。WebView 默认菜单在
@@ -436,7 +443,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       }
       // 写失败必须可见：典型场景是整段粘贴超过后端单次输入上限被拒——
       // 静默吞掉的话，粘贴无声消失，终端画面纹丝不动。
-      void writeManagedTerminal(sessionId, payload).catch((e) => setError(String(e)));
+      void writeManagedTerminal(sessionId, payload).catch((e) => setError(formatBackendError(e, t.locale)));
     });
     // 声明「正在看」:后端 emitter 只对已注册的会话推 pty-output 实时帧,其余托管会话
     // 不再白付 base64 与 IPC(N 会话齐跑时那正是压垮前端的部分)。失败静默——快照轮询
@@ -446,13 +453,24 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     // 会话/进程的旧水位不作数。
     lastByteAtRef.current = Date.now();
     const stallTimer = window.setInterval(() => {
-      setStalled(terminalStreamStalled({
+      const candidate = terminalStreamStalled({
         active: activeRef.current,
         background: backgroundRef.current,
         status: statusRef.current,
+        reviewPending: reviewPendingRef.current,
         lastByteAt: lastByteAtRef.current,
         now: Date.now(),
-      }));
+      });
+      // 二级判据（实拍误报：回合早已结束、TUI 停在输入提示符上等人打字，但 status 管线
+      // 仍挂 running，30s 一到就弹「ConPTY 疑似卡死」）。画面里有唯一的自绘输入光标
+      // （findFakeCaret 多义/缺失时返回 null，自动放弃豁免）= 在等人，不是管道僵死。
+      // 真在提示符上僵死的情形放给「打字无回显」自然暴露，不拿横幅吓人——与判据注释
+      // 「宁可漏报，不可谎报」同一取向。
+      if (candidate && findFakeCaret(terminal.buffer?.active, terminal.rows)) {
+        setStalled(false);
+        return;
+      }
+      setStalled(candidate);
     }, 5_000);
     let unOutput: (() => void) | undefined;
     let unExit: (() => void) | undefined;
@@ -904,7 +922,6 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     const terminal = terminalRef.current;
     if (!terminal) return;
     setStarting(true);
-    setStopping(false);
     setError("");
     terminal.focus();
     try {
@@ -913,7 +930,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       // 新 PTY 的偏移从 0 重新计数，必须归零重拉，否则新输出会被当成旧数据丢弃。
       rearmRef.current?.();
     } catch (e) {
-      setError(String(e));
+      setError(formatBackendError(e, t.locale));
     } finally {
       setStarting(false);
     }
@@ -929,7 +946,7 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       await attachBackgroundSession(sessionId);
       rearmRef.current?.(); // 偏移归零重拉：接上的是别人已经跑了一阵的 PTY。
     } catch (e) {
-      setError(String(e));
+      setError(formatBackendError(e, t.locale));
     } finally {
       setStarting(false);
     }
@@ -947,7 +964,6 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
     });
     if (!yes) return;
     setStarting(true);
-    setStopping(false);
     setError("");
     terminal.focus();
     try {
@@ -955,27 +971,9 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       setActive(true);
       rearmRef.current?.();
     } catch (e) {
-      setError(String(e));
+      setError(formatBackendError(e, t.locale));
     } finally {
       setStarting(false);
-    }
-  };
-
-  const stop = async () => {
-    // 结束是破坏性操作(直接杀掉正在跑的 Agent 进程):确认+停止走与对话页标题栏共用的
-    // confirmStopSession(api.ts)。确认后立刻置 busy:按钮转「正在结束…」并禁用,直到
-    // 进程退出(pty-exit 把 active 设 false,整个操作区随之卸载)。成功后不清 stopping。
-    setError("");
-    try {
-      await confirmStopSession(
-        sessionId,
-        { title: t.chat.terminalStop, message: t.chat.endSessionConfirm },
-        () => setStopping(true),
-      );
-    } catch (e) {
-      // 失败要能重试：终端看着还活着，得把状态退回可点。
-      setError(String(e));
-      setStopping(false);
     }
   };
 
@@ -1025,12 +1023,10 @@ export function ManagedTerminal({ sessionId, status, background = false, onBackg
       )}
       {active && (
         <div className="managed-terminal-actions">
-          {/* 后端刻意让 attach 失败可见（不静默回退 GUI），前端吞掉就前功尽弃；
-              结束失败同理——终端看起来还活着，用户会以为已经停了。 */}
-          <button type="button" onClick={() => { setError(""); void openAttachedTerminal(sessionId).catch((e) => setError(String(e))); }}>{t.chat.terminalAttach}</button>
-          <button type="button" disabled={stopping} onClick={() => void stop()}>
-            {stopping ? t.chat.terminalStopping : t.chat.terminalStop}
-          </button>
+          {/* 结束会话的入口在标题栏(ChatWindow 的「结束会话」),这里不再放一份——
+              曾并存过「结束终端」按钮,同一条 confirmStopSession 流程双入口徒增困惑。
+              后端刻意让 attach 失败可见（不静默回退 GUI），前端吞掉就前功尽弃。 */}
+          <button type="button" onClick={() => { setError(""); void openAttachedTerminal(sessionId).catch((e) => setError(formatBackendError(e, t.locale))); }}>{t.chat.terminalAttach}</button>
         </div>
       )}
       {active && error && (

@@ -15,6 +15,10 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use tauri::{Emitter, Manager};
 
+/// 锁中毒(持锁线程 panic 过)对用户只有一个含义:内部坏了,重启才能恢复。
+/// 具体哪把锁属于排障细节,不抛到界面;前端 errors.ts 按本串前缀做双语映射,改文案需同步。
+const LOCK_POISONED: &str = "内部状态异常，请重启 Meowo";
+
 const BACKLOG_LIMIT: usize = 1024 * 1024;
 
 /// 屏幕检测的启动宽限：spawn 后头几秒是启动 splash / 首帧探测期，扫出来的多半是噪音
@@ -246,6 +250,11 @@ struct AttachState {
     /// claim 认领时写进 sessions.launch_args——权限模式等选项是启动参数，不落库的话
     /// resume/接管的重启进程会重置回 CLI 默认（实拍反馈）。
     pending_launch_args: Mutex<HashMap<String, HashMap<String, String>>>,
+    /// launch_token → 被接替的旧会话 id（跨 provider 切换）。与 pending_launch_args
+    /// 同构：会话行 claim 认领时才存在，接续链也只能在那一刻落库。CLI 起不来 / claim
+    /// 不发生时这条暂存自然过期，旧会话**不会**被错误标记为已接替——这是切换失败的
+    /// 关键防线（用户仍可 resume 回旧引擎）。
+    pending_lineage: Mutex<HashMap<String, i64>>,
     bindings: Mutex<HashMap<i64, i64>>,
     approvals: Mutex<HashMap<String, PendingApproval>>,
     /// 显式注册的 GUI 审批消费者。窗口存在/可见不等于已经订阅了目标 session。
@@ -308,6 +317,7 @@ impl Default for PtyBroker {
                 next_pending: AtomicI64::new(-1),
                 pending: Mutex::new(HashMap::new()),
                 pending_launch_args: Mutex::new(HashMap::new()),
+                pending_lineage: Mutex::new(HashMap::new()),
                 bindings: Mutex::new(HashMap::new()),
                 approvals: Mutex::new(HashMap::new()),
                 approval_consumers: Mutex::new(HashMap::new()),
@@ -900,30 +910,46 @@ impl PtyBroker {
     /// discovery 文件发现 broker，但那不代表此刻有 GUI 消费者；若直接入队，会让原 TUI
     /// 无提示等满五分钟。
     ///
-    /// 窗口不存在：没有进行中的输入可打断，新开窗口直接落在该会话上，等消费者注册。
-    /// 窗口已存在：**同样切到该会话**并闪任务栏。曾经这里只闪不切（怕打断用户在别的会话
-    /// 里的输入），代价是「窗口开在会话 A、会话 B 来要审批」这种常态下用户得在 10s 内自己
-    /// 注意到闪烁并点开 B，否则请求被撤回、答成 pass 退回 TUI——那 10s 是按 WebView2 冷启动
-    /// 量的，不是按人的反应时间量的。取舍已经翻面：宁可切走一次，也不要让审批悄悄回落。
-    /// 前端的侧栏授权徽标（approvalAwaitingIds）随之退居兜底：它覆盖切换竞态、以及消费者
-    /// 已注册在别的会话时到达的请求。
+    /// 召唤策略（[`approval_summon_action`]，第三回摆锤后的落点）：
+    /// - 用户正盯着**别的会话**（窗口在眼前且有消费者租约）：不切窗——正在 A 会话里
+    ///   阅读/打字被瞬间拽到 B 是夺屏（实拍反馈，第二回）。改为徽标 + 任务栏闪烁召唤，
+    ///   并返回 true 让请求**整个等待期（300s）保持可领取**：用户点过去的瞬间，消费者
+    ///   注册 + 轮询就能取到卡片；claude 的 TUI 权限框与 hook 竞速，终端里也照常可答。
+    ///   这与「只闪不切 + 10s 撤回」的第一代不同：撤回窗口是按 WebView2 冷启动量的，
+    ///   而这里请求不撤回，人有充分的反应时间，审批不会悄悄回落。
+    /// - 窗口不在眼前（隐藏/最小化/未创建）：没有进行中的注视可打断，照旧切到该会话
+    ///   并安静唤醒，等消费者注册。
     ///
-    /// 两个分支都只做**有界**等待，等不到就返回 false 让调用方撤回请求并答 `pass`，
-    /// 提示回落到 agent 自己的审批界面。已存在的窗口尤其不能无界等（此前直接返回
-    /// true）：窗口可能最小化、侧栏收起时徽标无处渲染，而 hook 正压着 TUI 自己的面板
-    /// ——handle_approval 会盲等满 300s，期间哪儿都看不到提示。
+    /// 切会话召唤的分支只做**有界**等待，等不到就返回 false 让调用方撤回请求并答
+    /// `pass`，提示回落到 agent 自己的审批界面——窗口起不来时 hook 不该压着 TUI
+    /// 盲等满 300s。
     fn ensure_approval_window(&self, session_id: i64) -> bool {
-        if self.has_approval_consumer(session_id) {
-            return true;
+        // 对话功能关闭（轻量模式）：GUI 不是合法消费者，立即返回 false 让调用方答 pass
+        // 回落 TUI——不能走下面的 10s 消费者等待，那只会把终端审批面板的出现拖慢同样久。
+        // 放在租约检查之前：关闭后即便残留已开的对话窗，审批也统一走 TUI，语义不摇摆。
+        if !crate::settings::load_settings().chat_enabled {
+            return false;
         }
         let Some(app) = self.attach.app.lock().ok().and_then(|app| app.clone()) else {
             return false;
         };
-        // 无论窗口在不在，都要把它切到**这个**会话上：注册审批消费者的是对话页那套
-        // useEffect，只有会话切过去了才会注册。曾经在窗口已存在时只闪一下任务栏就干等，
-        // 于是「窗口开在会话 A、会话 B 来要审批」这种常态下，用户得在 10 秒内自己注意到
-        // 闪烁、在侧栏找到 B 并点开，否则请求被撤回、答成 pass 退回 TUI——那 10 秒是按
-        // WebView2 冷启动量的，不是按人的反应时间量的。
+        match approval_summon_action(
+            self.has_approval_consumer(session_id),
+            self.has_any_approval_consumer(),
+            crate::window::chat_window_in_view(&app),
+        ) {
+            SummonAction::Ready => return true,
+            SummonAction::Hold => {
+                // 不切窗只召唤：请求已由调用方先入表，pending-approval 事件让前端
+                // 点亮侧栏徽标（approvalAwaitingIds），闪烁提醒有事发生。
+                if let Some(window) = app.get_webview_window("chat") {
+                    let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
+                }
+                return true;
+            }
+            SummonAction::Summon => {}
+        }
+        // 切会话召唤：注册审批消费者的是对话页那套 useEffect，只有会话切过去了才会注册。
         //
         // quiet：唤醒不抢焦点——用户可能正在外部终端里打字（实拍反馈），召唤注意力
         // 交给下面的任务栏闪烁；卡片可答性不依赖焦点（请求在表里，注册后轮询可取）。
@@ -990,8 +1016,8 @@ impl PtyBroker {
     /// completed 判断「起没起来」），上一代退出的定格快照会被误读成本次启动秒退——当前
     /// 这一代（运行中/启动中）尚未 finalize，completed 里的任何条目对该探测都是噪音。
     fn begin_start(&self, session_id: i64) -> Result<bool, String> {
-        let mut starting = self.starting.lock().map_err(|_| "PTY 状态锁已损坏")?;
-        let sessions = self.sessions.lock().map_err(|_| "PTY 状态锁已损坏")?;
+        let mut starting = self.starting.lock().map_err(|_| LOCK_POISONED)?;
+        let sessions = self.sessions.lock().map_err(|_| LOCK_POISONED)?;
         let duplicate = sessions.contains_key(&session_id) || !starting.insert(session_id);
         if let Ok(mut completed) = self.completed.lock() {
             completed.remove(&session_id);
@@ -1009,7 +1035,7 @@ impl PtyBroker {
     /// spawn 完成后的登记。shutdown 先置 `shutting_down` 再抢同一把锁 drain，故在锁内复核：
     /// 复核看到的若是已置位，说明 drain 已结束，登记进去就是没人收尾的孤儿——调用方当场收尾。
     fn register_spawned(&self, session_id: i64, managed: &Arc<ManagedPty>) -> Result<(), String> {
-        let mut sessions = self.sessions.lock().map_err(|_| "PTY 状态锁已损坏")?;
+        let mut sessions = self.sessions.lock().map_err(|_| LOCK_POISONED)?;
         if self.shutting_down.load(Ordering::Acquire) {
             return Err("应用正在退出，放弃登记新会话".into());
         }
@@ -1371,24 +1397,31 @@ impl PtyBroker {
         rows: u16,
         provider: &str,
         launch_selections: &HashMap<String, String>,
+        // 跨 provider 切换时 = 被接替的旧会话 id；普通新建传 None。claim 认领时落接续链。
+        predecessor: Option<i64>,
     ) -> Result<i64, String> {
         let endpoint = self
             .attach
             .endpoint
             .lock()
-            .map_err(|_| "attach 状态锁已损坏")?
+            .map_err(|_| LOCK_POISONED)?
             .ok_or("attach 服务未启动")?;
         let launch_token = random_token();
         let temp_id = self.attach.next_pending.fetch_sub(1, Ordering::Relaxed);
         self.attach
             .pending
             .lock()
-            .map_err(|_| "PTY 临时会话锁已损坏")?
+            .map_err(|_| LOCK_POISONED)?
             .insert(launch_token.clone(), temp_id);
         // 启动选项随 token 暂存：会话行此刻还不存在（hook 认领时才建），claim 落库。
         if !launch_selections.is_empty() {
             if let Ok(mut map) = self.attach.pending_launch_args.lock() {
                 map.insert(launch_token.clone(), launch_selections.clone());
+            }
+        }
+        if let Some(old_sid) = predecessor {
+            if let Ok(mut map) = self.attach.pending_lineage.lock() {
+                map.insert(launch_token.clone(), old_sid);
             }
         }
         let mut launch_env = env.to_vec();
@@ -1416,6 +1449,9 @@ impl PtyBroker {
             if let Ok(mut map) = self.attach.pending_launch_args.lock() {
                 map.remove(&launch_token);
             }
+            if let Ok(mut map) = self.attach.pending_lineage.lock() {
+                map.remove(&launch_token);
+            }
             return Err(error);
         }
         Ok(temp_id)
@@ -1428,7 +1464,7 @@ impl PtyBroker {
         let session = self
             .sessions
             .lock()
-            .map_err(|_| "PTY 状态锁已损坏")?
+            .map_err(|_| LOCK_POISONED)?
             .get(&session_id)
             .cloned()
             .ok_or("PTY 会话未运行")?;
@@ -1449,7 +1485,7 @@ impl PtyBroker {
         let session = self
             .sessions
             .lock()
-            .map_err(|_| "PTY 状态锁已损坏")?
+            .map_err(|_| LOCK_POISONED)?
             .get(&session_id)
             .cloned()
             .ok_or("PTY 会话未运行")?;
@@ -1577,7 +1613,7 @@ impl PtyBroker {
         let session = self
             .sessions
             .lock()
-            .map_err(|_| "PTY 状态锁已损坏")?
+            .map_err(|_| LOCK_POISONED)?
             .get(&session_id)
             .cloned()
             .ok_or("PTY 会话未运行")?;
@@ -1614,7 +1650,7 @@ impl PtyBroker {
             .attach
             .endpoint
             .lock()
-            .map_err(|_| "attach 状态锁已损坏")? = Some(endpoint);
+            .map_err(|_| LOCK_POISONED)? = Some(endpoint);
         // 外部终端没有托管 PTY 注入的环境变量。把仅监听 loopback 的端点和随机 token
         // 登记到当前用户的数据目录，让同一用户启动的 reporter 也能把审批转交 GUI。
         // `pid` 是这份登记的有效性凭据：正常退出时 `shutdown` 会删文件，但崩溃时删不掉，
@@ -1871,7 +1907,7 @@ impl PtyBroker {
         if !self
             .sessions
             .lock()
-            .map_err(|_| "PTY 状态锁已损坏")?
+            .map_err(|_| LOCK_POISONED)?
             .contains_key(&session_id)
         {
             return Err("该会话尚未由 Meowo 接管".into());
@@ -1879,7 +1915,7 @@ impl PtyBroker {
         self.attach
             .endpoint
             .lock()
-            .map_err(|_| "attach 状态锁已损坏")?
+            .map_err(|_| LOCK_POISONED)?
             .ok_or("attach 服务未启动")?;
         Ok(())
     }
@@ -1923,7 +1959,7 @@ impl PtyBroker {
             .attach
             .approvals
             .lock()
-            .map_err(|_| "审批状态锁已损坏")?;
+            .map_err(|_| LOCK_POISONED)?;
         if approvals
             .get(request_id)
             .ok_or("审批请求已结束")?
@@ -1951,7 +1987,7 @@ impl PtyBroker {
             .attach
             .approvals
             .lock()
-            .map_err(|_| "审批状态锁已损坏")?;
+            .map_err(|_| LOCK_POISONED)?;
         let pending = approvals.get(request_id).ok_or("审批请求已结束")?;
         if pending.request.session_id != session_id {
             return Err("审批请求不属于该会话".into());
@@ -2033,6 +2069,16 @@ impl PtyBroker {
             .is_ok_and(|consumers| consumers.values().any(|session| *session == session_id))
     }
 
+    /// 有任何会话的消费者租约 = 对话窗的 WebView 活着且正显示着某条会话。
+    /// 与 [`crate::window::chat_window_in_view`] 合取才构成「用户正在看」：
+    /// 隐藏到托盘的窗口租约仍在（只有销毁才清），单凭租约不能断定有人注视。
+    fn has_any_approval_consumer(&self) -> bool {
+        self.attach
+            .approval_consumers
+            .lock()
+            .is_ok_and(|consumers| !consumers.is_empty())
+    }
+
     pub(crate) fn register_approval_consumer(
         &self,
         session_id: i64,
@@ -2044,7 +2090,7 @@ impl PtyBroker {
         self.attach
             .approval_consumers
             .lock()
-            .map_err(|_| "审批消费者状态锁已损坏".to_string())?
+            .map_err(|_| LOCK_POISONED.to_string())?
             .insert(consumer_id, session_id);
         Ok(())
     }
@@ -2141,7 +2187,7 @@ impl PtyBroker {
         let session = match self
             .sessions
             .lock()
-            .map_err(|_| "PTY 状态锁已损坏".to_string())
+            .map_err(|_| LOCK_POISONED.to_string())
             .and_then(|sessions| {
                 sessions
                     .get(&session_id)
@@ -2251,7 +2297,7 @@ impl PtyBroker {
         temp_id: i64,
         real_id: i64,
     ) -> Result<Option<Arc<ManagedPty>>, String> {
-        let mut sessions = self.sessions.lock().map_err(|_| "PTY 状态锁已损坏")?;
+        let mut sessions = self.sessions.lock().map_err(|_| LOCK_POISONED)?;
         if sessions.contains_key(&real_id) {
             return Err("真实 PTY 会话已存在".into());
         }
@@ -2276,7 +2322,7 @@ impl PtyBroker {
             .attach
             .pending
             .lock()
-            .map_err(|_| "PTY 临时会话锁已损坏")?
+            .map_err(|_| LOCK_POISONED)?
             .get(launch_token)
             .ok_or("PTY claim token 无效或已使用")?;
         // start 的 openpty+spawn 在锁外进行（冷启动+杀软扫描可达数秒），claim 又是一次性的
@@ -2291,7 +2337,7 @@ impl PtyBroker {
             let still_starting = self
                 .starting
                 .lock()
-                .map_err(|_| "PTY 状态锁已损坏")?
+                .map_err(|_| LOCK_POISONED)?
                 .contains(&temp_id);
             if !still_starting {
                 // 占位刚被摘掉：可能是登记落表（先 insert 后 remove，正常时上面一轮就该
@@ -2329,6 +2375,22 @@ impl PtyBroker {
                 let _ = store.set_session_launch_args(real_id, &json);
             }
         }
+        // 跨 provider 切换的接续链此刻才有会话行可指：双向成对写入（set_session_lineage
+        // 单事务）。best-effort 容错与 launch_args 同款——落库失败只丢「同一张卡」的
+        // 视觉折叠，不阻断认领；分叉被 store 层拒绝时同理（并发切换只有先到者成链）。
+        let lineage = self
+            .attach
+            .pending_lineage
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(launch_token));
+        if let Some(old_sid) = lineage {
+            if let Ok(store) = crate::open_store(&crate::db_path()) {
+                if let Err(e) = store.set_session_lineage(real_id, old_sid) {
+                    eprintln!("接续链落库失败（{old_sid} → {real_id}）: {e}");
+                }
+            }
+        }
         // 保持 Arc 活到映射完成，避免极短命进程在重绑边界提前析构。
         drop(managed);
         Ok(())
@@ -2361,12 +2423,25 @@ impl PtyBroker {
                 questions.insert(request.session_id, (request.clone(), crate::now_ms()));
             }
             if let Some(app) = self.attach.app.lock().ok().and_then(|app| app.clone()) {
-                // 与审批同等待遇：把对话窗切到该会话并闪任务栏（理由见 ensure_approval_window
-                // 的取舍注释——宁可切走一次，也不要让提问悄悄漏过）。quiet 同理不抢焦点。
-                crate::window::open_chat_window_quiet(app.clone(), request.session_id);
-                if let Some(window) = app.get_webview_window("chat") {
-                    let _ =
-                        window.request_user_attention(Some(tauri::UserAttentionType::Critical));
+                // 与审批同一套召唤策略（approval_summon_action）：用户正盯着别的会话时
+                // 不切窗只闪烁 + 亮徽标，题面已入表，用户过去时轮询可取；窗口不在眼前
+                // 才切会话安静唤醒。quiet 同理不抢焦点。
+                // 对话功能关闭时整段跳过：提问已放行、表单在终端里作答，弹窗与闪烁都是噪音。
+                if crate::settings::load_settings().chat_enabled {
+                    match approval_summon_action(
+                        self.has_approval_consumer(request.session_id),
+                        self.has_any_approval_consumer(),
+                        crate::window::chat_window_in_view(&app),
+                    ) {
+                        SummonAction::Summon => {
+                            crate::window::open_chat_window_quiet(app.clone(), request.session_id);
+                        }
+                        SummonAction::Ready | SummonAction::Hold => {}
+                    }
+                    if let Some(window) = app.get_webview_window("chat") {
+                        let _ =
+                            window.request_user_attention(Some(tauri::UserAttentionType::Critical));
+                    }
                 }
             }
             self.emit_approval("interactive-question", &request);
@@ -2381,7 +2456,7 @@ impl PtyBroker {
         self.attach
             .approvals
             .lock()
-            .map_err(|_| "审批状态锁已损坏")?
+            .map_err(|_| LOCK_POISONED)?
             .insert(
                 request.request_id.clone(),
                 PendingApproval {
@@ -2398,15 +2473,137 @@ impl PtyBroker {
             return stream.write_all(b"pass\n").map_err(|e| e.to_string());
         }
         self.emit_approval("pending-approval", &request);
-        let decision = rx.recv_timeout(std::time::Duration::from_secs(300)).ok();
+        // 等 GUI 决策的同时监视「已在终端结算」的信号(见 await_approval_outcome)——TUI
+        // 权限框与 hook 是并行竞速的(claude 官方 hooks 文档明载),用户完全可能直接在终端
+        // 作答。此前这里盲等满 300s,对话页的审批卡片残留成幽灵卡(实拍:终端已批准,切回
+        // 对话页倒计时还在走)。store 打不开时探针恒 None,退化为断连+超时两路,不会更坏。
+        let store = crate::open_store(&crate::db_path()).ok();
+        let outcome = await_approval_outcome(
+            &rx,
+            &stream,
+            std::time::Instant::now() + std::time::Duration::from_secs(300),
+            std::time::Duration::from_millis(500),
+            || {
+                store
+                    .as_ref()
+                    .and_then(|s| s.session_pending_review(request.session_id).ok())
+                    .map(|pending| pending.is_some())
+            },
+        );
         if let Ok(mut approvals) = self.attach.approvals.lock() {
             approvals.remove(&request.request_id);
         }
         self.emit_approval("pending-approval-cleared", &request);
-        let response = format!("{}\n", decision.unwrap_or(ApprovalDecision::Pass).as_wire());
+        let decision = match outcome {
+            // 对端已死,写响应只会得到 broken pipe——收尾即可,卡片已随上面的事件清掉。
+            ApprovalWait::PeerGone => return Ok(()),
+            ApprovalWait::Decision(decision) => decision,
+            // 别处结算时 hook 若还活着,pass 让它零决策退出——CLI 反正会丢弃迟到的 hook
+            // 结果;超时沿用既有语义交还终端。
+            ApprovalWait::TimedOut | ApprovalWait::ResolvedElsewhere => ApprovalDecision::Pass,
+        };
+        let _ = stream.set_nonblocking(false);
         stream
-            .write_all(response.as_bytes())
+            .write_all(format!("{}\n", decision.as_wire()).as_bytes())
             .map_err(|e| e.to_string())
+    }
+}
+
+/// 审批/提问到达时对对话窗的召唤动作。
+#[derive(Debug, PartialEq, Eq)]
+enum SummonAction {
+    /// 目标会话已有消费者（用户就在这条会话上）：无需任何窗口操作。
+    Ready,
+    /// 用户正盯着**别的**会话：不切窗，只闪任务栏 + 让前端亮徽标，请求保持可领取。
+    Hold,
+    /// 窗口不在用户眼前（隐藏/最小化/未创建）：切到目标会话安静唤醒。
+    Summon,
+}
+
+/// 召唤策略的纯决策（供单测）。参数依次是：目标会话是否已有消费者租约、
+/// 是否存在任何消费者租约、对话窗是否在用户眼前（可见且未最小化）。
+///
+/// 「有租约但窗口不在眼前」（隐藏到托盘：WebView 活着、租约未清）必须走 Summon——
+/// 那时不存在可打断的注视，而 Hold 的徽标没人看得见，等同把审批藏起来。
+fn approval_summon_action(
+    has_target_consumer: bool,
+    has_any_consumer: bool,
+    window_in_view: bool,
+) -> SummonAction {
+    if has_target_consumer {
+        SummonAction::Ready
+    } else if has_any_consumer && window_in_view {
+        SummonAction::Hold
+    } else {
+        SummonAction::Summon
+    }
+}
+
+/// 审批等待的结局:GUI 决策 / 超时 / 对端断开 / 已在别处结算,四路信号谁先到算谁的。
+#[derive(Debug, PartialEq, Eq)]
+enum ApprovalWait {
+    Decision(ApprovalDecision),
+    TimedOut,
+    PeerGone,
+    ResolvedElsewhere,
+}
+
+/// 审批等待循环(纯逻辑,供单测)。除 GUI 决策与超时外,还监视两路「已在终端结算」的信号:
+///
+/// 1. **连接断开**(PeerGone):用户在 TUI 作答后 CLI 会取消 hook,reporter 进程一死,
+///    对端 EOF/RESET 经 peek 立刻可见。也覆盖 CLI 崩溃/会话被杀。
+/// 2. **pending_review 从「已置位」翻到「已清除」**(ResolvedElsewhere):作答后
+///    PostToolUse/Stop 落库清位,覆盖 hook 没有被杀的形态。必须先观察到置位才认清除——
+///    reporter 在连 broker **之前**就已把它置位,从未见到置位只有两种解释:写库失败
+///    (codex 的 hook 可能继承只读沙箱)或迟到的上一工具事件抢先清了位,这两种「清除」
+///    都不是本请求的结算;认了就是把活着的审批误撤。再要求连续两拍确认,躲开毫秒级的
+///    事件乱序窗口。
+///
+/// peek 依赖非阻塞模式;set_nonblocking 失败时跳过对端监视(阻塞 peek 会挂死循环),
+/// 退化为其余三路。probe 返回 None = 本拍读不到状态(store 没开成/查询失败),跳过。
+fn await_approval_outcome(
+    rx: &mpsc::Receiver<ApprovalDecision>,
+    stream: &TcpStream,
+    deadline: std::time::Instant,
+    tick: std::time::Duration,
+    mut pending_review_probe: impl FnMut() -> Option<bool>,
+) -> ApprovalWait {
+    let peer_watch = stream.set_nonblocking(true).is_ok();
+    let mut seen_pending = false;
+    let mut cleared_streak = 0u8;
+    loop {
+        match rx.recv_timeout(tick) {
+            Ok(decision) => return ApprovalWait::Decision(decision),
+            // tx 被清理路径摘走(会话结束清租约等):按超时语义交还终端。
+            Err(mpsc::RecvTimeoutError::Disconnected) => return ApprovalWait::TimedOut,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return ApprovalWait::TimedOut;
+        }
+        if peer_watch {
+            let mut probe = [0u8; 1];
+            match stream.peek(&mut probe) {
+                Ok(0) => return ApprovalWait::PeerGone,
+                // 协议上对端此刻不会再发数据;真有字节也不影响继续等。
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return ApprovalWait::PeerGone,
+            }
+        }
+        match pending_review_probe() {
+            Some(true) => {
+                seen_pending = true;
+                cleared_streak = 0;
+            }
+            Some(false) if seen_pending => {
+                cleared_streak += 1;
+                if cleared_streak >= 2 {
+                    return ApprovalWait::ResolvedElsewhere;
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -2927,6 +3124,21 @@ mod tests {
         );
     }
 
+    /// 召唤策略:目标会话已有消费者→Ready;用户盯着别的会话(有租约+窗口在眼前)→Hold
+    /// 不夺屏;窗口不在眼前(含「租约在但窗口隐藏」的托盘态)→Summon 切会话召唤。
+    #[test]
+    fn summon_policy_never_yanks_a_watched_window() {
+        use super::{approval_summon_action, SummonAction};
+        assert_eq!(approval_summon_action(true, true, true), SummonAction::Ready);
+        // 在眼前与否不影响 Ready:请求靠事件+轮询送达已注册的消费者。
+        assert_eq!(approval_summon_action(true, true, false), SummonAction::Ready);
+        assert_eq!(approval_summon_action(false, true, true), SummonAction::Hold);
+        // 租约还在但窗口收进托盘:徽标没人看得见,必须召唤。
+        assert_eq!(approval_summon_action(false, true, false), SummonAction::Summon);
+        assert_eq!(approval_summon_action(false, false, true), SummonAction::Summon);
+        assert_eq!(approval_summon_action(false, false, false), SummonAction::Summon);
+    }
+
     /// AskUserQuestion 是提问不是权限：必须立即回 allow（TUI 表单零延迟），且**绝不入
     /// 审批表**——入了表 GUI 会看到一张没人能消解的幽灵审批卡。对照：普通工具在无 GUI
     /// 消费者时按既有语义回 pass 交还终端。
@@ -2963,6 +3175,65 @@ mod tests {
         );
         // 普通工具不受影响：无 GUI 消费者 → 撤回并交还终端（pass）。
         assert_eq!(roundtrip(&broker, "Bash"), "pass");
+    }
+
+    /// 审批等待循环的四路信号。场景即实拍 bug：TUI 权限框与 hook 并行竞速，用户在终端里
+    /// 批准后 GUI 卡片却要盲等满 300s 才消失——断连与 pending_review 清位两路信号都必须
+    /// 能提前结束等待，且「从未见置位的清除」不得误当结算。
+    #[test]
+    fn approval_wait_settles_on_terminal_side_signals() {
+        use std::time::{Duration, Instant};
+        fn pair() -> (TcpStream, TcpStream) {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            (client, server)
+        }
+        let tick = Duration::from_millis(5);
+        let far = || Instant::now() + Duration::from_secs(5);
+
+        // 对端断开（CLI 取消 hook → reporter 进程死）→ PeerGone。
+        let (client, server) = pair();
+        let (_tx, rx) = mpsc::channel::<ApprovalDecision>();
+        drop(client);
+        assert_eq!(
+            await_approval_outcome(&rx, &server, far(), tick, || Some(true)),
+            ApprovalWait::PeerGone
+        );
+
+        // pending_review 先置位再清除（作答后 PostToolUse 落库）→ 连续两拍确认后结算。
+        let (_client2, server2) = pair();
+        let (_tx2, rx2) = mpsc::channel::<ApprovalDecision>();
+        let mut ticks = 0;
+        let outcome = await_approval_outcome(&rx2, &server2, far(), tick, move || {
+            ticks += 1;
+            Some(ticks <= 2) // 两拍置位，此后清除
+        });
+        assert_eq!(outcome, ApprovalWait::ResolvedElsewhere);
+
+        // 从未观察到置位的「清除」不是本请求的结算（写库失败 / 迟到的上一工具事件）：
+        // 只能走到超时。
+        let (_client3, server3) = pair();
+        let (_tx3, rx3) = mpsc::channel::<ApprovalDecision>();
+        assert_eq!(
+            await_approval_outcome(
+                &rx3,
+                &server3,
+                Instant::now() + Duration::from_millis(40),
+                tick,
+                || Some(false)
+            ),
+            ApprovalWait::TimedOut
+        );
+
+        // GUI 决策最高优先：先于任何监视信号被消费。
+        let (_client4, server4) = pair();
+        let (tx4, rx4) = mpsc::channel::<ApprovalDecision>();
+        tx4.send(ApprovalDecision::Allow).unwrap();
+        assert_eq!(
+            await_approval_outcome(&rx4, &server4, far(), tick, || Some(true)),
+            ApprovalWait::Decision(ApprovalDecision::Allow)
+        );
     }
 
     /// 字节流 → 终端仿真 → 规则判定的端到端：真实风格的 ANSI（全屏重绘、光标定位、SGR、

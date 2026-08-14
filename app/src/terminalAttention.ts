@@ -124,6 +124,13 @@ const CLAUDE_GRAMMAR: AttentionGrammar = {
       patterns: ["this command requires approval", "do you want to proceed\\?"],
       last: true,
     },
+    {
+      // 计划模式批准提示。该提示不触发任何 hook（上游回归，取证见插件声明处注释），
+      // pendingReview 门控的选择器识别接不到它，整句识别是唯一出口。
+      id: "claude:plan-approval",
+      patterns: ["written\\s+up\\s+a\\s+plan\\s+and\\s+is\\s+ready\\s+to\\s+execute"],
+      last: true,
+    },
   ],
 };
 

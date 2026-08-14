@@ -65,6 +65,30 @@ fn parse_posttooluse_todowrite() {
     assert_eq!(todos[1].content, "b");
 }
 
+/// tool_response 形状不统一：裸字符串之外还有内容块数组 / 包 content 一层的对象。
+/// 三种都得能抠出编号——漏一种就是那批用户的任务静默不显示。
+#[test]
+fn todo_delta_reads_task_number_from_block_shaped_responses() {
+    for resp in [
+        r#""Task #7 created successfully: x""#,
+        r#"[{"type":"text","text":"Task #7 created successfully: x"}]"#,
+        r#"{"content":[{"type":"text","text":"Task #7 created successfully: x"}]}"#,
+    ] {
+        let json = format!(
+            r#"{{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"TaskCreate",
+                "tool_input":{{"subject":"x"}},"tool_response":{resp}}}"#
+        );
+        let ev = HookEvent::parse(&json).expect("parse");
+        match ev.todo_delta() {
+            Some(meowo_store::TodoDelta::Create { external_id, content }) => {
+                assert_eq!(external_id, "7", "resp={resp}");
+                assert_eq!(content, "x");
+            }
+            other => panic!("应解析出 Create，得到 {other:?}（resp={resp}）"),
+        }
+    }
+}
+
 #[test]
 fn parse_tolerates_unknown_fields() {
     let json = r#"{"hook_event_name":"Stop","session_id":"z","extra":123}"#;
@@ -160,6 +184,77 @@ fn kimi_todo_list_snapshot_lands_in_the_store() {
     let csid = store.find_session_id_pub("c1").unwrap().unwrap();
     let ctid = store.task_id_of_session_pub(csid).unwrap();
     assert!(store.list_todos(ctid).unwrap().is_empty());
+}
+
+/// claude 现版本的任务是增量式（TaskCreate 单条建、TaskUpdate 按编号改），不是 TodoWrite
+/// 快照——编号只出现在**结果文本**里，必须从 tool_response 抠出来逐条累积。此前没有这条
+/// 路径，新版 claude 会话的待办表恒空，对话窗与标题栏都无从显示任务进度。
+#[test]
+fn claude_task_delta_accumulates_into_todos() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"s1","cwd":"/home/me/proj"}"#),
+        100,
+    )
+    .unwrap();
+    // 两条 TaskCreate：编号在结果文本里（真实 transcript 取证的格式）。
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TaskCreate",
+        "tool_input":{"subject":"生成基线迁移","description":"…"},
+        "tool_response":"Task #1 created successfully: 生成基线迁移"}"#), 200).unwrap();
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TaskCreate",
+        "tool_input":{"subject":"删除旧迁移"},
+        "tool_response":"Task #2 created successfully: 删除旧迁移"}"#), 300).unwrap();
+    // TaskUpdate：taskId 数字/字符串两种形态都得认。
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TaskUpdate",
+        "tool_input":{"taskId":"1","status":"in_progress"}}"#), 400).unwrap();
+
+    let sid = store.find_session_id_pub("s1").unwrap().unwrap();
+    let tid = store.task_id_of_session_pub(sid).unwrap();
+    let todos = store.list_todos(tid).unwrap();
+    assert_eq!(
+        todos.iter().map(|t| t.content.as_str()).collect::<Vec<_>>(),
+        vec!["生成基线迁移", "删除旧迁移"]
+    );
+    assert_eq!(todos[0].status.as_str(), "in_progress");
+    assert_eq!(todos[1].status.as_str(), "pending");
+    // 有 in_progress → 看板列推导为 doing（与快照路径同口径）。
+    assert_eq!(store.get_task(tid).unwrap().column, "doing");
+
+    // 完成 + 删除：completed 落状态，deleted 是删行而不是一种状态。
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TaskUpdate",
+        "tool_input":{"taskId":1,"status":"completed"}}"#), 500).unwrap();
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TaskUpdate",
+        "tool_input":{"taskId":"2","status":"deleted"}}"#), 600).unwrap();
+    let todos = store.list_todos(tid).unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].status.as_str(), "completed");
+    assert_eq!(store.get_task(tid).unwrap().column, "done");
+
+    // 重放同一条 Create（hook 重复投递）不长重复行。
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TaskCreate",
+        "tool_input":{"subject":"生成基线迁移(改名)"},
+        "tool_response":"Task #1 created successfully: 生成基线迁移(改名)"}"#), 700).unwrap();
+    let todos = store.list_todos(tid).unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].content, "生成基线迁移(改名)");
+}
+
+/// 结果文本改版/缺失时解析放弃，事件降级为 touch——绝不能造错误编号或报错冒泡。
+#[test]
+fn claude_task_create_without_parsable_response_is_a_noop() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"s1","cwd":"/home/me/proj"}"#),
+        100,
+    )
+    .unwrap();
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TaskCreate",
+        "tool_input":{"subject":"x"},"tool_response":"格式变了"}"#), 200).unwrap();
+    let sid = store.find_session_id_pub("s1").unwrap().unwrap();
+    let tid = store.task_id_of_session_pub(sid).unwrap();
+    assert!(store.list_todos(tid).unwrap().is_empty());
 }
 
 #[test]

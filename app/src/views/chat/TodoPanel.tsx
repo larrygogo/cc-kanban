@@ -1,7 +1,8 @@
 import { useT } from "../../i18n";
+import { TodoBadge } from "./TodoBadge";
 
 /// Agent 的待办清单。默认展开当前正在做的那条附近，完成项划掉——与各家 TUI 的呈现一致。
-/// 长清单收进 details，避免把对话推走。
+/// 长清单收进 details，避免把对话推走。状态图标与标题栏进度面板同一套徽章(TodoBadge)。
 export function TodoPanel({ todos }: { todos: { content: string; status: string }[] }) {
   const t = useT();
   const done = todos.filter((todo) => todo.status === "completed").length;
@@ -18,9 +19,7 @@ export function TodoPanel({ todos }: { todos: { content: string; status: string 
       <ul className="chat-todos-list">
         {todos.map((todo, index) => (
           <li key={`${index}:${todo.content}`} className={"is-" + todo.status}>
-            <span className="chat-todo-mark" aria-hidden="true">
-              {todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "●" : "○"}
-            </span>
+            <TodoBadge status={todo.status} small />
             <span className="chat-todo-text">{todo.content}</span>
           </li>
         ))}

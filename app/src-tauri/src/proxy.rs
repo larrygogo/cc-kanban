@@ -217,7 +217,7 @@ fn normalize_proxy_url(url: &str) -> Result<Cow<'_, str>, String> {
         return Ok(Cow::Borrowed(u));
     };
     if host.is_empty() || port.is_empty() || user.is_empty() || pass.is_empty() {
-        return Err("host:port:user:pass 格式中的主机、端口、用户名和密码都不能为空".into());
+        return Err("host:port:user:pass 四段都不能为空".into());
     }
 
     // RFC 3986 unreserved 字符（ALPHA / DIGIT / "-._~"）在 URI 中本来就安全，必须原样保留。

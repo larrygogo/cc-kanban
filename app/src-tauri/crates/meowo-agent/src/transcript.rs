@@ -335,6 +335,13 @@ pub trait TranscriptSpec: Sync {
         Vec::new()
     }
 
+    /// 带 transcript 文件路径上下文的行解析：行内引用落在文件旁的资源时（kimi 把用户
+    /// 粘贴的图片记成 blobref，正文在 wire.jsonl 旁的 `blobs/` 目录）需要覆写它。
+    /// 默认忽略路径、退回 [`TranscriptSpec::parse_transcript_line`]。
+    fn parse_transcript_line_in(&self, _path: &Path, line: &str) -> Vec<TranscriptEvent> {
+        self.parse_transcript_line(line)
+    }
+
     /// 从一条完整 transcript 记录中提取零到多个模式维度更新。默认不支持。
     fn agent_modes_from_line(&self, _line: &str) -> Vec<AgentMode> {
         Vec::new()
@@ -505,7 +512,7 @@ pub fn read_chat_delta(
             }
         }
         items.extend(
-            spec.parse_transcript_line(line)
+            spec.parse_transcript_line_in(path, line)
                 .into_iter()
                 .map(ChatItem::from),
         );

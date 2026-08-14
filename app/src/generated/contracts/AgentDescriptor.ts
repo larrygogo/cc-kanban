@@ -64,6 +64,14 @@ supports_profiles: boolean,
  */
 supports_context: boolean, 
 /**
+ * 这个 agent 的会话历史能不能**导出交接**（＝transcript 能力槽 + `supports_chat()`）。
+ *
+ * 决定「切换引擎」入口的可见性：为 false（gemini/opencode：无结构化 transcript）的
+ * 会话没有可交接的历史，跨 provider 切换只能以它为**目标**、不能以它为来源。
+ * 前端不得按 id 判断——这正是守卫测试盯着的那类分支。
+ */
+supports_chat_export: boolean, 
+/**
  * 新建会话的启动选项（选择 → CLI flag 映射，由插件声明）。空 = 面板不给选项栏。
  * 前端只回传 choice id，翻译成 argv 在后端按这张表进行——用户输入进不了命令行。
  */

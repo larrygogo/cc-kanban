@@ -188,12 +188,15 @@ export function Dropdown<T extends string | number>({
   options,
   onChange,
   align = "right",
+  disabled,
 }: {
   value: T;
   options: { value: T; label: string; icon?: ReactElement; muted?: boolean }[];
   onChange: (v: T) => void;
   /** 水平对齐：默认右对齐（设置页行尾）；`"left"` 左对齐并钉成按钮宽（新建会话的整宽表单）。 */
   align?: "left" | "right";
+  /** 被上游设置门控时置灰（行保留 + 原因写在 row-desc），而不是整行隐藏。 */
+  disabled?: boolean;
 }) {
   const { open, setOpen, pos, ref, btnRef, menuRef, toggle, onKeyDown } = useMenuPopup({ align });
   const cur = options.find((o) => o.value === value);
@@ -205,6 +208,7 @@ export function Dropdown<T extends string | number>({
         className={"dd-btn" + (open ? " open" : "")}
         aria-haspopup="listbox"
         aria-expanded={open}
+        disabled={disabled}
         onClick={toggle}
       >
         <span className="dd-val">

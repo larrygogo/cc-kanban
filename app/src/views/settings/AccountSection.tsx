@@ -31,6 +31,7 @@ import {
 } from "../../api";
 import { agentAssets } from "../../providers";
 import { useT, repairFailMessage } from "../../i18n";
+import { formatBackendError } from "../../i18n/errors";
 import type { Dict } from "../../i18n/zh";
 import { Switch } from "./widgets";
 import { ActionMenu, Dropdown } from "../menu";
@@ -353,26 +354,23 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
         // 后端保存时顺手接了 hooks（settings.json 此刻必然存在）——重查让「未接入」提示条消失。
         checkProviderHooks(provider).then(setHooksStatus).catch(() => {});
       })
-      .catch((e) => setApiKeyMsg(t.account.apiKeyFailed(String(e))))
+      .catch((e) => setApiKeyMsg(t.account.apiKeyFailed(formatBackendError(e, t.locale))))
       .finally(() => setApiKeyBusy(false));
   };
 
   // 当前 provider 是否在贴纸配额列表中
   const inQuota = settings?.sticker_quota_providers?.includes(provider) ?? false;
 
+  // 退出登录可逆(重新登录即可,数据不删),不弹确认——直接执行,结果就地提示。
   const startLogout = async () => {
-    const yes = await appConfirm(t.account.logoutConfirm(name), {
-      title: t.account.logout,
-      danger: true,
-    });
-    if (!yes) return;
     setLogoutBusy(true);
     setLogoutMsg(null);
     try {
       await logoutAgent(provider);
+      setLogoutMsg(t.account.loggedOut);
       onLoggedIn();
     } catch (e) {
-      setLogoutMsg(t.account.logoutFailed(String(e)));
+      setLogoutMsg(t.account.logoutFailed(formatBackendError(e, t.locale)));
     } finally {
       setLogoutBusy(false);
     }
@@ -745,7 +743,7 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
       reload();
       onChanged();
     } catch (e) {
-      setErr(String(e));
+      setErr(formatBackendError(e, t.locale));
     } finally {
       setBusy(false);
     }
@@ -796,18 +794,10 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
   };
 
   /**
-   * 退出登录。**与删除账号不是一回事**：登出只清凭据，目录、配置、会话历史都留着，之后还能登回来；
-   * 删除则连目录一起抹掉，且默认账号根本删不掉（那是 agent 自己的目录）——所以登出是它唯一的退出手段。
-   *
-   * 清凭据不可逆，故同样要确认。
+   * 退出登录。**与删除账号不是一回事**：登出只清凭据，目录、配置、会话历史都留着，之后还能登回来。
+   * 可逆操作不设确认，直接执行（失败由 run 就地显示）。
    */
-  const logout = async (p: ProfileView) => {
-    const label = p.name || t.account.defaultProfile;
-    const yes = await appConfirm(t.account.logoutConfirm(label), {
-      title: t.account.logout,
-      danger: true,
-    });
-    if (!yes) return;
+  const logout = (p: ProfileView) => {
     run(() => logoutAgent(provider, p.id));
   };
 
@@ -913,7 +903,7 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
                 onClick={() => {
                   setErr(null);
                   const request = profileLoginPending ? onCancelLogin() : onStartLogin(p.id);
-                  void request.catch((e) => setErr(String(e)));
+                  void request.catch((e) => setErr(formatBackendError(e, t.locale)));
                 }}
               >
                 {profileLoginPending ? t.account.cancelLogin : t.account.login}

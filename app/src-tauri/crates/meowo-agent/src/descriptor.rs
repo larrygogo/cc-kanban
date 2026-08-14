@@ -53,6 +53,12 @@ pub struct AgentDescriptor {
     /// 为 false（gemini：官方 hook 不给 token；opencode：会话 token 在它自己库里，不经 hook）时，
     /// 前端显式标注「上下文占用：不支持」——不留空白让用户以为是 bug。
     pub supports_context: bool,
+    /// 这个 agent 的会话历史能不能**导出交接**（＝transcript 能力槽 + `supports_chat()`）。
+    ///
+    /// 决定「切换引擎」入口的可见性：为 false（gemini/opencode：无结构化 transcript）的
+    /// 会话没有可交接的历史，跨 provider 切换只能以它为**目标**、不能以它为来源。
+    /// 前端不得按 id 判断——这正是守卫测试盯着的那类分支。
+    pub supports_chat_export: bool,
     /// 新建会话的启动选项（选择 → CLI flag 映射，由插件声明）。空 = 面板不给选项栏。
     /// 前端只回传 choice id，翻译成 argv 在后端按这张表进行——用户输入进不了命令行。
     pub launch_options: &'static [crate::LaunchOption],
@@ -80,6 +86,10 @@ impl AgentDescriptor {
             supports_api_key_login: plugin.api_key_login().is_some(),
             supports_profiles: plugin.profile().is_some(),
             supports_context: plugin.provides_context(),
+            supports_chat_export: plugin
+                .telemetry()
+                .and_then(|telemetry| telemetry.transcript())
+                .is_some_and(|spec| spec.supports_chat()),
             launch_options: plugin.launch_options(),
             relay,
         }

@@ -431,6 +431,16 @@ pub(crate) fn open_chat_window_quiet(app: tauri::AppHandle, session_id: i64) {
     });
 }
 
+/// 对话窗此刻是否「在用户眼前」：存在、可见、且未最小化。审批/提问的召唤策略据此
+/// 分流——在眼前时窗口里必有用户正在看的会话，强行切会话是夺屏（实拍反馈：正在 A
+/// 会话里阅读/打字，B 会话一来审批就被瞬间拽走）；不在眼前（隐藏/最小化/未创建）时
+/// 切换无打断，仍走切会话召唤。查询失败按「不在眼前」处理：宁可多召唤一次，
+/// 不可让审批悄悄没入后台。
+pub(crate) fn chat_window_in_view(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("chat")
+        .is_some_and(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
+}
+
 /// 显示但不激活：Windows 用 SW_SHOWNOACTIVATE（普通 show 会激活并抢焦点）。
 /// 其余平台退化为普通 show——macOS 上显示非激活 App 的窗口本就不跨应用抢焦点
 /// （激活策略未变），够用。

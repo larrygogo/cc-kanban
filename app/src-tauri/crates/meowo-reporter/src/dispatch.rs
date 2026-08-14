@@ -66,9 +66,22 @@ pub fn dispatch(
                     meowo_agent::by_id(provider)
                         .is_some_and(|plugin| plugin.todo_snapshot_tools().contains(&name))
                 });
+                // claude 现版本的增量任务工具（TaskCreate/TaskUpdate）：逐条累积而非覆盖写。
+                let todo_delta_tool = ev.tool_name.as_deref().is_some_and(|name| {
+                    meowo_agent::by_id(provider)
+                        .is_some_and(|plugin| plugin.todo_delta_tools().contains(&name))
+                });
                 match ev.tool_name.as_deref() {
                     _ if todo_tool => {
                         store.sync_todos(sid, &ev.todo_items(), now_ms)?;
+                    }
+                    _ if todo_delta_tool => {
+                        // 解析不出（结果文本改版等）降级为 touch——任务工具是元操作，
+                        // 不该像普通工具那样把名字写进 current_activity。
+                        match ev.todo_delta() {
+                            Some(delta) => store.apply_todo_delta(sid, &delta, now_ms)?,
+                            None => store.touch_session(sid, now_ms)?,
+                        }
                     }
                     Some("Bash") => {
                         if let Some(cmd) = ev.bash_command() {

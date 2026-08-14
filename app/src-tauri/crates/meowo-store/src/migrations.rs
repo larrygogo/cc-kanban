@@ -39,7 +39,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- 不回放的话每次重启都重置成 CLI 默认。接管时用户改了权限模式会合并写回（成为
     -- 会话新的持久形态）。存选择而非 flag：CLI 改 flag 名不受影响，且能按选项维度合并。
     -- NULL = 从未选过任何选项（或会话非 meowo 启动），恢复时不追加任何 flag。
-    launch_args    TEXT
+    launch_args    TEXT,
+    -- 跨 provider 切换的接续链（两列在 set_session_lineage 的同一事务里成对写入）：
+    -- predecessor_id：本会话接替的上一段会话 id。NULL = 非切换产生的普通会话。
+    -- superseded_by：本会话已被哪个后继接替。非 NULL 的行从看板列表/角标里折叠隐藏
+    -- （谓词 superseded_by IS NULL，见 query.rs——四处口径必须同生共死），
+    -- 但按 id 直取的回看路径（get_chat_history / session_header）不受影响。
+    predecessor_id INTEGER,
+    superseded_by  INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -59,7 +66,10 @@ CREATE TABLE IF NOT EXISTS todos (
     task_id   INTEGER NOT NULL REFERENCES tasks(id),
     content   TEXT NOT NULL,
     status    TEXT NOT NULL,
-    order_idx INTEGER NOT NULL
+    order_idx INTEGER NOT NULL,
+    -- agent 自己的任务编号（claude TaskCreate 的 "1"/"2"…）。增量更新（TaskUpdate）靠它
+    -- 定位行；快照式同步（sync_todos）不写它，恒 NULL。
+    external_id TEXT
 );
 
 -- events: 预留给后续计划的事件审计流，当前管线尚未写入。

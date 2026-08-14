@@ -99,6 +99,9 @@ pub(super) static RULES: &[ScreenRule] = &[
                 Matcher::Contains(&["tab/arrow keys"]),
                 Matcher::Contains(&["arrow keys to navigate"]),
                 Matcher::Contains(&["↑/↓ to navigate"]),
+                // 计划批准对话框没有上面任何一条按键提示,选项行又以 ❯ 开头——不否决
+                // 就会被本条(950,可见 idle)压过 plan_approval_prompt(830,blocked)。
+                Matcher::Contains(&["written up a plan"]),
             ]),
         ]),
     )
@@ -153,6 +156,27 @@ pub(super) static RULES: &[ScreenRule] = &[
                 Matcher::NumberedOption('2', "yes"),
                 Matcher::NumberedOption('2', "no"),
                 Matcher::NumberedOption('3', "no"),
+            ]),
+        ]),
+    )
+    .visible(),
+    // 计划模式批准提示（2.1.227 plan-file 流程，实拍取证）：
+    //   Claude has written up a plan and is ready to execute. Would you like to proceed?
+    //   ❯ 1. Yes, and bypass permissions / 2. Yes, manually approve edits / …
+    // 它**不触发**任何 hook（上游回归，PreToolUse:ExitPlanMode 与 PermissionRequest 都
+    // 缺席），没有 pending_review 兜底，本条是「待交互」状态的唯一来源。指纹拆成两段
+    // 短子串（region_contains 逐行匹配，整句在窄终端会折行）再叠编号 Yes 项，问句
+    // "would you like to proceed?" 绝不单独作证——正文引用该句的场合太多。
+    ScreenRule::new(
+        "plan_approval_prompt",
+        ScreenState::Blocked,
+        830,
+        Region::WholeScreen,
+        Matcher::All(&[
+            Matcher::Contains(&["written up a plan", "would you like to proceed?"]),
+            Matcher::Any(&[
+                Matcher::NumberedOption('1', "yes"),
+                Matcher::NumberedOption('2', "yes"),
             ]),
         ]),
     )

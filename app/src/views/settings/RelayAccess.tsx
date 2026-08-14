@@ -12,6 +12,7 @@ import {
   type Settings,
 } from "../../api";
 import { useT } from "../../i18n";
+import { formatBackendError } from "../../i18n/errors";
 import { Segmented, Switch } from "./widgets";
 import { Dropdown } from "../menu";
 
@@ -337,7 +338,7 @@ function RelayAccessSupported({ agent, settings, patch, capability }: {
         if (seq === modelsRequestSeq.current) setRemoteModels(models);
       })
       .catch((e) => {
-        if (seq === modelsRequestSeq.current) setModelsError(t.relay.modelFetchFailed(String(e)));
+        if (seq === modelsRequestSeq.current) setModelsError(t.relay.modelFetchFailed(formatBackendError(e, t.locale)));
       })
       .finally(() => {
         if (seq === modelsRequestSeq.current) setModelsLoading(false);
@@ -389,8 +390,20 @@ function RelayAccessSupported({ agent, settings, patch, capability }: {
           void saveRule({ ...rule, enabled: true });
         }
       })
-      .catch((e) => setErr(String(e)));
+      .catch((e) => setErr(formatBackendError(e, t.locale)));
   };
+
+  // 未启用时把「还差哪几项」直接列出来——「填齐才自动启用」的规则此前只有一句笼统说明,
+  // 用户不知道自己还缺什么。
+  const missingFields = (() => {
+    const n = normalizeRule(rule);
+    const out: string[] = [];
+    if (!n.base_url.trim()) out.push(t.relay.baseUrl);
+    if (!n.model.trim()) out.push(t.relay.model);
+    if (!secretSaved) out.push(t.relay.secret);
+    if (capability.protocols.length && !n.protocol) out.push(t.relay.protocol);
+    return out;
+  })();
 
   const authOptions: { value: RelayAuth; label: string }[] = capability.auth_modes.map((option) => ({
     value: option.value,
@@ -508,7 +521,11 @@ function RelayAccessSupported({ agent, settings, patch, capability }: {
             )}
           </div>
           <div className="row-desc relay-coverage">
-            {rule.enabled ? t.relay.coverage : t.relay.completeToEnable}
+            {rule.enabled
+              ? t.relay.coverage
+              : missingFields.length
+              ? t.relay.missingFields(missingFields)
+              : t.relay.completeToEnable}
           </div>
         </>
       )}

@@ -73,11 +73,38 @@ fn write_atomic_impl(
     Ok(())
 }
 
-/// 粘贴/插话附件共用的临时根目录（`$TEMP/meowo-paste`）。三个消费方必须指同一处：
+/// 粘贴/插话附件共用的临时根目录（`$TEMP/meowo-paste`）。四个消费方必须指同一处：
 /// meowo-app `chat.rs` 的粘贴附件落盘、claude transcript 的排队插话图片落盘、
-/// `tauri.conf.json` 的 asset 协议 scope（前端据此渲染缩略图）。改路径三处一起改。
+/// kimi transcript 的用户消息图片落盘、`tauri.conf.json` 的 asset 协议 scope
+/// （前端据此渲染缩略图）。改路径四处一起改。
 pub fn paste_root() -> std::path::PathBuf {
     std::env::temp_dir().join("meowo-paste")
+}
+
+/// 把已解码的图片字节落盘到粘贴附件根的 `queued/` 下，返回可写进 `[Image: source: …]`
+/// 引用的绝对路径。按 `<stem>.<ext>` 幂等——transcript 增量解析在 reset/重放时会重解析
+/// 同一行，命中即复用不重写。空字节/超 [`PASTE_MAX_BYTES`] 返回 None（调用方退化为不显示图）。
+pub fn persist_paste_bytes(stem: &str, ext: &str, bytes: &[u8]) -> Option<std::path::PathBuf> {
+    if bytes.is_empty() || bytes.len() > PASTE_MAX_BYTES {
+        return None;
+    }
+    let dir = paste_root().join("queued");
+    let path = dir.join(format!("{stem}.{ext}"));
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 0 {
+            return Some(path);
+        }
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::write(&path, bytes).ok()?;
+    Some(path)
+}
+
+/// 跨 provider 切换的交接文件根目录（`$TEMP/meowo-handoff`）。文件由目标 agent 用
+/// 自己的读文件工具读取，不经 webview，故**不需要**进 asset scope——与 meowo-paste
+/// 的差别仅此一点。交给 OS 临时目录策略回收，不做主动清理。
+pub fn handoff_root() -> std::path::PathBuf {
+    std::env::temp_dir().join("meowo-handoff")
 }
 
 /// 粘贴/插话附件的单文件上限。覆盖截图与常规文档；防的是超大 payload 把 base64 +

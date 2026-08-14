@@ -334,5 +334,10 @@ export const Message = memo(function Message({ item }: { item: ChatItem }) {
       </details>
     );
   }
+  if (item.type === "meta" && item.kind.startsWith("handoff:")) {
+    // 跨 provider 接续的段间分隔条（kind = "handoff:<目标引擎展示名>"，见 ChatWindow 的
+    // prefixItems 组装）：前序段历史内联在上方，分隔条标明从哪一段起换了引擎。
+    return <div className="chat-meta"><span />{t.chat.handoffDivider(item.kind.slice("handoff:".length))}<span /></div>;
+  }
   return <div className="chat-meta"><span />{t.chat.compact}<span /></div>;
 });

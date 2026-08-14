@@ -205,6 +205,7 @@ pub trait AgentPlugin: Sync {
             startup_attention_markers: self.startup_attention_markers().to_vec(),
             selector_anchors: self.selector_anchors().to_vec(),
             attention_patterns: self.attention_patterns().to_vec(),
+            permission_prompt_races_hook: self.permission_prompt_races_hook(),
             interrupt_input: self.interrupt_input(),
             newline_input: self.newline_input(),
             runtime_commands_pending,
@@ -281,6 +282,16 @@ pub trait AgentPlugin: Sync {
         &[]
     }
 
+    /// 哪些工具是**增量式**待办操作（单条创建/改状态，非整份快照）。
+    ///
+    /// claude 现版本的 `TaskCreate`/`TaskUpdate` 属于此类：新建的编号只出现在工具结果文本
+    /// 里（`Task #N created successfully: …`），更新靠 `taskId` 引用那个编号——必须逐条
+    /// 累积才能还原列表（`apply_todo_delta`），与快照槽的覆盖写语义互斥，故独立成槽。
+    /// 具体字段解析在 reporter 侧（`HookEvent::todo_delta`），这里只声明工具名。
+    fn todo_delta_tools(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// 打开「选模型」交互菜单的斜杠命令。
     ///
     /// 与 [`Self::model_presets`] 互补而非重复：声明了预设的 agent（只有 claude，它的
@@ -311,6 +322,14 @@ pub trait AgentPlugin: Sync {
     /// kimi 的 GUI 审批改走屏幕识别兜底（terminalAttention 的 `kimi:command-approval`，
     /// 形态与按键语义为官方源码取证，见 docs/research/tui-menu-captures-2026-07.md）。
     fn permission_hook_decides(&self) -> bool {
+        false
+    }
+
+    /// TUI 在 PermissionRequest hook 阻塞期间是否**并行**显示自家权限选择框（与 GUI 审批
+    /// 竞速，用户先在终端作答则 hook 结果被丢弃）。声明前须有官方文档或真机取证：claude
+    /// 已确认（hooks 文档明载“对话框与 hook 并行显示”，实测同现）。false 错了的代价只是
+    /// 终端视图多一条引导横幅；true 错了则横幅不挂、用户对着空终端等满 300s——保守默认 false。
+    fn permission_prompt_races_hook(&self) -> bool {
         false
     }
 
@@ -875,6 +894,17 @@ mod tests {
                     .clipboard_image_paste(Some("1.0.0"))
                     .is_none(),
                 "{id} 的剪贴板图片粘贴未经验证,不该声明"
+            );
+        }
+
+        // TUI 权限框与 PermissionRequest hook 并行竞速:仅 claude 经官方文档+实测取证。
+        // codex 的 hook 同为阻塞式,但 TUI 行为未取证——错声明 true 的代价是横幅不挂、
+        // 用户对着空终端等满 300s,故保守 false。
+        assert!(by_id("claude").unwrap().permission_prompt_races_hook());
+        for id in ["codex", "kimi", "gemini", "opencode"] {
+            assert!(
+                !by_id(id).unwrap().permission_prompt_races_hook(),
+                "{id} 的 TUI 权限框并行行为未经取证,不该声明"
             );
         }
 

@@ -1,20 +1,23 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { appConfirm } from "../confirm";
-import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardImageFingerprint, confirmStopSession, dismissInteractiveQuestion, agentModels, getChatHistory, getLiveSessionsPage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, openProjectDir, pendingInteraction, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type ChatHistory, type ChatItem, type ChatUi, type LiveSession, type ModeScreenMarker, type PendingApproval } from "../api";
+import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardRestore, clipboardSetImage, confirmStopSession, dismissInteractiveQuestion, agentModels, getChatHistory, getGitDiffSummary, getLiveSessionsPage, getSessionLineage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, openProjectDir, pendingInteraction, refreshSessionModel, refreshSessionTodos, registerApprovalConsumer, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, switchSessionProvider, takeoverManagedTerminal, unregisterApprovalConsumer, writeManagedTerminal, type AgentId, type ChatHistory, type ChatItem, type ChatUi, type GitDiffSummaryDto, type LiveSession, type ModelPreset, type ModeScreenMarker, type PendingApproval } from "../api";
 import { hasEscLayers, pushEscLayer } from "../escLayers";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useT } from "../i18n";
+import { formatBackendError } from "../i18n/errors";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { reduceChatEvents } from "../chat/reducer";
 import { ApprovalCard } from "./chat/ApprovalCard";
 import { matchOptionByLabel, observeTranscriptForDismiss, parseAskUserQuestions, type QuestionDismissTracker, type StructuredQuestion } from "./chat/askUserQuestion";
 import { applyLearnedLabels, loadLearnedLabels, saveLearnedLabels } from "./chat/modelLabels";
 import { ContextMeter } from "./chat/ContextMeter";
+import { GitDiffView } from "./chat/GitDiffView";
 import { ImageRef } from "./chat/Message";
+import { TodoBadge } from "./chat/TodoBadge";
 import { TodoPanel } from "./chat/TodoPanel";
 import { Transcript } from "./chat/Transcript";
 import { ChatSidebar } from "./ChatSidebar";
@@ -27,6 +30,8 @@ import { appendTerminalText, modeFromScreen, terminalAttention as detectTerminal
 import { Dropdown, useMenuPopup } from "./menu";
 // 恢复时的权限改选需要 agent 的启动选项声明表（与新建会话面板同源）。
 import { listAgents, type AgentDescriptor } from "../api";
+// 「切换引擎」分组的目标 agent 图标（前端资产表，未知 id 走中性兜底）。
+import { agentAssets, tintStyle } from "../providers";
 
 function initialSessionId(): number {
   const value = new URLSearchParams(window.location.search).get("sessionId");
@@ -35,6 +40,11 @@ function initialSessionId(): number {
 }
 
 const SIDEBAR_COLLAPSED_KEY = "meowo-chat-sidebar-collapsed";
+/** 改动/文件停靠面板的宽度持久化键（localStorage 既有 meowo-* 命名惯例）。 */
+const DIFF_WIDTH_KEY = "meowo-diff-panel-width";
+/** 面板宽度上下限：下限保面板可用，上限在拖拽时给对话区留 MIN_CHAT 动态计算。 */
+const DIFF_PANEL_MIN_WIDTH = 280;
+const DIFF_PANEL_DEFAULT_WIDTH = 400;
 /** 窄窗门限：低于它停靠侧栏放不下（208px 侧栏 + 卡片最小可用宽），自动收起、开关改开浮窗。 */
 const SIDEBAR_NARROW_QUERY = "(max-width: 880px)";
 
@@ -156,10 +166,7 @@ function sameHistoryMeta(prev: ChatHistory | null, next: ChatHistory): boolean {
   return true;
 }
 
-/// clipFingerprint:粘贴落盘那一刻的剪贴板图像指纹。仅粘贴来源的图片有——发送时若剪贴板
-/// 指纹仍与它相等,才允许向 PTY 发 Ctrl-V 走 TUI 的原生图片附加(文件选择器来源没有指纹,
-/// 天然不走该路径)。
-type Attachment = { path: string; name: string; image: boolean; clipFingerprint?: string;
+type Attachment = { path: string; name: string; image: boolean;
   /** 字节数，仅粘贴来源有（File.size 现成）；文件选择器只给路径，拿大小要多一次 IPC，不值。 */
   size?: number };
 
@@ -175,6 +182,15 @@ function attachmentOf(path: string): Attachment {
   const name = path.split(/[\\/]/).pop() || path;
   const extension = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
   return { path, name, image: IMAGE_EXTENSIONS.has(extension) };
+}
+
+// 交接注入语（两种界面语言的模板前缀，见 i18n handoffPrompt）+ 交接目录标记：识别
+// transcript 里那条「请读交接文件」的机器消息。前序段历史内联进时间线后，它再以用户
+// 气泡出现只是重复分隔条已说的内容——显示层滤掉；items 记账层保留原文，水位线等
+// 逻辑不受影响。
+const HANDOFF_PROMPT_PREFIXES = ["请先完整阅读文件 ", "Please read the file "];
+function isHandoffInjectedPrompt(text: string): boolean {
+  return text.includes("meowo-handoff") && HANDOFF_PROMPT_PREFIXES.some((prefix) => text.startsWith(prefix));
 }
 
 function promptWithAttachments(prompt: string, attachments: Attachment[], instruction: (files: string) => string, mention = false): string {
@@ -282,6 +298,141 @@ function ChatTitleMenu({ title, cwd, archived, archiving, starred, onToggleStar,
   );
 }
 
+/** 标题栏任务进度入口:常驻清单图标钮,点开浮出「进度」面板(参考 Claude 桌面版形态,
+ *  用户指定)。无任务时不藏图标——面板给骨架占位,让用户知道任务进度会出现在这里。
+ *  清单行样式与底部 TodoPanel 共用同一组类(.chat-todos-list/.chat-todo-mark),两处不分叉。 */
+/** 折叠态每小节最多露的行数;两节合计只多藏得下 1 条时不折(为省 1 行多点一次不值)。 */
+const TODO_PANEL_COLLAPSED_MAX = 4;
+
+/** 面板行的统一形态:任务清单与子任务都归一到「文字 + 状态」再渲染。 */
+type TodoPanelRow = { content: string; status: string };
+
+/** 显示序与原始序脱钩:进行中最前、待办其次、失败(仅子任务有)再次、完成沉底(用户指定)
+ *  ——折叠态露出的是「正在做/接下来做什么」,而不是一排划了线的旧账。sort 稳定,组内保持原顺序。 */
+function sortPanelRows(rows: TodoPanelRow[]): TodoPanelRow[] {
+  const rank: Record<string, number> = { in_progress: 0, pending: 1, failed: 2, completed: 3 };
+  return [...rows].sort((a, b) => (rank[a.status] ?? 1) - (rank[b.status] ?? 1));
+}
+
+function TodoPanelList({ rows }: { rows: TodoPanelRow[] }) {
+  return (
+    <ul className="chat-todo-panel-list">
+      {rows.map((row, index) => (
+        <li key={`${index}:${row.content}`} className={"is-" + row.status}>
+          <TodoBadge status={row.status} />
+          <span className="chat-todo-panel-text" title={row.content}>{row.content}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function ChatTodoMenu({ todos, subagents, t }: {
+  todos: TodoPanelRow[];
+  /** 从时间线聚合的子任务(Agent 委派),与任务清单分节显示——用户反馈「子任务没在这里」。 */
+  subagents: TodoPanelRow[];
+  t: ReturnType<typeof useT>;
+}) {
+  const { open, pos, ref, btnRef, menuRef, toggle, onKeyDown } = useMenuPopup();
+  const done = todos.filter((todo) => todo.status === "completed").length;
+  const subDone = subagents.filter((row) => row.status === "completed").length;
+  // 长清单默认折叠只露前几条,底部「展开 N 个 / 收起」切换(参考形态,用户指定)。
+  // 每次重开面板回到折叠态——上次翻开的状态对这次没意义。
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    if (open) setExpanded(false);
+  }, [open]);
+  // 面板水平贴的是对话窗格(.chat-main)右缘,不是窗口右缘:改动侧栏是与 .chat-main
+  // 并列的右列,写死贴窗口会让面板悬到侧栏上、远离按钮(实拍反馈)。只在打开瞬间量一次
+  // 即可——开着期间窗口 resize、点分栏柄/改动钮都会先把菜单关掉(hook 的关闭语义)。
+  // 窗格比面板窄时钳到视口内,不许被左缘裁掉(与 hook 的水平钳制同一取舍)。
+  const [panelRight, setPanelRight] = useState(10);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const pane = ref.current?.closest(".chat-main")?.getBoundingClientRect();
+    const menuW = menuRef.current?.offsetWidth ?? 0;
+    const want = pane ? window.innerWidth - pane.right + 10 : 10;
+    setPanelRight(Math.max(10, Math.min(want, window.innerWidth - menuW - 6)));
+  }, [open, ref, menuRef]);
+  const sortedTodos = sortPanelRows(todos);
+  const sortedSubs = sortPanelRows(subagents);
+  const hiddenCount =
+    Math.max(0, sortedTodos.length - TODO_PANEL_COLLAPSED_MAX) +
+    Math.max(0, sortedSubs.length - TODO_PANEL_COLLAPSED_MAX);
+  const collapsible = hiddenCount > 1;
+  const clip = (rows: TodoPanelRow[]) =>
+    collapsible && !expanded ? rows.slice(0, TODO_PANEL_COLLAPSED_MAX) : rows;
+  const empty = todos.length === 0 && subagents.length === 0;
+  return (
+    <div className="dd chat-todo-menu" ref={ref} onKeyDown={onKeyDown}>
+      <button
+        ref={btnRef}
+        type="button"
+        className="chat-todo-btn"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        data-tip={t.chat.todoBadgeTip}
+        onClick={toggle}
+      >
+        {/* list-checks:清单 + 勾,与「任务进度」语义对齐。 */}
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="m3 17 2 2 4-4" /><path d="m3 7 2 2 4-4" />
+          <path d="M13 6h8" /><path d="M13 12h8" /><path d="M13 18h8" />
+        </svg>
+      </button>
+      {open && (
+        /* 水平不跟按钮对齐:面板统一贴对话窗格右缘、留 10px 间距(用户指定,与参考形态一致)
+           ——按钮左侧还有页签等控件,对齐按钮会让面板悬在标题栏中段。垂直仍由 hook 算
+           (按钮下方、放不下自动上翻)。 */
+        <div className="dd-menu chat-todo-panel" role="dialog" aria-label={t.chat.todoPanelTitle} ref={menuRef} style={{ position: "fixed", top: pos.top, bottom: pos.bottom, right: panelRight }}>
+          <div className="chat-todo-panel-head">
+            <span className="chat-todo-panel-title">{t.chat.todoPanelTitle}</span>
+            {todos.length > 0 && <span className="chat-todos-count">{t.chat.todoProgress(done, todos.length)}</span>}
+          </div>
+          {empty ? (
+            <div className="chat-todo-panel-empty">
+              {/* 骨架占位:两行假清单 + 右上勾圈,示意「这里将来长什么样」。 */}
+              <div className="chat-todo-skeleton" aria-hidden="true">
+                <span className="sk-row"><i className="sk-dot" /><i className="sk-bar" /></span>
+                <span className="sk-row"><i className="sk-dot" /><i className="sk-bar is-short" /></span>
+                <svg className="sk-check" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="9" /><path d="m8.5 12 2.5 2.5 4.5-5" />
+                </svg>
+              </div>
+              <div className="chat-todo-panel-hint">{t.chat.todoEmptyHint}</div>
+            </div>
+          ) : (
+            <>
+              {/* 行样式独立于底部 TodoPanel 的紧凑清单(用户按参考形态指定):实心圆勾徽章、
+                  宽松行距、单行省略。 */}
+              {todos.length > 0 && <TodoPanelList rows={clip(sortedTodos)} />}
+              {subagents.length > 0 && (
+                <>
+                  <div className="chat-todo-panel-head is-sub">
+                    <span className="chat-todo-panel-title">{t.chat.todoSubagentSection}</span>
+                    <span className="chat-todos-count">{t.chat.todoProgress(subDone, subagents.length)}</span>
+                  </div>
+                  <TodoPanelList rows={clip(sortedSubs)} />
+                </>
+              )}
+              {collapsible && (
+                <button type="button" className="chat-todo-panel-collapse" onClick={() => setExpanded((v) => !v)}>
+                  {expanded ? (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 15 6-6 6 6" /></svg>
+                  ) : (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+                  )}
+                  {expanded ? t.chat.todoCollapse : t.chat.todoExpand(hiddenCount)}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** 重命名会话的独立 modal（用户指定，不做就地编辑）。Enter 保存、Esc/取消/点遮罩关闭；
  *  失败原因就地显示在弹层里，不静默吞。 */
 function RenameModal({ initial, onSubmit, onClose, t }: {
@@ -305,7 +456,7 @@ function RenameModal({ initial, onSubmit, onClose, t }: {
       await onSubmit(title);
       onClose();
     } catch (e) {
-      setError(String(e));
+      setError(formatBackendError(e, t.locale));
       setSaving(false);
     }
   };
@@ -593,7 +744,7 @@ async function submitToTerminal(sessionId: number, content: string, abortIf?: ()
       const snapshot = await managedTerminalSnapshot(sessionId, since);
       if (!snapshot.active) break;
       if (Number.isFinite(snapshot.endOffset) && snapshot.endOffset < since) {
-        // 偏移回绕(PTY 被重启复位):归零重对齐,别拿旧偏移空等(同 sendWithClipboardImage)。
+        // 偏移回绕(PTY 被重启复位):归零重对齐,别拿旧偏移空等(同 sendWithClipboardImages)。
         since = 0;
         tail = "";
         continue;
@@ -688,6 +839,8 @@ export function ChatWindow() {
   const [prompt, setPrompt] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
+  // 软拦非阻断提示:pendingReview 但屏幕没识别出卡片时,发送照常、亮这条横幅(见 withSendGuard)。
+  const [softPromptNotice, setSoftPromptNotice] = useState(false);
   // 运行中发出的插话:CLI 把它们排队到回合结束,期间 transcript 不显示——这里记账给
   // 用户回执。消解见轮询侧 effect(回合结束整单清空;单条提前现身 transcript 也移除)。
   // 带 id 而非裸文本:用户可手动移除单条回执,重复文本按下标删会在自动消解并发时错位。
@@ -714,11 +867,12 @@ export function ChatWindow() {
   }[]>([]);
   const echoIdRef = useRef(0);
   // 渲染序列 = 真实 transcript + 乐观回显（以 user_text 形态挂在末尾）。
-  // 消解/计数等逻辑一律读真实 items，回显只进显示层。
+  // 消解/计数等逻辑一律读真实 items，回显只进显示层。交接注入语同样在显示层滤掉。
   const displayItems = useMemo<ChatItem[]>(() => {
-    if (pendingEchoes.length === 0) return items;
+    const visible = items.filter((item) => item.type !== "user_text" || !isHandoffInjectedPrompt(item.text));
+    if (pendingEchoes.length === 0) return visible;
     return [
-      ...items,
+      ...visible,
       ...pendingEchoes.map((echo) => ({
         type: "user_text" as const,
         id: `echo-${echo.id}`,
@@ -784,7 +938,9 @@ export function ChatWindow() {
   if (view === "terminal") terminalEverShownRef.current = true;
   const terminalMounted = terminalEverShownRef.current || terminalMonitorNeeded;
   const [approval, setApproval] = useState<PendingApproval | null>(null);
-  // broker 审批的剩余时间：后端 300s 超时此前只写在注释里，卡片到点凭空消失像 bug。
+  // broker 审批的剩余时间。用户在终端作答的场景不靠它——后端监视断连与 pending_review
+  // 清位（pty.rs 的 await_approval_outcome），结算后 pending-approval-cleared 实时收卡；
+  // 倒计时只覆盖「两边都没人答」的兜底：300s 超时此前只写在注释里，卡片到点凭空消失像 bug。
   // 后端不下发 deadline，从本窗口首见该 requestId 起本地计时（晚开窗只会显得更宽裕，
   // 不会提前误报超时）；每秒 tick 一次驱动徽章上的倒计时。
   const APPROVAL_TIMEOUT_MS = 300_000;
@@ -826,6 +982,80 @@ export function ChatWindow() {
   // ManagedTerminal 后停更,PTY 退出后悬死 true,把 tone 钉死「运行中」——已整根拆除)。
   // history 未加载时按离线处理,避免首帧闪一下运行态。
   const tone = sessionTone(history?.connected ?? false, history?.status, history?.pendingReview, history?.errored);
+  // claude 新版任务列表(TaskCreate/TaskUpdate)从时间线累积重建:CC 对这类 harness
+  // 内部工具**不触发 PostToolUse hook**(实测:reporter 手喂事件能落库,真调用不触发),
+  // hook 快照/增量两条路都收不到,transcript 是唯一来源。编号在 TaskCreate 回执文本
+  // `Task #N created successfully` 里;TaskUpdate 的摘要是 Rust 侧精简出的 JSON。
+  // 「当前回合」分界:最后一条用户消息的位置。任务/子任务列表跨回合只增不减,长会话
+  // 会把历史旧账全堆进面板(用户反馈)——已完成项只显示**这条分界之后**完成的;
+  // 未完成的恒显示,无论多老,它们都是还没做完的活计划。
+  const lastUserIdx = useMemo(
+    () => items.reduce((acc, item, index) => (item.type === "user_text" ? index : acc), -1),
+    [items],
+  );
+  const transcriptTodos = useMemo(() => {
+    const byId = new Map<string, { content: string; status: string; touch: number }>();
+    const pendingCreates = new Map<string, string>();
+    items.forEach((item, index) => {
+      if (item.type === "tool_use" && item.name === "TaskCreate") {
+        pendingCreates.set(item.id, item.summary);
+      } else if (item.type === "tool_use" && item.name === "TaskUpdate") {
+        try {
+          const input = JSON.parse(item.summary) as { taskId?: unknown; status?: unknown; subject?: unknown };
+          const id = input.taskId == null ? "" : String(input.taskId);
+          if (!id) return;
+          if (input.status === "deleted") { byId.delete(id); return; }
+          const row = byId.get(id);
+          if (row) {
+            if (typeof input.status === "string") row.status = input.status;
+            if (typeof input.subject === "string") row.content = input.subject;
+            row.touch = index;
+          } else if (typeof input.subject === "string") {
+            // 错过 Create(如 transcript 截段)但这次带了标题 → 补建自愈。
+            byId.set(id, { content: input.subject, status: typeof input.status === "string" ? input.status : "pending", touch: index });
+          }
+        } catch { /* 摘要被截断等罕见形态:跳过这条,状态晚一拍好过整表消失 */ }
+      } else if (item.type === "tool_result" && item.tool_use_id && pendingCreates.has(item.tool_use_id)) {
+        const numbered = /Task #(\d+)/.exec(item.text ?? "");
+        if (numbered) byId.set(numbered[1], { content: pendingCreates.get(item.tool_use_id)!, status: "pending", touch: index });
+        pendingCreates.delete(item.tool_use_id);
+      }
+    });
+    return [...byId.values()]
+      .filter((row) => row.status !== "completed" || row.touch > lastUserIdx)
+      .map(({ content, status }) => ({ content, status }));
+  }, [items, lastUserIdx]);
+  // 标题栏任务进度面板与底部 TodoPanel 共用这一份数据。DB 快照(旧版 TodoWrite/kimi
+  // 的 TodoList,hook 路线仍通)优先;空则用 transcript 重建的(claude 新版唯一来源)。
+  const todos = history?.todos?.length ? history.todos : transcriptTodos;
+  // 面板的「子任务」小节:从时间线聚合 Agent 委派(与 Transcript 的关联逻辑同源)。
+  // 状态口径:回执统计里还有在跑的算进行中、有失败算失败、否则完成;没回执 = 还没回来 = 在跑。
+  const panelSubagents = useMemo(() => {
+    const outcomes = new Map<string, { running: number; completed: number; failed: number }>();
+    // 记「最后一次回执的位置」而不只是有无:后台委派先有启动回执、后有完成通知的
+    // 合成回执,判断「完成于当前回合吗」要看最终那次。
+    const settledAt = new Map<string, number>();
+    items.forEach((item, index) => {
+      if (item.type !== "tool_result" || !item.tool_use_id) return;
+      settledAt.set(item.tool_use_id, index);
+      if (item.subagent) outcomes.set(item.tool_use_id, item.subagent);
+    });
+    const rows: { content: string; status: string }[] = [];
+    for (const item of items) {
+      if (item.type !== "tool_use" || !item.subagent) continue;
+      const outcome = outcomes.get(item.id);
+      const status = outcome
+        ? outcome.running > 0 ? "in_progress" : outcome.failed > 0 ? "failed" : "completed"
+        : settledAt.has(item.id) ? "completed" : "in_progress";
+      // 与任务列表同一条「不堆积」规则:已结束的委派只显示当前回合内结束的,
+      // 历史旧账收走;还在跑的恒显示(跨回合的后台子任务正是最该盯的)。
+      if (status !== "in_progress" && (settledAt.get(item.id) ?? -1) <= lastUserIdx) continue;
+      const count = item.subagent.count ?? 1;
+      const label = item.subagent.description || item.summary || "";
+      rows.push({ content: count > 1 ? `${label} ×${count}` : label, status });
+    }
+    return rows;
+  }, [items, lastUserIdx]);
   // 后台会话的 transcript 可能**永远是空的**:claude 以 fork/resume 起的后台 worker 存在
   // 不落盘的老毛病(实测 2.1.220:新会话文件里只有 ai-title / agent-name 两行元数据,正文
   // 既不在自己名下、也不在 fork 源里,只活在进程内存)。对这类会话,对话页给不出任何东西,
@@ -875,7 +1105,7 @@ export function ChatWindow() {
         () => setEndingSession(true),
       );
     } catch (e) {
-      setSendError(String(e));
+      setSendError(formatBackendError(e, t.locale));
     } finally {
       setEndingSession(false);
     }
@@ -918,7 +1148,7 @@ export function ChatWindow() {
       }
     } catch (e) {
       setHistory((current) => (current ? { ...current, archived: !next } : current));
-      setSendError(String(e));
+      setSendError(formatBackendError(e, t.locale));
     } finally {
       setArchiving(false);
     }
@@ -1017,6 +1247,71 @@ export function ChatWindow() {
   const [capabilityOffset, setCapabilityOffset] = useState(0);
   const provider = history?.provider;
   const cwd = history?.cwd ?? null;
+  // 「查看改动」入口：仅当 cwd 落在 git 仓库内时后端才回 isRepo=true，按钮据此显隐。
+  // 换会话（cwd 变化）重取；取不到/非仓库时保持 null，入口不出现。
+  const [gitSummary, setGitSummary] = useState<GitDiffSummaryDto | null>(null);
+  const [diffOpen, setDiffOpen] = useState(false);
+  // 折叠/最大化都只在面板已挂载（diffOpen）后才有意义；折叠不卸载——面板内的
+  // 打开文件、树展开与 diff/目录缓存全部保留，再展开时原样回来。换会话照旧整体重置。
+  const [diffCollapsed, setDiffCollapsed] = useState(false);
+  const [diffMaximized, setDiffMaximized] = useState(false);
+  // 面板宽度随会话持久化（localStorage）；折叠只藏不改宽，再展开原宽回来。
+  const [diffWidth, setDiffWidth] = useState(() => {
+    const stored = Number(localStorage.getItem(DIFF_WIDTH_KEY));
+    return Number.isFinite(stored) && stored >= DIFF_PANEL_MIN_WIDTH ? stored : DIFF_PANEL_DEFAULT_WIDTH;
+  });
+  // 拖拽分栏柄：pointer capture 挂在柄上，移出窗口也不丢事件；宽度上限按
+  // .chat-body 实测宽给对话区留 ≥360px（CSS 的 max-width:40vw 仍是窗口缩小的兜底）。
+  const startDiffResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    const handle = event.currentTarget;
+    const body = handle.parentElement;
+    if (!body) return;
+    event.preventDefault();
+    handle.setPointerCapture(event.pointerId);
+    const startX = event.clientX;
+    const panel = body.querySelector<HTMLElement>(".chat-diff-panel");
+    // 以实测宽为起点：state 宽可能被 40vw 上限压小，从 state 起算会跳变。
+    const startWidth = panel ? panel.getBoundingClientRect().width : diffWidth;
+    const maxWidth = Math.max(DIFF_PANEL_MIN_WIDTH, body.getBoundingClientRect().width - 360);
+    let lastWidth = startWidth;
+    body.classList.add("is-diff-resizing");
+    const onMove = (move: PointerEvent) => {
+      lastWidth = Math.min(Math.max(startWidth + (startX - move.clientX), DIFF_PANEL_MIN_WIDTH), maxWidth);
+      setDiffWidth(lastWidth);
+    };
+    const onUp = () => {
+      body.classList.remove("is-diff-resizing");
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+      localStorage.setItem(DIFF_WIDTH_KEY, String(Math.round(lastWidth)));
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  };
+  useEffect(() => {
+    setDiffOpen(false);
+    setDiffCollapsed(false);
+    setDiffMaximized(false);
+    if (!cwd) { setGitSummary(null); return; }
+    let cancelled = false;
+    getGitDiffSummary(cwd)
+      .then((result) => { if (!cancelled) setGitSummary(result); })
+      .catch(() => { if (!cancelled) setGitSummary(null); });
+    return () => { cancelled = true; };
+  }, [cwd]);
+  // 面板每次转为可见都重拉摘要:agent 随时在提交/改文件,进窗时拉的那份清单会过期
+  // ——点开「更改」看到的是已提交文件的空 diff(实拍反馈)。git status 毫秒级,不设节流。
+  useEffect(() => {
+    if (!cwd || !diffOpen || diffCollapsed) return;
+    let cancelled = false;
+    getGitDiffSummary(cwd)
+      .then((result) => { if (!cancelled) setGitSummary(result); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [cwd, diffOpen, diffCollapsed]);
   // 恢复/接管时的权限改选："" = 沿用会话存的选择；选了具体档就随本次恢复下发，
   // 后端按选项维度合并写回，成为会话新的持久形态——覆盖「当年不是以跳过权限新建、
   // 恢复时想切过去」的场景（存量会话同样适用）。没声明权限类选项的 agent 不显示。
@@ -1046,22 +1341,28 @@ export function ChatWindow() {
   const storedPermission = permissionOption
     ? permissionOption.choices.find((choice) => choice.id === storedSelections[permissionOption.id]) ?? null
     : null;
+  // 恢复权限档的选项清单：「沿用原设置」占位 + 插件声明的档位。resumePermissionPicker
+  // 与休眠态权限胶囊共用同一份构造——此前两处各写一遍,改一处漏一处。
+  // 有存值时不放「沿用原设置」占位项：直接预选存的那一档（沿用=选中它本身，不写覆盖），
+  // 用户一眼看到沿用的是什么；没存过原值只有 CLI 自己知道，才退回占位文案。
+  const permissionChoiceOptions = useMemo(() => {
+    if (!permissionOption) return [];
+    return [
+      ...(storedPermission ? [] : [{ value: "", label: t.chat.resumeKeepOptions }]),
+      ...permissionOption.choices.map((choice) => ({
+        value: choice.id,
+        label: t.newSession.launchChoice[`${permissionOption.id}.${choice.id}`] ?? choice.label,
+      })),
+    ];
+  }, [permissionOption, storedPermission, t]);
   // 容器不挂 data-tip：提示气泡会盖在展开的下拉菜单上挡住选项（用户实拍两回）。
   // 「选了会记住」的说明性文案价值低于被它糊住的菜单，整个去掉。
-  // 有存值时不再放「沿用原设置」占位项：直接预选存的那一档（沿用=选中它本身，不写覆盖），
-  // 用户一眼看到沿用的是什么；没存过原值只有 CLI 自己知道，才退回占位文案。
   const resumePermissionPicker = permissionOption ? (
     <div className="chat-resume-permission">
       <Dropdown
         align="left"
         value={storedPermission ? (resumePermission || storedPermission.id) : resumePermission}
-        options={[
-          ...(storedPermission ? [] : [{ value: "", label: t.chat.resumeKeepOptions }]),
-          ...permissionOption.choices.map((choice) => ({
-            value: choice.id,
-            label: t.newSession.launchChoice[`${permissionOption.id}.${choice.id}`] ?? choice.label,
-          })),
-        ]}
+        options={permissionChoiceOptions}
         onChange={(value) => setResumePermission(
           storedPermission && String(value) === storedPermission.id ? "" : String(value),
         )}
@@ -1220,6 +1521,62 @@ export function ChatWindow() {
   // 按钮改为「去终端页切」的直达入口。换会话时复位——换个 agent 可能就能读到。
   const [modelProbeFailed, setModelProbeFailed] = useState(false);
   useEffect(() => setModelProbeFailed(false), [sessionId, history?.provider]);
+  // ── 跨 provider 切换（切换引擎）──
+  // 展开的目标 agent（模型下拉里二级子项的开合）与惰性取到的目标模型预设。
+  const [switchTarget, setSwitchTarget] = useState<AgentId | null>(null);
+  const [switchPresets, setSwitchPresets] = useState<Record<string, ModelPreset[]>>({});
+  useEffect(() => { if (!modelMenu) setSwitchTarget(null); }, [modelMenu]);
+  // 待注入的交接：switch 命令返回后记下文件路径与目标 provider，新会话认领成真 id、
+  // 终端就绪后由注入 effect 消费。ref 而非 state：注入是流程记账，不驱动渲染。
+  const handoffRef = useRef<{ path: string; expectProvider: AgentId; at: number } | null>(null);
+  // 当前会话 provider 的 descriptor：切换入口的可见性由后端下发的能力位决定
+  //（supports_chat_export），前端不判 id——守卫测试盯着。
+  const currentAgentDescriptor = provider
+    ? agentsForOptions?.find((agent) => agent.id === provider) ?? null
+    : null;
+  const switchTargets = currentAgentDescriptor?.supports_chat_export
+    ? (agentsForOptions ?? []).filter((agent) => agent.installed && agent.id !== provider)
+    : [];
+  // ── 接续会话的前序段历史（跨 provider 切换的连续性）──
+  // 切换引擎后新会话的时间线不从空白开始：前序段（已结束、内容静态）的完整消息内联在
+  // 上方，段间以「切换至 X」分隔条衔接（见 timelineItems）。内容不变，进会话只取一次。
+  const [prefixSegments, setPrefixSegments] = useState<{ provider: string; items: ChatItem[] }[]>([]);
+  useEffect(() => {
+    if (sessionId <= 0 || history?.predecessorId == null || prefixSegments.length > 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const chain = await getSessionLineage(sessionId);
+        const predecessors = chain.filter((entry) => entry.id !== sessionId);
+        const segments: { provider: string; items: ChatItem[] }[] = [];
+        for (const entry of predecessors) {
+          const full = await getChatHistory(entry.id, 0, true).catch(() => null);
+          if (cancelled) return;
+          segments.push({ provider: entry.provider, items: full && full.supported !== false ? full.items : [] });
+        }
+        if (!cancelled) setPrefixSegments(segments);
+      } catch {
+        // 链读取失败：prefixSegments 保持空，时间线退回 handoffContinued 注脚。
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [sessionId, history?.predecessorId, prefixSegments.length]);
+  // 渲染序列 = 前序段（含段间与当前段的分隔条）+ 当前会话消息。分隔条的展示名在渲染期
+  // 解析（agentsForOptions 可能晚于拉取到达），拿不到就退回 provider id。
+  const timelineItems = useMemo<ChatItem[]>(() => {
+    const filled = prefixSegments.filter((segment) => segment.items.length > 0);
+    if (filled.length === 0) return displayItems;
+    const nameOf = (id: string) => agentsForOptions?.find((agent) => agent.id === id)?.display_name ?? id;
+    const out: ChatItem[] = [];
+    filled.forEach((segment, index) => {
+      if (index > 0) out.push({ type: "meta", id: `handoff-${index}`, timestamp: null, kind: `handoff:${nameOf(segment.provider)}` });
+      out.push(...segment.items);
+    });
+    out.push({ type: "meta", id: "handoff-current", timestamp: null, kind: `handoff:${nameOf(provider ?? "")}` });
+    return [...out, ...displayItems];
+  }, [prefixSegments, displayItems, agentsForOptions, provider]);
+  // 前序内容没取到（或本来就没有）时的来历注脚；取到后由分隔条接力表达同一事实。
+  const showHandoffNote = history?.predecessorId != null && prefixSegments.every((segment) => segment.items.length === 0);
   // 识别窗口是个时间点，不是布尔——过期后要真的停下来，故用一个到点自灭的计时器驱动重渲染。
   const [menuWatching, setMenuWatching] = useState(false);
   useEffect(() => {
@@ -1281,6 +1638,7 @@ export function ChatWindow() {
       return next;
     });
     setItems([]);
+    setPrefixSegments([]);
     setHistory(null);
     setQuestionCustomText("");
     setLoading(true);
@@ -1531,12 +1889,29 @@ export function ChatWindow() {
         setStructuredQuestion(event.payload);
         // 与审批一致：用户正在终端视图操作时不抢（表单本来就在那里），否则拉回对话页。
         if (viewRef.current !== "terminal") setView("chat");
+      } else {
+        // 别的会话在提问：与审批同策略（后端不切窗只闪任务栏），侧栏亮徽标等用户自己
+        // 过去；过去后题面靠 pendingInteraction 轮询从后端表里取回。
+        setApprovalAwaitingIds((prev) => {
+          if (prev.has(event.payload.sessionId)) return prev;
+          const next = new Set(prev);
+          next.add(event.payload.sessionId);
+          return next;
+        });
       }
     }).then((fn) => { if (cancelled) fn(); else un = fn; }).catch(() => {});
     return () => { cancelled = true; un?.(); };
   }, []);
   // 会话切换：清掉旧会话的题面卡；竞态暂存的题面若属于新会话（事件先于切换抵达）则领养。
   useEffect(() => {
+    // 徽标的使命是「把人带过来」，人到了就退场——审批经 pending-approval-cleared 也会清，
+    // 但轮询取回（事件错过）与题面（无 cleared 事件）两条路都只能靠这里收尾。
+    setApprovalAwaitingIds((prev) => {
+      if (!prev.has(sessionId)) return prev;
+      const next = new Set(prev);
+      next.delete(sessionId);
+      return next;
+    });
     const last = lastInteractiveQuestionRef.current;
     if (last && last.payload.sessionId === sessionId && Date.now() - last.at < 3_000) {
       setBrokerOwnsReview(true);
@@ -1631,10 +2006,10 @@ export function ChatWindow() {
     }
     if (!followRef.current) return;
     const el = scrollRef.current;
-    if (!el || displayItems.length === 0) return;
+    if (!el || timelineItems.length === 0) return;
     stickToBottom(el);
     positionedRef.current = true;
-  }, [displayItems, view]);
+  }, [timelineItems, view]);
 
   // 终端页会把焦点交给 xterm（且 footer 整个卸载，回来的 textarea 是全新节点）；
   // 用户切回对话时把焦点还给输入框。只在「终端 → 对话」的切换沿触发——chat 内的
@@ -1716,11 +2091,12 @@ export function ChatWindow() {
   };
   const close = () => getCurrentWindow().close().catch(() => {});
   /// 发送类动作的公共守卫:sending 置位/清错 → 终端占用检查 → 确保可写终端 → 执行 body,
-  /// 统一 catch/收尾。sendText/sendWithClipboardImage/changeMode 三个入口共用——门控语义
+  /// 统一 catch/收尾。sendText/sendWithClipboardImages/changeMode 三个入口共用——门控语义
   /// (新增不可写原因、needsTakeover 复位时机)只需改这一处,不会漏出某条不检查占用的路径。
   const withSendGuard = async (body: () => Promise<boolean>): Promise<boolean> => {
     setSending(true);
     setSendError("");
+    setSoftPromptNotice(false);
     setNeedsTakeover(false);
     try {
       if (terminalAttention) {
@@ -1728,20 +2104,16 @@ export function ChatWindow() {
         setSendError(t.chat.terminalNeedsAttention);
         return false;
       }
-      // 软拦:hook 说 agent 在等交互(pendingReview),但屏幕识别没认出卡片——多半是
-      // 未覆盖的提示形态(别家 CLI/新版/本地化)。此时直接发送会把正文+回车打进那个
-      // 看不见的选择器:文字过滤选项、回车提交当前焦点项。识别是启发式的,不能硬拦
-      // (误报会把人锁死),给一次明确知情的确认。
+      // 软拦(非阻断):hook 说 agent 在等交互(pendingReview),但屏幕识别没认出卡片——识别
+      // 是启发式的,误报率不低,弹窗拦截会把最高频的「发消息」路径卡住。改为照常发送,
+      // 同时亮一条可跳终端的提示;真误触的兜底仍是终端页人工确认。
       if (!terminalAttention && history?.pendingReview && !approval && !brokerOwnsReview) {
-        const proceed = await appConfirm(t.chat.unrecognizedPromptConfirm, {
-          title: t.chat.terminalPromptTitle,
-        });
-        if (!proceed) return false;
+        setSoftPromptNotice(true);
       }
       if (!await ensureWritableTerminal()) return false;
       return await body();
     } catch (error) {
-      setSendError(error instanceof Error ? error.message : String(error));
+      setSendError(formatBackendError(error, t.locale));
       return false;
     } finally {
       setSending(false);
@@ -1764,38 +2136,57 @@ export function ChatWindow() {
   /// (claude 的 `[Image #N]`、kimi 的 `[image:…]`),从屏幕上确认占位符出现后再写正文提交。
   /// 调用方已确认「剪贴板指纹 == 待发附件」,全程只读剪贴板、不写。
   /// 返回 false = 未送达,调用方退回指令文本。
-  const sendWithClipboardImage = (content: string, marker: string): Promise<boolean> => withSendGuard(async () => {
+  /// 原生图片附加：逐张把附件写进系统剪贴板 → 发 Ctrl-V 让 TUI 自己读（claude 的
+  /// `[Image #N]`、kimi 的 `[image #N (W×H)]`）→ 等第 N 个占位符出现再贴下一张，
+  /// 全部落地后提交正文。剪贴板是发送通道的耗材：首次写入前后端自动快照，这里 finally
+  /// 还原。任一张落地失败（剪贴板写不进、占位符超时）返回 false，调用方回退指令文本。
+  const sendWithClipboardImages = (content: string, marker: string, images: Attachment[]): Promise<boolean> => withSendGuard(async () => {
     const before = await managedTerminalSnapshot(sessionId);
-    await writeManagedTerminal(sessionId, "\x16");
-    // TUI 读剪贴板+缓存图片是异步的:轮询增量输出等占位符,1.5s 没出现放弃原生化。
-    const markerPattern = new RegExp(marker, "i");
+    const markerPattern = new RegExp(marker, "gi");
     const decoder = new TextDecoder();
     let tail = "";
     let since = before.endOffset;
-    for (let attempt = 0; attempt < 6; attempt += 1) {
-      await new Promise((resolve) => window.setTimeout(resolve, 250));
-      const snapshot = await managedTerminalSnapshot(sessionId, since);
-      // PTY 中途退出/重启:定格帧上等不来占位符,直接走回退(与其余三处屏幕轮询同守卫)。
-      if (!snapshot.active) break;
-      if (snapshot.endOffset < since) {
-        // 偏移回绕(PTY 被重启复位):按快照契约把 since 归零重新对齐,别拿旧偏移空等。
-        since = 0;
-        tail = "";
-        continue;
+    try {
+      for (let index = 0; index < images.length; index += 1) {
+        try {
+          await clipboardSetImage(images[index].path);
+        } catch {
+          // 剪贴板写不进去（被占用/附件文件已删）：绝不能照常 Ctrl-V——那会把剪贴板里
+          // 别人的内容附给 agent。回退指令文本由调用方接。
+          return false;
+        }
+        await writeManagedTerminal(sessionId, "\x16");
+        // TUI 读剪贴板+缓存图片是异步的:轮询增量输出等占位符计数达标,1.5s 没出现放弃原生化。
+        let landed = false;
+        for (let attempt = 0; attempt < 6 && !landed; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 250));
+          const snapshot = await managedTerminalSnapshot(sessionId, since);
+          // PTY 中途退出/重启:定格帧上等不来占位符,直接走回退(与其余三处屏幕轮询同守卫)。
+          if (!snapshot.active) break;
+          if (snapshot.endOffset < since) {
+            // 偏移回绕(PTY 被重启复位):按快照契约把 since 归零重新对齐,别拿旧偏移空等。
+            since = 0;
+            tail = "";
+            continue;
+          }
+          since = snapshot.endOffset;
+          tail = appendTerminalText(tail, snapshot.data, decoder);
+          landed = (visibleTerminalText(tail).match(markerPattern) ?? []).length >= index + 1;
+        }
+        if (!landed) {
+          // 占位符没出现。Ctrl-V 的副作用不可撤销——慢机/大图上图片可能在超时之后才落进
+          // composer,若直接回退指令文本,迟到的原生图会和它一起提交成重复附件。先 Ctrl-U
+          // 清行做尽力撤销(两家 TUI 都支持 emacs 行编辑),把残余竞态压缩到「清行后才落地」
+          // 的极小窗口。
+          await writeManagedTerminal(sessionId, "\x15").catch(() => {});
+          return false;
+        }
       }
-      since = snapshot.endOffset;
-      tail = appendTerminalText(tail, snapshot.data, decoder);
-      if (markerPattern.test(visibleTerminalText(tail))) {
-        await submitToTerminal(sessionId, content, attentionAbort);
-        return true;
-      }
+      await submitToTerminal(sessionId, content, attentionAbort);
+      return true;
+    } finally {
+      await clipboardRestore().catch(() => {});
     }
-    // 占位符没出现。Ctrl-V 的副作用不可撤销——慢机/大图上图片可能在超时之后才落进
-    // composer,若直接回退指令文本,迟到的原生图会和它一起提交成重复附件。先 Ctrl-U
-    // 清行做尽力撤销(两家 TUI 都支持 emacs 行编辑),把残余竞态压缩到「清行后才落地」
-    // 的极小窗口。
-    await writeManagedTerminal(sessionId, "\x15").catch(() => {});
-    return false;
   });
   /// 确保有一个可写的托管终端；没有就地拉起。返回 false 表示已把原因写进 sendError。
   ///
@@ -1870,13 +2261,84 @@ export function ChatWindow() {
         return;
       }
     } catch (error) {
-      setSendError(String(error));
+      setSendError(formatBackendError(error, t.locale));
       return;
     } finally {
       setSending(false);
     }
     await retry();
   };
+
+  /// 跨 provider 切换：确认 → 后端导出交接文件并起新会话 → 本窗切到临时负 id
+  ///（既有 binding 轮询会把它换成真 id）→ 注入 effect 在新终端就绪后发交接提示。
+  /// 破坏性动作（结束当前进程）必须显式确认，与接管同款纪律。
+  const startProviderSwitch = async (target: AgentDescriptor, model?: string) => {
+    setModelMenu(false);
+    const from = currentAgentDescriptor?.display_name ?? provider ?? "";
+    const yes = await appConfirm(t.chat.switchProviderConfirm(from, target.display_name), {
+      title: t.chat.switchProvider,
+      danger: true,
+    });
+    if (!yes) return;
+    setSending(true);
+    setSendError("");
+    try {
+      const started = await switchSessionProvider(sessionId, target.id, model ? { model } : undefined);
+      handoffRef.current = { path: started.handoffPath, expectProvider: target.id, at: Date.now() };
+      resetTo(started.tempId);
+    } catch (error) {
+      setSendError(formatBackendError(error, t.locale));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  /// 交接注入：切换产生的新会话被认领成真 id、chatUi 就绪后，等终端可写再把
+  /// 「请读交接文件」发进去。启动交互（目录信任等）拦路时亮出注意力卡、保留待注入
+  /// 记账，用户处理完（attention 清除）本 effect 重跑续注。任何失败都把注入语落回
+  /// 输入框当草稿——宁可让用户多按一次回车，不能让交接静默丢失。
+  const handoffInjectingRef = useRef(false);
+  useEffect(() => {
+    const pending = handoffRef.current;
+    if (!pending || sessionId <= 0 || handoffInjectingRef.current) return;
+    // 过期防污染：拖过 10 分钟（比如用户一直没处理信任提示就去干别的）不再自动注入。
+    if (Date.now() - pending.at > 600_000) { handoffRef.current = null; return; }
+    if (history?.provider !== pending.expectProvider || !chatUi) return;
+    // 只认切换产生的那条会话：接续链已落库（predecessorId 非空）才是我们等的新段。
+    if (history.predecessorId == null) return;
+    if (terminalAttention) return; // 等用户处理完启动交互，attention 清除后重跑
+    let cancelled = false;
+    const injectPrompt = t.chat.handoffPrompt(pending.path);
+    handoffInjectingRef.current = true;
+    (async () => {
+      try {
+        const startup = await waitForTerminalReady(
+          sessionId,
+          chatUi.startup_attention_markers ?? [],
+          terminalReadyMessages,
+          attentionGrammar,
+        );
+        if (cancelled) return;
+        if (startup !== "ready") {
+          terminalEverShownRef.current = true;
+          setTerminalAttention(startup);
+          return;
+        }
+        await submitToTerminal(sessionId, injectPrompt, undefined, { message: t.chat.handoffInjectFailed });
+        if (cancelled) return;
+        handoffRef.current = null;
+      } catch (error) {
+        if (cancelled) return;
+        handoffRef.current = null;
+        setPrompt(injectPrompt);
+        setSendError(formatBackendError(error, t.locale));
+      } finally {
+        handoffInjectingRef.current = false;
+      }
+    })();
+    return () => { cancelled = true; handoffInjectingRef.current = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- t/attentionGrammar 随渲染变化，注入只由会话代际与就绪信号驱动
+  }, [sessionId, history?.provider, history?.predecessorId, chatUi, terminalAttention]);
 
   const sendPrompt = async () => {
     if ((!prompt.trim() && attachments.length === 0) || sending) return;
@@ -1904,7 +2366,7 @@ export function ChatWindow() {
         // 用户刚打的字一起吞掉(实测踩过:输入框一空,内容再也找不回来)。
         setSendError(t.chat.sendBackgroundQueued);
       } catch (error) {
-        setSendError(String(error));
+        setSendError(formatBackendError(error, t.locale));
       } finally {
         setSending(false);
       }
@@ -1943,14 +2405,13 @@ export function ChatWindow() {
         }]);
       }
     };
-    // 原生图片附加:仅当「单一图片附件 + 粘贴来源 + 剪贴板此刻仍是这张图 + 插件声明
-    // TUI 支持 Ctrl-V 图片粘贴」。任一不满足(含指纹比对失败、占位符超时)都静默退回
-    // 指令文本——那条路径对所有 agent 恒可用。
+    // 原生图片附加:仅当「附件全部是图片 + 插件声明 TUI 支持 Ctrl-V 图片粘贴」。逐张写
+    // 剪贴板让 TUI 自己读(kimi/claude 的 composer 都支持多张图连续粘贴)。含非图片附件、
+    // 或任一张落地失败(剪贴板写不进、占位符超时)都静默退回指令文本——那条路径对所有
+    // agent 恒可用。
     const clipMarker = chatUi?.clipboard_image_paste;
-    const single = attachments.length === 1 ? attachments[0] : null;
-    if (clipMarker && single?.image && single.clipFingerprint) {
-      const current = await clipboardImageFingerprint().catch(() => null);
-      if (current && current === single.clipFingerprint && await sendWithClipboardImage(prompt.trim(), clipMarker)) {
+    if (clipMarker && attachments.length > 0 && attachments.every((file) => file.image)) {
+      if (await sendWithClipboardImages(prompt.trim(), clipMarker, attachments)) {
         setPrompt("");
         setAttachments([]);
         setAttachmentNotice("");
@@ -1973,7 +2434,7 @@ export function ChatWindow() {
     try {
       await writeManagedTerminal(sessionId, interrupt);
     } catch (error) {
-      setSendError(error instanceof Error ? error.message : String(error));
+      setSendError(formatBackendError(error, t.locale));
       return;
     }
     // 给 TUI 一拍完成中断收尾(打印 Interrupted、回到 composer),再走正常发送。
@@ -1986,7 +2447,7 @@ export function ChatWindow() {
     const interrupt = chatUi?.interrupt_input;
     if (!interrupt) return;
     void writeManagedTerminal(sessionId, interrupt)
-      .catch((error) => setSendError(error instanceof Error ? error.message : String(error)));
+      .catch((error) => setSendError(formatBackendError(error, t.locale)));
   };
   /// 手动移除一条排队回执。**只动 GUI 记账**:消息已经写进 PTY,CLI 队列里的它照常
   /// 在回合结束后执行——按钮文案与 tip 必须说清这点,否则用户会以为消息被撤回了。
@@ -2243,23 +2704,16 @@ export function ChatWindow() {
   /// 交给 CLI 自己读」——先经宿主落成临时文件拿到路径，再走与文件选择器完全相同的流程。
   /// 截图（剪贴板位图）与资源管理器里复制的文件都会出现在 clipboardData.files 里。
   const pasteAttachments = async (files: File[]) => {
-    // 粘贴此刻剪贴板就是这批内容:记下图像指纹,发送时比对「剪贴板里还是不是这张图」,
-    // 匹配才走 TUI 的原生 Ctrl-V 图片附加。读失败(平台不支持/无图像)按 null 处理,
-    // 只影响原生化,不影响附件本身。
-    const clipFingerprint = files.some((file) => (file.type ?? "").startsWith("image/"))
-      ? await clipboardImageFingerprint().catch(() => null)
-      : null;
     const results = await Promise.allSettled(files.map(async (file) => {
       const data = base64OfBuffer(await file.arrayBuffer());
       // 剪贴板截图统一叫 image.png；名字进的是带时间戳的独立子目录，不会互踩。
       const path = await savePastedAttachment(file.name || "pasted.png", data);
       // 缩略图不留 data: URL 副本：粘贴目录在 asset 协议作用域内（tauri.conf.json），
       // ImageRef 按路径回读即可——base64 常驻 state 是每图 1.33 倍体积的白付内存（评审）。
-      const base: Attachment = { ...attachmentOf(path), size: file.size };
-      return base.image && clipFingerprint ? { ...base, clipFingerprint } : base;
+      return { ...attachmentOf(path), size: file.size };
     }));
     const fresh = results
-      .filter((entry): entry is PromiseFulfilledResult<Attachment> => entry.status === "fulfilled")
+      .filter((entry): entry is PromiseFulfilledResult<Attachment & { size: number }> => entry.status === "fulfilled")
       .map((entry) => entry.value);
     const failed = results.find((entry) => entry.status === "rejected") as PromiseRejectedResult | undefined;
     // 失败原因（超限/落盘失败）必须可见；没失败再按数量上限给提示，与文件选择器同一套。
@@ -2300,6 +2754,9 @@ export function ChatWindow() {
   // background 例外:它没有终端可接管,composer 是唯一出口(发送时后端另有拒绝话术)。
   const composerGated = !!history && history.supported && !history.background
     && history.ptyManaged === false && (externalRunning || history.status === "ended");
+  // 已被跨 provider 切换接替的会话：只读回看。禁发优先于其它门卡——「恢复会话」对它
+  // 是错误动作（会让接续链分叉，store 层也会拒绝再次接替），唯一正确的出口是去链尾。
+  const supersededTo = history?.supersededBy ?? null;
   // 门卡上的「恢复会话」:只拉起托管终端(withSendGuard 里的 ensureWritableTerminal),
   // 不发任何内容;成功后轮询把 ptyManaged 翻真,门卡自动让位给 composer。
   const resumeForChat = () => void withSendGuard(async () => true);
@@ -2356,7 +2813,7 @@ export function ChatWindow() {
         // 会话日志，故稍等再读。
         if (wasModelMenu) window.setTimeout(() => void refreshSessionModel(sessionId).catch(() => {}), 600);
       })
-      .catch((error) => setSendError(String(error)));
+      .catch((error) => setSendError(formatBackendError(error, t.locale)));
   };
   // Esc = 拒绝本次请求。审批卡上的 kbd 徽章得说话算话,键在这里真绑上。
   // 只绑这一个安全方向:Enter→允许没绑,也不打算绑——输入框外随手一个回车就放行一条
@@ -2401,7 +2858,7 @@ export function ChatWindow() {
     }
     void writeManagedTerminal(sessionId, option.input)
       .then(() => { if (option.kind === "submit" || option.kind === "chat") setTerminalAttention(null); })
-      .catch((error) => setSendError(String(error)));
+      .catch((error) => setSendError(formatBackendError(error, t.locale)));
   };
   // 排队作答的落键时刻：屏幕识别接管（表单确认在屏）后，把题面卡上点选的答案自动写进
   // 表单。choice 的 input 是「方向键定位 + 回车」——单选即完成作答，多选是勾选该项、
@@ -2424,7 +2881,7 @@ export function ChatWindow() {
     if (!value || !option.input) return;
     void writeManagedTerminal(sessionId, option.input + value + "\r")
       .then(() => setQuestionCustomText(""))
-      .catch((error) => setSendError(String(error)));
+      .catch((error) => setSendError(formatBackendError(error, t.locale)));
   };
 
   // 侧栏折叠/展开的统一开关（Kimi 式面板图标，两态共用一个钮）。Windows/Linux 常驻
@@ -2474,7 +2931,7 @@ export function ChatWindow() {
           </div>
         </>
       )}
-      <div className="chat-body">
+      <div className={"chat-body" + (diffOpen && diffMaximized && !diffCollapsed ? " is-diff-max" : "")}>
       {!narrow && !sidebarCollapsed && <ChatSidebar
         activeId={sessionId}
         approvalAwaitingIds={approvalAwaitingIds}
@@ -2502,14 +2959,33 @@ export function ChatWindow() {
             <span className="chat-title" data-tauri-drag-region>{t.chat.title}</span>
           </div>
         )}
-        {/* 标题栏常驻状态徽标:原「Live sync」恒亮绿点与运行状态无关,信息量为零;
-            改为状态驱动——滚动到哪里都能一眼看到 agent 是否在跑。 */}
-        <span className={`chat-live is-${tone}`} data-tauri-drag-region role="status">
-          <i data-tauri-drag-region />
-          {t.chat.status[tone]}
-        </span>
+        {/* 标题栏刻意不放运行状态徽标（实拍反馈嫌吵）：运行态已有多处冗余信号——
+            窗口标题的 ▶ 标记、对话区底部的脉冲指示条、侧栏状态点。 */}
+        {/* 任务进度入口:常驻图标,点开浮出「进度」面板(无任务时是骨架占位空态)。 */}
+        <ChatTodoMenu todos={todos} subagents={panelSubagents} t={t} />
+        {/* 文件/改动面板入口:有 cwd 即显示(非仓库会话只有「文件」页签),徽标数 = 变更文件数。 */}
+        {cwd && (
+          <button
+            type="button"
+            className="chat-todo-btn chat-diff-btn"
+            data-tip={t.chat.diff}
+            aria-label={t.chat.diff}
+            onClick={() => {
+              // 首次点击挂载并展开；之后折叠↔展开切换，不再卸载（保留面板内状态）。
+              if (!diffOpen) setDiffOpen(true);
+              else setDiffCollapsed((collapsed) => !collapsed);
+            }}
+          >
+            {/* git-diff 语义:左右分叉的对比图标。 */}
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="9" r="2.5" />
+              <path d="M6 8.5v7" /><path d="M18 11.5c0 4-4 4.5-9.2 4.6" />
+            </svg>
+            {gitSummary && gitSummary.isRepo && gitSummary.files.length > 0 && <span className="chat-diff-btn-count">{gitSummary.files.length}</span>}
+          </button>
+        )}
         {history?.ptyManaged && (
-          <button type="button" className="chat-end" disabled={endingSession} data-tip={t.chat.endSessionConfirm} onClick={() => void endSession()}>
+          <button type="button" className="chat-end" disabled={endingSession} onClick={() => void endSession()}>
             {endingSession ? t.chat.terminalStopping : t.chat.endSession}
           </button>
         )}
@@ -2538,8 +3014,9 @@ export function ChatWindow() {
           )
           /* 空列表分两种事实：会话已在跑（transcript 尚未落第一条/尚未定位到）≠ 真的没有记录。
              hook 侧已知的最近往来（lastUserText / lastAiText）先顶上；连它也没有时，
-             running 态也不能说「没有内容」——那与下面的运行指示互相打架。 */
-          : items.length === 0 ? (
+             running 态也不能说「没有内容」——那与下面的运行指示互相打架。
+             接续会话只看 timelineItems：当前段还没落字时，前序段历史已经撑起时间线。 */
+          : timelineItems.length === 0 ? (
             provisional.length > 0
               ? <Transcript sessionId={sessionId} items={provisional} />
               : <div className="chat-empty">{tone === "running" ? t.chat.emptyWorking : t.chat.empty}</div>
@@ -2552,7 +3029,12 @@ export function ChatWindow() {
                 </button>
               </div>
             )}
-            <Transcript sessionId={sessionId} items={displayItems} />
+            {/* 跨 provider 接续的新会话：前序历史没取到时的来历注脚（取到后由段间
+                分隔条表达同一事实，见 timelineItems）。 */}
+            {showHandoffNote && !hasEarlier && (
+              <div className="chat-empty is-note">{t.chat.handoffContinued}</div>
+            )}
+            <Transcript sessionId={sessionId} items={timelineItems} />
             {/* 上翻后回到底部的悬浮出口：sticky 钉在滚动视口底缘，贴底时不渲染。 */}
             {!atBottom && (
               <button type="button" className="chat-jump-latest" onClick={jumpToLatest}>
@@ -2562,7 +3044,7 @@ export function ChatWindow() {
           </>}
         {/* Agent 自己维护的待办清单。它不属于时间线（会被反复整份改写），故固定在底部
             而不是插进消息流里——否则每改一次待办就多一条历史。 */}
-        {!loading && (history?.todos?.length ?? 0) > 0 && <TodoPanel todos={history!.todos} />}
+        {!loading && todos.length > 0 && <TodoPanel todos={todos} />}
       </main>
       {/* Agent 正在跑但 transcript 半天不落新行时，页面此前毫无动静，像卡死。
           运行条原在滚动流内、Transcript 之后——上翻历史就随内容滚出视口。移到 main 与
@@ -2672,6 +3154,8 @@ export function ChatWindow() {
           ? t.chat.longSessionPromptTitle
           : terminalAttention.id === "claude:command-approval"
             ? t.chat.approvalTitle
+          : terminalAttention.id === "claude:plan-approval"
+            ? t.chat.planTitle
           : terminalAttention.options?.length && terminalAttention.id.startsWith("provider:")
             ? t.chat.trustPromptTitle
             : t.chat.terminalPromptTitle}
@@ -2682,12 +3166,12 @@ export function ChatWindow() {
           <button type="button" onClick={() => {
             void writeManagedTerminal(sessionId, "\x1b")
               .then(() => setTerminalAttention(null))
-              .catch((error) => setSendError(String(error)));
+              .catch((error) => setSendError(formatBackendError(error, t.locale)));
           }}>{t.chat.terminalPromptCancel}</button>
           <button type="button" className="is-allow" onClick={() => {
             void writeManagedTerminal(sessionId, "\r")
               .then(() => setTerminalAttention(null))
-              .catch((error) => setSendError(String(error)));
+              .catch((error) => setSendError(formatBackendError(error, t.locale)));
           }}>{t.chat.terminalPromptConfirm}</button>
         </>}
       >
@@ -2711,10 +3195,12 @@ export function ChatWindow() {
       </ApprovalCard>}
       {terminalMounted && (
         <div className={`chat-terminal-pane${view !== "terminal" ? " is-background" : ""}`} aria-hidden={view !== "terminal"}>
-          {/* broker 审批是被 hook 劫走的：终端 TUI 里**不会**出现那个选择框。终端视图下
-              用户既看不到卡片也看不到 TUI 提示，agent 就这么干等到 300s 超时——挂一条
-              常驻横幅把人领回对话页。屏幕识别类提示（TUI 上真有表单的）不挂：表单就在眼前。 */}
-          {view === "terminal" && approval && (
+          {/* broker 审批横幅——只给「hook 阻塞期间 TUI 不显示权限框」的 provider 挂
+              （permission_prompt_races_hook=false，如 codex/未取证者）：那种终端视图下
+              用户什么都看不到，agent 干等到 300s 超时，须领回对话页。claude 相反：官方
+              hooks 文档明载 TUI 权限框与 hook 并行竞速（实测同现），授权框就在眼前，
+              横幅只会误导，不挂。屏幕识别类提示（TUI 上真有表单的）同理不挂。 */}
+          {view === "terminal" && approval && !chatUi?.permission_prompt_races_hook && (
             <div className="chat-terminal-approval" role="status">
               <span>{t.chat.terminalApprovalBanner}{approvalCountdown ? ` · ${approvalCountdown}` : ""}</span>
               <button type="button" onClick={() => setView("chat")}>{t.chat.terminalApprovalGo}</button>
@@ -2724,6 +3210,9 @@ export function ChatWindow() {
             key={sessionId}
             sessionId={sessionId}
             status={history?.status}
+            // 停滞检测豁免:broker 审批/hook 落库的待批/屏幕识别的表单/结构化题面,任一
+            // 在场都说明 TUI 静止是「在等人」——回合没结束 status 仍 running,不能报僵死。
+            reviewPending={Boolean(approval || history?.pendingReview || terminalAttention || structuredQuestion)}
             visible={view === "terminal"}
             background={history?.background ?? false}
             resumeOptions={resumeOptions}
@@ -2813,8 +3302,17 @@ export function ChatWindow() {
             在探测循环移交后停更,PTY 退出后悬死 true,这里会一直显示「正在读取终端」。 */}
         </> : <span>{history?.ptyManaged ? t.chat.approvalReadingTerminal : t.chat.approvalInTerminal}</span>}
       </ApprovalCard>}
-      {view === "chat" && <footer ref={composeRef} className={"chat-compose" + (composerLocked ? " is-locked" : "") + (composerGated ? " is-gated" : "")}>
-        {composerGated ? <div className="chat-compose-gate">
+      {view === "chat" && <footer ref={composeRef} className={"chat-compose" + (composerLocked ? " is-locked" : "") + (composerGated || supersededTo != null ? " is-gated" : "")}>
+        {supersededTo != null ? <div className="chat-compose-gate">
+          <span>{t.chat.supersededBanner}</span>
+          <div className="chat-compose-gate-actions">
+            <button
+              type="button"
+              className="chat-send-takeover"
+              onClick={() => resetTo(supersededTo)}
+            >{t.chat.supersededGo}</button>
+          </div>
+        </div> : composerGated ? <div className="chat-compose-gate">
           <span>{externalRunning ? t.chat.sendNeedsTakeover : t.chat.composerGateEnded}</span>
           {/* 恢复失败的原因就地可见（接管态的主文案已是同一句，不重复）。 */}
           {sendError && sendError !== t.chat.sendNeedsTakeover && (
@@ -2955,27 +3453,34 @@ export function ChatWindow() {
           <button type="button" className="chat-attach-button" aria-label={t.chat.attach} data-tip={t.chat.attach} onClick={() => void chooseAttachments()}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65"><path d="M12 5v14M5 12h14" /></svg>
           </button>
-          {(modelPresets.length > 0 || modelMenuCommand || history?.model) && <div className="chat-model" ref={modelMenuUi.ref} onKeyDown={modelMenuUi.onKeyDown}>
+          {(modelPresets.length > 0 || modelMenuCommand || history?.model || switchTargets.length > 0) && <div className="chat-model" ref={modelMenuUi.ref} onKeyDown={modelMenuUi.onKeyDown}>
             <button
               ref={modelMenuUi.btnRef}
               type="button"
               className="chat-model-button"
-              disabled={modelPresets.length === 0 && !modelMenuCommand}
+              disabled={modelPresets.length === 0 && !modelMenuCommand && switchTargets.length === 0}
               aria-label={t.chat.switchModel}
-              aria-expanded={modelDropdownReady ? modelMenu : undefined}
-              data-tip={modelProbing ? t.chat.modelProbing : modelProbeFailed ? t.chat.modelGoTerminal : menuWatching ? t.chat.modelMenuOpen : modelPresets.length > 0 || modelMenuCommand ? t.chat.switchModel : undefined}
-              // 标签学过了就直接下拉（切换走 `/model <别名>` 内联，静默、不打扰会话）；
-              // 没学过（首次/CLI 刚升级）先让 CLI 自己弹一次菜单，屏幕识别把它转成 GUI
-              // 按钮，同时把真实标签学下来——清单始终是 CLI 现给的，宿主不维护会过时的那份。
-              // 无内联能力的 CLI（无静态预设）恒走菜单通道。
+              aria-expanded={modelMenu}
+              data-tip={menuWatching && !modelProbing ? t.chat.modelMenuOpen : modelPresets.length > 0 || modelMenuCommand || switchTargets.length > 0 ? t.chat.switchModel : undefined}
+              // 单一点击语义：恒为开/关菜单。探测中（转圈+取消）、读不到清单（去终端页）
+              // 都改在菜单条目里表达——此前同一颗按钮隐形承担「开菜单/取消探测/跳终端/
+              // 发起探测」四种动作，用户无从预判点下去会发生什么。
+              // 清单未学到时开菜单顺带发起静默探测：CLI 自己弹一次菜单，屏幕识别转成 GUI
+              // 选项并把真实标签学下来——清单始终是 CLI 现给的，宿主不维护会过时的那份。
               onClick={() => {
                 // 与模式菜单互斥：同时只开一个。
-                if (modelDropdownReady) { setModeMenu(null); setModelMenu((open) => !open); return; }
-                // 探测进行中：再点是「取消」。
-                if (modelProbing) { endSilentProbe(); return; }
-                // 这个 CLI 读不到清单：直接把用户送到能切的地方，别再空转一次。
-                if (modelProbeFailed) { setView("terminal"); return; }
-                void probeModelMenu();
+                setModeMenu(null);
+                const opening = !modelMenu;
+                setModelMenu(opening);
+                // 关菜单时若探测在途,一并取消(给 TUI 发 Esc 收掉菜单)——识别窗口开着时
+                // 绝不能重发命令,否则会打进菜单搜索框把候选全过滤掉。
+                if (!opening && modelProbing) { endSilentProbe(); return; }
+                // 开菜单顺带发起静默探测学清单;有「切换引擎」分组时不自动探测(跨 provider
+                // 切换不该被探测门槛拖住),菜单里保留显式的探测入口。
+                if (opening && !modelDropdownReady && !modelProbing && !modelProbeFailed
+                  && modelMenuCommand && switchTargets.length === 0) {
+                  void probeModelMenu();
+                }
               }}
             >
               {history?.model || t.chat.model}
@@ -2984,7 +3489,32 @@ export function ChatWindow() {
                 ? <span className="chat-model-spinner" aria-hidden="true" />
                 : (modelPresets.length > 0 || modelMenuCommand) && <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"><path d="M6 9l6 6 6-6" /></svg>}
             </button>
-            {modelMenu && modelDropdownReady && <div className="dd-menu chat-model-menu" role="menu">
+            {modelMenu && <div className="dd-menu chat-model-menu" role="menu">
+              {/* 探测中：清单还在读，点击取消。探测成功后清单条目就地接管本菜单。 */}
+              {modelProbing && (
+                <button type="button" role="menuitem" className="chat-model-item" onClick={endSilentProbe}>
+                  <span className="chat-model-item-text">
+                    <span className="chat-model-item-name">{t.chat.modelProbing}</span>
+                  </span>
+                  <span className="chat-model-spinner" aria-hidden="true" />
+                </button>
+              )}
+              {/* 清单未学到（无内联预设的 CLI）：重试探测；读不到清单的 CLI 给「去终端页」直达。 */}
+              {!modelProbing && modelPresets.length === 0 && modelMenuCommand && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="chat-model-item"
+                  onClick={() => {
+                    if (modelProbeFailed) { setModelMenu(false); setView("terminal"); }
+                    else void probeModelMenu();
+                  }}
+                >
+                  <span className="chat-model-item-text">
+                    <span className="chat-model-item-name">{modelProbeFailed ? t.chat.modelGoTerminal : t.chat.switchModel}</span>
+                  </span>
+                </button>
+              )}
               {modelPresets.map((preset) => {
                 const active = history?.model === preset.label;
                 return (
@@ -3013,6 +3543,70 @@ export function ChatWindow() {
                   </button>
                 );
               })}
+              {/* 「切换引擎」分组：跨 provider 切换（携带交接历史）。仅当当前 agent 的历史
+                  可导出（后端 supports_chat_export 能力位）且有其他已装 agent 时出现。
+                  点 agent 行展开二级（默认模型 + 该 agent 的模型预设，惰性取），点具体
+                  档位才真正发起切换——切换是破坏性动作，后面还有 appConfirm 把关。 */}
+              {switchTargets.length > 0 && <>
+                <div className="chat-model-group" role="presentation">{t.chat.switchProvider}</div>
+                {switchTargets.map((agent) => {
+                  const { Icon } = agentAssets(agent.id);
+                  const expanded = switchTarget === agent.id;
+                  const presets = switchPresets[agent.id];
+                  return (
+                    <div key={agent.id}>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={"chat-model-item chat-switch-agent" + (expanded ? " is-active" : "")}
+                        aria-expanded={expanded}
+                        onClick={() => {
+                          if (expanded) { setSwitchTarget(null); return; }
+                          setSwitchTarget(agent.id);
+                          // 目标模型预设惰性取一次（静态声明，不依赖会话），失败按无预设处理。
+                          if (!switchPresets[agent.id]) {
+                            void agentChatUi(agent.id, cwd, undefined)
+                              .then((ui) => setSwitchPresets((prev) => ({ ...prev, [agent.id]: ui?.model_presets ?? [] })))
+                              .catch(() => setSwitchPresets((prev) => ({ ...prev, [agent.id]: [] })));
+                          }
+                        }}
+                      >
+                        <span className="chat-switch-agent-ico" style={tintStyle(agent.id)}><Icon /></span>
+                        <span className="chat-model-item-text">
+                          <span className="chat-model-item-name">{agent.display_name}</span>
+                        </span>
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" style={expanded ? { transform: "rotate(180deg)" } : undefined}><path d="M6 9l6 6 6-6" /></svg>
+                      </button>
+                      {expanded && <div className="chat-switch-models">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="chat-model-item chat-switch-model"
+                          onClick={() => void startProviderSwitch(agent)}
+                        >
+                          <span className="chat-model-item-text">
+                            <span className="chat-model-item-name">{t.chat.switchProviderDefaultModel}</span>
+                          </span>
+                        </button>
+                        {(presets ?? []).map((preset) => (
+                          <button
+                            type="button"
+                            key={preset.id}
+                            role="menuitem"
+                            className="chat-model-item chat-switch-model"
+                            onClick={() => void startProviderSwitch(agent, preset.id)}
+                          >
+                            <span className="chat-model-item-text">
+                              <span className="chat-model-item-name">{preset.label}</span>
+                              <span className="chat-model-item-desc">{t.chat.modelDesc[preset.id] ?? ""}</span>
+                            </span>
+                          </button>
+                        ))}
+                      </div>}
+                    </div>
+                  );
+                })}
+              </>}
             </div>}
           </div>}
           {(() => {
@@ -3029,17 +3623,10 @@ export function ChatWindow() {
               // resumePermission，随下一次发送经 ensureWritableTerminal 作为启动参数下发并
               // 由后端持久化，与终端封面、接管横幅里的改选共用同一个状态。后台会话除外
               //（daemon 托管，我们恢复不了它）。
-              // 有存值时同 resumePermissionPicker：不放「沿用原设置」占位，直接预选存的那档。
+              // 选项清单与 resumePermissionPicker 共用同一份构造（permissionChoiceOptions）。
               const resumeChoices = permissionOption && dimension === permissionOption.id
                 && history && !history.connected && !history.background
-                ? [
-                    ...(storedPermission ? [] : [{ value: "", label: t.chat.resumeKeepOptions, inputs: [] }]),
-                    ...permissionOption.choices.map((choice) => ({
-                      value: choice.id,
-                      label: t.newSession.launchChoice[`${permissionOption.id}.${choice.id}`] ?? choice.label,
-                      inputs: [],
-                    })),
-                  ]
+                ? permissionChoiceOptions.map((option) => ({ ...option, inputs: [] }))
                 : null;
               const resumePick = resumeChoices !== null;
               // 只有 cycle 键的维度（claude 权限模式）用**屏幕回显标记**派生下拉：那些标记
@@ -3180,9 +3767,39 @@ export function ChatWindow() {
           <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>
           <button type="button" className="chat-send-takeover" onClick={cancelTerminalMenu}>{t.chat.slashMenuDismiss}</button>
         </div>}
+        {/* 软拦非阻断横幅:消息已发出,提示终端可能有未识别的交互等待,给跳终端/收起两个出口。
+            terminalAttention 出现说明识别成功变成了卡片,此横幅即让位。 */}
+        {softPromptNotice && !terminalAttention && <div className="chat-send-error" role="status">
+          <span>{t.chat.unrecognizedPromptNotice}</span>
+          <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>
+          <button type="button" className="chat-send-takeover" onClick={() => setSoftPromptNotice(false)}>{t.chat.slashMenuDismiss}</button>
+        </div>}
         </>}
       </footer>}
       </div>
+      {/* 「查看改动」停靠面板：与 .chat-main 并列的右列，对话区收缩让位（非覆盖层）。
+          折叠只加 is-collapsed（display:none）不卸载，面板状态原样保留。
+          分栏柄落在两张卡之间的缝隙里，拖拽调宽（折叠/最大化时隐藏）。 */}
+      {diffOpen && cwd && (
+        <>
+          <div
+            className={"chat-diff-resizer" + (diffCollapsed ? " is-hidden" : "")}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t.chat.diffResize}
+            onPointerDown={startDiffResize}
+          />
+          <GitDiffView
+            cwd={cwd}
+            summary={gitSummary}
+            width={diffWidth}
+            collapsed={diffCollapsed}
+            maximized={diffMaximized}
+            onCollapse={() => { setDiffCollapsed(true); setDiffMaximized(false); }}
+            onToggleMaximize={() => { setDiffMaximized((max) => !max); setDiffCollapsed(false); }}
+          />
+        </>
+      )}
       </div>
       {renaming && history && (
         <RenameModal

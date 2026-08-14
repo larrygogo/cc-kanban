@@ -1,10 +1,10 @@
-import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { languageOptions, useT } from "../i18n";
-import { availableTerminals, type ResumeTerminal, type StickerStyle, type CardMenuMode, type ThemeMode } from "../api";
-import { Segmented, Switch } from "./settings/widgets";
+import { type ThemeMode } from "../api";
+import { Segmented } from "./settings/widgets";
 import { Dropdown } from "./menu";
 import { useSettingsState } from "./settings/state";
 import logoUrl from "../../src-tauri/icons/128x128.png";
@@ -12,20 +12,8 @@ import { useEscClose } from "../hooks/useEscClose";
 
 type Dict = ReturnType<typeof useT>;
 
-// 平台判定与真实设置页一致（WKWebView 的 UA 含 "Mac"）。默认终端选项按平台给，再用后端探测过滤。
+// 平台判定与真实设置页一致（WKWebView 的 UA 含 "Mac"）。吸边要点仅 Windows 拼接。
 const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.userAgent);
-const IS_WIN = typeof navigator !== "undefined" && /Win/i.test(navigator.userAgent);
-const RESUME_TERM_OPTIONS_MAC: { value: ResumeTerminal; label: string }[] = [
-  { value: "terminal", label: "Terminal" },
-  { value: "iterm", label: "iTerm2" },
-  { value: "ghostty", label: "Ghostty" },
-];
-const resumeTermOptionsWin = (t: Dict): { value: ResumeTerminal; label: string }[] => [
-  { value: "wt", label: "Windows Terminal" },
-  { value: "wezterm", label: "WezTerm" },
-  { value: "powershell", label: "PowerShell" },
-  { value: "cmd", label: t.settings.cmdPrompt },
-];
 
 // ── 每步的「迷你界面示意图」：用 div 复刻贴纸真实观感（状态色、卡片、tab、底栏、菜单）。
 
@@ -73,87 +61,6 @@ function HeroBoard({ t }: { t: Dict }) {
       </div>
       <MiniCard variant="wait" />
       <MiniCard variant="off" />
-    </div>
-  );
-}
-
-// 卡片菜单：一张卡片右上角「⋯」按钮高亮 + 展开的操作菜单。项与图标对齐真实 CardContextMenu：
-// 置顶 / 便签 / 改名 / 归档 —分隔线— 新建会话 / 打开目录，共 6 项。
-const CARD_MENU_ICONS: ReactNode[] = [
-  // 置顶：与 CardContextMenu 的 TopIcon 同形（arrow-up-to-line）。这里画星星的话，
-  // 新手在引导里认的图标和真实菜单里的对不上。
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 3h14" /><path d="m18 13-6-6-6 6" /><path d="M12 7v14" /></svg>,
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11l5-5V5a2 2 0 0 0-2-2z" /><path d="M15 21v-5a1 1 0 0 1 1-1h5" /></svg>,
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>,
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="20" height="5" x="2" y="3" rx="1" /><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" /><path d="M10 12h4" /></svg>,
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14" /></svg>,
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" /></svg>,
-];
-
-function HeroCardMenu({ t }: { t: Dict }) {
-  const labels = [
-    t.sticker.star,
-    t.sticker.noteAdd,
-    t.sticker.renameTitle,
-    t.sticker.archive,
-    t.sticker.newSession,
-    t.sticker.openProjectDir,
-  ];
-  return (
-    <div className="obm-cardmenu">
-      <div className="obm-card obm-card-menu">
-        <span className="obm-dot obm-active" />
-        <div className="obm-lines">
-          <i className="obm-l1" />
-          <i className="obm-l2" />
-        </div>
-        <span className="obm-menubtn" aria-hidden>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg>
-        </span>
-      </div>
-      <div className="obm-pop">
-        {labels.map((label, i) => (
-          <Fragment key={i}>
-            {/* 真实菜单里「新建会话/打开目录」上方有分隔线 */}
-            {i === 4 && <div className="obm-pop-sep" />}
-            <span className="obm-pop-item">
-              <span className="obm-pop-ico">{CARD_MENU_ICONS[i]}</span>
-              {label}
-            </span>
-          </Fragment>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function HeroTerminal() {
-  return (
-    <div className="obm-jump">
-      <div className="obm-toast">
-        <span className="obm-dot obm-wait" />
-        <i />
-      </div>
-      <div className="obm-jump-row">
-        <div className="obm-card obm-card-click">
-          <span className="obm-dot obm-active" />
-          <div className="obm-lines">
-            <i className="obm-l1" />
-            <i className="obm-l2" />
-          </div>
-          <svg className="obm-cursor" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-            <path d="M5 3l14 8-6 1.5L9.5 18z" />
-          </svg>
-        </div>
-        <svg className="obm-arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-          <line x1="4" y1="12" x2="18" y2="12" />
-          <polyline points="12 6 18 12 12 18" />
-        </svg>
-        <div className="obm-term">
-          <span className="obm-term-dots"><i /><i /><i /></span>
-          <code>$ claude --resume</code>
-        </div>
-      </div>
     </div>
   );
 }
@@ -209,64 +116,14 @@ const SI = {
   theme: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none" /></svg>
   ),
-  style: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3 3 8l9 5 9-5-9-5z" /><path d="m3 12 9 5 9-5" /><path d="m3 16 9 5 9-5" /></svg>
-  ),
-  menu: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="9" y1="6" x2="20" y2="6" /><line x1="9" y1="12" x2="20" y2="12" /><line x1="9" y1="18" x2="20" y2="18" /><circle cx="4.5" cy="6" r="1" /><circle cx="4.5" cy="12" r="1" /><circle cx="4.5" cy="18" r="1" /></svg>
-  ),
-  term: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m7 9 3 3-3 3" /><line x1="12.5" y1="15" x2="17" y2="15" /></svg>
-  ),
-  chat: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z" /><line x1="9" y1="10" x2="15" y2="10" /><line x1="9" y1="14" x2="13" y2="14" /></svg>
-  ),
 };
 
-// 会话菜单打开方式（卡片按钮 / 右键菜单）——留在「卡片菜单」步就地配置（那里正好解释菜单是什么）。
-function CardMenuControl({ t }: { t: Dict }) {
+// 欢迎步就地设置:只留最关键的语言与外观两项(其余项全用默认值,设置页随时可改)。
+// 引导从 6 步压到 3 步:配置项与设置页重复的步骤删除,是「操作更简」的一部分。
+function WelcomeConfig({ t }: { t: Dict }) {
   const [settings, patch] = useSettingsState();
-  const mode = (settings?.card_menu_mode ?? "button") as CardMenuMode;
-  return (
-    <div className="ob-set">
-      <div className="ob-set-row">
-        <span className="ob-set-ico">{SI.menu}</span>
-        <div className="ob-set-text">
-          <div className="ob-set-label">{t.settings.cardMenu}</div>
-          <div className="ob-set-desc">{t.onboarding.cardmenu.mode}</div>
-        </div>
-        <Segmented
-          value={mode}
-          options={[
-            { value: "button" as const, label: t.settings.cardMenuButton },
-            { value: "context" as const, label: t.settings.cardMenuContext },
-          ]}
-          onChange={(v: CardMenuMode) => patch({ card_menu_mode: v })}
-          label={t.settings.cardMenu}
-        />
-      </div>
-    </div>
-  );
-}
-
-// 快速设置：语言 / 贴纸风格 / 默认终端，即时写入并生效（复用设置页的读写 hook 与控件）。
-// 刻意前置到欢迎之后——偏配置的项若压到最后，用户很可能一路 Next 跳过。
-function ConfigBody({ t }: { t: Dict }) {
-  const [settings, patch] = useSettingsState();
-  const [availTerms, setAvailTerms] = useState<ResumeTerminal[] | null>(null);
-  useEffect(() => {
-    availableTerminals().then(setAvailTerms).catch(() => setAvailTerms([]));
-  }, []);
-
   const language = settings?.language ?? "auto";
   const theme = (settings?.theme ?? "dark") as ThemeMode;
-  const stickerStyle = (settings?.sticker_style ?? "elevated") as StickerStyle;
-  const platformOpts = IS_MAC ? RESUME_TERM_OPTIONS_MAC : resumeTermOptionsWin(t);
-  const termOptions = platformOpts.filter((o) => (availTerms ?? []).includes(o.value));
-  const storedTerm = (settings?.resume_terminal ?? "terminal") as ResumeTerminal;
-  const resumeTerm = termOptions.some((o) => o.value === storedTerm) ? storedTerm : termOptions[0]?.value ?? "terminal";
-  const showTermRow = (IS_MAC || IS_WIN) && termOptions.length >= 2;
-
   return (
     <div className="ob-set">
       <div className="ob-set-row">
@@ -296,45 +153,6 @@ function ConfigBody({ t }: { t: Dict }) {
           label={t.settings.theme}
         />
       </div>
-      <div className="ob-set-row">
-        <span className="ob-set-ico">{SI.style}</span>
-        <div className="ob-set-text">
-          <div className="ob-set-label">{t.settings.stickerStyle}</div>
-        </div>
-        <Segmented
-          value={stickerStyle}
-          options={[
-            { value: "elevated" as const, label: t.settings.styleElevated },
-            { value: "flat" as const, label: t.settings.styleFlat },
-          ]}
-          onChange={(v: StickerStyle) => patch({ sticker_style: v })}
-          label={t.settings.stickerStyle}
-        />
-      </div>
-      {showTermRow && (
-        <div className="ob-set-row">
-          <span className="ob-set-ico">{SI.term}</span>
-          <div className="ob-set-text">
-            <div className="ob-set-label">{t.settings.resumeTerm}</div>
-            <div className="ob-set-desc">{t.onboarding.setup.terminalHint}</div>
-          </div>
-          <Dropdown value={resumeTerm} options={termOptions} onChange={(v) => patch({ resume_terminal: v })} />
-        </div>
-      )}
-      {/* 对话窗口功能（轻量模式开关）：安装器种子只在 Windows 存在，这里是全平台
-          都能第一时间做出选择的地方；随时可在设置页改回。 */}
-      <div className="ob-set-row">
-        <span className="ob-set-ico">{SI.chat}</span>
-        <div className="ob-set-text">
-          <div className="ob-set-label">{t.settings.chatFeature}</div>
-          <div className="ob-set-desc">{t.onboarding.setup.chatHint}</div>
-        </div>
-        <Switch
-          checked={settings?.chat_enabled ?? true}
-          onChange={() => patch({ chat_enabled: !(settings?.chat_enabled ?? true) })}
-          label={t.settings.chatFeature}
-        />
-      </div>
     </div>
   );
 }
@@ -358,14 +176,11 @@ export function Onboarding() {
   useShowWhenReady();
   const [step, setStep] = useState(0);
 
-  // 顺序刻意把两个「偏配置」的步骤（快速设置、卡片菜单）放到欢迎之后的前面：
-  // 压到最后用户很可能一路 Next 跳过。会话菜单的打开方式就地配置在「卡片菜单」步（那里正好解释菜单是什么）。
+  // 3 步:欢迎(含语言/外观两项就地设置) → 看板与卡片 → 窗口行为。
+  // 其余配置项全用默认值,设置页随时可改——配置型步骤与设置页重复,已删。
   const steps: Step[] = [
-    { hero: <HeroWelcome />, title: t.onboarding.welcome.title, desc: t.onboarding.welcome.desc },
-    { title: t.onboarding.setup.title, desc: t.onboarding.setup.desc, body: <ConfigBody t={t} /> },
-    { hero: <HeroCardMenu t={t} />, title: t.onboarding.cardmenu.title, desc: t.onboarding.cardmenu.desc, body: <CardMenuControl t={t} /> },
+    { hero: <HeroWelcome />, title: t.onboarding.welcome.title, desc: t.onboarding.welcome.desc, body: <WelcomeConfig t={t} /> },
     { hero: <HeroBoard t={t} />, title: t.onboarding.board.title, points: t.onboarding.board.points },
-    { hero: <HeroTerminal />, title: t.onboarding.terminal.title, points: t.onboarding.terminal.points },
     // 吸边仅 Windows 有（macOS 是菜单栏面板），要点按平台拼接——不教的话用户误吸附后
     // 只会以为「窗口不见了」。
     { hero: <HeroWindow />, title: t.onboarding.window.title, points: IS_MAC ? t.onboarding.window.points : [...t.onboarding.window.points, t.onboarding.window.snapPoint] },

@@ -27,11 +27,13 @@ import {
   type ProviderUsage,
 } from "../api";
 import { isMacPanel } from "../platform";
+import { appConfirm } from "../confirm";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
 import { useAgents } from "../useAgents";
 import { useT } from "../i18n";
+import { formatBackendError } from "../i18n/errors";
 import { type Item, type Tab, TAB_KEYS, PIN_KEY, UNNAMED_SESSION_SENTINEL } from "./sticker/types";
 import { cardTone, editorKeyDown, fmtAgo, fmtWaited, useStarred, match } from "./sticker/helpers";
 import {
@@ -52,7 +54,7 @@ import { CardContextMenu } from "./sticker/CardContextMenu";
 import { EmptyState } from "./sticker/EmptyState";
 import { UsageScreen } from "./sticker/UsageScreen";
 
-type FocusNoticeKind = FocusSessionResult | "connecting" | "failed" | "background" | "archived" | "resuming";
+type FocusNoticeKind = FocusSessionResult | "connecting" | "failed" | "background" | "archived" | "resuming" | "foreign";
 
 /** 便签字符上限：与后端 session_command.rs 的 `chars().take(500)` 截断阈值对齐。
  *  前端不设限时超长便签被后端静默截断，用户丢字无感。 */
@@ -60,8 +62,9 @@ const NOTE_MAX_CHARS = 500;
 
 /** 卡片就地编辑框（重命名/便签共用）。草稿住在本组件的局部状态：放在 Sticker 里时
  *  每次按键 setState 都让整个看板重渲染（虚拟化把代价压到可见行，但可见行的整卡重建
- *  仍是白付；侧栏同款问题见 ChatSidebar 的 EditorInput）。提交/取消语义与原实现一致：
- *  Enter/✓ 提交、Esc/✗ 取消；无失焦提交（有显式按钮，失焦提交会和点 ✗ 打架）。 */
+ *  仍是白付；侧栏同款问题见 ChatSidebar 的 EditorInput）。提交/取消语义与侧栏对齐：
+ *  Enter/✓/失焦 提交、Esc/✗ 取消。按钮的 mousedown preventDefault 保证点 ✗ 不先触发
+ *  失焦提交;done 标志防 Enter 提交后卸载期的 blur 二次提交。 */
 function EditBox({ initial, placeholder, inputClass, extraClass, icon, saveLabel, cancelLabel, maxLength, onSubmit, onCancel }: {
   initial: string;
   placeholder: string;
@@ -77,6 +80,9 @@ function EditBox({ initial, placeholder, inputClass, extraClass, icon, saveLabel
   onCancel: () => void;
 }) {
   const [value, setValue] = useState(initial);
+  const done = useRef(false);
+  const submit = (v: string) => { if (done.current) return; done.current = true; onSubmit(v); };
+  const cancel = () => { if (done.current) return; done.current = true; onCancel(); };
   const nearLimit = maxLength != null && value.length >= maxLength * 0.8;
   return (
     <div className={"stk-editbox" + (extraClass ? ` ${extraClass}` : "")} onClick={(e) => e.stopPropagation()}>
@@ -88,17 +94,18 @@ function EditBox({ initial, placeholder, inputClass, extraClass, icon, saveLabel
         placeholder={placeholder}
         maxLength={maxLength}
         onChange={(e) => setValue(e.target.value)}
-        onKeyDown={editorKeyDown(() => onSubmit(value), onCancel)}
+        onKeyDown={editorKeyDown(() => submit(value), cancel)}
+        onBlur={() => submit(value)}
       />
       {nearLimit && <span className="stk-editbox-count">{maxLength! - value.length}</span>}
-      {/* mousedown preventDefault：点按钮不抢走输入框焦点，避免触发其它失焦逻辑 */}
+      {/* mousedown preventDefault：点按钮不抢走输入框焦点，避免触发失焦提交 */}
       <button
         type="button"
         className="stk-ebtn stk-ebtn-ok"
         aria-label={saveLabel}
         data-tip={saveLabel}
         onMouseDown={(e) => e.preventDefault()}
-        onClick={() => onSubmit(value)}
+        onClick={() => submit(value)}
       ><CheckIcon /></button>
       <button
         type="button"
@@ -106,7 +113,7 @@ function EditBox({ initial, placeholder, inputClass, extraClass, icon, saveLabel
         aria-label={cancelLabel}
         data-tip={cancelLabel}
         onMouseDown={(e) => e.preventDefault()}
-        onClick={onCancel}
+        onClick={cancel}
       ><XIcon /></button>
     </div>
   );
@@ -304,6 +311,10 @@ export function Sticker({
   // 重命名：editingId 为正在编辑的会话 id。草稿文本住在 EditBox 的局部状态里，
   // 按键不触发看板整表重渲染。
   const [editingId, setEditingId] = useState<number | null>(null);
+  // 失焦提交后,blur 先于 click 触发:click 到达时编辑态已清,「编辑态点卡片只关编辑器、
+  // 不导航」的守卫会漏。记录编辑器关闭时刻,250ms 内的卡片点击视为同一手势不导航。
+  const editCloseAtRef = useRef(0);
+  const markEditClosed = () => { editCloseAtRef.current = Date.now(); };
   const startRename = (l: Item) => {
     setNotingId(null); // 与便签编辑互斥，同卡只开一个编辑器
     setEditingId(l.session.id);
@@ -320,6 +331,7 @@ export function Sticker({
           setFocusNotice({ kind: "failed", item: l, detail: t.sticker.renameFailed });
         });
     }
+    markEditClosed();
     setEditingId(null);
   };
 
@@ -333,12 +345,11 @@ export function Sticker({
   const [focusNotice, setFocusNotice] = useState<{
     kind: FocusNoticeKind;
     item: Item;
-    confirming?: boolean;
     busy?: boolean;
     detail?: string;
   } | null>(null);
   useEffect(() => {
-    if (!focusNotice || focusNotice.confirming || focusNotice.busy) return;
+    if (!focusNotice || focusNotice.busy) return;
     // resuming 由 resume_session 的 promise settle 时清（成功清空/失败换 failed），不走定时。
     if (["host_focused", "unsupported_terminal", "alive_but_not_found", "process_ended", "resuming"].includes(focusNotice.kind)) return;
     const id = window.setTimeout(() => setFocusNotice(null), 4_000);
@@ -376,6 +387,8 @@ export function Sticker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusNotice, searchOpen]);
   const startNote = (l: Item) => {
+    // 外库卡的便签只读:写入走本库 cc_session_id 查行,对外库会话必然落空。
+    if (l.foreign) return;
     setEditingId(null);
     setNotingId(l.session.id);
   };
@@ -389,12 +402,14 @@ export function Sticker({
           setFocusNotice({ kind: "failed", item: l, detail: t.sticker.noteFailed });
         });
     }
+    markEditClosed();
     setNotingId(null);
   };
 
   // 打开终端：连接中→跳转 WT 标签页；已断开未归档→新建终端 resume；归档不开。
+  // 外库(安装版)会话只读观察,永不可开——openTerminal 里还有一道守卫兜漏网的调用方。
   const buttonMode = openMode === "button";
-  const canOpen = (l: Item) => l.connected || !l.archived;
+  const canOpen = (l: Item) => !l.foreign && (l.connected || !l.archived);
   // 跳转/恢复的在飞集合：一次点击到后端返回可能长达数秒（跳转要做 UIA 枚举，恢复链路含
   // 目录扫描与 1s 秒退探测），期间界面毫无变化时用户必然连点——同一会话的重复请求当场拒绝。
   // state 驱动卡片 pending 样式（.is-opening），ref 供同步判定（state 落地前的同 tick 重入）。
@@ -411,6 +426,13 @@ export function Sticker({
     setOpenBusyIds(new Set(openBusyRef.current));
   };
   const openTerminal = (l: Item) => {
+    // 外库(安装版)会话:本实例只有观察权——focus 跳不到安装版 GUI 内部的 PTY 视图,
+    // resume 更危险(cc_session_id 是全局 UUID,恢复会真的 spawn 新进程把会话抢过来)。
+    // 只说明它归谁管、去哪操作。
+    if (l.foreign) {
+      setFocusNotice({ kind: "foreign", item: l });
+      return;
+    }
     // Agent 自己派生的后台会话：没有终端窗口可切（daemon 起的 PTY 宿主不是用户的终端），
     // 也无从恢复——恢复等于跟 supervisor 抢同一个 session id。只说明它是什么、去哪找它。
     // 注意：后端当前把这类会话整条藏掉（session_query 的 hidden_background），所以
@@ -437,7 +459,7 @@ export function Sticker({
           if (!result || result === "focused") setFocusNotice(null);
           else setFocusNotice({ kind: result, item: l });
         })
-        .catch((err) => setFocusNotice({ kind: "failed", item: l, detail: String(err) }))
+        .catch((err) => setFocusNotice({ kind: "failed", item: l, detail: formatBackendError(err, t.locale) }))
         .finally(() => endOpen(l.session.id));
     } else if (!l.archived) {
       // 恢复现在可能因多种原因失败（恢复计划无效、PTY 起不来、attach 打不开外部终端）。
@@ -449,31 +471,31 @@ export function Sticker({
       setFocusNotice({ kind: "resuming", item: l });
       invoke("resume_session", { cwd: l.cwd, sessionId: l.session.cc_session_id, provider: l.provider })
         .then(() => setFocusNotice((cur) => (cur?.kind === "resuming" && cur.item.session.id === l.session.id ? null : cur)))
-        .catch((err) => setFocusNotice({ kind: "failed", item: l, detail: String(err) }))
+        .catch((err) => setFocusNotice({ kind: "failed", item: l, detail: formatBackendError(err, t.locale) }))
         .finally(() => endOpen(l.session.id));
     }
   };
 
-  const reopenNoticeSession = () => {
+  const reopenNoticeSession = async () => {
     if (!focusNotice || focusNotice.busy) return;
     const l = focusNotice.item;
     if (focusNotice.kind === "process_ended") {
       setFocusNotice({ ...focusNotice, busy: true });
       invoke("resume_session", { cwd: l.cwd, sessionId: l.session.cc_session_id, provider: l.provider })
         .then(() => setFocusNotice(null))
-        .catch((err) => setFocusNotice({ ...focusNotice, busy: false, kind: "failed", detail: String(err) }));
-      return;
-    }
-    if (!focusNotice.confirming) {
-      setFocusNotice({ ...focusNotice, confirming: true });
+        .catch((err) => setFocusNotice({ ...focusNotice, busy: false, kind: "failed", detail: formatBackendError(err, t.locale) }));
       return;
     }
     const pid = l.pid;
     if (!pid) {
       // notice 持有点击时的快照，正常不会走到这里；仍在命令边界防御可空类型，绝不把 null 交给后端。
-      setFocusNotice({ ...focusNotice, confirming: false, kind: "process_ended" });
+      setFocusNotice({ ...focusNotice, kind: "process_ended" });
       return;
     }
+    // 结束并重开会杀掉原进程,属破坏性操作:走全应用统一的 appConfirm 原生小窗
+    // (toast 内二次点击的旧确认范式已移除)。
+    const yes = await appConfirm(t.sticker.reopenConfirm, { title: t.sticker.reopen, danger: true });
+    if (!yes) return;
     setFocusNotice({ ...focusNotice, busy: true });
     invoke("restart_session_supported", {
       pid,
@@ -482,7 +504,7 @@ export function Sticker({
       provider: l.provider,
     })
       .then(() => setFocusNotice(null))
-      .catch((err) => setFocusNotice({ ...focusNotice, busy: false, confirming: false, kind: "failed", detail: String(err) }));
+      .catch((err) => setFocusNotice({ ...focusNotice, busy: false, kind: "failed", detail: formatBackendError(err, t.locale) }));
   };
 
   // 归档撤销：toast 4s 窗口内点「撤销」把会话捞回来（后端 board-changed 会让卡片自己回来）。
@@ -496,9 +518,7 @@ export function Sticker({
   };
 
   const focusNoticeText = focusNotice
-    ? focusNotice.detail || (focusNotice.confirming
-      ? t.sticker.reopenConfirm
-      : {
+    ? focusNotice.detail || ({
           connecting: t.sticker.focusConnecting,
           host_focused: t.sticker.focusHostOnly,
           alive_but_not_found: t.sticker.focusNotFound,
@@ -507,6 +527,7 @@ export function Sticker({
           process_ended: t.sticker.focusEnded,
           failed: t.sticker.focusFailed,
           background: t.sticker.focusBackground,
+          foreign: t.sticker.focusForeign,
           archived: t.sticker.archivedNotice,
           resuming: t.sticker.resuming,
           focused: "",
@@ -844,6 +865,8 @@ export function Sticker({
                         setNotingId(null);
                         return;
                       }
+                      // 失焦提交刚关闭编辑器的同一次点击:只当失焦,不导航。
+                      if (Date.now() - editCloseAtRef.current < 250) return;
                       // 按钮模式：点击卡片不开终端，改由卡片上的打开按钮触发。
                       if (buttonMode) return;
                       openTerminal(l);
@@ -864,8 +887,9 @@ export function Sticker({
                     }}
                     onContextMenu={(e) => {
                       // 与卡片菜单按钮二选一：button 模式下右键只吞掉默认 webview 菜单、不弹卡片菜单。
+                      // 外库卡不弹菜单:置顶/便签/重命名/归档全是本库操作,对它一律无效。
                       e.preventDefault();
-                      if (menuMode === "context") {
+                      if (menuMode === "context" && !l.foreign) {
                         setCtxMenu({ sid: l.session.id, x: e.clientX, y: e.clientY });
                       }
                     }}
@@ -904,8 +928,9 @@ export function Sticker({
                               <span className={"stk-time" + (tab === "waiting" ? " is-waited" : "")}>
                                 {tab === "waiting" ? fmtWaited(l.session.last_event_at, t) : fmtAgo(l.session.last_event_at, t)}
                               </span>
-                              {/* 对话功能关闭（轻量模式）时不渲染：入口不存在优于点了被拦。 */}
-                              {chatEnabled && (
+                              {/* 对话功能关闭（轻量模式）时不渲染：入口不存在优于点了被拦。
+                                  外库卡同理:对话窗按本库 id 加载历史,外库 id 必落空。 */}
+                              {chatEnabled && !l.foreign && (
                                 <button
                                   type="button"
                                   className="stk-chat-btn"
@@ -920,7 +945,7 @@ export function Sticker({
                               {/* 置顶/便签/重命名/归档操作收进卡片菜单（CardContextMenu），标题行不再挤 hover 图标。
                                   默认右键触发；card_menu_mode=button（触屏等不便右键）时改为此处的常显菜单按钮，
                                   两种触发方式二选一。置顶态由卡片金角、便签由便签块表达，收起入口不丢信息。 */}
-                              {menuMode === "button" && (
+                              {menuMode === "button" && !l.foreign && (
                                 <button
                                   type="button"
                                   className="stk-menu-btn"
@@ -958,6 +983,13 @@ export function Sticker({
                               不建卡（见后端 hidden_background），源会话卡上也不标数——用户既
                               管不了这些作业（终端按键无效、发消息在手动模式下不会被执行），
                               一个数字除了让人困惑并无用处。要处理请回派出它们的终端。 */}
+                          {/* 外库来源徽章:这张卡由安装版托管,本实例只读观察(dev 构建
+                              聚合生产库的会话,监控视野不因数据目录隔离变窄)。 */}
+                          {l.foreign && (
+                            <span className="stk-foreign" data-tip={t.sticker.foreignTip}>
+                              {t.sticker.foreignBadge}
+                            </span>
+                          )}
                           {/* 所属账号徽章：默认账号（profile_name 为 null）不显示——
                               没建过 profile 的用户零感知。 */}
                           {l.profile_name && (
@@ -1106,21 +1138,10 @@ export function Sticker({
           <div className="stk-focus-body">
             <span className="stk-focus-text">{focusNoticeText}</span>
             <div className="stk-focus-actions">
-              {focusNotice.confirming && (
-                <button
-                  type="button"
-                  className="stk-focus-btn is-quiet"
-                  onClick={() => setFocusNotice({ ...focusNotice, confirming: false })}
-                >
-                  {t.sticker.noteCancel}
-                </button>
-              )}
               {(["host_focused", "unsupported_terminal", "alive_but_not_found", "process_ended"] as FocusNoticeKind[]).includes(focusNotice.kind) && (
-                <button type="button" className="stk-focus-btn" disabled={focusNotice.busy} onClick={reopenNoticeSession}>
+                <button type="button" className="stk-focus-btn" disabled={focusNotice.busy} onClick={() => void reopenNoticeSession()}>
                   {focusNotice.busy
                     ? t.sticker.reopening
-                    : focusNotice.confirming
-                    ? t.sticker.endAndReopen
                     : focusNotice.kind === "process_ended"
                     ? t.sticker.reopen
                     : t.sticker.reopenSupported}

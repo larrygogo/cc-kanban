@@ -1319,7 +1319,7 @@ pub(crate) fn env_source_prefix_posix(env: &[(String, String)]) -> Result<String
         use std::io::Write as _;
         if let Err(error) = file.write_all(content.as_bytes()) {
             let _ = std::fs::remove_file(&path);
-            return Err(format!("env 注入文件写入失败：{error}"));
+            return Err(format!("写入启动配置失败：{error}"));
         }
         drop(file);
         // 路径按同一套单引号规则转义后拼进 source/rm（temp_dir 一般不会带引号，纪律不松）。
@@ -1730,7 +1730,17 @@ pub(crate) async fn new_session(
     // PTY 冷启动与杀软扫描可能阻塞数秒，放 blocking 池；首次 SessionStart hook 会把临时 PTY
     // 认领为真实数据库 session。
     let temp_id = tauri::async_runtime::spawn_blocking(move || {
-        broker.start_pending(app, &argv, Some(&dir), &env, 100, 30, &provider, &selections)
+        broker.start_pending(
+            app,
+            &argv,
+            Some(&dir),
+            &env,
+            100,
+            30,
+            &provider,
+            &selections,
+            None,
+        )
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -1879,7 +1889,7 @@ pub(crate) fn attach_in_external_terminal(
                 force_foreground(hwnd);
                 return Ok(());
             }
-            return Err("外部同步终端已在线，但未能将其带到前台，请手动切换到对应窗口".into());
+            return Err("外部终端已在线，但没能带到前台，请手动切换".into());
         }
         // 旧 reporter 的订阅没有 pid：无从定位，维持原行为（新开一扇）。
         crate::pty::ExternalViewer::Legacy => {}
@@ -1898,7 +1908,7 @@ pub(crate) fn attach_in_external_terminal(
             return if crate::macos::terminal::focus_attach_viewer(pid as i64) {
                 Ok(())
             } else {
-                Err("外部同步终端已在线，但未能将其带到前台（宿主终端可能无法聚焦，或缺少辅助功能权限）".into())
+                Err("外部终端已在线，但没能带到前台，请手动切换".into())
             };
         }
         // 旧 reporter 的订阅没有 pid，才退回应用级兜底。
@@ -2201,7 +2211,7 @@ impl Drop for AgentProcessHandle {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn terminate_agent_for_restart(pid: i64) -> Result<(), String> {
+pub(crate) fn terminate_agent_for_restart(pid: i64) -> Result<(), String> {
     // 确认弹窗停留期间进程可能已经自然结束；此时无需报错，直接进入恢复流程。
     if !pid_alive_agent_quick(pid) {
         return Ok(());

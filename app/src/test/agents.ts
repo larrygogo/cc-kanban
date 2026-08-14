@@ -67,6 +67,13 @@ const SUPPORTS_PROFILES = new Set(["claude", "codex", "kimi", "opencode"]);
 const SUPPORTS_CONTEXT = new Set(["claude", "codex", "kimi"]);
 
 /**
+ * 会话历史可导出交接（跨 provider 切换的**来源**门槛）的那些。与后端
+ * `telemetry().transcript().supports_chat()` 同源——gemini/opencode 无结构化
+ * transcript，只能当切换目标，不能当来源。
+ */
+const SUPPORTS_CHAT_EXPORT = new Set(["claude", "codex", "kimi"]);
+
+/**
  * 对话页内置 `/` 补全候选。与后端 `AgentPlugin::slash_commands()` 同源——各家命令表是插件
  * 声明的事实（gemini 是 `/stats` 不是 `/status`，opencode 是 `/models` 不是 `/model`）。
  */
@@ -199,6 +206,8 @@ export function chatUi(provider: string, custom: SlashCommand[] = []): ChatUi | 
     attachment_mention: provider === "claude" || provider === "gemini" || provider === "kimi",
     // 与后端同源:claude/kimi 的 TUI 文档明确 Ctrl-V 读剪贴板原生附加图片,占位符各家不同。
     clipboard_image_paste: provider === "claude" ? "\\[Image #\\d" : provider === "kimi" ? "\\[image[:# ]" : null,
+    // 与后端同源:仅 claude 取证过「TUI 权限框与 PermissionRequest hook 并行竞速」。
+    permission_prompt_races_hook: provider === "claude",
     version: null,
   };
 }
@@ -275,6 +284,7 @@ export function descriptors(installed: string[]): AgentDescriptor[] {
     supports_api_key_login: SUPPORTS_API_KEY_LOGIN.has(id),
     supports_profiles: SUPPORTS_PROFILES.has(id),
     supports_context: SUPPORTS_CONTEXT.has(id),
+    supports_chat_export: SUPPORTS_CHAT_EXPORT.has(id),
     launch_options: LAUNCH_OPTIONS[id] ?? [],
     relay: RELAYS[id],
   }));

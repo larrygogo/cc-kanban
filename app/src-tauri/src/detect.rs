@@ -533,6 +533,23 @@ mod tests {
         );
     }
 
+    /// 计划模式批准提示(2.1.227 plan-file 流程,实拍取证)。它不触发任何 hook,
+    /// 没有 pending_review 兜底,这条可见 blocked 规则是「待交互」的唯一来源。
+    #[test]
+    fn plan_approval_prompt_is_blocked() {
+        let s = snap(&[
+            " Claude has written up a plan and is ready to execute. Would you like to proceed?",
+            " \u{276F} 1. Yes, and bypass permissions",
+            "   2. Yes, manually approve edits",
+            "   3. Tell Claude what to change",
+            " ctrl+g to edit in Notepad · ~\\.claude\\plans\\compiled-wiggling-papert.md",
+        ]);
+        assert_eq!(
+            state_of(evaluate("claude", &s)),
+            Some((ScreenState::Blocked, "plan_approval_prompt"))
+        );
+    }
+
     /// 提示框（倒数第二条分隔线之后）里 ❯ 开头且无审批文案 → 可见 idle。
     #[test]
     fn prompt_box_is_visible_idle() {

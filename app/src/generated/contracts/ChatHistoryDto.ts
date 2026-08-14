@@ -47,4 +47,14 @@ todos: Array<TodoDto>, hasMore: boolean,
  * items 为空（transcript 未落盘/未定位）或该 agent 不提供结构化 transcript 时，
  * 前端用它们渲染临时时间线——「会话已在工作」不该显示成一片空白。
  */
-lastUserText: string | null, lastAiText: string | null, };
+lastUserText: string | null, lastAiText: string | null, 
+/**
+ * 跨 provider 接续链：本会话接替的上一段会话 id。Some 时对话页时间线头部
+ * 渲染「由上一段会话接续」的提示。
+ */
+predecessorId: number | null, 
+/**
+ * 本会话已被哪个后继接替。Some 时对话页渲染「已切换至…」横幅并禁发——
+ * 向被接替的会话续话会让接续链分叉。
+ */
+supersededBy: number | null, };

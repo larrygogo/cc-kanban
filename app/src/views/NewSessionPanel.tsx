@@ -23,6 +23,7 @@ import { useAgentListRefresh } from "../useAgents";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useLoginOperations } from "../hooks/useLoginOperations";
 import { useT, repairFailMessage } from "../i18n";
+import { formatBackendError } from "../i18n/errors";
 import { useEscClose } from "../hooks/useEscClose";
 
 function FolderIcon() {
@@ -214,7 +215,7 @@ export function NewSessionPanel(): ReactElement {
       closeWin();
     } catch (e) {
       launchPendingRef.current = false;
-      setError(String(e));
+      setError(formatBackendError(e, t.locale));
       setBusy(false);
     }
   }
@@ -230,7 +231,7 @@ export function NewSessionPanel(): ReactElement {
       // 按后端 reason 给出精准提示（如 kimi 未登录 → 「请先登录」）。
       if (res.status !== "installed") setError(repairFailMessage(t, res.reason));
     } catch (e) {
-      setError(String(e));
+      setError(formatBackendError(e, t.locale));
     } finally {
       setRepairing(false);
     }
@@ -244,7 +245,7 @@ export function NewSessionPanel(): ReactElement {
     try {
       await loginOperations.start(target);
     } catch (e) {
-      setError(String(e));
+      setError(formatBackendError(e, t.locale));
     }
   }
 

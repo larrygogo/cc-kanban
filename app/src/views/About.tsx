@@ -193,7 +193,6 @@ function GeneralSection() {
         </div>}
       </div>
       <SettingsError error={patchError} />
-      <div className="sec-hint">{t.settings.moreSoon}</div>
     </>
   );
 }
@@ -215,6 +214,7 @@ function SessionsSection() {
   useAgentListRefresh(reloadAgents); // 装完新 agent 立刻反映
   const previewOn = settings?.preview_enabled ?? true;
   const togglePreview = () => patch({ preview_enabled: !previewOn });
+  const chatOn = settings?.chat_enabled ?? true;
   // 终端选项按平台给，再用后端探测到的「本机实际可用」列表过滤（未装的不列出）。
   const platformOpts = IS_MAC ? RESUME_TERM_OPTIONS_MAC : resumeTermOptionsWin(t);
   const termOptions = platformOpts.filter((o) => (availTerms ?? []).includes(o.value));
@@ -245,24 +245,23 @@ function SessionsSection() {
             onChange={(v) => patch({ default_agent: v })}
           />
         </div>
-        {/* 对话功能关闭（轻量模式）时隐藏：此时后端 reveal_session 强制走外部终端，
-            这个下拉不再有效，摆着只会误导。 */}
-        {(settings?.chat_enabled ?? true) && (
-          <div className="row">
-            <div className="row-text">
-              <div className="row-label">{t.settings.sessionOpenIn}</div>
-              <div className="row-desc">{t.settings.sessionOpenInDesc}</div>
-            </div>
-            <Dropdown
-              value={settings?.session_open_in ?? "terminal"}
-              options={[
-                { value: "chat" as const, label: t.settings.sessionOpenInChat },
-                { value: "terminal" as const, label: t.settings.sessionOpenInTerminal },
-              ]}
-              onChange={(v: SessionOpenIn) => patch({ session_open_in: v })}
-            />
+        {/* 轻量模式（chat_enabled=off）下后端强制走外部终端：行保留但置灰、原因写进
+            row-desc——整行隐藏会让用户以为设置项消失了。 */}
+        <div className="row">
+          <div className="row-text">
+            <div className="row-label">{t.settings.sessionOpenIn}</div>
+            <div className="row-desc">{chatOn ? t.settings.sessionOpenInDesc : t.settings.sessionOpenInLite}</div>
           </div>
-        )}
+          <Dropdown
+            value={chatOn ? (settings?.session_open_in ?? "terminal") : ("terminal" as SessionOpenIn)}
+            disabled={!chatOn}
+            options={[
+              { value: "chat" as const, label: t.settings.sessionOpenInChat },
+              { value: "terminal" as const, label: t.settings.sessionOpenInTerminal },
+            ]}
+            onChange={(v: SessionOpenIn) => patch({ session_open_in: v })}
+          />
+        </div>
         {showTermRow && (
           <div className="row">
             <div className="row-text">

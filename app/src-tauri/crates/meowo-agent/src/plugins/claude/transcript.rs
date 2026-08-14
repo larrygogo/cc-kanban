@@ -8,10 +8,49 @@
 #[cfg(test)]
 use crate::transcript::ChatItem;
 use crate::transcript::{
-    SubagentRef, SubagentSpec, SubagentStream, TranscriptEvent, TranscriptInfo, TranscriptParser,
-    TranscriptSpec, TurnError,
+    SubagentOutcome, SubagentRef, SubagentSpec, SubagentStream, TranscriptEvent, TranscriptInfo,
+    TranscriptParser, TranscriptSpec, TurnError,
 };
 use std::path::{Path, PathBuf};
+
+/// 从 `<tag>值</tag>` 里抠值。task-notification 的格式是 CLI 固定生成的单层标签,
+/// 不需要真 XML 解析;取不到返回 None。
+fn tag_text<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&format!("</{tag}>"))? + start;
+    Some(text[start..end].trim())
+}
+
+/// `<task-notification>` user 消息 → 该 tool_use 的合成回执。形态(真实 transcript 取证):
+/// `<task-notification><task-id>…<tool-use-id>toolu_x</tool-use-id><output-file>…
+/// <status>completed</status><summary>…</summary></task-notification>`。
+/// 不是通知、或缺 tool-use-id(没法关联)时返回 None,调用方按普通 user 文本处理。
+fn task_notification_result(
+    text: &str,
+    base_id: &str,
+    timestamp: Option<String>,
+) -> Option<TranscriptEvent> {
+    if !text.trim_start().starts_with("<task-notification>") {
+        return None;
+    }
+    let tool_use_id = tag_text(text, "tool-use-id")?.to_string();
+    // status 缺省按 completed:通知本身就意味着「结束了」,分不清成败时宁可少报失败。
+    let failed = tag_text(text, "status").is_some_and(|s| s.eq_ignore_ascii_case("failed"));
+    let summary = tag_text(text, "summary").unwrap_or("task completed").to_string();
+    Some(TranscriptEvent::ToolResult {
+        id: base_id.to_string(),
+        timestamp,
+        tool_call_id: Some(tool_use_id),
+        text: summary,
+        is_error: failed,
+        subagent: Some(SubagentOutcome {
+            running: 0,
+            completed: if failed { 0 } else { 1 },
+            failed: if failed { 1 } else { 0 },
+        }),
+    })
+}
 
 fn text_from_content(value: &serde_json::Value) -> String {
     if let Some(s) = value.as_str() {
@@ -53,6 +92,21 @@ fn compact_json(value: Option<&serde_json::Value>, max: usize) -> String {
 }
 
 fn tool_summary(name: &str, input: Option<&serde_json::Value>) -> String {
+    // 任务列表工具的摘要是前端的**数据源**,不只是展示:CC 对 TaskCreate/TaskUpdate 这类
+    // harness 内部工具不触发 PostToolUse hook(实测,reporter 端手喂事件能落库、真调用
+    // 不触发),transcript 是任务列表的唯一来源,前端从 items 里累积重建。
+    // TaskUpdate 只留三个关键字段:整包 input 里 metadata/addBlocks 等可能把 JSON 顶过
+    // 截断上限,截一刀前端就 parse 不回来了。
+    if name == "TaskUpdate" {
+        if let Some(input) = input {
+            let slim = serde_json::json!({
+                "taskId": input.get("taskId"),
+                "status": input.get("status"),
+                "subject": input.get("subject"),
+            });
+            return compact_json(Some(&slim), 800);
+        }
+    }
     let key = match name {
         "Bash" => "command",
         "WebSearch" => "query",
@@ -60,6 +114,8 @@ fn tool_summary(name: &str, input: Option<&serde_json::Value>) -> String {
         // 子任务委派：摘要取那句任务描述。缺了这条会落到下面的整包 JSON 兜底，
         // 而 prompt 动辄上千字——摘要行会变成一段被截断的 prompt 泥巴。
         "Agent" | "Task" => "description",
+        // 任务标题;description 同样动辄几百字,兜底 JSON 会被截坏(见上)。
+        "TaskCreate" => "subject",
         _ => "",
     };
     if !key.is_empty() {
@@ -70,15 +126,14 @@ fn tool_summary(name: &str, input: Option<&serde_json::Value>) -> String {
     compact_json(input, 800)
 }
 
-// 排队插话里内嵌图片的落盘上限与目录，与粘贴附件共用同一份（fsutil 单点定义）——
+// 排队插话里内嵌图片的落盘上限与粘贴附件共用同一份（fsutil 单点定义）——
 // CC 对单图另有更紧的限制，这里只挡异常脏数据把临时目录写爆。
-use crate::fsutil::{paste_root, PASTE_MAX_BYTES};
+use crate::fsutil::PASTE_MAX_BYTES;
 
 /// 把 queued_command 里的 base64 图片块落成本地文件，返回可写进 `[Image: source: …]`
-/// 引用的绝对路径。落在 `$TEMP/meowo-paste/queued/`：该目录在 asset 协议 scope 内
-/// （tauri.conf.json），前端才能渲染缩略图；与粘贴附件同归 OS 临时清理策略。
-/// 按行 uuid + 块序号命名做幂等——refresh/full 会重解析同一行，命中即复用不重写。
-/// 任何失败都返回 None：插话正文照常显示，只是这张图退化为不显示。
+/// 引用的绝对路径。落盘走 fsutil 的共享原语（`$TEMP/meowo-paste/queued/`，在 asset 协议
+/// scope 内，前端才能渲染缩略图；与粘贴附件同归 OS 临时清理策略；按行 uuid + 块序号
+/// 命名幂等）。任何失败都返回 None：插话正文照常显示，只是这张图退化为不显示。
 fn persist_queued_image(base_id: &str, index: usize, ext: &str, data: &str) -> Option<PathBuf> {
     // uuid 之外的 id 形态（回退的 "message" 等）也进得来，过滤成文件名安全字符集。
     let safe_id: String = base_id
@@ -89,13 +144,6 @@ fn persist_queued_image(base_id: &str, index: usize, ext: &str, data: &str) -> O
     if safe_id.is_empty() {
         return None;
     }
-    let dir = paste_root().join("queued");
-    let path = dir.join(format!("{safe_id}-{index}.{ext}"));
-    if let Ok(meta) = std::fs::metadata(&path) {
-        if meta.len() > 0 {
-            return Some(path);
-        }
-    }
     // 编码后长度 ≈ 4/3 原始大小：先按编码长度挡超大 payload，再解码（同粘贴附件的写法）。
     if data.len() > PASTE_MAX_BYTES / 3 * 4 + 4 {
         return None;
@@ -104,12 +152,7 @@ fn persist_queued_image(base_id: &str, index: usize, ext: &str, data: &str) -> O
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data.as_bytes())
         .ok()?;
-    if bytes.is_empty() || bytes.len() > PASTE_MAX_BYTES {
-        return None;
-    }
-    std::fs::create_dir_all(&dir).ok()?;
-    std::fs::write(&path, &bytes).ok()?;
-    Some(path)
+    crate::fsutil::persist_paste_bytes(&format!("{safe_id}-{index}"), ext, &bytes)
 }
 
 fn parse_transcript_events(line: &str) -> Vec<TranscriptEvent> {
@@ -142,6 +185,14 @@ fn parse_events(line: &str, allow_sidechain: bool) -> Vec<TranscriptEvent> {
                 .and_then(|x| x.as_str())
                 .filter(|s| !s.trim().is_empty())
             {
+                // 后台任务(Agent 委派/后台 Bash)的完成通知:CLI 以 user 消息注入
+                // `<task-notification>…<tool-use-id>…<status>…`。它不是用户说的话,
+                // 且携带着后台委派的**真实结局**——主链上唯一的完成信号(启动回执只说
+                // launched,侧车 meta 不记结局)。转译成该 tool_use 的合成回执,
+                // 折叠徽标/进度面板的「进行中」由此翻转成完成/失败。
+                if let Some(event) = task_notification_result(text, base_id, timestamp.clone()) {
+                    return vec![event];
+                }
                 return vec![TranscriptEvent::UserMessage {
                     id: base_id.to_string(),
                     timestamp,
@@ -168,6 +219,11 @@ fn parse_events(line: &str, allow_sidechain: bool) -> Vec<TranscriptEvent> {
                             let text = text_from_content(
                                 block.get("content").unwrap_or(&serde_json::Value::Null),
                             );
+                            // 后台委派的启动回执(`Async agent launched…`)标 running——
+                            // 「已回执」在这里只意味着「派出去了」,真结局由 task-notification
+                            // 的合成回执(见 user 分支)后到覆盖。同步委派的回执没有结局
+                            // 信号,如实留空,前端按「已回执=完成」处理。
+                            let subagent = CLAUDE_SUBAGENTS.detect_result(&text);
                             Some(TranscriptEvent::ToolResult {
                                 id: format!("{base_id}:{i}"),
                                 timestamp: timestamp.clone(),
@@ -180,9 +236,7 @@ fn parse_events(line: &str, allow_sidechain: bool) -> Vec<TranscriptEvent> {
                                     .get("is_error")
                                     .and_then(|x| x.as_bool())
                                     .unwrap_or(false),
-                                // claude 的委派回执不带结局（异步子任务的完成经 notification
-                                // 另行回来），主链上没有可靠信号，如实留空。
-                                subagent: None,
+                                subagent,
                             })
                         }
                         _ => None,
@@ -1013,6 +1067,18 @@ impl SubagentSpec for ClaudeSubagents {
 
     fn parse_stream_line(&self, line: &str) -> Vec<TranscriptEvent> {
         parse_events(line, true)
+    }
+
+    /// 后台委派的**启动回执**:`Agent` 现版本默认异步,立即回一句
+    /// `Async agent launched successfully. …`,此时子任务才刚开跑。没有这个信号,
+    /// 前端「已回执=已完成」的兜底会把在跑的后台子任务标成完成(实拍反馈)。
+    /// 真结局由 `<task-notification>` 的合成回执后到覆盖(见 [`task_notification_result`])。
+    fn detect_result(&self, output: &str) -> Option<SubagentOutcome> {
+        output.contains("Async agent launched").then_some(SubagentOutcome {
+            running: 1,
+            completed: 0,
+            failed: 0,
+        })
     }
 }
 
@@ -1892,6 +1958,90 @@ mod tests {
             panic!("应解析成工具调用");
         };
         assert!(subagent.is_none());
+    }
+
+    /// 任务列表工具的摘要是前端重建任务列表的数据源(CC 对它们不触发 hook):
+    /// TaskCreate 必须是纯 subject;TaskUpdate 必须是**没截断的合法 JSON**——
+    /// 整包兜底会被 metadata/description 顶过 800 上限,截一刀就 parse 不回来了。
+    #[test]
+    fn task_tool_summaries_are_frontend_parseable() {
+        let long = "很长".repeat(600);
+        let create = format!(
+            r#"{{"type":"assistant","uuid":"a1","message":{{"content":[{{"type":"tool_use","id":"t1","name":"TaskCreate","input":{{"subject":"生成基线迁移","description":"{long}"}}}}]}}}}"#
+        );
+        let ChatItem::ToolUse { summary, .. } = &parse_chat_items(&create)[0] else {
+            panic!("应解析成工具调用");
+        };
+        assert_eq!(summary, "生成基线迁移");
+
+        let update = format!(
+            r#"{{"type":"assistant","uuid":"a2","message":{{"content":[{{"type":"tool_use","id":"t2","name":"TaskUpdate","input":{{"taskId":"3","status":"completed","metadata":{{"note":"{long}"}}}}}}]}}}}"#
+        );
+        let ChatItem::ToolUse { summary, .. } = &parse_chat_items(&update)[0] else {
+            panic!("应解析成工具调用");
+        };
+        let parsed: serde_json::Value = serde_json::from_str(summary).expect("摘要应是合法 JSON");
+        assert_eq!(parsed["taskId"], "3");
+        assert_eq!(parsed["status"], "completed");
+    }
+
+    /// 后台委派(`Agent` 现版本默认异步)的立即回执只是「派出去了」,不是完成——
+    /// 此前不带结局信号,前端「已回执=完成」的兜底把在跑的后台子任务标成完成(实拍反馈)。
+    /// 启动回执须标 running;真结局由 task-notification 的合成回执覆盖。
+    #[test]
+    fn async_launch_receipt_marks_subagent_running() {
+        let line = r#"{"type":"user","uuid":"u1","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully. (This tool result is internal metadata — never quote it.)"}]}]}}"#;
+        let ChatItem::ToolResult { subagent, .. } = &parse_chat_items(line)[0] else {
+            panic!("应解析成工具回执");
+        };
+        let outcome = subagent.as_ref().expect("启动回执应标 running");
+        assert_eq!((outcome.running, outcome.completed, outcome.failed), (1, 0, 0));
+
+        // 同步委派的回执(真实结果文本)不带结局信号——「已回执=完成」的兜底对它成立。
+        let sync = r#"{"type":"user","uuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_s","content":"探索完成:共 3 个文件"}]}}"#;
+        let ChatItem::ToolResult { subagent, .. } = &parse_chat_items(sync)[0] else {
+            panic!("应解析成工具回执");
+        };
+        assert!(subagent.is_none());
+    }
+
+    /// `<task-notification>` user 消息是后台任务的完成通知,不是用户说的话:
+    /// 应转译成该 tool_use 的合成回执(带结局统计),而不是一条用户气泡。
+    #[test]
+    fn task_notification_becomes_synthetic_tool_result() {
+        let line = r#"{"type":"user","uuid":"n1","message":{"content":"<task-notification>\n<task-id>abc</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<output-file>C:\\tmp\\x.output</output-file>\n<status>completed</status>\n<summary>Background agent done</summary>\n</task-notification>"}}"#;
+        let items = parse_chat_items(line);
+        let ChatItem::ToolResult {
+            tool_use_id,
+            text,
+            is_error,
+            subagent,
+            ..
+        } = &items[0]
+        else {
+            panic!("通知应转译成合成回执，实际：{items:?}");
+        };
+        assert_eq!(tool_use_id.as_deref(), Some("toolu_bg"));
+        assert_eq!(text, "Background agent done");
+        assert!(!is_error);
+        let outcome = subagent.as_ref().expect("合成回执应带结局统计");
+        assert_eq!((outcome.running, outcome.completed, outcome.failed), (0, 1, 0));
+
+        // failed 变体:统计与错误位都翻转。
+        let failed = line.replace("<status>completed</status>", "<status>failed</status>");
+        let ChatItem::ToolResult { is_error, subagent, .. } = &parse_chat_items(&failed)[0] else {
+            panic!("failed 通知也应转译成合成回执");
+        };
+        assert!(is_error);
+        assert_eq!(subagent.as_ref().unwrap().failed, 1);
+
+        // 缺 tool-use-id 关联不上 → 保持普通用户文本,宁可显示原文也不造孤儿回执。
+        let orphan = r#"{"type":"user","uuid":"n2","message":{"content":"<task-notification>坏格式</task-notification>"}}"#;
+        assert!(matches!(&parse_chat_items(orphan)[0], ChatItem::UserText { .. }));
+
+        // 普通用户消息不受影响。
+        let plain = r#"{"type":"user","uuid":"n3","message":{"content":"帮我看看这个"}}"#;
+        assert!(matches!(&parse_chat_items(plain)[0], ChatItem::UserText { .. }));
     }
 
     /// 侧车流按 meta.json 的 toolUseId 外键定位；流内每行都是 sidechain，

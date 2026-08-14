@@ -50,4 +50,9 @@ provider: string,
  * 会话所属的账号（profile id）；None = 默认账号。这里传原始 id，
  * id → 展示名的解析在 app 层做（它才读得到 settings.json）。
  */
-profile: string | null, };
+profile: string | null, 
+/**
+ * 跨 provider 接续链：本会话接替的上一段会话 id。Some = 卡片渲染链徽标
+ *（点开可回看链上历史各段）；None = 普通会话。
+ */
+predecessor_id: number | null, };

@@ -80,6 +80,10 @@ pub struct LiveSession {
     /// 会话所属的账号（profile id）；None = 默认账号。这里传原始 id，
     /// id → 展示名的解析在 app 层做（它才读得到 settings.json）。
     pub profile: Option<String>,
+    /// 跨 provider 接续链：本会话接替的上一段会话 id。Some = 卡片渲染链徽标
+    ///（点开可回看链上历史各段）；None = 普通会话。
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub predecessor_id: Option<i64>,
 }
 
 /// 转义 SQL LIKE 通配符，使用户输入里的 `%` `_` `\` 作字面量匹配（配合 `LIKE … ESCAPE '\'`）。
@@ -158,7 +162,7 @@ impl Store {
         const SELECT: &str = "SELECT s.id, s.project_id, s.cc_session_id, s.status, s.started_at, s.last_event_at, s.ended_at,
                 p.name, t.id, t.title, t.current_activity, t.column_name, s.pid, s.archived, s.cwd, s.archived_at,
                 sc.used_pct, sc.window_size, sc.model, sn.note,
-                s.pending_review, s.last_ai_text, s.last_user_text, s.provider, s.profile
+                s.pending_review, s.last_ai_text, s.last_user_text, s.provider, s.profile, s.predecessor_id
          FROM sessions s
          JOIN projects p ON p.id = s.project_id
          LEFT JOIN tasks t ON t.session_id = s.id
@@ -168,16 +172,28 @@ impl Store {
         let mut conditions: Vec<String> = Vec::new();
         let mut params: Vec<Value> = Vec::new();
 
+        // superseded_by IS NULL：被跨 provider 切换接替的旧段从所有 tab 折叠隐藏
+        // （链尾代表整条链；回看走 get_chat_history 按 id 直取，不受影响）。
+        // 该谓词与 live_sessions_totals / live_totals_for / live_count_candidates
+        // 四处口径必须同生共死，改任何一处都要同步其余三处。
         match filter {
-            Some("all") => conditions.push("s.archived = 0".into()),
+            Some("all") => {
+                conditions.push("s.archived = 0 AND s.superseded_by IS NULL".into());
+            }
             Some("running") => conditions.push(
-                "s.status = 'running' AND s.pending_review IS NULL AND s.archived = 0".into(),
+                "s.status = 'running' AND s.pending_review IS NULL AND s.archived = 0 \
+                 AND s.superseded_by IS NULL"
+                    .into(),
             ),
             Some("waiting") => conditions.push(
-                "(s.status = 'waiting' OR s.pending_review IS NOT NULL) AND s.archived = 0".into(),
+                "(s.status = 'waiting' OR s.pending_review IS NOT NULL) AND s.archived = 0 \
+                 AND s.superseded_by IS NULL"
+                    .into(),
             ),
-            Some("archived") => conditions.push("s.archived = 1".into()),
-            _ => {} // None 不过滤
+            Some("archived") => {
+                conditions.push("s.archived = 1 AND s.superseded_by IS NULL".into());
+            }
+            _ => {} // None 不过滤（仅测试取证用，生产两处调用都传 Some）
         }
 
         // 搜索（当前 tab 内 AND 搜索词）：title / cwd / project 名任一命中。%/_/\ 转义成字面量。
@@ -258,6 +274,7 @@ impl Store {
                 let last_user_text: Option<String> = r.get(22)?;
                 let provider: Option<String> = r.get(23)?;
                 let profile: Option<String> = r.get(24)?;
+                let predecessor_id: Option<i64> = r.get(25)?;
                 Ok((
                     session,
                     project_name,
@@ -278,6 +295,7 @@ impl Store {
                     last_user_text,
                     provider,
                     profile,
+                    predecessor_id,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -306,6 +324,7 @@ impl Store {
             last_user_text,
             provider,
             profile,
+            predecessor_id,
         ) in rows
         {
             let todos = task_id
@@ -339,6 +358,7 @@ impl Store {
                     .filter(|p| !p.trim().is_empty())
                     .unwrap_or_else(|| crate::DEFAULT_PROVIDER.to_string()),
                 profile,
+                predecessor_id,
             });
         }
         Ok(out)
@@ -364,7 +384,7 @@ impl Store {
         const SQL: &str = "SELECT COUNT(*), COALESCE(SUM(s.archived = 1), 0)
              FROM sessions s
              LEFT JOIN tasks t ON t.session_id = s.id
-             WHERE NOT (
+             WHERE s.superseded_by IS NULL AND NOT (
                  LOWER(TRIM(COALESCE(t.title, ''))) = 'ping'
                  OR (s.status = 'ended'
                      AND TRIM(COALESCE(t.title, '')) IN ('', '(未命名会话)')
@@ -391,7 +411,8 @@ impl Store {
                 "SELECT COUNT(*), COALESCE(SUM(s.archived = 1), 0)
                  FROM sessions s
                  LEFT JOIN tasks t ON t.session_id = s.id
-                 WHERE s.cc_session_id IN ({placeholders}) AND NOT (
+                 WHERE s.cc_session_id IN ({placeholders})
+                   AND s.superseded_by IS NULL AND NOT (
                      LOWER(TRIM(COALESCE(t.title, ''))) = 'ping'
                      OR (s.status = 'ended'
                          AND TRIM(COALESCE(t.title, '')) IN ('', '(未命名会话)')
@@ -424,7 +445,7 @@ impl Store {
             "SELECT s.id, s.status, s.pending_review, s.pid, s.last_event_at,
                     s.cc_session_id, s.provider FROM sessions s
              LEFT JOIN tasks t ON t.session_id = s.id
-             WHERE s.archived = 0 AND s.status != 'ended'
+             WHERE s.archived = 0 AND s.status != 'ended' AND s.superseded_by IS NULL
                AND (s.status IN ('running','waiting') OR s.pending_review IS NOT NULL)
                AND LOWER(TRIM(COALESCE(t.title, ''))) != 'ping'",
         )?;

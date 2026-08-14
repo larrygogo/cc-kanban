@@ -327,7 +327,7 @@ describe("Sticker", () => {
     expect(document.activeElement).toBe(items[1]);
     fireEvent.keyDown(menu, { key: "ArrowUp" });
     expect(document.activeElement).toBe(items[0]);
-    // Enter 激活当前项（首项=星标置顶）并关闭菜单
+    // Enter 激活当前项（首项=置顶）并关闭菜单
     fireEvent.keyDown(menu, { key: "Enter" });
     expect(JSON.parse(localStorage.getItem("meowo-starred") ?? "[]")).toContain("kbd-star");
     expect(document.querySelector(".ctx-menu")).toBeNull();
@@ -347,19 +347,16 @@ describe("Sticker", () => {
   });
 
   it("点击菜单外部关闭菜单,且该次点击不触发卡片点击", async () => {
-    const { container } = render(<Sticker filter="all" data={[mk()]} />);
-    // 先打开重命名编辑器作观察哨:卡片 onClick 若被触发会关闭编辑器。
-    await settingsApplied();
-    fireEvent.contextMenu(container.querySelector(".stk-card")!);
-    fireEvent.click(screen.getByText(zh.sticker.renameTitle));
-    expect(container.querySelector(".stk-edit")).toBeTruthy();
-    // 再开菜单,点击卡片(菜单外部)——菜单应关闭,但编辑器保持打开,证明点击被捕获相拦下。
+    // 观察哨改为「未发起导航」:编辑器有失焦提交后,菜单开启抢焦点会合法地提交并关闭
+    // 编辑器,不能再当哨兵用。连接中的卡片被点击会发 focus_session,没发就证明点击被
+    // 菜单的捕获相拦下了。
+    const { container } = render(<Sticker filter="all" data={[mk({ connected: true, pid: 1234 })]} />);
     await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     expect(document.querySelector(".ctx-menu")).toBeTruthy();
     fireEvent.click(container.querySelector(".stk-card")!);
     expect(document.querySelector(".ctx-menu")).toBeNull();
-    expect(container.querySelector(".stk-edit")).toBeTruthy(); // 编辑器未被误关
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === "focus_session")).toBe(false);
   });
 
   it("首帧按真实默认(button)渲染菜单按钮;注入 context 设置后按钮让位右键", async () => {
@@ -570,11 +567,14 @@ describe("Sticker", () => {
     expect(container.querySelector(".stk-edit")).toBeNull();
   });
 
-  it("终端不受支持时提示用支持的终端重新打开，并在结束原进程前二次确认", async () => {
+  it("终端不受支持时提示用支持的终端重新打开，并在结束原进程前经 appConfirm 确认", async () => {
     const original = invokeMock.getMockImplementation()!;
     invokeMock.mockImplementation((cmd: string, args?: unknown) => {
       if (cmd === "focus_session") {
         return Promise.resolve("unsupported_terminal") as unknown as ReturnType<typeof original>;
+      }
+      if (cmd === "confirm_dialog") {
+        return Promise.resolve(true) as unknown as ReturnType<typeof original>;
       }
       return original(cmd, args);
     });
@@ -583,8 +583,11 @@ describe("Sticker", () => {
       fireEvent.click(container.querySelector(".stk-card")!);
       await waitFor(() => expect(screen.getByText(zh.sticker.focusUnsupported)).toBeTruthy());
       fireEvent.click(screen.getByText(zh.sticker.reopenSupported));
-      expect(screen.getByText(zh.sticker.reopenConfirm)).toBeTruthy();
-      fireEvent.click(screen.getByText(zh.sticker.endAndReopen));
+      // 确认走全应用统一的 appConfirm 原生小窗（不再是 toast 内二次点击）。
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
+        "confirm_dialog",
+        expect.objectContaining({ message: zh.sticker.reopenConfirm, danger: true }),
+      ));
       await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("restart_session_supported", {
         pid: 1234,
         cwd: null,

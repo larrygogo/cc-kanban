@@ -32,6 +32,7 @@ pub mod codec;
 pub mod config;
 pub mod descriptor;
 pub mod fsutil;
+pub mod handoff;
 pub mod id;
 pub mod install;
 pub mod launch;
@@ -62,6 +63,7 @@ pub use chat_ui::{
 pub use config::{
     CommandSpec, ConfigFormat, EnsureOutcome, HookEvent, HookSpec, MissingConfig, RepairReason,
 };
+pub use handoff::{render_history, HandoffMeta};
 pub use id::AgentId;
 pub use install::{
     is_runnable_script, looks_like_challenge, looks_like_html, InstallCap, InstallPlan,
