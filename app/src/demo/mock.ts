@@ -26,6 +26,7 @@ export const store: Store = {
     language: "zh",
     terminal_open_mode: "card",
     session_open_in: "terminal",
+    chat_enabled: true,
     card_menu_mode: "button",
     preview_enabled: true,
     terminal_font_size: 12,

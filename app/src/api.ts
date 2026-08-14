@@ -444,6 +444,11 @@ export type Settings = {
    * PTY attach 到 `resume_terminal` 选定的终端里，不是另起一个进程。
    */
   session_open_in: SessionOpenIn;
+  /**
+   * 对话窗口功能总开关（「轻量模式」）。false 时应用只保留贴纸生态：所有 chat 入口
+   * 隐藏，审批/交互提问回落终端 TUI。安装器「自定义安装」的勾选写入首选值（Windows）。
+   */
+  chat_enabled: boolean;
   /** 卡片菜单触发方式：button = 卡片菜单按钮（默认）/ context = 右键菜单，二选一。 */
   card_menu_mode: CardMenuMode;
   /** 是否在卡片显示对话预览（你的提问 + AI 回复两行）。缺省开启。 */

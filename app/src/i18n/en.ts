@@ -475,6 +475,8 @@ export const en: Dict = {
     sessionOpenInDesc: "Sessions always run under Meowo; this picks which view opens them",
     sessionOpenInChat: "Chat window",
     sessionOpenInTerminal: "External terminal",
+    chatFeature: "Chat window",
+    chatFeatureDesc: "Turn off for lite mode: stickers only — sessions open in your terminal, approvals and questions are answered there too",
     cardMenu: "Card menu",
     cardMenuDesc: "How to open star, note, rename and other actions; use the card button on devices where right-click is awkward",
     cardMenuContext: "Right-click",
@@ -746,6 +748,7 @@ export const en: Dict = {
       title: "Choose your preferences",
       desc: "Just the common ones — change any of them later in Settings.",
       terminalHint: "Which terminal to use when an external one is needed (sessions themselves run under Meowo).",
+      chatHint: "Turn off for lite mode: stickers only, everything happens in the terminal.",
     },
   },
 };

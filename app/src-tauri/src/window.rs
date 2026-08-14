@@ -485,6 +485,16 @@ pub(crate) fn open_chat_window_impl(
     session_id: i64,
     activate: bool,
 ) -> Result<(), String> {
+    // 对话功能关闭（轻量模式）时的唯一闸门：四个开窗变体（command/detached/quiet/latest）
+    // 全部汇于此，一处拦截全覆盖。用户主动点击（activate）回落设置窗——那里有重新打开
+    // 的开关，点了不能毫无反应；审批/提问的安静唤醒则无声吞掉，调用方已各自回落 TUI。
+    if !crate::settings::load_settings().chat_enabled {
+        if activate {
+            open_settings_window(app);
+        }
+        return Ok(());
+    }
+
     #[cfg(target_os = "macos")]
     crate::macos::menubar::settings_window_will_open(app, "chat");
 
@@ -603,15 +613,19 @@ pub(crate) fn build_tray_menu(
         .build()
 }
 
-/// 切语言后让已存在的系统 UI 跟上：重建托盘菜单、改已开设置窗口的标题。
-pub(crate) fn apply_language(app: &tauri::AppHandle, lang: &str) {
+/// 切语言/改设置后让已存在的系统 UI 跟上：重建托盘菜单、改已开设置窗口的标题。
+/// `chat_enabled` 决定 macOS 托盘菜单是否包含「打开对话窗口」项（主线程不读设置文件，
+/// 由调用方从已持有的 Settings 传入——线程纪律）。
+pub(crate) fn apply_language(app: &tauri::AppHandle, lang: &str, chat_enabled: bool) {
+    #[cfg(not(target_os = "macos"))]
+    let _ = chat_enabled; // Windows 托盘菜单无 chat 项，左键入口在事件回调里自行判断。
     if let Some(tray) = app.tray_by_id("meowo-tray") {
         #[cfg(not(target_os = "macos"))]
         if let Ok(menu) = build_tray_menu(app, lang) {
             let _ = tray.set_menu(Some(menu));
         }
         #[cfg(target_os = "macos")]
-        if let Ok(menu) = crate::macos::menubar::build_tray_menu(app, lang) {
+        if let Ok(menu) = crate::macos::menubar::build_tray_menu(app, lang, chat_enabled) {
             let _ = tray.set_menu(Some(menu));
         }
     }
@@ -659,7 +673,16 @@ pub(crate) fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 ..
             } = event
             {
-                open_latest_chat_window(tray.app_handle());
+                // 对话功能关闭（轻量模式）时左键改为找回贴纸——轻量用户的主界面就是贴纸。
+                // load_settings 是文件 IO，托盘回调在主线程，放子线程读（线程纪律）。
+                let app = tray.app_handle().clone();
+                std::thread::spawn(move || {
+                    if crate::settings::load_settings().chat_enabled {
+                        open_latest_chat_window(&app);
+                    } else {
+                        recall_sticker(&app);
+                    }
+                });
             }
         })
         .build(app)?;

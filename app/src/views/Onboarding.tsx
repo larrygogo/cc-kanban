@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { languageOptions, useT } from "../i18n";
 import { availableTerminals, type ResumeTerminal, type StickerStyle, type CardMenuMode, type ThemeMode } from "../api";
-import { Segmented } from "./settings/widgets";
+import { Segmented, Switch } from "./settings/widgets";
 import { Dropdown } from "./menu";
 import { useSettingsState } from "./settings/state";
 import logoUrl from "../../src-tauri/icons/128x128.png";
@@ -218,6 +218,9 @@ const SI = {
   term: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m7 9 3 3-3 3" /><line x1="12.5" y1="15" x2="17" y2="15" /></svg>
   ),
+  chat: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z" /><line x1="9" y1="10" x2="15" y2="10" /><line x1="9" y1="14" x2="13" y2="14" /></svg>
+  ),
 };
 
 // 会话菜单打开方式（卡片按钮 / 右键菜单）——留在「卡片菜单」步就地配置（那里正好解释菜单是什么）。
@@ -318,6 +321,20 @@ function ConfigBody({ t }: { t: Dict }) {
           <Dropdown value={resumeTerm} options={termOptions} onChange={(v) => patch({ resume_terminal: v })} />
         </div>
       )}
+      {/* 对话窗口功能（轻量模式开关）：安装器种子只在 Windows 存在，这里是全平台
+          都能第一时间做出选择的地方；随时可在设置页改回。 */}
+      <div className="ob-set-row">
+        <span className="ob-set-ico">{SI.chat}</span>
+        <div className="ob-set-text">
+          <div className="ob-set-label">{t.settings.chatFeature}</div>
+          <div className="ob-set-desc">{t.onboarding.setup.chatHint}</div>
+        </div>
+        <Switch
+          checked={settings?.chat_enabled ?? true}
+          onChange={() => patch({ chat_enabled: !(settings?.chat_enabled ?? true) })}
+          label={t.settings.chatFeature}
+        />
+      </div>
     </div>
   );
 }

@@ -1952,7 +1952,10 @@ pub(crate) fn reveal_session(
     broker: &crate::pty::PtyBroker,
     sid: i64,
 ) -> Result<(), String> {
-    if load_settings().session_open_in == "terminal" {
+    // 对话功能关闭（轻量模式）时无视 session_open_in 强制走外部终端——此时 chat 不是
+    // 合法落点，静默改道比开一个「不该存在」的窗口诚实。
+    let settings = load_settings();
+    if settings.session_open_in == "terminal" || !settings.chat_enabled {
         return attach_in_external_terminal(broker, sid);
     }
     // 同步等窗口创建结果：PTY 已经拉起、窗口却没开时，把错误交还调用方，

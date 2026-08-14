@@ -198,6 +198,9 @@ export function Sticker({
   // 每次挂载都先渲染一批没有 ⋯ 按钮的卡片、settings 回来按钮才凭空弹入并挤压标题行。
   const [menuMode, setMenuMode] = useState<CardMenuMode>("button");
   const [previewEnabled, setPreviewEnabled] = useState(true);
+  // 对话窗口功能开关（轻量模式=false）：关闭时贴纸上不渲染任何 chat 入口。
+  // 首帧占位 true 与后端默认一致（default_true），避免开关用户的按钮闪现/消失。
+  const [chatEnabled, setChatEnabled] = useState(true);
   // 空初值：settings resolve 前不渲染配额区，好过先闪一个猜出来的 agent。默认值由后端给。
   const [quotaProviders, setQuotaProviders] = useState<string[]>([]);
   // 中转启用状态改变时重建贴纸用量请求：启用后立即隐藏官方配额，关闭后立即恢复缓存并刷新。
@@ -208,6 +211,7 @@ export function Sticker({
     setOpenMode(s.terminal_open_mode);
     setMenuMode(s.card_menu_mode ?? "button");
     setPreviewEnabled(s.preview_enabled);
+    setChatEnabled(s.chat_enabled ?? true);
     setQuotaProviders(s.sticker_quota_providers ?? []);
     const signature = relayEnabledSignature(s);
     if (relaySignatureRef.current !== null && relaySignatureRef.current !== signature) {
@@ -900,16 +904,19 @@ export function Sticker({
                               <span className={"stk-time" + (tab === "waiting" ? " is-waited" : "")}>
                                 {tab === "waiting" ? fmtWaited(l.session.last_event_at, t) : fmtAgo(l.session.last_event_at, t)}
                               </span>
-                              <button
-                                type="button"
-                                className="stk-chat-btn"
-                                aria-label={t.sticker.openChat}
-                                data-tip={t.sticker.openChat}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  invoke("open_chat_window", { sessionId: l.session.id }).catch(() => {});
-                                }}
-                              ><ChatIcon /></button>
+                              {/* 对话功能关闭（轻量模式）时不渲染：入口不存在优于点了被拦。 */}
+                              {chatEnabled && (
+                                <button
+                                  type="button"
+                                  className="stk-chat-btn"
+                                  aria-label={t.sticker.openChat}
+                                  data-tip={t.sticker.openChat}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    invoke("open_chat_window", { sessionId: l.session.id }).catch(() => {});
+                                  }}
+                                ><ChatIcon /></button>
+                              )}
                               {/* 置顶/便签/重命名/归档操作收进卡片菜单（CardContextMenu），标题行不再挤 hover 图标。
                                   默认右键触发；card_menu_mode=button（触屏等不便右键）时改为此处的常显菜单按钮，
                                   两种触发方式二选一。置顶态由卡片金角、便签由便签块表达，收起入口不丢信息。 */}
@@ -1168,16 +1175,19 @@ export function Sticker({
           <>
             <UsageScreen quotaProviders={shownQuota} usageMap={usageMap} />
             <div className="stk-bar-actions">
-              <button
-                type="button"
-                className="stk-act"
-                data-tip={t.sticker.openChatWindow}
-                aria-label={t.sticker.openChatWindow}
-                data-testid="bar-chat"
-                onClick={() => invoke("open_latest_chat").catch(() => {})}
-              >
-                <ChatIcon />
-              </button>
+              {/* 对话功能关闭（轻量模式）时不渲染 chat 入口。 */}
+              {chatEnabled && (
+                <button
+                  type="button"
+                  className="stk-act"
+                  data-tip={t.sticker.openChatWindow}
+                  aria-label={t.sticker.openChatWindow}
+                  data-testid="bar-chat"
+                  onClick={() => invoke("open_latest_chat").catch(() => {})}
+                >
+                  <ChatIcon />
+                </button>
+              )}
               <button
                 type="button"
                 className="stk-act"

@@ -232,26 +232,36 @@ pub fn update_tray_status(app: &AppHandle, running: usize, waiting: usize) {
     let _ = tray.set_title(None::<&str>);
 }
 
-/// 托盘右键菜单（设置 / 退出），按语言构建；切语言时由 lib.rs 的 apply_language 重建。
+/// 托盘右键菜单（设置 / 退出），按语言构建；切语言/改设置时由 lib.rs 的 apply_language 重建。
+/// `chat_enabled` 为 false（轻量模式）时不放「打开对话窗口」项——入口都不该出现，
+/// 而不是点了被拦。设置页切换开关会经 set_settings → apply_language 即时重建。
 pub fn build_tray_menu(
     app: &AppHandle,
     lang: &str,
+    chat_enabled: bool,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    let chat = MenuItemBuilder::with_id("chat", crate::tr(lang, "tray.chat")).build(app)?;
+    let chat = if chat_enabled {
+        Some(MenuItemBuilder::with_id("chat", crate::tr(lang, "tray.chat")).build(app)?)
+    } else {
+        None
+    };
     let guide = MenuItemBuilder::with_id("guide", crate::tr(lang, "tray.guide")).build(app)?;
     let settings =
         MenuItemBuilder::with_id("settings", crate::tr(lang, "tray.settings")).build(app)?;
     let website =
         MenuItemBuilder::with_id("website", crate::tr(lang, "tray.website")).build(app)?;
     let quit = MenuItemBuilder::with_id("quit", crate::tr(lang, "tray.quit")).build(app)?;
-    MenuBuilder::new(app)
-        .items(&[&chat, &guide, &settings, &website, &quit])
-        .build()
+    let mut builder = MenuBuilder::new(app);
+    if let Some(chat) = &chat {
+        builder = builder.item(chat);
+    }
+    builder.items(&[&guide, &settings, &website, &quit]).build()
 }
 
 /// 创建 macOS 状态栏托盘：左键切换面板，右键弹「设置 / 退出」菜单。
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let menu = build_tray_menu(app, crate::ui_lang(&crate::load_settings()))?;
+    let boot_settings = crate::load_settings();
+    let menu = build_tray_menu(app, crate::ui_lang(&boot_settings), boot_settings.chat_enabled)?;
 
     // 菜单栏用单色模板图标（彩色 app 图标在菜单栏里偏花，且不随明暗反色）；Dock/设置页仍用彩色图标。
     let icon = tauri::image::Image::new(MENUBAR_ICON_RGBA, MENUBAR_ICON_SIZE, MENUBAR_ICON_SIZE);

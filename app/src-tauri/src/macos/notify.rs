@@ -37,9 +37,17 @@ pub fn init(app: &AppHandle) {
                 // 与 send_notification 同线程调用（该线程已在跑通知中心的 runloop）。
                 clear_delivered();
                 // 托管会话：PTY 归 Meowo，没有可聚焦的外部终端——打开对话窗口落在该会话上。
+                // 对话功能关闭（轻量模式）时对话窗不是合法落点，改把同一个 PTY 镜像进
+                // 外部终端（reveal_session 在关闭态强制走 attach 路径）。
                 if let Some((app, ptys)) = CLICK_CONTEXT.get() {
                     if ptys.is_managed(job.session_id) {
-                        crate::window::open_chat_window_detached(app.clone(), job.session_id);
+                        if crate::settings::load_settings().chat_enabled {
+                            crate::window::open_chat_window_detached(app.clone(), job.session_id);
+                        } else if let Err(error) =
+                            crate::terminal::reveal_session(app, ptys, job.session_id)
+                        {
+                            eprintln!("通知点击打开外部终端失败: {error}");
+                        }
                         continue;
                     }
                 }

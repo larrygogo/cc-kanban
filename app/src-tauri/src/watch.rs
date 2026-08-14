@@ -402,7 +402,22 @@ pub(crate) fn show_session_notification(
                     .ptys
                     .is_managed(session_id)
                 {
-                    crate::window::open_chat_window_detached(click_app.clone(), session_id);
+                    // 对话功能关闭（轻量模式）时对话窗不是合法落点：把同一个 PTY 镜像进
+                    // 外部终端（reveal_session 在关闭态强制走 attach 路径）。spawn 子进程
+                    // 放子线程，与下面 focus 分支同一纪律。
+                    if crate::settings::load_settings().chat_enabled {
+                        crate::window::open_chat_window_detached(click_app.clone(), session_id);
+                    } else {
+                        let app = click_app.clone();
+                        std::thread::spawn(move || {
+                            let broker = app.state::<crate::AppState>().ptys.clone();
+                            if let Err(error) =
+                                crate::terminal::reveal_session(&app, &broker, session_id)
+                            {
+                                eprintln!("通知点击打开外部终端失败: {error}");
+                            }
+                        });
+                    }
                     return Ok(());
                 }
                 let title = focus_title.clone();
@@ -420,7 +435,14 @@ pub(crate) fn show_session_notification(
                         crate::terminal::FocusSessionResult::Focused
                             | crate::terminal::FocusSessionResult::HostFocused
                     ) {
-                        crate::window::open_chat_window_detached(fallback_app, session_id);
+                        // 对话功能关闭（轻量模式）时退而召回贴纸：外部终端已经聚焦失败
+                        // （终端不支持/进程已结束），贴纸板至少让用户看到会话状态，
+                        // 比无回应或突兀弹设置窗都贴近意图。
+                        if crate::settings::load_settings().chat_enabled {
+                            crate::window::open_chat_window_detached(fallback_app, session_id);
+                        } else {
+                            crate::window::recall_sticker(&fallback_app);
+                        }
                     }
                 });
                 Ok(())

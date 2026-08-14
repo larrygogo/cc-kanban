@@ -134,9 +134,11 @@ function GeneralSection() {
   const notifyOn = settings?.notifications_enabled ?? true;
   const flashOn = settings?.attention_flash_enabled ?? true;
   const autoUpdateOn = settings?.auto_update_enabled ?? true;
+  const chatOn = settings?.chat_enabled ?? true;
   const toggleNotify = () => patch({ notifications_enabled: !notifyOn });
   const toggleFlash = () => patch({ attention_flash_enabled: !flashOn });
   const toggleAutoUpdate = () => patch({ auto_update_enabled: !autoUpdateOn });
+  const toggleChat = () => patch({ chat_enabled: !chatOn });
   return (
     <>
       <div className="row-card">
@@ -157,6 +159,15 @@ function GeneralSection() {
             <div className="row-desc">{t.settings.autostartDesc}</div>
           </div>
           <Switch checked={autostart} onChange={toggleAutostart} disabled={autostartDisabled} label={t.settings.autostart} />
+        </div>
+        {/* 对话窗口功能总开关（轻量模式）。放 General：轻量模式下点任何 chat 入口都会
+            落到设置窗，这里是用户找回完整功能的地方，必须在首屏分区就看得见。 */}
+        <div className="row">
+          <div className="row-text">
+            <div className="row-label">{t.settings.chatFeature}</div>
+            <div className="row-desc">{t.settings.chatFeatureDesc}</div>
+          </div>
+          <Switch checked={chatOn} onChange={toggleChat} label={t.settings.chatFeature} />
         </div>
         <div className="row">
           <div className="row-text">
@@ -234,20 +245,24 @@ function SessionsSection() {
             onChange={(v) => patch({ default_agent: v })}
           />
         </div>
-        <div className="row">
-          <div className="row-text">
-            <div className="row-label">{t.settings.sessionOpenIn}</div>
-            <div className="row-desc">{t.settings.sessionOpenInDesc}</div>
+        {/* 对话功能关闭（轻量模式）时隐藏：此时后端 reveal_session 强制走外部终端，
+            这个下拉不再有效，摆着只会误导。 */}
+        {(settings?.chat_enabled ?? true) && (
+          <div className="row">
+            <div className="row-text">
+              <div className="row-label">{t.settings.sessionOpenIn}</div>
+              <div className="row-desc">{t.settings.sessionOpenInDesc}</div>
+            </div>
+            <Dropdown
+              value={settings?.session_open_in ?? "terminal"}
+              options={[
+                { value: "chat" as const, label: t.settings.sessionOpenInChat },
+                { value: "terminal" as const, label: t.settings.sessionOpenInTerminal },
+              ]}
+              onChange={(v: SessionOpenIn) => patch({ session_open_in: v })}
+            />
           </div>
-          <Dropdown
-            value={settings?.session_open_in ?? "terminal"}
-            options={[
-              { value: "chat" as const, label: t.settings.sessionOpenInChat },
-              { value: "terminal" as const, label: t.settings.sessionOpenInTerminal },
-            ]}
-            onChange={(v: SessionOpenIn) => patch({ session_open_in: v })}
-          />
-        </div>
+        )}
         {showTermRow && (
           <div className="row">
             <div className="row-text">

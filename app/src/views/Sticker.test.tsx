@@ -229,6 +229,28 @@ describe("Sticker", () => {
     expect(invokeMock.mock.calls.some(([cmd]) => cmd === "open_latest_chat")).toBe(true);
   });
 
+  it("对话功能关闭（轻量模式）时贴纸上不渲染任何 chat 入口", async () => {
+    const { container } = render(<Sticker filter="all" data={[mk({ connected: true })]} />);
+    // 默认开启：底栏按钮与卡片按钮都在。
+    await screen.findByRole("button", { name: zh.sticker.openChatWindow });
+    expect(container.querySelector(".stk-chat-btn")).toBeTruthy();
+    await waitFor(() => expect(events.settingsChanged).not.toBeNull());
+    // 完整对象：useSettingsEffect 的 apply 会读 terminal_open_mode/relay 等字段，瘦 payload 会踩空。
+    act(() => events.settingsChanged?.({
+      payload: {
+        notifications_enabled: true, auto_update_enabled: true,
+        theme: "dark", opacity: 94, ui_scale: 100, resume_terminal: "wt", language: "auto",
+        terminal_open_mode: "card", card_menu_mode: "context", preview_enabled: true,
+        sticker_style: "elevated", sticker_color: "classic", sticker_quota_providers: ["claude"],
+        default_agent: "claude", proxy: { mode: "system", url: "", per_agent: {} },
+        relay: { per_agent: {} }, chat_enabled: false,
+      } as any,
+    }));
+    // 关闭后两个入口一起消失（settings-changed 实时生效，无需重启）。
+    await waitFor(() => expect(screen.queryByRole("button", { name: zh.sticker.openChatWindow })).toBeNull());
+    expect(container.querySelector(".stk-chat-btn")).toBeNull();
+  });
+
   it("用量选择在卸载重挂后保留（记住上次选择，找不到才退第一个）", () => {
     const usageMap: Record<string, ProviderUsage> = {
       claude: { lanes: [], note: null } as ProviderUsage,

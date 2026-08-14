@@ -16,6 +16,7 @@ export const SETTINGS_DEFAULTS: Settings = {
   language: "auto",
   terminal_open_mode: "card",
   session_open_in: "terminal",
+  chat_enabled: true,
   card_menu_mode: "button",
   preview_enabled: true,
   terminal_font_size: 12,

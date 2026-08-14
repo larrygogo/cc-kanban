@@ -105,6 +105,11 @@ pub(crate) struct Settings {
     /// 兼容老 settings.json（缺席 → terminal）。
     #[serde(default = "default_session_open_in")]
     pub(crate) session_open_in: String,
+    /// 对话窗口功能总开关（「轻量模式」）。关闭后应用只保留贴纸生态：所有 chat 开窗
+    /// 入口隐藏/拦截，审批与交互提问回落终端 TUI 作答。缺省开启，兼容老 settings.json。
+    /// 安装器的「自定义安装」勾选会经注册表种子写入首选值（见 seed.rs，仅 Windows）。
+    #[serde(default = "default_true")]
+    pub(crate) chat_enabled: bool,
     /// 卡片菜单触发方式：button = 卡片菜单按钮（默认），context = 右键菜单。兼容老 settings.json。
     #[serde(default = "default_card_menu_mode")]
     pub(crate) card_menu_mode: String,
@@ -171,6 +176,7 @@ impl Default for Settings {
             language: default_language(),
             terminal_open_mode: default_terminal_open_mode(),
             session_open_in: default_session_open_in(),
+            chat_enabled: true,
             card_menu_mode: default_card_menu_mode(),
             preview_enabled: true,
             terminal_font_size: default_terminal_font_size(),
@@ -288,6 +294,45 @@ pub(crate) fn update_settings<T>(
     Ok(result)
 }
 
+/// 安装器种子合并（调用方：seed.rs，仅 Windows）：settings.json 尚无显式 `chat_enabled`
+/// 字段时采纳种子并落盘；字段在场 = 用户已做过选择（serde default 让缺席文件也能反序列
+/// 化成 true，所以「在场性」只能裸读 JSON 判断，不能看反序列化结果）。落盘经
+/// `update_settings` 全量序列化，字段从此显式在场——种子只生效这一次。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn adopt_chat_enabled_seed(enabled: bool) {
+    let raw = std::fs::read_to_string(settings_path()).unwrap_or_default();
+    if chat_enabled_field_present(&raw) {
+        return;
+    }
+    let _ = update_settings(|s| {
+        s.chat_enabled = enabled;
+        Ok(())
+    });
+}
+
+/// 裸 JSON 的字段在场性（拆出便于单测；解析失败按缺席算——文件损坏时 load 也会回默认）。
+fn chat_enabled_field_present(raw: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .is_some_and(|v| v.get("chat_enabled").is_some())
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::chat_enabled_field_present;
+
+    /// 种子合并的准入判断：字段在场（无论 true/false）都算用户已选择，种子必须被忽略；
+    /// 缺席、空文件、损坏 JSON 都算未选择。
+    #[test]
+    fn field_presence_rules() {
+        assert!(chat_enabled_field_present(r#"{"chat_enabled": false}"#));
+        assert!(chat_enabled_field_present(r#"{"chat_enabled": true}"#));
+        assert!(!chat_enabled_field_present(r#"{"theme": "dark"}"#));
+        assert!(!chat_enabled_field_present(""));
+        assert!(!chat_enabled_field_present("{broken"));
+    }
+}
+
 // 本文件的 command 一律 async + spawn_blocking：同步命令跑在主线程，settings.json 虽小，
 // 但杀软扫描/同步盘接管目录时任何一次读写都可能拖到秒级，冻住消息泵。
 #[tauri::command]
@@ -362,8 +407,9 @@ pub(crate) async fn set_settings(
     // 切语言后重建托盘菜单/窗口标题（无条件重建，菜单仅两项，幂等且廉价）。
     // 托盘/菜单对象有线程亲和（muda 在其创建线程即主线程上操作），不能在 blocking 池里碰。
     let lang = ui_lang(&settings);
+    let chat_enabled = settings.chat_enabled;
     let menu_app = app.clone();
-    app.run_on_main_thread(move || apply_language(&menu_app, lang))
+    app.run_on_main_thread(move || apply_language(&menu_app, lang, chat_enabled))
         .map_err(|e| e.to_string())?;
     // 通知贴纸窗口实时套用新设置。
     let _ = app.emit("settings-changed", settings);

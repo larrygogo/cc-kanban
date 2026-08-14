@@ -495,6 +495,8 @@ export const zh = {
     sessionOpenInDesc: "会话都由 Meowo 托管运行；这里选用哪个界面打开它",
     sessionOpenInChat: "对话窗口",
     sessionOpenInTerminal: "外部终端",
+    chatFeature: "对话窗口功能",
+    chatFeatureDesc: "关闭后进入轻量模式：只保留贴纸，会话在外部终端里打开，审批与提问也在终端作答",
     cardMenu: "卡片菜单",
     cardMenuDesc: "星标、便签、重命名等操作的打开方式；触屏等不便右键的设备可改用卡片按钮",
     cardMenuContext: "右键菜单",
@@ -775,6 +777,7 @@ export const zh = {
       title: "选择你的偏好",
       desc: "都是常用项，随时能在设置里再改。",
       terminalHint: "需要外部终端时用哪个（会话本身由 Meowo 托管运行）。",
+      chatHint: "关闭则进入轻量模式：只保留贴纸，一切在终端里进行。",
     },
   },
 };
