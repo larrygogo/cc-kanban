@@ -1,0 +1,44 @@
+# winget 收录自动更新：release 从 draft 点 Publish 后，用微软官方 wingetcreate
+# 向 microsoft/winget-pkgs 自动发版本更新 PR。人工闸门就是「点 Publish」本身。
+#
+# manifest 指向 NSIS 芯（-setup.exe）而非 WebView2 壳：winget 本来就是静默安装
+# （installerType: nsis 自动识别 /S），壳的 UI 在这条链路毫无用武之地；
+# 壳继续做官网/GitHub 的人类下载入口。
+#
+# ── 一次性准备（没做完之前本 workflow 会失败，属预期）──
+# 1. 建 GitHub PAT（classic，勾 public_repo），存为仓库 secret：WINGET_PAT。
+#    PR 以该账号名义从其 winget-pkgs fork 发出（wingetcreate 自动建 fork）。
+# 2. 首个版本必须手动提交一次（update 只能更新已收录的包）。本地跑：
+#      wingetcreate new https://github.com/larrygogo/meowo/releases/download/vX.Y.Z/Meowo_X.Y.Z_x64-setup.exe
+#    交互里填：PackageIdentifier = larrygogo.Meowo，Publisher = larrygogo，
+#    License = MIT，主页 https://meowo.io，短描述见 README 首行；最后 --submit。
+#    合并进 winget-pkgs 后，本 workflow 即接管后续所有版本。
+# 详见 docs/winget.md。
+name: winget
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  submit:
+    # 预发布不投 winget；正式包才值得占用户的升级通道。
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: windows-latest
+    steps:
+      - name: 提交版本更新 PR 到 winget-pkgs
+        shell: pwsh
+        env:
+          WINGET_PAT: ${{ secrets.WINGET_PAT }}
+        run: |
+          if (-not $env:WINGET_PAT) {
+            Write-Host "::error::缺少 WINGET_PAT secret（见本 workflow 头部注释的一次性准备），跳过提交。"
+            exit 1
+          }
+          $tag = "${{ github.event.release.tag_name }}"
+          $ver = $tag.TrimStart("v")
+          $url = "https://github.com/${{ github.repository }}/releases/download/$tag/Meowo_${ver}_x64-setup.exe"
+          # 资产必须已在 release 上（tauri-action 上传后才 Publish，正常恒成立）。
+          Invoke-WebRequest -Method Head -Uri $url | Out-Null
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          .\wingetcreate.exe update larrygogo.Meowo --version $ver --urls $url --submit --token $env:WINGET_PAT
