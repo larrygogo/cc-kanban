@@ -6,4 +6,10 @@ export type ManagedTerminalSnapshotDto = { sessionId: number, active: boolean,
  * 旁路快照的 active 只代表旁观连接活着，不代表能输入——曾拿 active 当判据，
  * 恢复会话被旁路活性短路，托管 PTY 根本没起。
  */
-managed: boolean, data: string, startOffset: number, endOffset: number, exited: boolean, exitCode: number | null, };
+managed: boolean, data: string, startOffset: number, endOffset: number, exited: boolean, exitCode: number | null, 
+/**
+ * PTY 当前生效的行列数（0 = 未知：无活跃 PTY / 尚未设置尺寸）。前端在终端视图
+ * **隐藏**时用它把 xterm 网格钉到 PTY 真实尺寸——隐藏态宿主是屏外停靠盒，按盒子
+ * fit 出来的网格与 PTY 脱节，隐藏期到达的帧会按错误宽度换行/错行叠画（实拍花屏）。
+ */
+cols: number, rows: number, };

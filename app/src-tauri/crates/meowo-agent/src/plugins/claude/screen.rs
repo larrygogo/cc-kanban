@@ -1,4 +1,6 @@
-//! Claude Code 的屏幕状态规则（语义移植自 herdr claude.toml 2026.07.13.1，Apache-2.0）。
+//! Claude Code 的屏幕状态规则（语义移植自 herdr claude.toml 2026.07.13.1，Apache-2.0；
+//! CC 2.1.233 的运行形态变更按 2026-08-17 ConPTY 实拍补充——标题 spinner 从盲文帧换成
+//! 月相帧 ◐◑，OSC 9;4 进度序列不再发送，状态行括号里的中断提示被移除）。
 //!
 //! 改这里之前请先取证：宿主的 `screen_detect_explain` / `screen_detect_explain_text`
 //! 会打印真实末屏与命中规则，照着真实屏幕改，不要凭想象改。
@@ -29,6 +31,20 @@ pub(super) static RULES: &[ScreenRule] = &[
         1100,
         Region::Title,
         Matcher::StartsWithCharInRange(BRAILLE_LO, BRAILLE_HI),
+    )
+    .visible(),
+    // CC 2.1.233（2026-08 ConPTY 实拍取证）标题 spinner 换成月相圆形帧：运行中
+    // `◐ Claude Code` / `◑ <任务名>`，结束回到 `✳ <任务名>`。上一条盲文规则在新版
+    // 永不命中，正在跑的会话于是被 ❯ 提示框（live_prompt_box）判成可见 idle——
+    // 看板黄环「等你」错挂整个长任务，正是「状态不及时」实拍反馈的根因。
+    // 区间取整段半圆/四分圆族（实拍见 ◐◑，旋转帧自然含 ◒◓）：手工枚举漏帧的教训
+    // 见 BRAILLE 常量注释。
+    ScreenRule::new(
+        "osc_title_moon_working",
+        ScreenState::Working,
+        1090,
+        Region::Title,
+        Matcher::StartsWithCharInRange('\u{25D0}', '\u{25D7}'),
     )
     .visible(),
     // ctrl+o 的详细 transcript 覆盖层：屏幕全被它占据，不代表状态变化。
@@ -83,6 +99,20 @@ pub(super) static RULES: &[ScreenRule] = &[
             Matcher::LineRegex(r"^\s*/btw(?:\s|$)"),
             Matcher::LineRegex(r"esc to close\s*$"),
         ]),
+    )
+    .visible(),
+    // 运行中的屏幕状态行（CC 2.1.233 实拍）：`✢ Brewing… (7s · ↓ 129 tokens)`。
+    // 帧字符开头 + `… (` + 计时数字三者齐备才算——回合结束行 `✻ Baked for 11s`
+    // 没有括号计时，不命中。标题月相是第一证据，本条兜屏幕侧（用户自设终端标题、
+    // 标题事件丢失时仍能判对）；970 压过 live_prompt_box（950）：运行中输入框照画
+    // ❯，不能再被它判成可见 idle。注意新版括号里没有 esc to interrupt（该提示已被
+    // 上游移除），不能沿用 codex/opencode 的中断提示锚。
+    ScreenRule::new(
+        "status_line_working",
+        ScreenState::Working,
+        970,
+        Region::BottomNonEmpty(6),
+        Matcher::LineRegex(r"^[·✢✳✶✻✽*+]\s+\S.*(…|\.\.\.)\s*\(\d+"),
     )
     .visible(),
     // 提示框体内以 ❯ 开头且无任何审批文案 = 在等你输入的空闲态（可见证据）。

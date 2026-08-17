@@ -458,6 +458,20 @@ fn show_window_no_activate(window: &tauri::WebviewWindow) {
     let _ = window.show();
 }
 
+/// 把窗口可靠带到前台。普通 set_focus 在 Windows 上受前台锁限制：托盘点击授予的
+/// SetForegroundWindow 权限只在点击后的极短窗口内有效，稍有延迟（查库、WebView 首帧）
+/// 就被拒——窗口显示了却垫在当前前台窗口身后，用户看到的就是「点了没反应」
+/// （实拍：dev/安装版并存时双击托盘「呼不出」对话窗，其实它开在另一实例的对话窗底下）。
+/// 走 AttachThreadInput 的 force_foreground（点卡片拉终端置前的同一套）强置前。
+fn raise_window(window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    if let Ok(handle) = window.hwnd() {
+        crate::terminal::force_foreground(handle.0 as _);
+        return;
+    }
+    let _ = window.set_focus();
+}
+
 /// 托盘点击入口：打开最近活跃会话的对话窗口。托盘没有「当前会话」上下文，
 /// 取 last_event_at 最新的未归档会话最贴近「看看现在在跑什么」。
 /// 一条会话都没有（新装/全归档）时回落到设置窗口，避免点了毫无反应。
@@ -516,7 +530,7 @@ pub(crate) fn open_chat_window_impl(
             .map_err(|e| format!("切换会话失败: {e}"))?;
         if activate {
             let _ = w.show();
-            let _ = w.set_focus();
+            raise_window(&w);
         } else if !w.is_visible().unwrap_or(false) {
             // 隐藏（关到托盘等）时无声显形；最小化的留在任务栏——闪烁已在召唤，
             // 强行还原窗口同样是夺屏。
@@ -567,6 +581,22 @@ pub(crate) fn open_chat_window_impl(
             crate::macos::menubar::settings_window_did_close(&app_handle, "chat");
         }
     });
+    // 置前兜底：真正 show 由前端首帧触发（useShowWhenReady），距点击已过去数秒
+    // （懒加载 chunk；dev 下 vite 现场编译更久）——前端那句 setFocus 到达时托盘点击
+    // 授予的前台权限早已过期，窗口默默垫在当前前台窗口身后。盯到首次可见即强置前；
+    // 只对用户主动打开（activate）做，安静唤醒不夺焦的语义不变。
+    if activate {
+        let w = win.clone();
+        std::thread::spawn(move || {
+            for _ in 0..300 {
+                if w.is_visible().unwrap_or(false) {
+                    raise_window(&w);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
+    }
     Ok(())
 }
 
@@ -602,7 +632,22 @@ pub(crate) fn recall_sticker(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
-        let _ = w.set_focus();
+        // 原生层几何救援，不依赖 webview 活着：WebView2 浏览器进程崩溃后窗口 JS 全灭，
+        // 下面 emit 的事件无人处理，「找回」就彻底失灵（实拍：吸附细条卡在屏边，重启
+        // 才恢复）。窗口还是细条尺寸就先撑回正常最小尺寸，再居中主屏；前端若活着，
+        // 随后会按它记录的正常尺寸精确还原（snap_restore + recall_center），终态一致。
+        let scale = w.scale_factor().unwrap_or(1.0);
+        if let Ok(size) = w.outer_size() {
+            let logical = size.to_logical::<f64>(scale);
+            if logical.width < crate::snap::STICKER_MIN_W || logical.height < crate::snap::STICKER_MIN_H
+            {
+                let _ = w.set_size(tauri::LogicalSize::new(
+                    crate::snap::STICKER_MIN_W,
+                    crate::snap::STICKER_MIN_H,
+                ));
+            }
+        }
+        let _ = recall_center(w.clone());
         let _ = w.emit("recall-sticker", ());
     }
 }
@@ -649,6 +694,46 @@ pub(crate) fn apply_language(app: &tauri::AppHandle, lang: &str, chat_enabled: b
     // 这里不再按语言重设——两处写同一标题会互相覆盖。
 }
 
+/// dev 构建的托盘角标：右下角叠一枚琥珀圆点，带深色描边与抗锯齿边缘——托盘图标
+/// 只有 16~32px，无描边的硬边色块糊成一团锯齿。像素级绘制而非另备图标资源：
+/// 角标只存在于 debug 构建，不值得为它维护一套打包文件。
+#[cfg(not(target_os = "macos"))]
+fn dev_badge_icon(icon: &tauri::image::Image<'_>) -> tauri::image::Image<'static> {
+    /// 按覆盖率把颜色混进像素（普通 alpha over），cov ∈ [0,1]。
+    fn blend(px: &mut [u8], color: [u8; 3], cov: f32) {
+        for c in 0..3 {
+            px[c] = (f32::from(color[c]) * cov + f32::from(px[c]) * (1.0 - cov)).round() as u8;
+        }
+        let a = f32::from(px[3]) / 255.0;
+        px[3] = ((cov + a * (1.0 - cov)) * 255.0).round() as u8;
+    }
+    let (w, h) = (icon.width(), icon.height());
+    let mut rgba = icon.rgba().to_vec();
+    let r = (w.min(h) as f32) * 0.26;
+    let rim = (r * 0.22).max(1.0); // 描边厚度随尺寸缩放，最小 1px 保证 16px 下仍有分离感
+    let (cx, cy) = (w as f32 - r - 1.0, h as f32 - r - 1.0);
+    for y in 0..h {
+        for x in 0..w {
+            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            let d = (dx * dx + dy * dy).sqrt();
+            let Some(px) = rgba.get_mut(((y * w + x) * 4) as usize..((y * w + x) * 4 + 4) as usize)
+            else {
+                continue;
+            };
+            // 半像素过渡的圆盘覆盖率：外层深色圆先铺，内层琥珀圆压上，留出的环即描边。
+            let outer = (r + 0.5 - d).clamp(0.0, 1.0);
+            if outer > 0.0 {
+                blend(px, [40, 34, 28], outer);
+            }
+            let inner = (r - rim + 0.5 - d).clamp(0.0, 1.0);
+            if inner > 0.0 {
+                blend(px, [245, 158, 11], inner);
+            }
+        }
+    }
+    tauri::image::Image::new_owned(rgba, w, h)
+}
+
 /// 构建系统托盘：左键点击直接打开设置；右键菜单提供设置 / 退出。
 /// macOS 走 `macos::menubar::setup_tray`（面板模式），故此实现仅用于非 macOS 平台。
 #[cfg(not(target_os = "macos"))]
@@ -657,11 +742,16 @@ pub(crate) fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
     let mut builder = TrayIconBuilder::with_id("meowo-tray");
     // 图标恒由打包提供，但缺失时不该 unwrap panic 把启动打挂——没图标就建无图标托盘。
+    // dev 构建叠橙色角标：共库后 dev 与安装版托盘并排且内容全同，只能靠图标分辨实例。
     if let Some(icon) = app.default_window_icon() {
-        builder = builder.icon(icon.clone());
+        if cfg!(debug_assertions) {
+            builder = builder.icon(dev_badge_icon(icon));
+        } else {
+            builder = builder.icon(icon.clone());
+        }
     }
     builder
-        .tooltip("Meowo")
+        .tooltip(if cfg!(debug_assertions) { "Meowo (dev)" } else { "Meowo" })
         .menu(&menu)
         // 左键留给「打开对话窗口」，菜单仅在右键弹出（设置仍在右键菜单里）。
         .show_menu_on_left_click(false)
@@ -711,7 +801,13 @@ pub(crate) fn update_tray_tooltip(
     let Some(tray) = app.tray_by_id("meowo-tray") else {
         return;
     };
-    let _ = tray.set_tooltip(Some(tray_tooltip_text(lang, running, waiting)));
+    // dev 标记在调用点补而不进 tray_tooltip_text：那是带精确断言的纯函数，
+    // 单测在 debug 下跑，函数内 cfg! 会让断言随构建漂移。
+    let mut tip = tray_tooltip_text(lang, running, waiting);
+    if cfg!(debug_assertions) {
+        tip = tip.replacen("Meowo", "Meowo (dev)", 1);
+    }
+    let _ = tray.set_tooltip(Some(tip));
 }
 
 /// 构建托盘提示文案（本地化）。待交互更紧急，排在运行中之前。

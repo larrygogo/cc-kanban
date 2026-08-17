@@ -334,6 +334,11 @@ pub struct ManagedTerminalSnapshotDto {
     pub end_offset: u64,
     pub exited: bool,
     pub exit_code: Option<u32>,
+    /// PTY 当前生效的行列数（0 = 未知：无活跃 PTY / 尚未设置尺寸）。前端在终端视图
+    /// **隐藏**时用它把 xterm 网格钉到 PTY 真实尺寸——隐藏态宿主是屏外停靠盒，按盒子
+    /// fit 出来的网格与 PTY 脱节，隐藏期到达的帧会按错误宽度换行/错行叠画（实拍花屏）。
+    pub cols: u16,
+    pub rows: u16,
 }
 
 /// 工作区里有改动的一个文件（git status --porcelain 的一行归一化结果）。
@@ -505,6 +510,8 @@ mod tests {
             end_offset: 13,
             exited: false,
             exit_code: None,
+            cols: 120,
+            rows: 40,
         })
         .unwrap();
         assert_eq!(value["sessionId"], 7);

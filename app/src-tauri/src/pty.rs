@@ -647,8 +647,22 @@ fn finalize_exit(broker: &PtyBroker, app: &tauri::AppHandle, managed: &Arc<Manag
                 eprintln!("PTY 退出后打开数据库失败（等待 pid 宽限窗口自愈）: {error}");
             }
         }
+        // launch token 存续到 PTY 退出（/clear 换代要拿它重认领），此刻随绑定一起清：
+        // 先收集本会话名下的临时 id，再按值反查摘掉 pending 里对应的 token。
+        let mut temp_ids: Vec<i64> = Vec::new();
         if let Ok(mut bindings) = broker.attach.bindings.lock() {
-            bindings.retain(|_, real| *real != session_id);
+            bindings.retain(|temp, real| {
+                if *real == session_id {
+                    temp_ids.push(*temp);
+                    return false;
+                }
+                true
+            });
+        }
+        if !temp_ids.is_empty() {
+            if let Ok(mut pending) = broker.attach.pending.lock() {
+                pending.retain(|_, id| !temp_ids.contains(id));
+            }
         }
         crate::watch::emit_board_changed(app, "pty-exit");
     }
@@ -886,6 +900,11 @@ fn pack_size(cols: u16, rows: u16) -> u32 {
     (u32::from(cols) << 16) | u32::from(rows)
 }
 
+/// [`pack_size`] 的逆运算。0（尚未设置）解回 (0, 0)，快照侧以 0 表达「未知」。
+fn unpack_size(packed: u32) -> (u16, u16) {
+    ((packed >> 16) as u16, (packed & 0xffff) as u16)
+}
+
 impl PtyBroker {
     pub(crate) fn set_app_handle(&self, app: tauri::AppHandle) {
         if let Ok(mut current) = self.attach.app.lock() {
@@ -1082,12 +1101,6 @@ impl PtyBroker {
         for (key, value) in env {
             command.env(key, value);
         }
-        // 数据落点由拉起者显式决定，不靠环境继承：dev GUI（~/.meowo-dev）与安装版
-        // （~/.meowo）并行时，各自托管会话内的 hook/reporter 必须写各自的库——托管会话
-        // 写了别的库，GUI 将永远认领不到它。放在 caller env 循环之后 = 覆盖任何外来
-        // MEOWO_DB；release 下值即默认路径，行为不变。外部终端会话无此注入，reporter
-        // 按默认落 ~/.meowo，归安装版——正是期望的归属。
-        command.env("MEOWO_DB", crate::db_path().as_os_str());
         // 所有托管会话（新建和恢复）都必须把本机鉴权通道传给 hook 子进程；此前只有
         // start_pending 注入，导致历史会话恢复后 PermissionRequest 无法抵达 GUI。
         if let Ok(endpoint) = self.attach.endpoint.lock() {
@@ -1562,6 +1575,13 @@ impl PtyBroker {
         } else {
             None
         };
+        // 隐藏态的前端要拿它把 xterm 网格钉到 PTY 真实尺寸（0 = 未知，前端跳过）。
+        // 已退出的定格快照不再有新帧，尺寸没有对齐价值，维持 0。
+        let (cols, rows) = unpack_size(
+            session
+                .as_ref()
+                .map_or(0, |s| s.last_size.load(Ordering::Acquire)),
+        );
         let (data, start_offset, end_offset) = if let Some(item) = completed.as_ref() {
             // 已退出的会话：completed 是定格快照，同样按 since 裁剪。
             let skip = since
@@ -1588,6 +1608,8 @@ impl PtyBroker {
             end_offset,
             exited: completed.is_some(),
             exit_code: completed.and_then(|item| item.code),
+            cols,
+            rows,
         }
     }
 
@@ -2289,23 +2311,24 @@ impl PtyBroker {
         }
     }
 
-    /// claim 的 sessions 锁内段：真实 id 已被占用 → Err；临时会话已登记 → 在同一锁程内
+    /// claim 的 sessions 锁内段：目标 id 已被占用 → Err；`from_id` 已登记 → 在同一锁程内
     /// 完成「取出 + 改 id + 重绑」，外部观察者看不到空窗；尚未登记 → Ok(None)，由调用方
-    /// 决定等（启动占位还在）还是报错（真的已结束）。
+    /// 决定等（启动占位还在）还是报错（真的已结束）。首次认领时 `from_id` 是负数临时 id；
+    /// /clear 换代时是被接替的旧真实 id（见 [`Self::handle_reclaim`]）。
     fn try_claim_rebind(
         &self,
-        temp_id: i64,
-        real_id: i64,
+        from_id: i64,
+        to_id: i64,
     ) -> Result<Option<Arc<ManagedPty>>, String> {
         let mut sessions = self.sessions.lock().map_err(|_| LOCK_POISONED)?;
-        if sessions.contains_key(&real_id) {
+        if sessions.contains_key(&to_id) {
             return Err("真实 PTY 会话已存在".into());
         }
-        let Some(managed) = sessions.remove(&temp_id) else {
+        let Some(managed) = sessions.remove(&from_id) else {
             return Ok(None);
         };
-        managed.session_id.store(real_id, Ordering::Release);
-        sessions.insert(real_id, managed.clone());
+        managed.session_id.store(to_id, Ordering::Release);
+        sessions.insert(to_id, managed.clone());
         Ok(Some(managed))
     }
 
@@ -2316,15 +2339,30 @@ impl PtyBroker {
         if real_id <= 0 {
             return Err("PTY claim session 无效".into());
         }
-        // 先只读 token，直到 sessions 重绑完成才消费。极快启动的 agent 可能在 start() 完成
-        // 注册前就触发 hook；这时保留 token，下一次认领仍可成功。
         let temp_id = *self
             .attach
             .pending
             .lock()
             .map_err(|_| LOCK_POISONED)?
             .get(launch_token)
-            .ok_or("PTY claim token 无效或已使用")?;
+            .ok_or("PTY claim token 无效或已过期")?;
+        // launch token 不消费，随 PTY 生命周期存续（退出路径清理）：agent 在同一进程里
+        // /clear 换新会话时，SessionStart 会带着继承的同一 token 再次认领。历次认领的
+        // 语义由 bindings 区分——无绑定 = 启动首次认领；同 id 重放（compact 后补发等）
+        // 幂等成功；异 id = 原地换代，PTY 从旧会话行换绑到新行。
+        let prior = self
+            .attach
+            .bindings
+            .lock()
+            .map_err(|_| LOCK_POISONED)?
+            .get(&temp_id)
+            .copied();
+        if let Some(old_sid) = prior {
+            if old_sid == real_id {
+                return Ok(());
+            }
+            return self.handle_reclaim(temp_id, old_sid, real_id);
+        }
         // start 的 openpty+spawn 在锁外进行（冷启动+杀软扫描可达数秒），claim 又是一次性的
         // （reporter 不重试）——子进程已起、登记未落的窗口里绝不能按「已结束」把这次绑定
         // 错杀掉。占位还在就等它落地：占的是本连接自己的 handler 线程，不挤别人。
@@ -2352,9 +2390,6 @@ impl PtyBroker {
         }
         // 占位最长存留一个 spawn 周期；5s 还没落地按启动失败处理，token 保留供重认。
         let managed = managed.ok_or("PTY 启动登记超时")?;
-        if let Ok(mut pending) = self.attach.pending.lock() {
-            pending.remove(launch_token);
-        }
         if let Ok(mut bindings) = self.attach.bindings.lock() {
             bindings.insert(temp_id, real_id);
         }
@@ -2396,6 +2431,45 @@ impl PtyBroker {
         Ok(())
     }
 
+    /// /clear 换代：agent 进程原地开新会话（新 cc_session_id → reporter 建了新 DB 行），
+    /// PTY 却还绑在旧行上——不换绑的话旧卡片拿着活终端但状态定格，新会话则被当成
+    /// 外部起的、只给「在外部终端同步打开」（实拍反馈）。这里把 PTY 换绑到新行，旧行
+    /// 标记结束并写接续链（superseded_by），看板折叠成同一张卡；开着旧段的对话窗靠
+    /// 轮询 header 里的 supersededBy 自动跟随跳转。
+    fn handle_reclaim(&self, temp_id: i64, old_sid: i64, new_sid: i64) -> Result<(), String> {
+        // 首次认领已完成（bindings 有值），不存在 starting 占位竞态，无需等待循环。
+        let managed = self
+            .try_claim_rebind(old_sid, new_sid)?
+            .ok_or("旧 PTY 会话已结束")?;
+        if let Ok(mut bindings) = self.attach.bindings.lock() {
+            bindings.insert(temp_id, new_sid);
+        }
+        // DB 收尾 best-effort（与首次认领的 launch_args 落库同款容错）：失败只丢同卡
+        // 折叠与选项回放，不阻断换绑——PTY 归属是主语义，必须先落。
+        match crate::open_store(&crate::db_path()) {
+            Ok(store) => {
+                // 旧段结束：agent 的 SessionEnd(clear) 也会写这条，不依赖其到达顺序。
+                if let Err(e) = store.end_session(old_sid, crate::now_ms()) {
+                    eprintln!("换代后回写旧会话结束状态失败（{old_sid}）: {e}");
+                }
+                // 启动选项跟着终端进程走：复制到新行，新段日后单独 resume 才能回放
+                // 权限模式等参数。
+                if let Ok(Some(args)) = store.session_launch_args(old_sid) {
+                    let _ = store.set_session_launch_args(new_sid, &args);
+                }
+                if let Err(e) = store.set_session_lineage(new_sid, old_sid) {
+                    eprintln!("换代接续链落库失败（{old_sid} → {new_sid}）: {e}");
+                }
+            }
+            Err(e) => eprintln!("换代后打开数据库失败（{old_sid} → {new_sid}）: {e}"),
+        }
+        if let Some(app) = self.attach.app.lock().ok().and_then(|app| app.clone()) {
+            crate::watch::emit_board_changed(&app, "pty-reclaim");
+        }
+        drop(managed);
+        Ok(())
+    }
+
     fn handle_approval(
         &self,
         token: &str,
@@ -2407,6 +2481,25 @@ impl PtyBroker {
         }
         if request.session_id <= 0 || request.request_id.len() < 8 {
             return Err("审批请求无效".into());
+        }
+        // 外部终端跑的会话（不是本 broker 托管的 PTY）：审批与提问一律留在终端处理。
+        // 用户就坐在那个终端前，TUI 的权限框/提问表单当场可答；GUI 这边弹卡、召唤
+        // 对话窗反而是打扰——尤其审批会被 GUI 租约抢走挂起，终端里那个正等着的人
+        // 看不到任何权限框（实拍反馈）。提问回 allow（表单零延迟出现）、审批回 pass
+        // （决定权交还 agent 自己的界面），两者都不入表、不发事件、不动窗口。
+        let externally_run = !self
+            .sessions
+            .lock()
+            .is_ok_and(|sessions| sessions.contains_key(&request.session_id));
+        if externally_run {
+            let decision = if request.tool_name == "AskUserQuestion" {
+                ApprovalDecision::Allow
+            } else {
+                ApprovalDecision::Pass
+            };
+            return stream
+                .write_all(format!("{}\n", decision.as_wire()).as_bytes())
+                .map_err(|e| e.to_string());
         }
         // AskUserQuestion 不是权限请求而是提问：「允许提问」这个决定没有信息量（且它属于
         // 「需用户交互」的工具，连 bypassPermissions 都拦不住触发），弹一张 JSON 审批卡
@@ -3060,11 +3153,17 @@ mod tests {
     }
 
     /// 冷启动路径：题面必须能被**轮询**取回。`interactive-question` 事件在对话窗
-    /// 冷启动（WebView2 1~2s）时打进虚空且不重放，入表是唯一的兜底——外部终端会话
-    /// 更没有屏幕识别可退。收卡时撤表，避免轮询把答过的题重新弹成幽灵卡。
+    /// 冷启动（WebView2 1~2s）时打进虚空且不重放，入表是唯一的兜底。会话须为本
+    /// broker 托管——外部终端会话的题面留在终端作答，根本不入表。收卡时撤表，
+    /// 避免轮询把答过的题重新弹成幽灵卡。
     #[test]
     fn interactive_question_survives_a_missed_event_and_clears_on_dismiss() {
         let broker = PtyBroker::default();
+        broker
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(11, dummy_managed(11));
         let request = ApprovalRequest {
             session_id: 11,
             request_id: "request-11-ask".into(),
@@ -3139,42 +3238,66 @@ mod tests {
         assert_eq!(approval_summon_action(false, false, false), SummonAction::Summon);
     }
 
+    fn approval_request(session_id: i64, tool: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            session_id,
+            request_id: format!("request-{session_id}-ask"),
+            provider: "claude".into(),
+            tool_name: tool.into(),
+            description: None,
+            input: r#"{"questions":[]}"#.into(),
+            permission_suggestions: vec![],
+        }
+    }
+
+    fn approval_roundtrip(broker: &PtyBroker, session_id: i64, tool: &str) -> String {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_side, _) = listener.accept().unwrap();
+        let token = broker.attach.token.clone();
+        broker
+            .handle_approval(&token, approval_request(session_id, tool), server_side)
+            .unwrap();
+        let mut reply = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(client), &mut reply).unwrap();
+        reply.trim().to_string()
+    }
+
     /// AskUserQuestion 是提问不是权限：必须立即回 allow（TUI 表单零延迟），且**绝不入
     /// 审批表**——入了表 GUI 会看到一张没人能消解的幽灵审批卡。对照：普通工具在无 GUI
-    /// 消费者时按既有语义回 pass 交还终端。
+    /// 消费者时按既有语义回 pass 交还终端。会话为本 broker 托管（外部会话另有整段
+    /// 短路，见下一个测试）。
     #[test]
     fn ask_user_question_is_auto_allowed_without_queueing() {
-        fn approval_request(tool: &str) -> ApprovalRequest {
-            ApprovalRequest {
-                session_id: 7,
-                request_id: "request-7-ask".into(),
-                provider: "claude".into(),
-                tool_name: tool.into(),
-                description: None,
-                input: r#"{"questions":[]}"#.into(),
-                permission_suggestions: vec![],
-            }
-        }
-        fn roundtrip(broker: &PtyBroker, tool: &str) -> String {
-            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-            let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            let (server_side, _) = listener.accept().unwrap();
-            let token = broker.attach.token.clone();
-            broker
-                .handle_approval(&token, approval_request(tool), server_side)
-                .unwrap();
-            let mut reply = String::new();
-            std::io::BufRead::read_line(&mut std::io::BufReader::new(client), &mut reply).unwrap();
-            reply.trim().to_string()
-        }
         let broker = PtyBroker::default();
-        assert_eq!(roundtrip(&broker, "AskUserQuestion"), "allow");
+        broker.sessions.lock().unwrap().insert(7, dummy_managed(7));
+        assert_eq!(approval_roundtrip(&broker, 7, "AskUserQuestion"), "allow");
         assert!(
             broker.attach.approvals.lock().unwrap().is_empty(),
             "自动放行的提问不得滞留在审批表里"
         );
         // 普通工具不受影响：无 GUI 消费者 → 撤回并交还终端（pass）。
-        assert_eq!(roundtrip(&broker, "Bash"), "pass");
+        assert_eq!(approval_roundtrip(&broker, 7, "Bash"), "pass");
+    }
+
+    /// 外部终端跑的会话（非本 broker 托管）：提问与审批一律留在终端处理。提问回
+    /// allow（终端表单零延迟）、审批回 pass（决定权交还 agent 界面），且都不入表——
+    /// 入了表对话窗就会长出题面卡/审批卡，而用户明确要求外部会话的这些交互只在
+    /// 终端出现（GUI 抢走审批时，终端前的人反而看不到权限框）。
+    #[test]
+    fn externally_run_sessions_keep_interactions_in_the_terminal() {
+        let broker = PtyBroker::default();
+        assert_eq!(approval_roundtrip(&broker, 99, "AskUserQuestion"), "allow");
+        assert_eq!(
+            broker.interactive_question(99),
+            None,
+            "外部会话的题面不得入表——否则对话窗轮询会把卡弹出来"
+        );
+        assert_eq!(approval_roundtrip(&broker, 99, "Bash"), "pass");
+        assert!(
+            broker.attach.approvals.lock().unwrap().is_empty(),
+            "外部会话的审批不得挂进 broker"
+        );
     }
 
     /// 审批等待循环的四路信号。场景即实拍 bug：TUI 权限框与 hook 并行竞速，用户在终端里
@@ -3430,7 +3553,7 @@ mod tests {
             registrar.end_start(-5);
         });
 
-        // claim 一次性、reporter 不重试：登记未落的窗口里必须等，不能按「已结束」错杀。
+        // claim 不重试（reporter 一次性）：登记未落的窗口里必须等，不能按「已结束」错杀。
         broker.handle_claim(&token, "launch", 9).unwrap();
         handle.join().unwrap();
         let sessions = broker.sessions.lock().unwrap();
@@ -3438,13 +3561,11 @@ mod tests {
         assert!(!sessions.contains_key(&-5));
         drop(sessions);
         assert_eq!(broker.binding(-5), Some(9));
-        assert!(broker
-            .attach
-            .pending
-            .lock()
-            .unwrap()
-            .get("launch")
-            .is_none());
+        // token 不随认领消费：/clear 换代要带着它重认领，存续到 PTY 退出路径清理。
+        assert_eq!(
+            broker.attach.pending.lock().unwrap().get("launch"),
+            Some(&-5)
+        );
     }
 
     #[test]
@@ -3649,6 +3770,33 @@ mod tests {
         // 后到的读方永远等不到真实 id。绑定表由 PTY 退出路径清理（reader 线程 retain）。
         assert_eq!(first.binding(-7), Some(9));
         assert_eq!(first.binding(-7), Some(9));
+    }
+
+    /// /clear 换代的 claim 状态机（不触 DB 的分支）：同 id 重放幂等成功、launch token
+    /// 不被消费；旧会话已不在 sessions（PTY 已亡）时换代报错且不动绑定表。
+    #[test]
+    fn reclaim_is_idempotent_on_replay_and_rejects_dead_session() {
+        let broker = PtyBroker::default();
+        let token = broker.attach.token.clone();
+        broker
+            .attach
+            .pending
+            .lock()
+            .unwrap()
+            .insert("launch-token".into(), -7);
+        broker.attach.bindings.lock().unwrap().insert(-7, 9);
+
+        // compact 等场景会对同一真实 id 重发 SessionStart：重放必须幂等成功。
+        broker.handle_claim(&token, "launch-token", 9).unwrap();
+        // token 存续（/clear 换代还要靠它重认领），不随认领消费。
+        assert_eq!(
+            broker.attach.pending.lock().unwrap().get("launch-token"),
+            Some(&-7)
+        );
+
+        // 换代到新 id，但旧会话已不在 sessions（PTY 已退出）：报错，且绑定保持原值。
+        assert!(broker.handle_claim(&token, "launch-token", 10).is_err());
+        assert_eq!(broker.binding(-7), Some(9));
     }
 
     #[test]

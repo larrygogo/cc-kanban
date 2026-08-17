@@ -400,66 +400,6 @@ pub(crate) fn migrate_legacy_data() {
     }
 }
 
-/// dev(debug)构建的默认库路径:`<home>/.meowo-dev/board.db`。home 解析链与
-/// [`db_path`] 完全一致(USERPROFILE → HOME → ".")。独立成纯函数是为了可测——
-/// 先例是 reporter 的 `db_path_under`:测试传参,不改进程环境变量。
-fn dev_db_path_under(userprofile: Option<&str>, home: Option<&str>) -> PathBuf {
-    let home = userprofile.or(home).unwrap_or(".");
-    PathBuf::from(home).join(".meowo-dev").join("board.db")
-}
-
-/// dev/安装版并行隔离的落点设定:`MEOWO_DB` 未显式设置时把它设成 dev 默认库,
-/// 返回「是否由本函数设定」(首启 seed 据此判断)。数据目录的六个独立解析点
-/// (app 侧 db_path/migrate/usage_cache、agent 侧 transcript/telemetry、reporter)
-/// 全部 env 优先,在此一处设定即全体跟随;托管 PTY 子进程另由 `pty` 显式注入。
-/// 只允许 run() 在**单线程早期**调用:set_var 是进程级副作用(edition 2021 下
-/// 非 unsafe;workspace 升 2024 时此处要包 unsafe 块);测试进程不走 run(),不受污染。
-fn apply_dev_default_db() -> bool {
-    if std::env::var_os("MEOWO_DB").is_some() {
-        return false;
-    }
-    let dev_db = dev_db_path_under(
-        std::env::var("USERPROFILE").ok().as_deref(),
-        std::env::var("HOME").ok().as_deref(),
-    );
-    std::env::set_var("MEOWO_DB", &dev_db);
-    eprintln!("Meowo dev: 数据目录隔离生效,库落 {}", dev_db.display());
-    true
-}
-
-/// dev 首启种子:`~/.meowo-dev` 尚不存在时,从安装版目录拷 `settings.json` 与
-/// `relay-secrets.json`(存在才拷),让中转、语言等设置开箱即用。刻意不拷
-/// board.db(会话数据正是要隔离的东西)与 profiles/——settings 里的 profiles
-/// 元数据没有对应目录时,`wire_all_profiles` 有缺目录即跳过的守卫,至多短暂
-/// 显示待登录的账号。只在 [`apply_dev_default_db`] 返回 true 时调用:用户显式
-/// 把 MEOWO_DB 指向别处的话,那个目录的内容轮不到我们猜。
-fn seed_dev_dir_from_release() {
-    let Some(dev_dir) = db_path().parent().map(std::path::Path::to_path_buf) else {
-        return;
-    };
-    if dev_dir.exists() {
-        return;
-    }
-    if let Err(e) = std::fs::create_dir_all(&dev_dir) {
-        eprintln!("Meowo dev: 创建数据目录失败: {e}");
-        return;
-    }
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".to_string());
-    let release_dir = PathBuf::from(home).join(".meowo");
-    for name in ["settings.json", "relay-secrets.json"] {
-        let src = release_dir.join(name);
-        if !src.is_file() {
-            continue;
-        }
-        match std::fs::copy(&src, dev_dir.join(name)) {
-            Ok(_) => eprintln!("Meowo dev: 已从安装版拷贝 {name}"),
-            Err(e) => eprintln!("Meowo dev: 拷贝 {name} 失败: {e}"),
-        }
-    }
-}
-
 fn open_store(path: &std::path::Path) -> Result<Store, String> {
     Store::open(path).map_err(|e| e.to_string())
 }
@@ -957,13 +897,6 @@ pub fn run() {
             }
         );
     }
-    // dev/安装版并行隔离:debug 构建默认数据目录 ~/.meowo-dev(显式 MEOWO_DB 仍最
-    // 优先),首启并从安装版 seed 一份 settings/relay 密钥。必须先于任何线程创建
-    // (下方 PtyBroker/attach server)与任何 db_path() 读取——set_var 要在单线程期完成。
-    // cfg! 而非 #[cfg]:与 single-instance 同款理由,两个分支都要过编译。
-    if cfg!(debug_assertions) && apply_dev_default_db() {
-        seed_dev_dir_from_release();
-    }
     migrate_legacy_data();
     let path = db_path();
     let tx_cache: Arc<Mutex<meowo_agent::TranscriptCache>> =
@@ -1315,7 +1248,21 @@ pub fn run() {
             }
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build({
+            #[allow(unused_mut)]
+            let mut context = tauri::generate_context!();
+            // dev 构建独立 identifier：与安装版共 identifier 时，WebView2 用户数据目录
+            // （%LOCALAPPDATA%\<identifier>\EBWebView）与 window-state 落盘是同一份——
+            // 两个应用寄生同一个 WebView2 浏览器进程，dev 热重建的崩溃/重启会连带杀死
+            // 安装版的 webview（实拍：贴纸窗 JS 全灭，托盘「找回贴纸」失灵，重启才恢复）；
+            // 窗口位置/吸附状态也互相污染。数据目录（~/.meowo）刻意仍共享（用户要求
+            // 不分两份数据）——这里隔离的只是「壳」：webview 配置、窗口状态、单实例键。
+            #[cfg(debug_assertions)]
+            {
+                context.config_mut().identifier = "com.larrygogo.meowo.dev".into();
+            }
+            context
+        })
         .expect("error while running tauri application")
         .run(move |_app, event| {
             // 托管 PTY 的子进程不随 GUI 一起死：不显式收尾就会被孤儿化（Windows 上 conhost
@@ -1343,23 +1290,6 @@ mod tests {
         is_viewing_session, pending_fingerprint, screen_blocked_fingerprint, should_notify,
         suppressed_by_viewing, waiting_fingerprint, NotifyKind,
     };
-
-    /// dev 默认库路径的推导：home 解析链必须与 db_path() 完全一致
-    /// （USERPROFILE 优先 → HOME 兜底 → 双缺回 "."），目录名固定 `.meowo-dev`。
-    /// 纯函数传参而不改进程 env——同进程并行单测互踩环境变量是本仓明文禁区
-    /// （先例：reporter 的 db_path_under 测试）。
-    #[test]
-    fn dev_db_path_derivation() {
-        use std::path::PathBuf;
-        let expect = |root: &str| PathBuf::from(root).join(".meowo-dev").join("board.db");
-        assert_eq!(
-            crate::dev_db_path_under(Some("C:/up"), Some("C:/home")),
-            expect("C:/up"),
-            "USERPROFILE 应优先于 HOME"
-        );
-        assert_eq!(crate::dev_db_path_under(None, Some("C:/home")), expect("C:/home"));
-        assert_eq!(crate::dev_db_path_under(None, None), expect("."));
-    }
 
     /// 通知抑制的非对称：用户正看着某会话时不弹它的「等待你回复」（他就在屏幕前），
     /// 但要人做决定的通知（错误/待审批/屏幕阻塞）**永不抑制**——抑制它等于把需要
@@ -1580,6 +1510,7 @@ mod tests {
         let pty_none = std::collections::HashSet::new();
         let no_runtimes = SessionRuntimeIndex::new();
         let no_approvals = std::collections::HashSet::new();
+        let no_screens = std::collections::HashMap::new();
         let page = live_sessions_blocking(
             &path,
             &cache,
@@ -1588,6 +1519,7 @@ mod tests {
                 pty_live: &pty_none,
                 runtimes: &no_runtimes,
                 approvals: &no_approvals,
+                screen_states: &no_screens,
             },
             "waiting",
             None,
@@ -1841,23 +1773,56 @@ mod tests {
     #[test]
     fn tab_class_excludes_disconnected_sessions() {
         // 连着：三类各归其位。
-        assert_eq!(tab_class(true, "running", None), Some("running"));
-        assert_eq!(tab_class(true, "waiting", None), Some("waiting"));
+        assert_eq!(tab_class(true, "running", None, None), Some("running"));
+        assert_eq!(tab_class(true, "waiting", None, None), Some("waiting"));
         // pending_review 压过 status：正在等用户批准，不算「自主运行中」。
         assert_eq!(
-            tab_class(true, "running", Some("approval")),
+            tab_class(true, "running", Some("approval"), None),
             Some("waiting")
         );
 
         // 断开：一律不进这两个 tab，只作为历史留在「全部」里。
         // 尤其是这条——DB 里残留的 pending_review 曾让断开的会话挂在「待交互」里催人，
         // 点进去却只是个死掉的历史会话（兼容旧数据库中的 pending_review 残留）。
-        assert_eq!(tab_class(false, "running", Some("approval")), None);
-        assert_eq!(tab_class(false, "waiting", None), None);
-        assert_eq!(tab_class(false, "running", None), None);
+        assert_eq!(tab_class(false, "running", Some("approval"), None), None);
+        assert_eq!(tab_class(false, "waiting", None, None), None);
+        assert_eq!(tab_class(false, "running", None, None), None);
 
         // 已结束/其它状态：本就不属于这两类。
-        assert_eq!(tab_class(true, "ended", None), None);
+        assert_eq!(tab_class(true, "ended", None, None), None);
+    }
+
+    /// tab 归属与卡片状态环同源：屏幕检测（实时）压过 DB status（hook 驱动、滞后）。
+    /// 原始症状（实拍反馈）：status=running 而屏幕已 idle 的会话顶着黄环（等你）
+    /// 待在「运行中」tab 里——环说等你、tab 说在跑，用户以为状态坏了。
+    #[test]
+    fn tab_class_lets_screen_state_override_db_status() {
+        // 屏幕说了算：idle/blocked → 待交互，working → 运行中，无论 DB status 停在哪。
+        assert_eq!(
+            tab_class(true, "running", None, Some("idle")),
+            Some("waiting")
+        );
+        assert_eq!(
+            tab_class(true, "running", None, Some("blocked")),
+            Some("waiting")
+        );
+        assert_eq!(
+            tab_class(true, "waiting", None, Some("working")),
+            Some("running")
+        );
+        // 审批（校正后仍在压着的）最优先——那是事实源，屏幕规则可能漏报 blocked。
+        assert_eq!(
+            tab_class(true, "running", Some("approval"), Some("working")),
+            Some("waiting")
+        );
+        // 屏幕状态对 ended 也生效前提是 connected；ended + 屏幕 working 属于恢复窗口，
+        // 由 PTY 存活判 connected，这里归运行中，与卡片绿环一致。
+        assert_eq!(
+            tab_class(true, "ended", None, Some("working")),
+            Some("running")
+        );
+        // 断开永远优先于一切。
+        assert_eq!(tab_class(false, "running", None, Some("idle")), None);
     }
 
     #[test]

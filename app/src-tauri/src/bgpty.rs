@@ -374,6 +374,9 @@ impl BgPtyRegistry {
             end_offset: end,
             exited: closed,
             exit_code,
+            // 旁路不追踪对面 PTY 的尺寸,0 = 未知:前端不做隐藏态网格对齐。
+            cols: 0,
+            rows: 0,
         })
     }
 
