@@ -133,6 +133,8 @@ impl Store {
     /// 活跃区：按 filter（+ 可选 search，作用于当前 tab 内）取会话，附项目名、任务标题、进度。
     /// waiting tab 按 last_event_at ASC（等最久优先）、其它按 DESC；游标方向随排序翻转，cursor 为 null 取首页。
     /// filter: "all" | "running" | "waiting" | "archived"；其它值按 "all"。search 去空白后非空才生效。
+    /// running/waiting 返回的是**候选并集**（两者同一条 SQL），最终归属由 app 层 tab_class
+    /// 结合进程表/屏幕状态判定后再过滤——见谓词处注释。
     pub fn live_sessions(
         &self,
         filter: Option<&str>,
@@ -176,18 +178,20 @@ impl Store {
         // （链尾代表整条链；回看走 get_chat_history 按 id 直取，不受影响）。
         // 该谓词与 live_sessions_totals / live_totals_for / live_count_candidates
         // 四处口径必须同生共死，改任何一处都要同步其余三处。
+        //
+        // running/waiting 共用一个**候选并集**（与 live_count_candidates 逐字同口径）：
+        // 归属哪个 tab 由 app 层的 tab_class 决定——它要看屏幕检测状态（broker 内存里的
+        // 实时事实）与审批存活校正，SQL 都看不见。SQL 若按 status 预分 tab，一条
+        // status=running 而屏幕已 idle 的会话就会被钉死在运行中 tab，与卡片黄环打架
+        //（卡片状态与 tab 归属必须同源，见 session_query.rs 的 tab_class）。
         match filter {
             Some("all") => {
                 conditions.push("s.archived = 0 AND s.superseded_by IS NULL".into());
             }
-            Some("running") => conditions.push(
-                "s.status = 'running' AND s.pending_review IS NULL AND s.archived = 0 \
-                 AND s.superseded_by IS NULL"
-                    .into(),
-            ),
-            Some("waiting") => conditions.push(
-                "(s.status = 'waiting' OR s.pending_review IS NOT NULL) AND s.archived = 0 \
-                 AND s.superseded_by IS NULL"
+            Some("running") | Some("waiting") => conditions.push(
+                "s.status != 'ended' \
+                 AND (s.status IN ('running','waiting') OR s.pending_review IS NOT NULL) \
+                 AND s.archived = 0 AND s.superseded_by IS NULL"
                     .into(),
             ),
             Some("archived") => {
@@ -196,15 +200,18 @@ impl Store {
             _ => {} // None 不过滤（仅测试取证用，生产两处调用都传 Some）
         }
 
-        // 搜索（当前 tab 内 AND 搜索词）：title / cwd / project 名任一命中。%/_/\ 转义成字面量。
+        // 搜索（当前 tab 内 AND 搜索词）：title / cwd / project 名 / 便签 / 最近往来任一命中。
+        // %/_/\ 转义成字面量。便签是用户亲手写的记忆锚点、最近往来是「上次聊到哪」的
+        // 第一线索——这两处搜不到时用户只能凭记忆逐个点开翻。
         if let Some(q) = search.map(str::trim).filter(|s| !s.is_empty()) {
             let pat = format!("%{}%", escape_like(q));
             conditions.push(
-                "(t.title LIKE ? ESCAPE '\\' OR s.cwd LIKE ? ESCAPE '\\' OR p.name LIKE ? ESCAPE '\\')".into(),
+                "(t.title LIKE ? ESCAPE '\\' OR s.cwd LIKE ? ESCAPE '\\' OR p.name LIKE ? ESCAPE '\\' \
+                 OR sn.note LIKE ? ESCAPE '\\' OR s.last_user_text LIKE ? ESCAPE '\\' OR s.last_ai_text LIKE ? ESCAPE '\\')".into(),
             );
-            params.push(Value::Text(pat.clone()));
-            params.push(Value::Text(pat.clone()));
-            params.push(Value::Text(pat));
+            for _ in 0..6 {
+                params.push(Value::Text(pat.clone()));
+            }
         }
 
         // 目录过滤:斜杠归一 + 去尾斜杠后的精确比较(NOCASE 只管 ASCII,盘符/常见路径够用;

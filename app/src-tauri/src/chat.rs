@@ -603,6 +603,144 @@ pub(crate) async fn clipboard_text() -> Result<Option<String>, String> {
     .map_err(|e| e.to_string())?
 }
 
+// ── 对话内容全文搜索 ─────────────────────────────────────────────────────────
+// transcript 不落库(库里只有 last_user_text/last_ai_text 摘要),全文搜索按活跃序
+// 扫最近会话的 transcript 文件(JSONL)。这是**显式动作**(前端点按钮触发,不随击键),
+// 扫描量有硬上限,一次点击的等待压在秒级以内。
+
+/// 全文搜索的一条命中:会话 + 命中处摘录。每会话至多一条——结果回答的是
+/// 「哪个会话聊过它」,不是列出每一处。
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TranscriptSearchHit {
+    pub session_id: i64,
+    pub title: String,
+    pub project_name: String,
+    pub excerpt: String,
+}
+
+/// 扫描上限:最近活跃的会话数(活跃+已归档合并后)、单文件读取字节数、总命中数。
+const TRANSCRIPT_SEARCH_SESSIONS: usize = 200;
+const TRANSCRIPT_SEARCH_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const TRANSCRIPT_SEARCH_MAX_HITS: usize = 30;
+/// 单行超过它就跳过:transcript 里的粘贴图片是整行 base64,扫它只有噪声没有价值。
+const TRANSCRIPT_SEARCH_LINE_BYTES: usize = 200 * 1024;
+
+/// ASCII 大小写折叠的子串查找。不用 `to_lowercase`:某些 Unicode 小写化会变字节长度,
+/// 偏移映射回原串有越界/断字风险;逐字节 ASCII 折叠对中文(多字节原样比较)天然正确。
+fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || h.len() < n.len() {
+        return None;
+    }
+    (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
+}
+
+/// 摘录:命中位置前后各 ~60 字节,按 char 边界收敛,粗略还原 JSON 转义。
+fn excerpt_around(line: &str, at: usize, len: usize) -> String {
+    let start_target = at.saturating_sub(60);
+    let end_target = (at + len + 60).min(line.len());
+    let start = (0..=start_target)
+        .rev()
+        .find(|&i| line.is_char_boundary(i))
+        .unwrap_or(0);
+    let end = (end_target..=line.len())
+        .find(|&i| line.is_char_boundary(i))
+        .unwrap_or(line.len());
+    let mut text = line[start..end]
+        .replace("\\n", " ")
+        .replace("\\t", " ")
+        .replace("\\\"", "\"");
+    if start > 0 {
+        text = format!("…{text}");
+    }
+    if end < line.len() {
+        text.push('…');
+    }
+    text
+}
+
+/// 逐行扫一个 transcript 文件,返回首个命中处的摘录。
+fn search_file_excerpt(path: &Path, needle: &str) -> Option<String> {
+    use std::io::{BufRead, BufReader, Read};
+    let file = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(file.take(TRANSCRIPT_SEARCH_FILE_BYTES));
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        if line.len() > TRANSCRIPT_SEARCH_LINE_BYTES {
+            continue;
+        }
+        if let Some(at) = find_ignore_ascii_case(&line, needle) {
+            return Some(excerpt_around(&line, at, needle.len()));
+        }
+    }
+    None
+}
+
+fn search_transcripts_blocking(
+    db_path: &Path,
+    query: &str,
+) -> Result<Vec<TranscriptSearchHit>, String> {
+    let needle = query.trim();
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+    let store = super::open_store(db_path)?;
+    // 活跃与已归档各取一批(用户找旧对话时它多半已被收纳),合并后按活跃序截断。
+    let mut sessions = Vec::new();
+    for filter in ["all", "archived"] {
+        sessions.extend(
+            store
+                .live_sessions(Some(filter), None, None, None, TRANSCRIPT_SEARCH_SESSIONS)
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    sessions.sort_by_key(|row| std::cmp::Reverse(row.session.last_event_at));
+    sessions.truncate(TRANSCRIPT_SEARCH_SESSIONS);
+    let mut hits = Vec::new();
+    for row in sessions {
+        if hits.len() >= TRANSCRIPT_SEARCH_MAX_HITS {
+            break;
+        }
+        let Some(spec) = meowo_agent::by_id(&row.provider)
+            .and_then(|agent| agent.telemetry())
+            .and_then(|telemetry| telemetry.transcript())
+            .filter(|spec| spec.supports_chat())
+        else {
+            continue;
+        };
+        let Some(path) =
+            spec.resolve_transcript_path(None, row.cwd.as_deref(), &row.session.cc_session_id)
+        else {
+            continue;
+        };
+        if let Some(excerpt) = search_file_excerpt(&path, needle) {
+            hits.push(TranscriptSearchHit {
+                session_id: row.session.id,
+                title: row.task_title.clone(),
+                project_name: row.project_name.clone(),
+                excerpt,
+            });
+        }
+    }
+    Ok(hits)
+}
+
+#[tauri::command]
+pub(crate) async fn search_chat_transcripts(
+    state: State<'_, super::AppState>,
+    query: String,
+) -> Result<Vec<TranscriptSearchHit>, String> {
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || search_transcripts_blocking(&db_path, &query))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// `@` 文件补全不另起命令:复用 fsutil::search_project_files(名称+内容双搜,跳过
+// 依赖/构建目录),前端取其中的文件名命中。
+
 #[cfg(test)]
 mod tests {
     use super::*;

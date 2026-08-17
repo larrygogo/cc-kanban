@@ -47,6 +47,7 @@ mod window;
 use chat::{
     clipboard_restore, clipboard_set_image, clipboard_text, get_chat_history,
     get_subagent_transcript, refresh_session_model, refresh_session_todos, save_pasted_attachment,
+    search_chat_transcripts,
 };
 use handoff::{get_session_lineage, switch_session_provider};
 use fsutil::{
@@ -977,6 +978,7 @@ pub fn run() {
             get_live_sessions_counts,
             get_live_sessions_page,
             get_chat_history,
+            search_chat_transcripts,
             confirm::confirm_dialog,
             confirm::confirm_dialog_payload,
             confirm::confirm_dialog_result,
