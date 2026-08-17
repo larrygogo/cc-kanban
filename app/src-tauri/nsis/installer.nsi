@@ -217,7 +217,9 @@ Var MeowoNoteLabel
 
 ; 一次性改造向导外框：resize + 居中、隐藏向导 chrome、内页占位控件(1018)撑满。
 ; 之后所有页面（含 MUI 的 INSTFILES）都按全屏 client 区排版。passive 也走这里
-; （updater 弹出的 /P 进度窗与 GUI 同一视觉）；silent 无窗口直接返回。
+; （/P 进度窗与 GUI 同一视觉——但 updater 已改传 /S 全静默，见 README「必须保留的
+; 语义」：0.5.15 首次实跑 /P 弹窗且界面错乱，修好并截图验证前更新链路不走这条路）；
+; silent 无窗口直接返回。
 !define MUI_CUSTOMFUNCTION_GUIINIT MeowoGuiInit
 Function MeowoGuiInit
   ${If} ${Silent}

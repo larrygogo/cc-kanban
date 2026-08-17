@@ -70,7 +70,10 @@
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZCQURCRTg1RTBGNzJCNjUKUldSbEsvZmdoYjZ0YTQvWDg4cGI5ZjAxUTZhWVpUVTVBNk4rSFc3UW9JTTE2NmVKMlJUUmg2ZDMK",
       "endpoints": [
         "https://github.com/larrygogo/meowo/releases/latest/download/latest.json"
-      ]
+      ],
+      "windows": {
+        "installMode": "quiet"
+      }
     }
   }
 }
