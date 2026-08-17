@@ -1,6 +1,19 @@
 import { memo } from "react";
 import { type ChatItem } from "../../api";
 import { useT } from "../../i18n";
+import type { Dict } from "../../i18n/zh";
+
+/** 日期分隔条文案：今天/昨天沿用侧栏日期分组的同一对键，更早按界面语言格式化。 */
+function dayLabel(date: Date, t: Dict): string {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const day = new Date(date);
+  day.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((today.getTime() - day.getTime()) / 86_400_000);
+  if (diffDays === 0) return t.chat.dateToday;
+  if (diffDays === 1) return t.chat.dateYesterday;
+  return date.toLocaleDateString(t.locale);
+}
 import { imageOnlyPaths, Message, UserImageGroup } from "./Message";
 import { SubagentBlock } from "./SubagentBlock";
 import { friendlyToolName, ToolActivity } from "./ToolActivity";
@@ -23,8 +36,26 @@ export const Transcript = memo(function Transcript({ sessionId, items }: { sessi
     if (item.subagent) outcomes.set(item.tool_use_id, item.subagent);
   }
   const blocks: JSX.Element[] = [];
+  // 日期分隔条：跨天处插一条（含首个带时间的块，IM 惯例——每天的开头都有标签）。
+  // timestamp 为 null 的条目（乐观回显/部分 provider 不带时间）不参与也不重置游标，
+  // 混在带时间的消息中间不会催生重复的分隔条。
+  let lastDay: string | null = null;
+  const pushDaySep = (item: ChatItem) => {
+    if (!item.timestamp) return;
+    const date = new Date(item.timestamp);
+    if (Number.isNaN(date.getTime())) return;
+    const key = date.toDateString();
+    if (key === lastDay) return;
+    lastDay = key;
+    blocks.push(
+      <div className="chat-day-sep" role="separator" key={`day-${item.id}`}>
+        <span>{dayLabel(date, t)}</span>
+      </div>,
+    );
+  };
   for (let index = 0; index < items.length;) {
     const item = items[index];
+    pushDaySep(item);
     // 连续的纯图片用户消息合成一行：Claude Code 把一次多图粘贴记成连续多条独立消息，
     // 逐条渲染是竖着摞一列大图；用户视角那是「一次发的几张图」，该排在一起。
     if (item.type === "user_text") {

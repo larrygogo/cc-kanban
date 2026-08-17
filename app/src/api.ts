@@ -433,6 +433,20 @@ export function revealPathInFileManager(cwd: string, rel: string): Promise<void>
   return invoke("reveal_path_in_file_manager", { cwd, rel });
 }
 
+/** 对话内容全文搜索的一条命中（后端 chat.rs 的 TranscriptSearchHit，serde camelCase）。 */
+export type TranscriptSearchHit = {
+  sessionId: number;
+  title: string;
+  projectName: string;
+  excerpt: string;
+};
+
+/** 对话内容全文搜索：扫最近会话的 transcript 文件（显式动作，不随击键触发）。
+ *  每会话至多一条命中，按活跃序返回，后端带扫描上限（秒级以内）。 */
+export function searchChatTranscripts(query: string): Promise<TranscriptSearchHit[]> {
+  return invoke("search_chat_transcripts", { query });
+}
+
 /** 打开「新建会话」独立窗；带 prefill 时预选目录与 agent。 */
 export function openNewSessionWindow(prefill?: { cwd?: string | null; provider?: string | null }): Promise<void> {
   return prefill

@@ -24,7 +24,15 @@ export function installInputModality(): void {
   window.addEventListener(
     "keydown",
     (e) => {
-      if (NAV_KEYS.has(e.key)) useKeyboard();
+      if (!NAV_KEYS.has(e.key)) return;
+      // 可编辑元素内的方向键/Home/End 是**光标移动**（或输入框自己的历史翻阅），不是
+      // 「在控件间导航」——据此切键盘模态会让正在打字的输入框平白亮起焦点环
+      // （实拍：对话输入框按 ↑ 取回历史时冒出绿框）。Tab 不豁免：它正是离开输入框的导航。
+      if (e.key !== "Tab") {
+        const el = document.activeElement;
+        if (el instanceof HTMLElement && (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.isContentEditable)) return;
+      }
+      useKeyboard();
     },
     true,
   );

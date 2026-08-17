@@ -217,6 +217,12 @@ const REASONING_PREVIEW_LINES = 6;
 /// parseUserText / split 这类逐条解析不再全量重跑。
 export const Message = memo(function Message({ item }: { item: ChatItem }) {
   const t = useT();
+  // hover 显示精确时间：原生 title 而非自绘浮层——时间是低频查询信息，不值一个浮层；
+  // 上面「路径不进 title」的纪律针对身份信息，时间无此虑。timestamp 缺失就整个不挂。
+  const stampDate = item.timestamp ? new Date(item.timestamp) : null;
+  const timeTitle = stampDate && !Number.isNaN(stampDate.getTime())
+    ? stampDate.toLocaleString(t.locale)
+    : undefined;
   if (item.type === "user_text") {
     // 斜杠命令在 transcript 里是一条 XML 包裹的用户消息。渲染成命令徽章 + 可展开输出，
     // 而不是把 <command-name> 这类标签摊在对话里让人自己读。
@@ -268,7 +274,7 @@ export const Message = memo(function Message({ item }: { item: ChatItem }) {
     // 有图时缩略图独立成行排在**气泡上方**、气泡只包正文（Claude Code 同款布局，
     // has-images 把气泡皮从 article 挪到 .chat-text 上）；纯图消息没有气泡，只有图。
     return (
-      <article className={"chat-message is-user" + (images.length ? " has-images" : "")}>
+      <article className={"chat-message is-user" + (images.length ? " has-images" : "")} title={timeTitle}>
         {images.length > 0 && <ImageRow images={images} />}
         {body && <div className="chat-text">{body}</div>}
       </article>
@@ -290,7 +296,7 @@ export const Message = memo(function Message({ item }: { item: ChatItem }) {
   }
   if (item.type === "assistant_text" || item.type === "assistant_delta") {
     return (
-      <article className="chat-message is-assistant">
+      <article className="chat-message is-assistant" title={timeTitle}>
         <div className="chat-text chat-md"><ChatMarkdown text={item.text} /></div>
       </article>
     );

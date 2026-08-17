@@ -53,6 +53,8 @@ export const zh = {
     // 落点由设置 sessionOpenIn 决定（对话窗口 / 外部终端），故不在文案里写死「终端」。
     openSession: "打开会话",
     resumeSession: "恢复会话",
+    // 断开卡的单击会拉起 CLI 进程（1~3s），tip 把后果讲在点击之前。
+    cardResumeTip: "点击恢复会话，将重新拉起进程",
     renameTitle: "重命名",
     renamePlaceholder: "输入名称，回车保存",
     renameHint: "运行中：改名后需在该终端 /resume 才生效",
@@ -179,6 +181,8 @@ export const zh = {
     empty: "还没有可显示的对话记录",
     // 会话 running 但 transcript 尚未落第一条时用它——此时说「没有记录」与运行指示自相矛盾。
     emptyWorking: "Agent 已开始工作，对话内容马上出现",
+    // 新建会话认领前（负数临时 id）：CLI 正在冷启动，说「没有记录」是谎报。
+    emptyStarting: "会话正在启动…",
     loading: "正在读取对话…",
     loadEarlier: "加载更早的对话",
     loadingEarlier: "正在加载…",
@@ -196,8 +200,17 @@ export const zh = {
     shortcutSend: "发送消息",
     shortcutNewline: "换行",
     shortcutInterruptSend: "打断当前回合并发送",
-    shortcutDeny: "拒绝待审批请求（输入框为空时）",
+    shortcutDeny: "拒绝待审批请求（输入框为空时，按两次确认）",
+    shortcutSlashComplete: "选中斜杠命令补全",
+    shortcutHistory: "取回上一条消息（输入框为空时）",
     shortcutSheet: "打开本速查表",
+    // 终端视图的让位说明（速查表底注）：静默失效的键必须有一处写明。
+    shortcutTerminalNote: "终端视图中 Ctrl+K/B/N/1/2 由应用占用，Ctrl+F 是终端搜索",
+    // 终端内搜索条（Ctrl+F，xterm addon-search）。
+    termSearchPlaceholder: "搜索终端输出",
+    termSearchPrev: "上一个",
+    termSearchNext: "下一个",
+    termSearchNoMatch: "无匹配",
     codeCopy: "复制",
     codeCopied: "已复制",
     questionExpired: "提问卡已超时收起，可到终端页继续作答",
@@ -255,7 +268,6 @@ export const zh = {
     approvalDetails: "查看请求详情",
     approvalTool: "请求工具",
     approvalInput: "完整参数",
-    approvalInTerminal: "请在运行它的终端里处理此请求",
     approvalReadingTerminal: "正在读取 Agent 的选项…",
     allowOnce: "允许一次",
     allowRemember: "允许并记住",
@@ -265,6 +277,10 @@ export const zh = {
     allowUser: "始终允许（全局）",
     allowSuggested: (index: number) => `采用 Agent 选项 ${index}`,
     deny: "拒绝",
+    // Esc 两段式确认的第二段按钮文案（第一下 Esc 点亮后显示）。
+    denyConfirmEsc: "再按 Esc 确认拒绝",
+    // 审批卡被别处结算/超时收卡时的去向说明——凭空消失像 bug。
+    approvalClearedNotice: "该审批已在别处处理或已超时，如需继续请查看终端",
     openTerminal: "打开终端",
     close: "关闭",
     renameSave: "保存",
@@ -355,6 +371,8 @@ export const zh = {
     terminalNeedsAttention: "Agent 在等启动确认，请先在交互卡片中选择，再重新发送。",
     sendEchoTimeout: "消息未进入终端，已撤回。请切到终端页确认状态后重试。",
     terminalStreamStalled: "终端画面卡住了，不会自行恢复。点「结束会话」再重启即可，对话记录不受影响。",
+    // 初始化 25s 超时（撤遮罩后的黑屏说明，见 ManagedTerminal 的 initTimedOut）。
+    terminalInitTimeout: "终端长时间无输出，可能启动失败。可结束会话后重试，对话记录不受影响。",
     queuedInterjections: (n: number) => `${n} 条插话已排队，本回合结束后处理`,
     queuedAttachmentOnly: "（附件）",
     interjectNow: "立即插话",
@@ -364,6 +382,8 @@ export const zh = {
     interruptAndSendTip: "Ctrl+Enter 中断并发送，Enter 排队",
     interruptNow: "中断",
     interruptNowTip: "中断当前回合，不发送",
+    // 中断键已写入、等回合真正停下的过渡态（按钮禁用期间的文案/无障碍标签）。
+    interrupting: "正在中断…",
     attentionDismiss: "仅收起",
     attentionDismissTip: "仅收起卡片，不发送按键",
     unrecognizedPromptNotice: "终端似乎在等待选择，消息已发出。若无响应请到终端页确认。",
@@ -374,6 +394,8 @@ export const zh = {
     longSessionPromptHelp: "完整恢复会消耗较多额度，建议从摘要恢复。",
     terminalPromptConfirm: "确认",
     terminalPromptCancel: "取消 / 返回",
+    // 「取消」实发 Esc 的后果说明：与零副作用的「仅收起」是两回事，必须对用户说出来。
+    terminalPromptCancelTip: "向终端发送 Esc，可能打断正在执行的回合",
     sidebarTitle: "会话",
     sidebarFilterTip: "筛选与分组",
     sidebarFilterDir: "目录",
@@ -392,6 +414,17 @@ export const zh = {
     sidebarSearch: "搜索标题 / 仓库…",
     sidebarSearchClear: "清空搜索",
     sidebarEmptySearch: "没有匹配的会话",
+    // 对话内容全文搜索（显式动作：扫 transcript 文件，不随击键触发）。
+    searchTranscripts: "搜索对话内容",
+    searchTranscriptsRunning: "正在搜索对话内容…",
+    searchTranscriptsEmpty: "对话内容中没有匹配",
+    searchTranscriptsHits: "对话内容命中",
+    // 侧栏批量归档（多选态）。
+    selectedCount: (n: number) => `已选 ${n} 条`,
+    archiveSelected: "归档所选",
+    cancelSelect: "取消多选",
+    // 拖拽文件到对话窗的落点遮罩。
+    dropToAttach: "松开以添加附件",
     sidebarLoading: "正在加载会话…",
     sidebarDirAll: "全部目录",
     sidebarShowIdle: (n: number) => `显示 ${n} 个未运行会话`,
@@ -404,6 +437,8 @@ export const zh = {
     sortRecent: "最近活跃",
     sortCreated: "创建时间",
     sortName: "按名称",
+    // 非默认排序只作用于已加载条目（翻页新条目追加尾部），要向用户说明范围。
+    sortPartialNote: "仅排序已加载的会话",
     dateToday: "今天",
     dateYesterday: "昨天",
     dateThisWeek: "近 7 天",

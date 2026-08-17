@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { confirmStopSession, getLiveSessionsPage, getSessionLineage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LineageEntry, type LiveSession, type SessionTone } from "../api";
+import { confirmStopSession, getLiveSessionsPage, getSessionLineage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, searchChatTranscripts, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LineageEntry, type LiveSession, type SessionTone, type TranscriptSearchHit } from "../api";
 import { useBoardRefresh } from "../hooks/useBoardRefresh";
 import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
@@ -303,6 +303,9 @@ function SidebarFilterMenu({ dirValue, dirOptions, groupMode, groupLabels, sortM
                   </button>
                 );
               })}
+              {/* 非默认档只排已加载的这一页（翻页新条目追加尾部）：不说明的话,
+                  乱序看起来就是「排序坏了」。 */}
+              {sortMode !== "recent" && <div className="sf-note">{t.chat.sortPartialNote}</div>}
               <div className="sf-sep" role="separator" />
               <button
                 type="button"
@@ -364,12 +367,15 @@ function readFolded(): Set<string> {
  * 这里不再自设轮询。折叠状态由 ChatWindow 持有（收起后展开入口在标题栏），
  * 本组件收起时整个卸载，数据加载随之停止。
  */
-export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollapse }: {
+export function ChatSidebar({ activeId, approvalAwaitingIds, visibleOrderRef, onSelect, onCollapse }: {
   activeId: number;
   /** 有待授权请求的非当前会话：靠这里的徽标召唤用户。后端 **会** 为 broker 接管的审批把
    *  窗口切到目标会话（见 pty.rs 的 ensure_approval_window），这里是切换竞态与
    *  「消费者已注册在别的会话」时的兜底。 */
   approvalAwaitingIds: ReadonlySet<number>;
+  /** 当前显示顺序的镜像（父层归档跳转用）：归档当前会话后跳「用户看到的下一条」，
+   *  两个归档入口（标题菜单/侧栏菜单）取序自此一致。卸载时清空，父层退回后端现查。 */
+  visibleOrderRef?: MutableRefObject<number[]>;
   onSelect: (id: number) => void;
   onCollapse: () => void;
 }) {
@@ -439,6 +445,20 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   const [search, setSearch] = useState("");
   const searchRef = useRef("");
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // 对话内容全文搜索(显式动作):LIKE 只覆盖标题/目录/便签/最近往来,正文要靠后端扫
+  // transcript 文件——点「搜索对话内容」才发,不随击键。结果与词绑定,词一变即作废。
+  const [deepHits, setDeepHits] = useState<TranscriptSearchHit[] | null>(null);
+  const [deepSearching, setDeepSearching] = useState(false);
+  useEffect(() => { setDeepHits(null); }, [search]);
+  const runDeepSearch = () => {
+    const q = search.trim();
+    if (!q || deepSearching) return;
+    setDeepSearching(true);
+    searchChatTranscripts(q)
+      .then((hits) => { if (mountedRef.current) setDeepHits(hits); })
+      .catch(() => { if (mountedRef.current) setActionError(t.chat.sidebarActionFailed); })
+      .finally(() => { if (mountedRef.current) setDeepSearching(false); });
+  };
 
   // refresh = 整段重取替换（首载 / board-changed）；grow = 翻页，只把新条目**追加到尾部**。
   // 追加而非替换：后端对整页做 connected-first 排序，扩大 limit 可能把更深处的活会话
@@ -490,29 +510,9 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
   const loadRef = useRef(load);
   loadRef.current = load;
 
-  // board-changed 订阅 + 节流统一在 useBoardRefresh（订阅只建一次、不随 limit 重建：
-  // unlisten → 新 listen 之间有异步空窗，恰落在空窗里的事件会被吞掉）。
-  useBoardRefresh(() => void loadRef.current("refresh"));
-  useEffect(() => {
-    mountedRef.current = true;
-    void loadRef.current("refresh");
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  // limit 变大（滚动翻页）→ 拉一次 grow。失败回退会把 limit 改小，不能据此再发请求，
-  // 否则「失败 → 回退 → 又触发加载」原地打转。
-  const prevLimitRef = useRef(PAGE_LIMIT);
-  useEffect(() => {
-    const grew = limit > prevLimitRef.current;
-    prevLimitRef.current = limit;
-    if (grew) void loadRef.current("grow");
-  }, [limit]);
-
-  // 目录清单与会话列表同源于库,但只在挂载时取一次:board-changed 三连发时重取它没有
-  // 意义(新目录只会在新建会话后出现,那时侧栏本就要重挂或用户会自己刷)。
-  useEffect(() => {
+  // 目录清单与会话列表同源于库。随 board-changed 一起刷（节流由 useBoardRefresh 统一做）:
+  // 只在挂载取一次的话，新目录里刚建的会话在筛选下拉里找不到，直到重开侧栏。
+  const refreshDirs = useCallback(() => {
     recentCwds(DIR_LIMIT)
       .then((list) => {
         if (!mountedRef.current) return;
@@ -529,6 +529,32 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
       })
       .catch(() => {});
   }, []);
+  const refreshDirsRef = useRef(refreshDirs);
+  refreshDirsRef.current = refreshDirs;
+
+  // board-changed 订阅 + 节流统一在 useBoardRefresh（订阅只建一次、不随 limit 重建：
+  // unlisten → 新 listen 之间有异步空窗，恰落在空窗里的事件会被吞掉）。
+  useBoardRefresh(() => {
+    void loadRef.current("refresh");
+    refreshDirsRef.current();
+  });
+  useEffect(() => {
+    mountedRef.current = true;
+    void loadRef.current("refresh");
+    refreshDirsRef.current();
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // limit 变大（滚动翻页）→ 拉一次 grow。失败回退会把 limit 改小，不能据此再发请求，
+  // 否则「失败 → 回退 → 又触发加载」原地打转。
+  const prevLimitRef = useRef(PAGE_LIMIT);
+  useEffect(() => {
+    const grew = limit > prevLimitRef.current;
+    prevLimitRef.current = limit;
+    if (grew) void loadRef.current("grow");
+  }, [limit]);
 
   // 切目录 = 换一份数据源:整段重取,并把翻页状态清回首页(不清的话新目录一上来就
   // 顶着上一个目录翻到的 limit,一次拉几百条)。首挂载不重复触发(那次由挂载 effect 发)。
@@ -657,6 +683,61 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
     }
     setNotingId(null);
   };
+  // 归档撤销:动作无确认、取回入口(筛选菜单→已归档)较隐蔽,归档成功后给 8s 一键撤销
+  // (与看板 toast、对话窗标题菜单同一语义)。数组承载批量归档的整批撤销。
+  const [archiveUndo, setArchiveUndo] = useState<number[] | null>(null);
+  useEffect(() => {
+    if (archiveUndo == null) return;
+    const timer = window.setTimeout(() => setArchiveUndo(null), 8_000);
+    return () => window.clearTimeout(timer);
+  }, [archiveUndo]);
+  const undoArchive = (ids: number[]) => {
+    setArchiveUndo(null);
+    void Promise.allSettled(ids.map((id) => setArchived(id, false))).then((results) => {
+      if (results.some((entry) => entry.status === "rejected")) setActionError(t.chat.sidebarActionFailed);
+      void loadRef.current("refresh");
+      onSelect(ids[0]);
+    });
+  };
+  // 批量归档:Ctrl/Cmd+点击进入多选(继续 Ctrl+点击增删),普通点击退出多选并正常切会话,
+  // Esc 清空退出。选中集按 id,刷新/翻页不受影响。
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<number>>(() => new Set());
+  useEffect(() => {
+    if (selectedIds.size === 0) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      // 截停:多选态的 Esc 只清选择,不落到窗口级「拒绝审批」。
+      event.preventDefault();
+      setSelectedIds(new Set());
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedIds]);
+  const toggleSelected = (id: number) =>
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  const archiveSelected = () => {
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
+    setSelectedIds(new Set());
+    // 乐观整批摘除;当前打开的也在其中时切到幸存的下一条(与单条归档同语义)。
+    setSessions((prev) => prev?.filter((s) => !ids.includes(s.session.id)) ?? prev);
+    if (ids.includes(activeId)) {
+      const following = (ordered ?? []).find((s) => !ids.includes(s.session.id));
+      if (following) onSelect(following.session.id);
+    }
+    void Promise.allSettled(ids.map((id) => setArchived(id, true))).then((results) => {
+      const ok = ids.filter((_, index) => results[index].status === "fulfilled");
+      if (ok.length < ids.length) {
+        setActionError(t.chat.sidebarActionFailed);
+        void loadRef.current("refresh");
+      }
+      if (ok.length > 0) setArchiveUndo(ok);
+    });
+  };
   const toggleArchived = (item: LiveSession) => {
     const target = !item.archived;
     const id = item.session.id;
@@ -669,10 +750,12 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
       const following = (ordered ?? []).find((s) => s.session.id !== id);
       if (following) onSelect(following.session.id);
     }
-    setArchived(id, target).catch(() => {
-      setActionError(t.chat.sidebarActionFailed);
-      void loadRef.current("refresh");
-    });
+    setArchived(id, target)
+      .then(() => { if (target) setArchiveUndo([id]); })
+      .catch(() => {
+        setActionError(t.chat.sidebarActionFailed);
+        void loadRef.current("refresh");
+      });
   };
   const endSession = (item: LiveSession) => {
     void confirmStopSession(item.session.id, { title: t.chat.endSession, message: t.chat.endSessionConfirm })
@@ -739,6 +822,14 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
     return groupByState(ordered, t);
   }, [groupMode, ordered, t]);
 
+  // 显示顺序镜像:分组模式的组序由 ordered 派生、组内亦是 ordered 序,写 ordered 即可。
+  // 卸载清空——收起的侧栏没有「用户看到的顺序」,父层归档跳转退回后端现查。
+  useEffect(() => {
+    if (!visibleOrderRef) return;
+    visibleOrderRef.current = (ordered ?? []).map((item) => item.session.id);
+  }, [ordered, visibleOrderRef]);
+  useEffect(() => () => { if (visibleOrderRef) visibleOrderRef.current = []; }, [visibleOrderRef]);
+
   // 滚到底前 120px 就预取下一页。
   const onScroll = (event: UIEvent<HTMLElement>) => {
     if (reachedEnd || sessions === null || growingRef.current) return;
@@ -771,12 +862,20 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
         key={item.session.id}
         role="button"
         tabIndex={0}
-        className={"chat-sidebar-item" + (item.session.id === activeId ? " is-active" : "")}
+        className={"chat-sidebar-item" + (item.session.id === activeId ? " is-active" : "") + (selectedIds.has(item.session.id) ? " is-checked" : "")}
         aria-current={item.session.id === activeId ? "true" : undefined}
+        aria-selected={selectedIds.size > 0 ? selectedIds.has(item.session.id) : undefined}
         data-tip={item.task_title}
-        onClick={() => {
+        onClick={(event) => {
           // 编辑态下点条目只用于收起编辑器，不切会话（输入框自身已 stopPropagation）。
           if (editing || noting) { setEditingId(null); setNotingId(null); return; }
+          // Ctrl/Cmd+点击 = 多选增删(批量归档);普通点击退出多选并正常切会话。
+          // 多选态下条目右侧另有勾选圈,点它增删不必按住 Ctrl。
+          if (event.ctrlKey || event.metaKey) {
+            toggleSelected(item.session.id);
+            return;
+          }
+          if (selectedIds.size > 0) setSelectedIds(new Set());
           onSelect(item.session.id);
         }}
         onKeyDown={(event) => {
@@ -787,7 +886,8 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
           onSelect(item.session.id);
         }}
         onContextMenu={(event) => {
-          if (menuMode !== "context") return; // 按钮模式下右键交还给系统
+          // 右键恒开菜单：条目上右键出上下文菜单是通用惯例，不随设置失效——
+          // card_menu_mode 只决定「⋯」按钮是否常驻，不再关掉右键这条路。
           event.preventDefault();
           openMenuAt(item, event.clientX, event.clientY);
         }}
@@ -856,7 +956,27 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
             />
           )}
         </span>
-        {menuMode === "button" && (
+        {selectedIds.size > 0 ? (
+          /* 多选态:右侧换成勾选圈(未选空心/选中实心勾),点它增删不必按住 Ctrl。
+             「⋯」菜单此间让位——多选时的动作在底部操作条上。 */
+          <button
+            type="button"
+            className="chat-sidebar-check-btn"
+            role="checkbox"
+            aria-checked={selectedIds.has(item.session.id)}
+            aria-label={item.task_title || t.sticker.waitingFirstInput}
+            onClick={(event) => {
+              event.stopPropagation();
+              toggleSelected(item.session.id);
+            }}
+          >
+            <span className="chat-sidebar-check" aria-hidden="true">
+              {selectedIds.has(item.session.id) && (
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round"><path d="M4.5 12.5l5 5 10-11" /></svg>
+              )}
+            </span>
+          </button>
+        ) : menuMode === "button" && (
           <button
             type="button"
             className="chat-sidebar-item-menu"
@@ -968,8 +1088,12 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
               const live = (item: LiveSession) =>
                 item.connected || item.session.id === activeId || starred.has(item.session.cc_session_id);
               const idle = group.items.filter((item) => !live(item));
-              // 一条活的都没有就不收：那会让展开分组后空空如也，比排得长更难用。
-              const canCollapse = idle.length > 0 && idle.length < group.items.length;
+              // 折叠只在组里真有在跑的会话时才启用：它的使命是保住在跑的那几条不被
+              // 历史挤出视野。仅因当前打开/置顶而有「活」条目的组（典型是「已结束」组，
+              // 用户刚把当前会话切进去）不收——否则选中一条,其余几十条凭空消失。
+              // 有搜索词时一律不折：用户明确在找某条会话,命中了却被藏进「显示 N 个
+              // 未运行」等于告诉他「搜不到」。
+              const canCollapse = !search.trim() && group.items.some((item) => item.connected) && idle.length > 0;
               const shown = canCollapse && !revealed.has(group.key) ? group.items.filter(live) : group.items;
               return (
                 <div className="chat-sidebar-group" key={group.key}>
@@ -1011,9 +1135,55 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, onSelect, onCollaps
         {sessions !== null && sessions.length > 0 && growing && (
           <div className="chat-sidebar-empty">{t.chat.sidebarLoading}</div>
         )}
+        {/* 对话内容全文搜索:LIKE 结果之外的第二段。显式按钮触发(扫 transcript 文件,
+            不随击键);结果每会话一条(标题 + 命中摘录),点击直达。 */}
+        {search.trim() && sessions !== null && (
+          <div className="chat-sidebar-deep">
+            {deepHits === null && !deepSearching && (
+              <button type="button" className="chat-sidebar-more" onClick={runDeepSearch}>
+                {t.chat.searchTranscripts}
+              </button>
+            )}
+            {deepSearching && <div className="chat-sidebar-empty">{t.chat.searchTranscriptsRunning}</div>}
+            {deepHits !== null && !deepSearching && (deepHits.length === 0
+              ? <div className="chat-sidebar-empty">{t.chat.searchTranscriptsEmpty}</div>
+              : <>
+                  <div className="chat-sidebar-deep-head">{t.chat.searchTranscriptsHits}</div>
+                  {deepHits.map((hit) => (
+                    <button
+                      type="button"
+                      key={hit.sessionId}
+                      className="chat-sidebar-deep-hit"
+                      onClick={() => onSelect(hit.sessionId)}
+                    >
+                      <span className="chat-sidebar-deep-title">
+                        <span className="chat-sidebar-name-text">{hit.title || t.sticker.waitingFirstInput}</span>
+                        <span className="chat-sidebar-meta">{hit.projectName}</span>
+                      </span>
+                      <span className="chat-sidebar-deep-excerpt">{hit.excerpt}</span>
+                    </button>
+                  ))}
+                </>)}
+          </div>
+        )}
       </nav>
       {/* 动作失败的唯一出口（重命名/便签/归档）：4s 后自动消失。 */}
       {actionError && <div className="chat-sidebar-error" role="status">{actionError}</div>}
+      {/* 归档撤销条:8s 内可一键取回并跳回该会话(批量归档整批撤销)。 */}
+      {archiveUndo != null && !actionError && (
+        <div className="chat-sidebar-error is-undo" role="status">
+          <span>{archiveUndo.length > 1 ? `${t.sticker.archivedNotice} × ${archiveUndo.length}` : t.sticker.archivedNotice}</span>
+          <button type="button" onClick={() => undoArchive(archiveUndo)}>{t.sticker.archiveUndo}</button>
+        </div>
+      )}
+      {/* 批量归档操作条:多选态常驻底部(Ctrl+点击增删,Esc 退出)。 */}
+      {selectedIds.size > 0 && (
+        <div className="chat-sidebar-batch" role="toolbar" aria-label={t.chat.selectedCount(selectedIds.size)}>
+          <span>{t.chat.selectedCount(selectedIds.size)}</span>
+          <button type="button" className="is-primary" onClick={archiveSelected}>{t.chat.archiveSelected}</button>
+          <button type="button" onClick={() => setSelectedIds(new Set())}>{t.chat.cancelSelect}</button>
+        </div>
+      )}
       {lineageMenu && (
         <LineagePopover
           x={lineageMenu.x}

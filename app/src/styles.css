@@ -423,6 +423,14 @@ button.stab {
 /* 控制按钮组在右(margin-auto 推到最右；无用量时也靠右) */
 .stk-bar-actions { margin-left: auto; display: flex; align-items: center; gap: calc(6px * var(--cc-ui)); }
 /* 终端定位提示：浮在底栏上方，不改变列表高度；带动作的提示由用户明确关闭。 */
+/* 归档撤销 toast 栈:位置同 stk-focus-toast,纵向堆叠——连续归档时各自的撤销窗口
+   互不相吞(逐条渲染,见 Sticker 的 archivedToasts)。 */
+.stk-archive-toasts {
+  position: absolute; z-index: 46;
+  left: 12px; right: 12px; bottom: calc(66px * var(--cc-ui));
+  display: flex; flex-direction: column; gap: 8px;
+}
+.stk-archive-toasts .stk-focus-toast { position: static; left: auto; right: auto; bottom: auto; }
 .stk-focus-toast {
   position: absolute; z-index: 45;
   left: 12px; right: 12px; bottom: calc(66px * var(--cc-ui));
@@ -3068,6 +3076,8 @@ select.ns-input {
    「进度」面板。图标钮与侧栏开关钮同一视觉规格。 */
 .chat-todo-btn { width: 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: var(--r-md); color: var(--cc-text-dim); background: transparent; cursor: pointer; }
 .chat-todo-btn:hover, .chat-todo-btn[aria-expanded="true"] { background: var(--cc-surface-hover); color: var(--cc-text); }
+/* 「更改」面板开着时按钮常亮:折叠态与「没开过」必须在按钮上可分辨。 */
+.chat-todo-btn.is-active { background: var(--cc-surface-hover); color: var(--cc-text); }
 /* 面板:比普通菜单更宽绰的卡片(大圆角、内边距)。行样式独立于底部 TodoPanel 的紧凑
    清单(用户按参考形态指定):20px 实心圆勾徽章、宽松行距、单行省略、底部「收起」行。 */
 /* 定宽(用户指定):内容多少都不改变面板宽,长任务名靠单行省略消化。复合选择器抬特异性
@@ -3288,6 +3298,8 @@ select.ns-input {
 .sf-back { justify-content: flex-start; gap: var(--sp-6); color: var(--cc-text-faint); }
 /* 扁平化筛选面板的小节标题（分组 / 排序 直接内联为 radio 行,不再进二级面板） */
 .sf-caption { padding: var(--sp-4) var(--sp-8) var(--sp-2); font-size: var(--fs-10-5); color: var(--cc-text-faint); user-select: none; }
+/* 排序范围注(非默认档只排已加载页):小字说明,不参与交互。 */
+.sf-note { padding: var(--sp-2) var(--sp-8) var(--sp-4); font-size: var(--fs-10); color: var(--cc-text-faint); user-select: none; }
 .chat-sidebar-toggle.is-on { color: var(--cc-text); background: color-mix(in srgb, var(--cc-text) 9%, transparent); }
 .chat-sidebar-list {
   flex: 1;
@@ -3388,6 +3400,30 @@ select.ns-input {
 .chat-sidebar-item-menu svg { width: 14px; height: 14px; }
 /* 动作失败提示：贴在列表与底栏之间，红字但不占常驻高度（4s 后自行消失）。 */
 .chat-sidebar-error { flex: 0 0 auto; padding: var(--sp-6) var(--sp-10); color: var(--cc-err-vivid); font-size: var(--fs-10); }
+/* 多选态(批量归档):右侧勾选圈是主视觉(未选空心/选中实心勾),条目背景只做轻微着色
+   ——生硬的左缘亮条与 is-active 打架,已废。 */
+.chat-sidebar-item.is-checked { background: color-mix(in srgb, var(--cc-text) 6%, transparent); }
+.chat-sidebar-check-btn { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 0; border-radius: var(--r-5); background: transparent; cursor: pointer; padding: 0; }
+.chat-sidebar-check { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border: 1.5px solid color-mix(in srgb, var(--cc-text) 32%, transparent); border-radius: 50%; color: var(--cc-bg); background: transparent; transition: background var(--dur-fast, .1s), border-color var(--dur-fast, .1s); }
+.chat-sidebar-check-btn:hover .chat-sidebar-check { border-color: color-mix(in srgb, var(--cc-text) 60%, transparent); }
+.chat-sidebar-item.is-checked .chat-sidebar-check { border-color: var(--cc-text); background: var(--cc-text); }
+/* 批量归档操作条:多选态常驻列表下方。 */
+.chat-sidebar-batch { flex: 0 0 auto; display: flex; align-items: center; gap: var(--sp-8); padding: var(--sp-6) var(--sp-10); border-top: 1px solid color-mix(in srgb, var(--cc-text) 8%, transparent); font-size: var(--fs-10); color: var(--cc-text-dim); }
+.chat-sidebar-batch button { border: 0; border-radius: var(--r-5); padding: var(--sp-2) var(--sp-8); color: var(--cc-text); background: color-mix(in srgb, var(--cc-text) 8%, transparent); font-size: var(--fs-10); cursor: pointer; }
+.chat-sidebar-batch button:hover { background: color-mix(in srgb, var(--cc-text) 14%, transparent); }
+.chat-sidebar-batch button.is-primary { color: var(--cc-bg); background: var(--cc-text); }
+.chat-sidebar-batch button.is-primary:hover { background: color-mix(in srgb, var(--cc-text) 86%, var(--cc-bg)); }
+/* 对话内容全文搜索区段(侧栏搜索的第二段)。 */
+.chat-sidebar-deep { border-top: 1px solid color-mix(in srgb, var(--cc-text) 8%, transparent); margin-top: var(--sp-6); padding-top: var(--sp-4); }
+.chat-sidebar-deep-head { padding: var(--sp-4) var(--sp-10) var(--sp-2); font-size: var(--fs-10); color: var(--cc-text-faint); user-select: none; }
+.chat-sidebar-deep-hit { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: var(--sp-5) var(--sp-10); border: 0; background: transparent; color: var(--cc-text); text-align: left; cursor: pointer; }
+.chat-sidebar-deep-hit:hover { background: color-mix(in srgb, var(--cc-text) 7%, transparent); }
+.chat-sidebar-deep-title { display: flex; align-items: baseline; gap: var(--sp-6); min-width: 0; font-size: var(--fs-11); }
+.chat-sidebar-deep-excerpt { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; color: var(--cc-text-dim); font-size: var(--fs-10); line-height: 1.4; overflow-wrap: anywhere; }
+/* 归档撤销条:中性提示 + 内嵌撤销按钮(与错误条同位,互斥渲染)。 */
+.chat-sidebar-error.is-undo { display: flex; align-items: center; gap: var(--sp-8); color: var(--cc-text-dim); }
+.chat-sidebar-error.is-undo button { border: 0; border-radius: var(--r-5); padding: var(--sp-2) var(--sp-8); color: var(--cc-text); background: color-mix(in srgb, var(--cc-text) 8%, transparent); font-size: var(--fs-10); cursor: pointer; }
+.chat-sidebar-error.is-undo button:hover { background: color-mix(in srgb, var(--cc-text) 14%, transparent); }
 .chat-scroll {
   flex: 1;
   overflow: auto;
@@ -3700,6 +3736,18 @@ select.ns-input {
 /* 注脚形态：上方已有兜底时间线（hook 落库的最近往来）时，「暂未提供结构化对话记录」
    降为一行说明，不再占满整屏居中。 */
 .chat-empty.is-note { min-height: 0; padding: var(--sp-14) 0 var(--sp-6); font-size: var(--fs-11); }
+/* 启动占位的终端出口：认领迟迟不来（信任询问/登录把启动卡住）时的逃生门。 */
+.chat-empty-cta {
+  margin-top: var(--sp-8);
+  padding: var(--sp-5) var(--sp-10);
+  font-size: var(--fs-11);
+  color: var(--cc-text-dim);
+  background: var(--cc-surface-hover);
+  border: 1px solid var(--cc-border);
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.chat-empty-cta:hover { color: var(--cc-text); }
 /* 审批条在文档流内、位于滚动区与 compose 之间，自然落在 compose 正上方；
    margin-bottom 14px 保持两卡间距（= 旧 absolute 布局 bottom 偏移之差），
    compose 不渲染时改由 .chat-terminal-command-approval 的 margin-bottom 18px 兜底。
@@ -3766,6 +3814,9 @@ select.ns-input {
 .chat-approval button.is-allow { color: var(--cc-bg); background: var(--cc-text); }
 .chat-approval button.is-allow:hover:not(:disabled) { background: color-mix(in srgb, var(--cc-text) 86%, var(--cc-bg)); }
 .chat-approval button.is-allow kbd { background: color-mix(in srgb, var(--cc-bg) 26%, transparent); color: var(--cc-bg); }
+/* Esc 两段式确认:第一下把拒绝按钮点亮为警示态并换文案「再按 Esc 确认拒绝」,
+   第二下才真拒(见 ChatWindow 的 denyViaEsc)。 */
+.chat-approval button.is-deny.is-esc-armed { border-color: color-mix(in srgb, var(--cc-err) 55%, transparent); color: var(--cc-err-vivid); background: color-mix(in srgb, var(--cc-err) 12%, transparent); }
 /* 屏幕识别卡在场时 composer 整体锁定:inert(由 ChatWindow 经 ref 设置)负责挡键盘
    与焦点,这里管视觉降级 + 老 WebView 的指针兜底。不卸载的理由见 ChatWindow 注释。 */
 .chat-compose.is-locked { opacity: .55; pointer-events: none; }
@@ -4219,13 +4270,17 @@ select.ns-input {
 .chat-compose .chat-slash-item:hover { background: var(--cc-surface-hover); }
 .chat-compose .chat-slash-item code { flex: 0 0 auto; color: var(--cc-text); font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, "Roboto Mono", "PingFang SC", "Microsoft YaHei", monospace; font-size: var(--fs-11-5); font-weight: 550; }
 .chat-compose .chat-slash-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cc-text-faint); font-size: var(--fs-10-5); margin-left: auto; }
-.chat-model { position: relative; }
+/* min-width:0 解除 flex 的 min-content 下限：窄窗格里这一行处于容量临界，默认下限是
+   CJK 的**单字宽**，超载时「跳过权限检查」会逐字竖排并纵向溢出按钮（实拍）。改为
+   标签 nowrap + 省略号，挤不下时横向收敛而不是竖向爆炸。 */
+.chat-model { position: relative; min-width: 0; }
+.chat-model-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 下面几组都带 .chat-compose 前缀：compose 里有一条 `.chat-compose button` 的 accent 皮肤
    （主题色边框+底色），那是发送按钮专属的，特异性却盖过单类名——菜单类控件必须
    用更高特异性重置回中性，否则整个菜单被刷成大片主题色。 */
 /* 无描边（实拍反馈「不要圆框」）：静态是纯文字，hover 的胶囊底自己就是可点暗示。
    留 1px 透明边占位，hover 出现底色时尺寸不跳。 */
-.chat-compose .chat-model-button { display: inline-flex; align-items: center; gap: var(--sp-4); height: 28px; min-height: 0; padding: 0 var(--sp-9); border: 1px solid transparent; border-radius: var(--r-7); color: var(--cc-text-dim); background: transparent; font-size: var(--fs-11-5); cursor: pointer; }
+.chat-compose .chat-model-button { display: inline-flex; align-items: center; gap: var(--sp-4); height: 28px; min-height: 0; max-width: 100%; padding: 0 var(--sp-9); border: 1px solid transparent; border-radius: var(--r-7); color: var(--cc-text-dim); background: transparent; font-size: var(--fs-11-5); cursor: pointer; }
 .chat-compose .chat-model-button:hover:not(:disabled) { color: var(--cc-text); background: var(--cc-surface-hover); }
 .chat-compose .chat-model-button:disabled { cursor: default; opacity: .8; }
 /* 上下文用量：环形进度条（环内百分比）+ 环右已用/总量。60% 起转黄、85% 起转红。 */
@@ -4265,6 +4320,26 @@ select.ns-input {
 /* 模型输出的 markdown 容器。必须晚于上方两段 .chat-text 定义：它们的 white-space: pre-wrap
    是给纯文本换行用的，markdown 的换行由块级元素承担，叠加 pre-wrap 会出现双重空行。 */
 .chat-md { white-space: normal; }
+/* 对话时间线的日期分隔条（Transcript 跨天处插入，含每天首条）。 */
+.chat-day-sep { display: flex; align-items: center; gap: var(--sp-8); margin: var(--sp-10) 0 var(--sp-4); color: var(--cc-text-faint); font-size: var(--fs-10-5); user-select: none; }
+.chat-day-sep::before, .chat-day-sep::after { content: ""; flex: 1 1 auto; height: 1px; background: color-mix(in srgb, var(--cc-text) 8%, transparent); }
+/* 对话正文代码块的 hljs 着色：与 .chat-diff-panel 的规则同一批 --cc-syn-* 变量，
+   色板同源；作用域限 .chat-md（ChatMarkdown 容器）。 */
+.chat-md .hljs-keyword, .chat-md .hljs-doctag, .chat-md .hljs-template-tag, .chat-md .hljs-variable.language_, .chat-md .hljs-meta, .chat-md .hljs-meta .hljs-keyword { color: var(--cc-syn-keyword); }
+.chat-md .hljs-string, .chat-md .hljs-regexp, .chat-md .hljs-symbol, .chat-md .hljs-code, .chat-md .hljs-meta .hljs-string { color: var(--cc-syn-string); }
+.chat-md .hljs-number, .chat-md .hljs-literal { color: var(--cc-syn-number); }
+.chat-md .hljs-comment, .chat-md .hljs-quote { color: var(--cc-syn-comment); }
+.chat-md .hljs-title, .chat-md .hljs-title.function_, .chat-md .hljs-section { color: var(--cc-syn-func); }
+.chat-md .hljs-title.class_, .chat-md .hljs-type, .chat-md .hljs-selector-pseudo, .chat-md .hljs-selector-attr { color: var(--cc-syn-type); }
+.chat-md .hljs-attr, .chat-md .hljs-attribute, .chat-md .hljs-property, .chat-md .hljs-variable, .chat-md .hljs-template-variable, .chat-md .hljs-name, .chat-md .hljs-selector-tag, .chat-md .hljs-selector-class, .chat-md .hljs-selector-id, .chat-md .hljs-bullet { color: var(--cc-syn-attr); }
+.chat-md .hljs-built_in, .chat-md .hljs-char.escape_ { color: var(--cc-syn-builtin); }
+.chat-md .hljs-punctuation, .chat-md .hljs-operator, .chat-md .hljs-tag { color: var(--cc-text-dim); }
+.chat-md .hljs-subst { color: var(--cc-text); }
+.chat-md .hljs-link { color: var(--cc-syn-string); text-decoration: underline; }
+.chat-md .hljs-addition { color: var(--cc-ok-vivid); }
+.chat-md .hljs-deletion { color: var(--cc-err-vivid); }
+.chat-md .hljs-emphasis { font-style: italic; }
+.chat-md .hljs-strong { font-weight: 700; }
 .chat-md > :first-child { margin-top: 0; }
 .chat-md > :last-child { margin-bottom: 0; }
 .chat-md p { margin: 0 0 var(--sp-10); }
@@ -4341,6 +4416,11 @@ select.ns-input {
 /* ? 快捷键速查表：双列 dl（组合键 / 描述）。 */
 .chat-shortcuts { width: min(420px, calc(100vw - 48px)); }
 .chat-shortcuts-list { display: flex; flex-direction: column; gap: var(--sp-6); margin: var(--sp-8) 0 0; }
+/* 速查表底注:终端视图的快捷键让位说明。 */
+.chat-shortcuts-note { margin-top: var(--sp-9); font-size: var(--fs-10-5); color: var(--cc-text-faint); line-height: 1.5; }
+/* 文件拖入的落点遮罩:铺满对话窗、虚线框 + 居中提示,pointer-events 关掉不挡 drop。 */
+.chat-drop-overlay { position: fixed; inset: 8px; z-index: 60; display: flex; align-items: center; justify-content: center; border: 2px dashed color-mix(in srgb, var(--cc-text) 35%, transparent); border-radius: var(--r-md); background: color-mix(in srgb, var(--cc-bg) 72%, transparent); pointer-events: none; }
+.chat-drop-overlay span { padding: var(--sp-8) var(--sp-11); border-radius: var(--r-9); background: var(--cc-bg); color: var(--cc-text); font-size: var(--fs-12); box-shadow: 0 4px 18px rgba(0,0,0,.25); }
 .chat-shortcuts-row { display: flex; align-items: baseline; gap: var(--sp-12); }
 .chat-shortcuts-row dt { flex: 0 0 148px; margin: 0; text-align: right; }
 .chat-shortcuts-row dd { flex: 1; margin: 0; color: var(--cc-text-dim); font-size: var(--fs-12); }
@@ -4491,7 +4571,22 @@ select.ns-input {
 /* 输出流停滞警示（ConPTY 管道疑似僵死，见 ManagedTerminal 的 terminalStreamStalled）：
    警示黄与错误红区分——它是诊断提示不是操作失败，且常驻到重启终端为止。 */
 .managed-terminal-error.is-stalled { border-color: color-mix(in srgb, var(--cc-warn, #d9a03f) 45%, transparent); color: color-mix(in srgb, var(--cc-warn, #d9a03f) 75%, var(--cc-text)); cursor: default; }
+/* 横幅内的动作组(结束会话/关闭):文案在左,按钮靠右排开——横幅不再只告知不给出口。 */
+.managed-terminal-error { display: flex; align-items: center; gap: var(--sp-8); }
+.managed-terminal-error > span { flex: 1 1 auto; }
+.managed-terminal-error button { flex: 0 0 auto; padding: var(--sp-3) var(--sp-8); border: 1px solid rgba(255,255,255,.14); border-radius: var(--r-5); color: inherit; background: rgba(255,255,255,.06); font-size: var(--fs-10); cursor: pointer; }
+.managed-terminal-error button:hover:not(:disabled) { background: rgba(255,255,255,.12); }
+.managed-terminal-error button:disabled { opacity: .55; cursor: default; }
 .managed-terminal-actions button { padding: var(--sp-4) var(--sp-8); border: 1px solid rgba(255,255,255,.12); border-radius: var(--r-5); color: #a7adaa; background: rgba(21,22,23,.82); font-size: var(--fs-10); cursor: pointer; }
+/* ── 终端内搜索条(Ctrl+F,ManagedTerminal):浮在终端右上角,深色底不遮 TUI 主体;
+   z 高于 hover 才显形的操作条(managed-terminal-actions),同区不打架。 ── */
+.term-search { position: absolute; top: 8px; right: 20px; z-index: 6; display: flex; align-items: center; gap: 4px; padding: 4px 6px; border: 1px solid rgba(255,255,255,.14); border-radius: var(--r-md); background: rgba(21,22,23,.94); box-shadow: 0 2px 10px rgba(0,0,0,.35); }
+.term-search-input { width: 180px; border: 0; outline: none; background: transparent; color: #e7e9e8; font-size: var(--fs-11); padding: 2px 4px; }
+.term-search-input::placeholder { color: #7d827f; }
+.term-search-miss { flex: 0 0 auto; color: #d9a03f; font-size: var(--fs-10); padding: 0 2px; }
+.term-search-btn { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 0; border-radius: var(--r-5); color: #a7adaa; background: transparent; cursor: pointer; font-size: var(--fs-12); line-height: 1; }
+.term-search-btn:hover { color: #e7e9e8; background: rgba(255,255,255,.10); }
+.term-search-btn.is-close { font-size: var(--fs-13); }
 .managed-terminal:hover .managed-terminal-actions { opacity: 1; }
 /* 键盘焦点落上去也要显形（hover 之外唯一的抵达方式）；无 hover 环境（触屏）常显——
    「在外部终端打开」曾对键盘与触屏用户完全隐形。 */
@@ -4514,3 +4609,31 @@ select.ns-input {
     scroll-behavior: auto !important;
   }
 }
+
+/* dev 构建角标（DevBadge，仅 vite dev 渲染）：幽灵胶囊——柔和琥珀填充 + 细边框，
+   与 .stk-focus-btn 一族的 soft/border/text 三层配色同构，只是换暖色调；实心色块
+   压在玻璃质感上太抢（实拍反馈「丑」）。pointer-events:none——贴纸的它压在拖拽区上，
+   对话窗的它压在顶栏拖拽区上，不能挡住下面的拖拽/点击。 */
+.dev-badge {
+  position: absolute;
+  z-index: 80;
+  pointer-events: none;
+  font-size: 8px;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: 0.1em;
+  color: #f0a35e;
+  background: rgba(240, 163, 94, 0.12);
+  border: 1px solid rgba(240, 163, 94, 0.32);
+  padding: 2px 5px;
+  border-radius: var(--r-pill);
+}
+:root[data-theme="light"] .dev-badge {
+  color: #b4690e;
+  background: rgba(180, 105, 14, 0.1);
+  border-color: rgba(180, 105, 14, 0.3);
+}
+/* 贴纸：拖拽条右端（中央是 grabber 短横条，居中会撞）。 */
+.sticker .dev-badge { top: 4px; right: 10px; }
+/* 对话窗：顶栏水平居中（左有侧栏开关、右有窗口控制组/mac 红绿灯，两端都不空）。 */
+.chat-window .dev-badge { top: 8px; left: 50%; transform: translateX(-50%); }

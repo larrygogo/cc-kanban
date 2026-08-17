@@ -456,6 +456,18 @@ function ChangesView({ cwd, summary }: { cwd: string; summary: GitDiffSummaryDto
   // 当前查看的文件（null = 文件树形态）；diff 结果按路径缓存，往返切换不重复拉取。
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [entries, setEntries] = useState<Map<string, FetchEntry<GitFileDiffDto>>>(new Map());
+  // 图片改动的预览缓存(与 FilesView 的图片通道同款):git 对二进制只会说 "(binary file)",
+  // 但图片完全可以直接把工作区当前版本渲染出来——「二进制文件,无法显示 diff」对一张
+  // 刚生成的截图毫无帮助(实拍反馈)。
+  const [images, setImages] = useState<Map<string, FetchEntry<ImagePreviewDto>>>(new Map());
+  useEffect(() => {
+    if (!selectedPath || previewKindOf(selectedPath) !== "image" || images.has(selectedPath)) return;
+    const rel = selectedPath;
+    setImages((prev) => new Map(prev).set(rel, { loading: true, error: null, data: null }));
+    readImagePreview(cwd, rel)
+      .then((data) => setImages((prev) => new Map(prev).set(rel, { loading: false, error: null, data })))
+      .catch((error) => setImages((prev) => new Map(prev).set(rel, { loading: false, error: formatBackendError(error, t.locale), data: null })));
+  }, [selectedPath, images, cwd, t.locale]);
   const [search, setSearch] = useState("");
   // 目录树默认全部展开，这里只记录被手动折叠的目录路径。
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -594,6 +606,21 @@ function ChangesView({ cwd, summary }: { cwd: string; summary: GitDiffSummaryDto
     if (selectedEntry.error) return <div className="chat-diff-empty is-error">{selectedEntry.error}</div>;
     const fileDiff = selectedEntry.data;
     if (!fileDiff || fileDiff.diff.trim() === BINARY_PLACEHOLDER) {
+      // 图片不甩「二进制」冷话:渲染工作区当前版本(新增/修改后的样子)。旧版对比
+      // 做不了(git 不给二进制 diff),看得到现状已经回答了「这张图是什么」。
+      // 已删除的文件工作区没有内容,才落回二进制占位文案。
+      const status = summary.files.find((file) => file.path === selectedPath)?.status;
+      if (selectedPath && previewKindOf(selectedPath) === "image" && status !== "D") {
+        const entry = images.get(selectedPath);
+        if (!entry || entry.loading) return <div className="chat-diff-empty">{t.chat.diffLoading}</div>;
+        if (entry.error) return <div className="chat-diff-empty is-error">{entry.error}</div>;
+        if (!entry.data?.dataUrl) return <div className="chat-diff-empty">{t.chat.diffImageTooLarge}</div>;
+        return (
+          <div className="chat-diff-scroll chat-diff-imgwrap">
+            <img className="chat-diff-img" src={entry.data.dataUrl} alt={selectedPath} />
+          </div>
+        );
+      }
       return <div className="chat-diff-empty">{t.chat.diffBinary}</div>;
     }
     // 空 diff ≠ 出错:清单快照落后于 agent 的提交/撤销时就会出现——给明确解释,
