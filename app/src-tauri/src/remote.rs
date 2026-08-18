@@ -961,10 +961,10 @@ fn static_root(app: &tauri::AppHandle) -> Option<PathBuf> {
             return Some(dev);
         }
     }
-    // tauri.conf.json 用 `resources: ["../dist-mobile"]` 打包(产物在 src-tauri 之外)。
-    // Tauri 把越过 tauri 目录的资源路径里的 `..` 折叠成 `_up_` 段以保留在 resource_dir 内,
-    // 故安装后实际落点是 resource_dir()/_up_/dist-mobile。两处都探,谁在用谁(未来 Tauri
-    // 若改回不折叠也不误伤)。
+    // tauri.conf.json 用 map 形式 `resources: { "../dist-mobile": "dist-mobile" }` 打包:
+    // 落点钉在 resource_dir()/dist-mobile。列表形式 `["../dist-mobile"]` 在 tauri-cli
+    // 2.11.2 实测静默打包不出任何文件(解包安装器验证过),不要改回去。仍保留 `_up_`
+    // 探测位:列表形式修好后若有人切回,`..` 会折叠成 `_up_` 段,双探不误伤。
     let base = app.path().resource_dir().ok()?;
     [base.join("dist-mobile"), base.join("_up_").join("dist-mobile")]
         .into_iter()

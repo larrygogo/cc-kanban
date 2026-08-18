@@ -42,7 +42,7 @@
     "createUpdaterArtifacts": true,
     "targets": ["nsis", "dmg", "app"],
     "externalBin": ["binaries/meowo-reporter"],
-    "resources": ["../dist-mobile"],
+    "resources": { "../dist-mobile": "dist-mobile" },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
