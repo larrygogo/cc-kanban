@@ -49,8 +49,8 @@ export function RemoteAccessCard() {
     remoteAccessInfo()
       .then((i) => {
         setInfo(i);
-        // 保留用户已选地址；失效或首取时落到第一个可达 IP。
-        setSelectedIp((cur) => (cur && i.ips.includes(cur) ? cur : (i.ips[0] ?? null)));
+        // 保留用户已选地址；失效或首取时落到首位候选（后端 Tailscale 优先排序）。
+        setSelectedIp((cur) => (cur && i.ips.some((c) => c.ip === cur) ? cur : (i.ips[0]?.ip ?? null)));
       })
       .catch(() => {});
   }, []);
@@ -84,7 +84,12 @@ export function RemoteAccessCard() {
       .catch(() => {});
   };
 
-  const ipOptions = (info?.ips ?? []).map((ip) => ({ value: ip, label: ip }));
+  // 桌面端猜不出手机在哪个网,只能把每个候选「是什么、什么情况下能通」标清楚让用户选。
+  const kindLabel = (kind: "tailscale" | "lan") =>
+    kind === "tailscale" ? t.remote.netTailscale : t.remote.netLan;
+  const candidates = info?.ips ?? [];
+  const ipOptions = candidates.map((c) => ({ value: c.ip, label: `${kindLabel(c.kind)} · ${c.ip}` }));
+  const selectedKind = candidates.find((c) => c.ip === selectedIp)?.kind ?? null;
 
   return (
     <div className="row-card remote-access-card">
@@ -118,6 +123,11 @@ export function RemoteAccessCard() {
                 <div className="remote-ip-pick">
                   <span className="row-desc">{t.remote.device}</span>
                   <Dropdown value={selectedIp ?? ""} options={ipOptions} onChange={setSelectedIp} />
+                </div>
+              )}
+              {selectedKind && (
+                <div className="row-desc">
+                  {selectedKind === "tailscale" ? t.remote.hintTailscale : t.remote.hintLan}
                 </div>
               )}
               <div className="remote-url-row">

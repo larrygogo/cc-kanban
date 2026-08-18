@@ -150,27 +150,60 @@ fn ensure_remote_token() -> Result<crate::settings::Settings, String> {
     })
 }
 
-/// 局域网/Tailscale 可达 IP 枚举（零依赖）：UDP `connect` 到公网/CGNAT 地址只让内核
-/// 按路由表选出口网卡、不实际发包，再读 `local_addr` 拿本机在该网卡上的地址。
-/// `8.8.8.8` 取默认网卡出口，`100.100.100.100`（Tailscale CGNAT）取 tailnet 出口。
-/// 取不到就空——设置页回退提示手输 IP。
-fn local_ips() -> Vec<String> {
-    let mut ips = Vec::new();
-    for probe in ["8.8.8.8:80", "100.100.100.100:80"] {
+/// 候选地址归类：桌面端无从知道手机在哪个网，只能把每个候选「是什么、什么情况下
+/// 能通」标清楚交给用户选。只认得清的两类——Tailscale CGNAT（100.64.0.0/10，手机装
+/// Tailscale 即任何网络可达）与 RFC1918 局域网段（须同一 Wi-Fi）。其余一律丢弃：
+/// TUN 代理的假地址（198.18/15 等）、link-local、回环、公网——给一个「可能通」的
+/// 地址让用户瞎试，不如没有。
+fn classify_ip(ip: std::net::IpAddr) -> Option<&'static str> {
+    let std::net::IpAddr::V4(v4) = ip else {
+        return None;
+    };
+    let o = v4.octets();
+    if o[0] == 100 && (64..128).contains(&o[1]) {
+        return Some("tailscale");
+    }
+    if v4.is_private() {
+        return Some("lan");
+    }
+    None
+}
+
+/// 可达地址枚举（零依赖）：UDP `connect` 只让内核按路由表选出口网卡、不实际发包，
+/// 再读 `local_addr` 拿本机在该网卡上的地址。`100.100.100.100`（Tailscale 的
+/// CGNAT 探针）取 tailnet 出口，`8.8.8.8` 取默认网卡出口。Tailscale 探测在前：
+/// 有 tailnet 时它是唯一不挑手机所在网络的地址，列表首位即前端默认选中项。
+/// 归类失败（如 TUN 假地址）逐个丢弃，全空则设置页回退提示手输 IP。
+fn local_ips() -> Vec<IpCandidate> {
+    let mut out: Vec<IpCandidate> = Vec::new();
+    for probe in ["100.100.100.100:80", "8.8.8.8:80"] {
         let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") else {
             continue;
         };
-        if sock.connect(probe).is_ok() {
-            if let Ok(addr) = sock.local_addr() {
-                let ip = addr.ip().to_string();
-                // 未连通网卡时内核可能回 0.0.0.0：无意义，丢弃。
-                if ip != "0.0.0.0" && !ips.contains(&ip) {
-                    ips.push(ip);
-                }
-            }
+        if sock.connect(probe).is_err() {
+            continue;
+        }
+        let Ok(addr) = sock.local_addr() else {
+            continue;
+        };
+        // 没装 Tailscale 时 CGNAT 探针照样按默认路由回局域网地址——归类兜住，去重兜住。
+        let Some(kind) = classify_ip(addr.ip()) else {
+            continue;
+        };
+        let ip = addr.ip().to_string();
+        if !out.iter().any(|c| c.ip == ip) {
+            out.push(IpCandidate { ip, kind });
         }
     }
-    ips
+    out
+}
+
+/// 单个可达地址候选。`kind`（"tailscale" / "lan"）供前端标注可达条件——地址本身
+/// 说明不了「手机在什么情况下连得上」，标签才说明得了。
+#[derive(serde::Serialize)]
+pub(crate) struct IpCandidate {
+    ip: String,
+    kind: &'static str,
 }
 
 /// 设置页配对信息（**桌面专用命令，不进 /rpc 白名单**——token 只在宿主机取得）。
@@ -181,8 +214,8 @@ pub(crate) struct RemoteAccessInfo {
     port: u32,
     /// 惰性生成并持久化的 token；二维码 URL = `http://<ip>:<port>/#token=<token>`。
     token: String,
-    /// 局域网/Tailscale 可达 IP（可能为空，前端回退手输）。
-    ips: Vec<String>,
+    /// 归类后的可达地址候选，Tailscale 优先（可能为空，前端回退手输）。
+    ips: Vec<IpCandidate>,
     /// 最近一次启动失败原因（端口被占等），供设置页红字提示。
     last_error: Option<String>,
 }
@@ -1051,13 +1084,33 @@ mod tests {
             enabled: true,
             port: 18620,
             token: "tok".into(),
-            ips: vec!["192.168.1.5".into()],
+            ips: vec![IpCandidate { ip: "192.168.1.5".into(), kind: "lan" }],
             last_error: Some("端口占用".into()),
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains(r#""lastError":"端口占用""#), "{json}");
-        assert!(json.contains(r#""ips":["192.168.1.5"]"#), "{json}");
+        assert!(json.contains(r#""ips":[{"ip":"192.168.1.5","kind":"lan"}]"#), "{json}");
         assert!(json.contains(r#""port":18620"#), "{json}");
+    }
+
+    /// 归类是配对地址的守门员：Tailscale CGNAT 与 RFC1918 之外（TUN 假地址、
+    /// link-local、回环、公网）一律丢弃——错的地址进了二维码，用户只会扫出「打不开」。
+    #[test]
+    fn classify_ip_labels_known_ranges_and_drops_garbage() {
+        let c = |s: &str| classify_ip(s.parse().unwrap());
+        assert_eq!(c("100.64.0.1"), Some("tailscale"));
+        assert_eq!(c("100.127.255.254"), Some("tailscale"));
+        assert_eq!(c("192.168.1.5"), Some("lan"));
+        assert_eq!(c("10.0.0.2"), Some("lan"));
+        assert_eq!(c("172.16.0.1"), Some("lan"));
+        // 100.64/10 之外的 100.x 是普通公网,不得冒充 Tailscale。
+        assert_eq!(c("100.128.0.1"), None);
+        assert_eq!(c("198.18.0.1"), None); // TUN 代理 fake-ip 常用段
+        assert_eq!(c("169.254.1.1"), None); // link-local
+        assert_eq!(c("127.0.0.1"), None);
+        assert_eq!(c("0.0.0.0"), None);
+        assert_eq!(c("8.8.8.8"), None); // 公网
+        assert_eq!(c("fe80::1"), None); // v6 一律不收
     }
 
     #[test]

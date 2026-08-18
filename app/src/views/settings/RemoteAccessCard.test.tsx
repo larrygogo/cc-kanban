@@ -26,26 +26,33 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("RemoteAccessCard", () => {
-  it("开启后展示扫码地址且 URL 含 token 与端口", async () => {
+  it("开启后展示扫码地址且 URL 含 token 与端口;有 Tailscale 默认选它", async () => {
     api.getSettings.mockResolvedValue({
       ...SETTINGS_DEFAULTS,
       remote_access_enabled: true,
       remote_access_port: 18620,
       remote_access_token: TOKEN,
     });
+    // 后端 Tailscale 优先排序;桌面猜不出手机在哪个网,Tailscale 是唯一不挑网的地址,
+    // 默认必须落它,而不是局域网 IP。
     api.remoteAccessInfo.mockResolvedValue({
       enabled: true,
       port: 18620,
       token: TOKEN,
-      ips: ["192.168.1.5"],
+      ips: [
+        { ip: "100.64.0.7", kind: "tailscale" },
+        { ip: "192.168.1.5", kind: "lan" },
+      ],
       lastError: null,
     });
     render(<RemoteAccessCard />);
 
-    const url = await screen.findByText(/^http:\/\/192\.168\.1\.5:18620\/#token=/);
+    const url = await screen.findByText(/^http:\/\/100\.64\.0\.7:18620\/#token=/);
     expect(url.textContent).toContain(`#token=${TOKEN}`);
     // 二维码就地生成(uqr renderSVG),扫码区确有 <svg>。
     expect(document.querySelector(".remote-qr svg")).toBeTruthy();
+    // 选中候选的可达性说明如实标注。
+    expect(screen.getByText(zh.remote.hintTailscale)).toBeTruthy();
   });
 
   it("关闭态点开关:落盘 remote_access_enabled=true", async () => {
