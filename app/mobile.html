@@ -1,0 +1,26 @@
+<!doctype html>
+<!-- 手机远程 UI 入口。与桌面 index.html 分家:viewport 禁缩放(触控界面自控尺寸)、
+     首帧按缓存定 lang(同 index.html 的内联判定,读屏发音)。真机在浏览器里跑,无 Tauri runtime。 -->
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="dark light" />
+    <title>Meowo 远程</title>
+    <script>
+      // 与 src/i18n/index.tsx 的 readCache/resolveLang 同一判定,改一处要同步另一处。
+      try {
+        var l = localStorage.getItem("meowo-lang");
+        if (l !== "zh" && l !== "en") l = /^zh\b|^zh-/i.test(navigator.language) ? "zh" : "en";
+        document.documentElement.lang = l;
+      } catch (e) { /* 拿不到缓存就等 I18nProvider 挂载后写入 */ }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/mobile/main.tsx"></script>
+  </body>
+</html>

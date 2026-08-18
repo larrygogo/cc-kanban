@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:e2e": "node e2e/run.mjs",
     "demo:webp": "node scripts/record-demo.mjs",
-    "demo:build": "vite build -c vite.demo.config.ts"
+    "demo:build": "vite build -c vite.demo.config.ts",
+    "build:mobile": "vite build -c vite.mobile.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",

@@ -1,0 +1,119 @@
+/* 手机远程 UI 的样式补丁。全部圈在 body.remote-ui 下,桌面各窗永不套用(远程门控标志同源,
+   见 remoteMode.ts)。只做三件事:适配移动视口高度与安全区、放大触控热区与字号、把桌面窗口
+   语义的浮层(新建会话)改成全屏 sheet。ChatWindow/ChatSidebar 的既有布局尽量原样复用。 */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overscroll-behavior: none;
+}
+
+body.remote-ui {
+  /* 字号阶梯整体放大:手机可视距离更近但像素密度高,桌面 12px 基准偏小。 */
+  --cc-ui: 1.12;
+  /* 移动端浏览器地址栏收放会改 vh;用 dvh 让根容器贴合实际可视高度,避免底部输入框被顶栏截。 */
+  height: 100dvh;
+  overflow: hidden;
+  /* 长按选中/系统放大镜在聊天操作里多是误触,输入框单独放开。 */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body.remote-ui .chat-window {
+  height: 100dvh;
+}
+
+/* 顶栏拖拽区在真浏览器里无意义(没有可拖的窗口),但仍占 data-tauri-drag-region 的高度做安全区留白。 */
+body.remote-ui .chat-topbar {
+  padding-top: env(safe-area-inset-top, 0);
+}
+
+/* 输入框/文本域放开选择与缩放,否则手机上无法选中已输入文本、粘贴不便。 */
+body.remote-ui input,
+body.remote-ui textarea {
+  -webkit-user-select: text;
+  user-select: text;
+  /* iOS Safari 对 <16px 的输入框会自动放大整页,统一钉到 16px 起免抖。 */
+  font-size: max(16px, var(--fs-13, 13px));
+}
+
+/* 触控热区:桌面按钮多为 hover 精瞄尺寸,手指需要 ≥40px 命中面。只补内边距不改视觉高度基线。 */
+body.remote-ui button {
+  min-height: 40px;
+  touch-action: manipulation;
+}
+
+/* 配对闸门(TokenGate)。首屏唯一界面,居中一张卡。 */
+.remote-gate {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg, #16171b);
+  color: var(--fg, #e7e7ea);
+}
+
+.remote-gate-card {
+  width: min(360px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.remote-gate-card h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.remote-gate-card p {
+  margin: 0;
+  opacity: 0.75;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.remote-gate-card input {
+  height: 44px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #33343a);
+  background: var(--panel, #1e1f24);
+  color: inherit;
+  font-size: 16px;
+}
+
+.remote-gate-card button {
+  height: 44px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent, #6b8afd);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.remote-gate-card button:disabled {
+  opacity: 0.5;
+}
+
+/* 新建会话浮层:桌面是独立窗口,远程改全屏 sheet 盖在会话列表上。 */
+.remote-new-session-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  padding-top: max(16px, env(safe-area-inset-top, 0));
+  padding-bottom: max(16px, env(safe-area-inset-bottom, 0));
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.remote-new-session-overlay .ns-window {
+  width: min(480px, 100%);
+  max-height: 100%;
+  border-radius: 12px;
+}

@@ -32,6 +32,11 @@ import { pushEscLayer } from "../escLayers";
 import type { PtyExitEvent as ExitEvent } from "../generated/contracts/PtyExitEvent";
 import type { PtyOutputEvent as OutputEvent } from "../generated/contracts/PtyOutputEvent";
 import { terminalAttention, visibleTerminalText, type AttentionGrammar, type TerminalAttention } from "../terminalAttention";
+import { remoteUi } from "../remoteMode";
+
+/** 远程模式补查周期（ms）。手机端收不到 pty-output 事件,靠定时补查增量快照喂满屏幕识别
+ *  （AskUserQuestion 表单检测跑在这条通道上）。带 nextOffset 只取增量,不重传 backlog。 */
+const REMOTE_SNAPSHOT_POLL_MS = 700;
 
 function decodeBase64(data: string): Uint8Array {
   const binary = atob(data);
@@ -999,9 +1004,21 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       }, 80);
     });
     observer.observe(host);
+
+    // 远程模式:pty-output 事件在手机端永远不触发(无 Tauri 事件桥),用定时补查驱动同一条
+    // 增量快照通道。inspectSnapshot 带 nextOffset 只取增量,每拍仅拉自上次以来的新字节。
+    // 这条通道同时喂饱隐藏的屏幕识别(AskUserQuestion 表单检测)。桌面走事件,不进此分支。
+    let remotePollTimer = 0;
+    if (remoteUi()) {
+      remotePollTimer = window.setInterval(() => {
+        if (!cancelled) void inspectSnapshot();
+      }, REMOTE_SNAPSHOT_POLL_MS);
+    }
+
     return () => {
       cancelled = true;
       void unregisterTerminalViewer(sessionId).catch(() => {});
+      window.clearInterval(remotePollTimer);
       window.clearInterval(stallTimer);
       window.clearTimeout(snapshotTimer);
       window.clearTimeout(resyncTimer);

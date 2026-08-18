@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 // 文件拖入走 Tauri 的 drag-drop 事件(webview 原生 drop 被拦截,DOM 拿不到 File;
@@ -34,6 +34,7 @@ import { ManagedTerminal } from "./ManagedTerminal";
 import { WindowControls } from "./WindowControls";
 import { DevBadge } from "./DevBadge";
 import { isMac } from "../platform";
+import { remoteUi } from "../remoteMode";
 import { appendTerminalText, modeFromScreen, terminalAttention as detectTerminalAttention, visibleTerminalText, type AttentionGrammar, type TerminalAttention, type TerminalAttentionOption } from "../terminalAttention";
 import { Dropdown, useMenuPopup } from "./menu";
 // 恢复时的权限改选需要 agent 的启动选项声明表（与新建会话面板同源）。
@@ -57,6 +58,30 @@ function storedViewPref(): "chat" | "terminal" {
 }
 function rememberViewPref(view: "chat" | "terminal") {
   localStorage.setItem(VIEW_PREF_KEY, view);
+}
+/** 远程模式选文件:临时挂一个隐藏 <input type=file multiple>,点开系统选择器,resolve 选中的 File。
+ *  取消(未选)时 change 不触发,靠 window focus 兜底 resolve 空数组,避免 Promise 永挂。 */
+function pickFilesViaInput(): Promise<File[]> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    input.style.display = "none";
+    let settled = false;
+    const done = (files: File[]) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("focus", onFocus);
+      input.remove();
+      resolve(files);
+    };
+    input.addEventListener("change", () => done(input.files ? Array.from(input.files) : []));
+    // 用户点「取消」:多数浏览器不发 change,只在窗口重新获焦后能判定放弃。延一拍让 change 先赢。
+    const onFocus = () => setTimeout(() => done([]), 300);
+    window.addEventListener("focus", onFocus, { once: true });
+    document.body.appendChild(input);
+    input.click();
+  });
 }
 /** 改动/文件停靠面板的宽度持久化键（localStorage 既有 meowo-* 命名惯例）。 */
 const DIFF_WIDTH_KEY = "meowo-diff-panel-width";
@@ -410,7 +435,19 @@ export function ChatWindow() {
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   // 新建会话（负数临时 id）落在用户偏好的视图上：对话页此时渲染「启动中」占位，
   // 发送链路（writeManagedTerminal）对临时 id 本就可用。已有会话恒从对话页进。
-  const [view, setView] = useState<"chat" | "terminal">(sessionId < 0 ? storedViewPref() : "chat");
+  const [view, setViewState] = useState<"chat" | "terminal">(
+    remoteUi() ? "chat" : sessionId < 0 ? storedViewPref() : "chat",
+  );
+  // 远程 UI 没有可用的 xterm 终端视图(手机上不渲染 250KB 终端,也没有 pty-output 实时流)。
+  // setView 在此收口:远程一律钉在对话页,散落各处的 setView("terminal")(后台自动切、
+  // 空态出口、去终端作答兜底)统统无害化——隐藏的 ManagedTerminal 仍按需挂载做屏幕识别,
+  // 但 visible 恒 false。桌面无此改写,行为逐字不变。
+  const setView = useCallback<Dispatch<SetStateAction<"chat" | "terminal">>>((next) => {
+    setViewState((prev) => {
+      const resolved = typeof next === "function" ? next(prev) : next;
+      return remoteUi() && resolved === "terminal" ? "chat" : resolved;
+    });
+  }, []);
   // 认领迟迟不来（信任目录询问/登录把 CLI 启动卡住，SessionStart hook 不触发）时，
   // 启动占位下亮「打开终端」出口——那些询问只在终端画面上，对话页看不见。
   // 计时器而非屏幕识别：认领前 provider 未知（history 还是 null），拿不到识别标记，
@@ -2221,6 +2258,13 @@ export function ChatWindow() {
     });
   };
   const chooseAttachments = async () => {
+    if (remoteUi()) {
+      // 手机没有系统文件对话框(plugin-dialog 也拿不到源路径):用原生 <input type=file> 取 File,
+      // 再走与粘贴完全相同的 base64→savePastedAttachment 落盘通道(该 command 已在远程白名单)。
+      const files = await pickFilesViaInput();
+      if (files.length) await pasteAttachments(files);
+      return;
+    }
     const selected = await open({ multiple: true, directory: false, title: t.chat.chooseAttachments });
     const paths = selected == null ? [] : Array.isArray(selected) ? selected : [selected];
     const fresh = (current: Attachment[]) => {
@@ -2532,7 +2576,8 @@ export function ChatWindow() {
       {!isMac() && (
         <header className="chat-topbar" data-tauri-drag-region>
           {sidebarToggleButton}
-          <WindowControls onClose={close} />
+          {/* 最小化/最大化/关闭是桌面窗口能力,手机浏览器没有可控窗口——远程隐藏。 */}
+          {!remoteUi() && <WindowControls onClose={close} />}
         </header>
       )}
       {/* 窄窗浮窗形态（Kimi 式全高抽屉）：挂在窗口层级、从最顶盖到最底——锚在 chat-body
@@ -2586,8 +2631,9 @@ export function ChatWindow() {
             窗口标题的 ▶ 标记、对话区底部的脉冲指示条、侧栏状态点。 */}
         {/* 任务进度入口:常驻图标,点开浮出「进度」面板(无任务时是骨架占位空态)。 */}
         <ChatTodoMenu todos={todos} subagents={panelSubagents} t={t} />
-        {/* 文件/改动面板入口:有 cwd 即显示(非仓库会话只有「文件」页签),徽标数 = 变更文件数。 */}
-        {cwd && (
+        {/* 文件/改动面板入口:有 cwd 即显示(非仓库会话只有「文件」页签),徽标数 = 变更文件数。
+            远程 v1 砍掉改动面板(GitDiffView),入口一并隐藏。 */}
+        {!remoteUi() && cwd && (
           <button
             type="button"
             // 面板可见时亮 is-active:点击语义是「首开/折叠↔展开」,没有状态指示的话
@@ -2615,10 +2661,13 @@ export function ChatWindow() {
             {endingSession ? t.chat.terminalStopping : t.chat.endSession}
           </button>
         )}
-        <div className="chat-view-tabs">
-          <button type="button" className={view === "chat" ? "is-active" : ""} aria-pressed={view === "chat"} onClick={() => { rememberViewPref("chat"); setView("chat"); }}>{t.chat.conversation}</button>
-          <button type="button" className={view === "terminal" ? "is-active" : ""} aria-pressed={view === "terminal"} onClick={() => { rememberViewPref("terminal"); setView("terminal"); }}>{t.chat.terminal}</button>
-        </div>
+        {/* 终端页签在远程无意义(见 setView 说明):只留对话页,不给死按钮。 */}
+        {!remoteUi() && (
+          <div className="chat-view-tabs">
+            <button type="button" className={view === "chat" ? "is-active" : ""} aria-pressed={view === "chat"} onClick={() => { rememberViewPref("chat"); setView("chat"); }}>{t.chat.conversation}</button>
+            <button type="button" className={view === "terminal" ? "is-active" : ""} aria-pressed={view === "terminal"} onClick={() => { rememberViewPref("terminal"); setView("terminal"); }}>{t.chat.terminal}</button>
+          </div>
+        )}
       </header>
       {/* 两个视图都留在树上、用 CSS 切换可见性：此前三元表达式会在每次切 tab 时
           dispose + new Terminal()，还要把整个 backlog 重传并让 xterm 重放一遍 ANSI。
@@ -3514,7 +3563,7 @@ export function ChatWindow() {
       {/* 「查看改动」停靠面板：与 .chat-main 并列的右列，对话区收缩让位（非覆盖层）。
           折叠只加 is-collapsed（display:none）不卸载，面板状态原样保留。
           分栏柄落在两张卡之间的缝隙里，拖拽调宽（折叠/最大化时隐藏）。 */}
-      {diffOpen && cwd && (
+      {!remoteUi() && diffOpen && cwd && (
         <>
           <div
             className={"chat-diff-resizer" + (diffCollapsed ? " is-hidden" : "")}

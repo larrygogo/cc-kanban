@@ -21,6 +21,10 @@ import {
   type PendingApproval,
 } from "../../api";
 import { useT } from "../../i18n";
+import { remoteUi } from "../../remoteMode";
+
+/** 远程审批租约续约周期（ms）。须显著小于后端 REMOTE_CONSUMER_TTL_MS(60s),留足网络抖动余量。 */
+export const REMOTE_CONSUMER_HEARTBEAT_MS = 20_000;
 
 export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setView, setSendError }: {
   sessionId: number;
@@ -92,9 +96,18 @@ export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setVi
       });
     };
     register(0);
+    // 远程租约带 60s TTL(防手机锁屏/被杀留幽灵租约)。前端每 20s 重注册续约——
+    // registerApprovalConsumer 幂等,重注册即刷新 seen_ms。桌面租约无 TTL,不进此分支。
+    let heartbeat = 0;
+    if (remoteUi()) {
+      heartbeat = window.setInterval(() => {
+        void registerApprovalConsumer(sessionId, consumerId).catch(() => {});
+      }, REMOTE_CONSUMER_HEARTBEAT_MS);
+    }
     return () => {
       disposed = true;
       window.clearTimeout(retryTimer);
+      window.clearInterval(heartbeat);
       void unregisterApprovalConsumer(consumerId).catch(() => {});
     };
   }, [sessionId]);

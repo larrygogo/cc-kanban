@@ -7,6 +7,9 @@ target/
 target-check/
 target-verify/
 dist/
+# 手机远程 UI 的独立构建产物(vite.mobile.config.ts 输出)。beforeBuildCommand 每次
+# 重建,打进安装包由 tauri.conf.json 的 bundle.resources 负责,不入库。
+dist-mobile/
 # 本项目用 bun(bun.lock)。npm 的 package-lock.json 只会是误跑 npm/npx 的产物,不入库。
 package-lock.json
 dev.log

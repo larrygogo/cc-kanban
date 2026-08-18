@@ -25,6 +25,7 @@ import { useLoginOperations } from "../hooks/useLoginOperations";
 import { useT, repairFailMessage } from "../i18n";
 import { formatBackendError } from "../i18n/errors";
 import { useEscClose } from "../hooks/useEscClose";
+import { remoteUi } from "../remoteMode";
 
 function FolderIcon() {
   return (
@@ -71,7 +72,7 @@ function saveStoredOpts(provider: string, opts: Record<string, string>) {
   }
 }
 
-export function NewSessionPanel(): ReactElement {
+export function NewSessionPanel({ onClose }: { onClose?: () => void } = {}): ReactElement {
   const t = useT();
   // 窗口以 visible:false 创建（window.rs），首帧渲染后再显示，消除打开瞬间的白框闪烁。
   useShowWhenReady();
@@ -194,6 +195,11 @@ export function NewSessionPanel(): ReactElement {
   const launchOptions = agents?.find((a) => a.id === provider)?.launch_options ?? [];
 
   function closeWin() {
+    // 桌面是独立窗口,关窗即销毁;远程是页内浮层,由 onClose 回列表(无 onClose 才退回关窗)。
+    if (onClose) {
+      onClose();
+      return;
+    }
     getCurrentWindow().close();
   }
   // Esc 关窗（输入框内让位）：填错想放弃时不必去点右上角 ✕。
@@ -302,9 +308,12 @@ export function NewSessionPanel(): ReactElement {
                 // Enter 直接启动（launch 内部对空目录/busy 有守卫），与账号页 API Key 输入框同规。
                 onKeyDown={(e) => { if (e.key === "Enter") void launch(); }}
               />
-              <button type="button" className="ns-browse" onClick={pickDir}>
-                {t.newSession.browse}
-              </button>
+              {/* 目录浏览走系统对话框(plugin-dialog),手机上无从弹起;远程只留手输 + 最近项。 */}
+              {!remoteUi() && (
+                <button type="button" className="ns-browse" onClick={pickDir}>
+                  {t.newSession.browse}
+                </button>
+              )}
             </div>
             {recent.length > 0 && shownRecent.length > 0 && (
               <div className="ns-recent-list">
@@ -381,7 +390,8 @@ export function NewSessionPanel(): ReactElement {
               ))}
             </div>
           )}
-          {avail && avail.length > 0 && warn && (
+          {/* 修复 hook / 登录都要在桌面拉起终端进程,远程既不放行也无从操作——隐藏,不留死按钮。 */}
+          {!remoteUi() && avail && avail.length > 0 && warn && (
             <div className="ns-warn" data-testid="ns-hooks-warn">
               <span>{hooks[provider] === "unknown" ? t.newSession.hooksUnknown : t.newSession.hooksMissing}</span>
               <button
@@ -395,7 +405,7 @@ export function NewSessionPanel(): ReactElement {
               </button>
             </div>
           )}
-          {avail && avail.length > 0 && needLogin && (
+          {!remoteUi() && avail && avail.length > 0 && needLogin && (
             <div className="ns-warn" data-testid="ns-login-warn">
               {/* 等待中：这行承载「正在等」，按钮则变成「取消等待」。 */}
               <span>{loginOperations.isPending(provider) ? t.newSession.loggingIn : t.newSession.notLoggedIn}</span>

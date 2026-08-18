@@ -6,7 +6,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1268",
     "beforeDevCommand": "bun ../scripts/prepare-sidecar.mjs && bun ../scripts/fetch-conpty.mjs && bun run dev",
-    "beforeBuildCommand": "bun ../scripts/prepare-sidecar.mjs && bun ../scripts/fetch-conpty.mjs && bun run build"
+    "beforeBuildCommand": "bun ../scripts/prepare-sidecar.mjs && bun ../scripts/fetch-conpty.mjs && bun run build && bun run build:mobile"
   },
   "app": {
     "macOSPrivateApi": true,
@@ -42,6 +42,7 @@
     "createUpdaterArtifacts": true,
     "targets": ["nsis", "dmg", "app"],
     "externalBin": ["binaries/meowo-reporter"],
+    "resources": ["../dist-mobile"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

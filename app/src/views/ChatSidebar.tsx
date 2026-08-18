@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirmStopSession, getLiveSessionsPage, getSessionLineage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, searchChatTranscripts, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LineageEntry, type LiveSession, type SessionTone, type TranscriptSearchHit } from "../api";
+import { remoteUi } from "../remoteMode";
 import { useBoardRefresh } from "../hooks/useBoardRefresh";
 import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
@@ -1210,14 +1211,16 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
           onRename={() => startRename(ctxItem)}
           onArchive={() => toggleArchived(ctxItem)}
           onNewSession={() => void openNewSessionWindow({ cwd: ctxItem.cwd, provider: ctxItem.provider }).catch(() => {})}
-          onOpenDir={ctxItem.cwd ? () => void openProjectDir(ctxItem.cwd!).catch(() => {}) : null}
+          onOpenDir={!remoteUi() && ctxItem.cwd ? () => void openProjectDir(ctxItem.cwd!).catch(() => {}) : null}
           // 结束会话只对本 GUI 托管的 PTY 开放（与看板同一门控）：外部终端里跑的会话
           // 杀不了，后台会话杀了也会被 supervisor 拉回来。
           onEndSession={ctxItem.pty_managed && !ctxItem.background ? () => endSession(ctxItem) : null}
           onClose={() => setCtxMenu(null)}
         />
       )}
-      {/* 常驻底部：会话列表可能很长并滚动，设置入口不能跟着滚走。 */}
+      {/* 常驻底部：会话列表可能很长并滚动，设置入口不能跟着滚走。
+          远程 v1 不含设置页(宿主执行类,default-deny)——整条底栏隐藏。 */}
+      {!remoteUi() && (
       <div className="chat-sidebar-footer">
         <button
           type="button"
@@ -1231,6 +1234,7 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
           <span>{t.sticker.openSettings}</span>
         </button>
       </div>
+      )}
     </aside>
   );
 }

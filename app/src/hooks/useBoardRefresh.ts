@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useTauriEvent } from "./useTauriEvent";
+import { remoteUi } from "../remoteMode";
+
+/** 远程模式的看板轮询周期（ms）。board-changed 事件在手机端永远收不到（无 Tauri 事件桥），
+ *  靠定时拉取兜底。3s 与列表新鲜度诉求相称，也不至于把内嵌 server 打满。 */
+export const REMOTE_BOARD_POLL_MS = 3000;
 
 /** board-changed 刷新的冷却窗口（ms）。该事件会三连发：命令写库后端立即通知 +
  *  db-watcher 稍后为同一次写入回声 + liveness 轮询。 */
@@ -55,6 +60,13 @@ export function useBoardRefresh(doRefresh: () => void): () => void {
       timerRef.current = undefined;
     };
   }, []);
+
+  // 远程模式:board-changed 收不到,改用定时轮询驱动同一条节流刷新通道。桌面永不进此分支。
+  useEffect(() => {
+    if (!remoteUi()) return;
+    const id = window.setInterval(() => refresh(), REMOTE_BOARD_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [refresh]);
 
   return refresh;
 }
