@@ -13,7 +13,8 @@ import {
 
 // fetch 桩:记录每次调用,按测试预置的响应回。
 function mockFetch(response: { status: number; body: string }) {
-  const fn = vi.fn(async () => ({
+  // 标注入参类型:否则 vi.fn 推断零参,mock.calls[0] 成空元组,取 [url, init] 时类型不匹配。
+  const fn = vi.fn(async (_url: string, _init?: RequestInit) => ({
     ok: response.status >= 200 && response.status < 300,
     status: response.status,
     text: async () => response.body,

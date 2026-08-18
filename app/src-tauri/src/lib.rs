@@ -1086,6 +1086,7 @@ pub fn run() {
             set_autostart,
             get_settings,
             set_settings,
+            remote::remote_access_info,
             mark_onboarding_seen,
             get_effective_proxy,
             get_relay_secret_status,

@@ -1825,6 +1825,48 @@ button.stab {
 .proxy-need { margin-top: var(--sp-4); }
 .row-text > .proxy-err { margin-top: var(--sp-4); color: var(--cc-err); }
 
+/* 手机远程配对卡：端口窄输入 + 扫码区。 */
+.remote-port-input { width: 96px; text-align: center; }
+.remote-pairing {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+  padding: var(--sp-8) 0 0;
+  align-items: flex-start;
+}
+/* 二维码白底留边:深色主题下纯 SVG 直贴会与背景糊在一起,扫不出来。 */
+.remote-qr {
+  background: #fff;
+  padding: var(--sp-6);
+  border-radius: var(--radius-md, 8px);
+  line-height: 0;
+}
+.remote-qr svg { width: 180px; height: 180px; display: block; }
+.remote-ip-pick { display: flex; align-items: center; gap: var(--sp-6); }
+.remote-url-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-6);
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+.remote-url {
+  font-size: 12px;
+  color: var(--cc-text-dim);
+  word-break: break-all;
+  user-select: all;
+}
+.remote-copy {
+  flex: none;
+  padding: var(--sp-2) var(--sp-8);
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--cc-border);
+  background: var(--cc-surface-2, transparent);
+  color: var(--cc-text);
+  cursor: pointer;
+}
+.remote-copy:hover { background: var(--cc-surface-3, var(--cc-hover)); }
+
 .settings-subtitle {
   margin: var(--sp-24) var(--sp-2) var(--sp-4);
   color: var(--cc-text);

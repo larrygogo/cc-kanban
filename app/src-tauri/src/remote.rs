@@ -127,13 +127,93 @@ struct Running {
 
 /// 严格 token 生成：OS RNG 不可用直接失败（调用方应拒绝启用远程访问）。
 /// 刻意不复用 pty.rs::random_token——它的弱回退（pid+时间）只在 loopback 语境下可接受。
-/// 生产调用方是设置页的 remote_access_info（随二维码配对一并交付）；在此先落地，
-/// 测试钉住「严格、64 位、唯一」的契约。
-#[cfg_attr(not(test), allow(dead_code))]
+/// 生产调用方是设置页的 [`remote_access_info`]（随二维码配对一并交付）。
 pub(crate) fn generate_token() -> Result<String, String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|e| format!("系统随机数不可用：{e}"))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// 惰性确保 settings 里有可用 token：已有（≥MIN_TOKEN_LEN）直接返回当前设置，否则
+/// 生成一枚落盘。刻意先只读判断、缺失才走 update_settings，避免设置页每次打开都写盘。
+/// 返回落盘后的完整 Settings（供 remote_access_info 一并读 enabled/port）。
+fn ensure_remote_token() -> Result<crate::settings::Settings, String> {
+    let existing = crate::settings::load_settings();
+    if existing.remote_access_token.len() >= MIN_TOKEN_LEN {
+        return Ok(existing);
+    }
+    crate::settings::update_settings(|s| {
+        if s.remote_access_token.len() < MIN_TOKEN_LEN {
+            s.remote_access_token = generate_token()?;
+        }
+        Ok(s.clone())
+    })
+}
+
+/// 局域网/Tailscale 可达 IP 枚举（零依赖）：UDP `connect` 到公网/CGNAT 地址只让内核
+/// 按路由表选出口网卡、不实际发包，再读 `local_addr` 拿本机在该网卡上的地址。
+/// `8.8.8.8` 取默认网卡出口，`100.100.100.100`（Tailscale CGNAT）取 tailnet 出口。
+/// 取不到就空——设置页回退提示手输 IP。
+fn local_ips() -> Vec<String> {
+    let mut ips = Vec::new();
+    for probe in ["8.8.8.8:80", "100.100.100.100:80"] {
+        let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") else {
+            continue;
+        };
+        if sock.connect(probe).is_ok() {
+            if let Ok(addr) = sock.local_addr() {
+                let ip = addr.ip().to_string();
+                // 未连通网卡时内核可能回 0.0.0.0：无意义，丢弃。
+                if ip != "0.0.0.0" && !ips.contains(&ip) {
+                    ips.push(ip);
+                }
+            }
+        }
+    }
+    ips
+}
+
+/// 设置页配对信息（**桌面专用命令，不进 /rpc 白名单**——token 只在宿主机取得）。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoteAccessInfo {
+    enabled: bool,
+    port: u32,
+    /// 惰性生成并持久化的 token；二维码 URL = `http://<ip>:<port>/#token=<token>`。
+    token: String,
+    /// 局域网/Tailscale 可达 IP（可能为空，前端回退手输）。
+    ips: Vec<String>,
+    /// 最近一次启动失败原因（端口被占等），供设置页红字提示。
+    last_error: Option<String>,
+}
+
+/// 设置页调用：惰性生成 token 落盘，返回开关/端口/可达 IP/最近启动错误。
+/// 只登记进 `generate_handler`（桌面 invoke），绝不进 `BRIDGED_COMMANDS`——远端不该
+/// 能读到 token 本身（它就是进门的凭据）。
+#[tauri::command]
+pub(crate) async fn remote_access_info(
+    app: tauri::AppHandle,
+) -> Result<RemoteAccessInfo, String> {
+    // token 惰性生成 + settings 读取 + IP 探测都可能触碰文件/网卡,挪进 blocking 池。
+    let (settings, ips) = tauri::async_runtime::spawn_blocking(|| -> Result<_, String> {
+        let settings = ensure_remote_token()?;
+        let ips = local_ips();
+        Ok((settings, ips))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let last_error = {
+        let runtime = app.state::<RemoteRuntime>();
+        let inner = runtime.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.last_error.clone()
+    };
+    Ok(RemoteAccessInfo {
+        enabled: settings.remote_access_enabled,
+        port: settings.remote_access_port,
+        token: settings.remote_access_token,
+        ips,
+        last_error,
+    })
 }
 
 /// 常量时间比较（逐字节 |= 异或）。长度不同直接 false——token 长度本就是公开信息
@@ -961,6 +1041,23 @@ mod tests {
         ] {
             assert!(BRIDGED_COMMANDS.contains(&cmd), "{cmd} 应在白名单");
         }
+    }
+
+    /// 前端 RemoteAccessInfo 类型按 camelCase 读 `lastError`：serde rename 一旦失守,
+    /// 设置页错误提示与 QR 端口会静默取到 undefined。
+    #[test]
+    fn remote_access_info_serializes_camel_case() {
+        let info = RemoteAccessInfo {
+            enabled: true,
+            port: 18620,
+            token: "tok".into(),
+            ips: vec!["192.168.1.5".into()],
+            last_error: Some("端口占用".into()),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains(r#""lastError":"端口占用""#), "{json}");
+        assert!(json.contains(r#""ips":["192.168.1.5"]"#), "{json}");
+        assert!(json.contains(r#""port":18620"#), "{json}");
     }
 
     #[test]

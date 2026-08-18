@@ -575,6 +575,12 @@ export type Settings = {
   proxy: ProxySettings;
   /** API 中转元数据；密钥由独立命令保存，不在此对象中。 */
   relay?: RelaySettings;
+  /** 手机远程访问总开关（局域网/Tailscale + token）。默认关闭。 */
+  remote_access_enabled: boolean;
+  /** 远程 HTTP 服务端口。默认 18620。 */
+  remote_access_port: number;
+  /** 远程访问 token。由 remote_access_info 惰性生成落盘；set_settings 忽略回传值(后端以磁盘值为准)。 */
+  remote_access_token: string;
 };
 
 export type RelayAuth = string;
@@ -715,6 +721,22 @@ export function getSettings(): Promise<Settings> {
 
 export function setSettings(settings: Settings): Promise<void> {
   return invoke("set_settings", { settings });
+}
+
+/** 设置页远程访问配对信息（桌面专用命令，不经 /rpc）。 */
+export type RemoteAccessInfo = {
+  enabled: boolean;
+  port: number;
+  /** 惰性生成的 token；二维码 URL = http://<ip>:<port>/#token=<token>。 */
+  token: string;
+  /** 局域网/Tailscale 可达 IP（可能为空,回退手输）。 */
+  ips: string[];
+  /** 最近一次启动失败原因（端口被占等），无错为 null。 */
+  lastError: string | null;
+};
+
+export function remoteAccessInfo(): Promise<RemoteAccessInfo> {
+  return invoke("remote_access_info");
 }
 
 // 纯函数：根据 todo 列表算完成度。
