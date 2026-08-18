@@ -362,12 +362,22 @@ export function Sticker({
   // 第一条的「撤销」窗口——每条各自渲染、各自 6s 消失,撤销互不相吞。
   const [archivedToasts, setArchivedToasts] = useState<{ key: number; item: Item }[]>([]);
   const archiveToastIdRef = useRef(0);
+  // 各 toast 的消失定时器：卸载时统一清掉，不让回调打在已卸载的组件上。
+  const archiveToastTimersRef = useRef<Set<number>>(new Set());
   const pushArchivedToast = (item: Item) => {
     archiveToastIdRef.current += 1;
     const key = archiveToastIdRef.current;
     setArchivedToasts((cur) => [...cur, { key, item }]);
-    window.setTimeout(() => setArchivedToasts((cur) => cur.filter((toast) => toast.key !== key)), 6_000);
+    const timer = window.setTimeout(() => {
+      archiveToastTimersRef.current.delete(timer);
+      setArchivedToasts((cur) => cur.filter((toast) => toast.key !== key));
+    }, 6_000);
+    archiveToastTimersRef.current.add(timer);
   };
+  useEffect(() => {
+    const timers = archiveToastTimersRef.current;
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, []);
 
   // 窗口级快捷键：Ctrl/Cmd+F 打开搜索；Esc 按「toast → 搜索」回退（右键菜单的 Esc 由
   // CardContextMenu 自己消费并 preventDefault，先于本监听）。焦点在输入框里时 Esc 让位
