@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -38,6 +39,22 @@ import { highlightLines, languageForPath } from "./highlight";
 /** 后端对二进制 diff 给的占位行（见 git.rs untracked_file_diff / GitFileDiffDto 注释）。 */
 const BINARY_PLACEHOLDER = "(binary file)";
 
+/** 估算等宽网格下最宽一行的列数（ASCII=1、宽字符按 2、tab 按 8）。行容器开了
+ *  content-visibility 后，跳过渲染的行不参与 pre 的 max-content 测量——不用这个
+ *  估算钉住 min-width 的话，滚动时横向宽度/滚动条会随视口内最宽行跳变。 */
+function estimateMaxColumns(lines: string[]): number {
+  let max = 0;
+  for (const line of lines) {
+    let cols = 0;
+    for (let i = 0; i < line.length; i += 1) {
+      const code = line.charCodeAt(i);
+      cols += code === 9 ? 8 : code < 0x1100 ? 1 : 2;
+    }
+    if (cols > max) max = cols;
+  }
+  return max;
+}
+
 /** cwd + rel 拼绝对路径（复制路径用）：cwd 是本机形态，Windows 下 rel 的正斜杠翻成反斜杠。 */
 function joinAbsPath(cwd: string, rel: string): string {
   const base = cwd.replace(/[\\/]+$/, "");
@@ -75,9 +92,13 @@ function resolveMdRel(baseDir: string, src: string): string | null {
     return null;
   }
   if (!clean) return null;
-  const joined = clean.startsWith("/") ? clean.slice(1) : baseDir ? `${baseDir}/${clean}` : clean;
+  // 分段必须同时按 `/` 与 `\` 切:Windows 上文内引用可能写成 `..\..\x`,只按 `/` 切会让
+  // 整串成为单个「段」,`..` 上跳守卫（out.pop）永不触发,穿越判定被绕过（后端 resolve_inside
+  // 仍兜底,但前端不该把越界路径当合法解析出来）。根前缀也一并认反斜杠。
+  const rooted = clean.startsWith("/") || clean.startsWith("\\");
+  const body = rooted ? clean.replace(/^[\\/]+/, "") : baseDir ? `${baseDir}/${clean}` : clean;
   const out: string[] = [];
-  for (const part of joined.split("/")) {
+  for (const part of body.split(/[\\/]+/)) {
     if (!part || part === ".") continue;
     if (part === "..") {
       if (out.length === 0) return null;
@@ -351,8 +372,11 @@ type FetchEntry<T> = { loading: boolean; error: string | null; data: T | null };
 /**
  * 「文件 / 更改」停靠面板：挂在 .chat-body 行内的右列（对话区收缩让位，非覆盖层）。
  * 「更改」页签仅仓库会话可见（summary?.isRepo）；非仓库会话打开时只有「文件」页签。
+ * memo：折叠只是 display:none 不卸载，不隔断的话 ChatWindow 每次击键都要对面板里
+ * 可能上千行的文件 DOM 做全量 reconcile；父层回调已换稳定引用配合生效。
  */
-export function GitDiffView({ cwd, summary, width, collapsed, maximized, onCollapse, onToggleMaximize }: {
+export const GitDiffView = memo(GitDiffViewImpl);
+function GitDiffViewImpl({ cwd, summary, width, collapsed, maximized, onCollapse, onToggleMaximize }: {
   cwd: string;
   summary: GitDiffSummaryDto | null;
   /** 停靠宽度（px，ChatWindow 侧的分栏柄拖动改写）；最大化时忽略（面板占满整宽）。 */
@@ -478,10 +502,12 @@ function ChangesView({ cwd, summary }: { cwd: string; summary: GitDiffSummaryDto
     setCtxMenu({ x: event.clientX, y: event.clientY, rel, isDir });
   };
 
-  // summary 每次刷新（面板重新可见时会重拉）都作废单文件 diff 缓存：
-  // agent 随时在提交，旧 diff 是相对旧清单的，继续用会展示过期内容。
+  // summary 每次刷新（面板重新可见时会重拉）都作废缓存：agent 随时在提交/改写文件，
+  // 旧 diff 相对旧清单、旧图片是改写前的字节，继续用会展示过期内容。images 与 entries
+  // 必须一起清——只清 entries 会让「改过的图重开仍显旧图」（与文本 diff 同一类 stale）。
   useEffect(() => {
     setEntries(new Map());
+    setImages(new Map());
   }, [summary]);
 
   const fileByPath = useMemo(() => new Map(summary.files.map((file) => [file.path, file])), [summary.files]);
@@ -561,6 +587,10 @@ function ChangesView({ cwd, summary }: { cwd: string; summary: GitDiffSummaryDto
     });
     return result;
   }, [activeDiff]);
+  const diffMaxCols = useMemo(
+    () => (activeDiff && activeDiff.diff.trim() !== BINARY_PLACEHOLDER ? estimateMaxColumns(activeDiff.diff.split("\n")) : 0),
+    [activeDiff],
+  );
 
   const renderTree = (nodes: FileTreeNode[], depth: number): ReactNode =>
     nodes.map((node) =>
@@ -631,7 +661,8 @@ function ChangesView({ cwd, summary }: { cwd: string; summary: GitDiffSummaryDto
     return (
       <>
         <div className="chat-diff-scroll">
-          <pre className="chat-diff-text">
+          {/* min-width 钉住横向宽度（+4ch 给符号列/内边距），理由见 estimateMaxColumns。 */}
+          <pre className="chat-diff-text" style={{ minWidth: `max(100%, ${diffMaxCols + 4}ch)` }}>
             {fileDiff.diff.split("\n").map((line, index) => {
               const cls = diffLineClass(line);
               const html = highlightedDiff?.[index];
@@ -782,6 +813,10 @@ function FilesView({ cwd }: { cwd: string }) {
     if (!selectedFile || selectedFile.binary) return null;
     return highlightLines(selectedFile.text.split("\n"), languageForPath(selectedFile.relPath));
   }, [selectedFile]);
+  const fileMaxCols = useMemo(
+    () => (selectedFile && !selectedFile.binary ? estimateMaxColumns(selectedFile.text.split("\n")) : 0),
+    [selectedFile],
+  );
 
   // 跳行滚动：等文件加载 + 高亮渲染完成后再滚（children 与行号一一对应）。
   useEffect(() => {
@@ -1021,8 +1056,9 @@ function FilesView({ cwd }: { cwd: string }) {
       return (
         <>
           <div className="chat-diff-scroll">
-            {/* 行号槽宽按最大行号位数走（--ln-w），右对齐 + 右描边，不可选中。 */}
-            <pre ref={preRef} className="chat-diff-text is-code" style={{ "--ln-w": `${String((highlightedFile ?? []).length).length}ch` } as CSSProperties}>
+            {/* 行号槽宽按最大行号位数走（--ln-w），右对齐 + 右描边，不可选中。
+                min-width 钉住横向宽度（+8ch 给行号槽/间距），理由见 estimateMaxColumns。 */}
+            <pre ref={preRef} className="chat-diff-text is-code" style={{ "--ln-w": `${String((highlightedFile ?? []).length).length}ch`, minWidth: `max(100%, ${fileMaxCols + 8}ch)` } as CSSProperties}>
               {(highlightedFile ?? []).map((html, index) => (
                 <div key={index} className={target && selectedPath === target.rel && index + 1 === target.line ? "is-target" : undefined}>
                   <span className="chat-diff-ln">{index + 1}</span>

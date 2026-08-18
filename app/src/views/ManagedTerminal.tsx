@@ -74,6 +74,11 @@ function hasVisibleOutput(bytes: Uint8Array): boolean {
 /// TUI 迟迟不画东西时的保底：宁可把黑屏交给用户，也不要让 spinner 永远转下去。
 const INITIALIZING_TIMEOUT_MS = 25_000;
 
+/// 通用启动提示(登录/凭据类)的识别窗口:挂载/就地重启起算。窗口内足够 attach 回放与
+/// 慢启动 CLI 画出登录页;窗口外这些整会话通用的规则不再参与扫描,防止正跑着的会话
+/// 因输出里引用登录话术被误锁(provider 声明的 markers/patterns 不受此窗限制)。
+const GENERIC_STARTUP_WINDOW_MS = 20_000;
+
 /// 重对齐增量超过它就跳尾（base64 字符数，≈256KB 原始字节）：落后这么多时把全量灌给
 /// xterm 是数秒级的渲染卡死，而终端是实时视图——落后就该直接看最新画面。
 const JUMP_TAIL_B64_CHARS = 350_000;
@@ -286,6 +291,10 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   const attentionTailRef = useRef("");
   const attentionReportedRef = useRef<string | null>(null);
   const lastScreenRef = useRef("");
+  // 通用启动提示(登录/凭据类,GENERIC_STARTUP_PROMPTS)只在启动窗口内参与识别:
+  // 挂载(attach 会回放当前屏,真在等登录的会话立刻能被扫到)与就地重启各开一窗。
+  // 窗口外正跑着的会话输出里引用登录话术(读 auth 文件等)不再弹卡锁输入。
+  const startupPromptsUntilRef = useRef(Date.now() + GENERIC_STARTUP_WINDOW_MS);
   onUserSubmitRef.current = onUserSubmit;
   onBackgroundInputRef.current = onBackgroundInput;
   backgroundRef.current = background;
@@ -542,6 +551,16 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // 输出流停滞检测节拍(判据见 terminalStreamStalled):挂载即重置水位——上一个
     // 会话/进程的旧水位不作数。
     lastByteAtRef.current = Date.now();
+    // 换会话重挂即重开通用启动提示的识别窗口(attach 回放的当前屏若真停在登录页,
+    // 首轮扫描就落在窗口内)。
+    startupPromptsUntilRef.current = Date.now() + GENERIC_STARTUP_WINDOW_MS;
+    // 识别态也随会话作废（本 effect 以 sessionId 为键,同一实例服务不同会话）:这三个
+    // ref 原先只在就地重启的 rearm 里清,换会话不清 → 上个会话的残屏会被晚到补扫读去,
+    // 对新会话弹一张不属于它的 attention 卡；attentionReportedRef 残留同签名还会反向
+    // 抑制,让新会话首张同文案的卡片发不出来。与 rearm 同款一并归零。
+    attentionReportedRef.current = null;
+    attentionTailRef.current = "";
+    lastScreenRef.current = "";
     const stallTimer = window.setInterval(() => {
       const candidate = terminalStreamStalled({
         active: activeRef.current,
@@ -648,7 +667,14 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     let clearPublished = false;
     const reportAttention = (text: string) => {
       if (text) lastScreenRef.current = text;
-      const attention = terminalAttention(text, attentionMarkersRef.current, interactivePromptRef.current, expectMenuRef.current, grammarRef.current);
+      const attention = terminalAttention(
+        text,
+        attentionMarkersRef.current,
+        interactivePromptRef.current,
+        expectMenuRef.current,
+        grammarRef.current,
+        Date.now() < startupPromptsUntilRef.current,
+      );
       if (!attention) {
         // 此前这里直接 return——attention 状态只置不清,误报或已在终端里处理过的提示会
         // 永久钉住卡片、锁死对话页输入框。现在:屏幕持续不匹配就发布 null 收卡,并重置
@@ -902,6 +928,8 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       attentionReportedRef.current = null;
       attentionTailRef.current = "";
       lastScreenRef.current = "";
+      // 就地重启 = 新进程重新走一遍启动流程,通用启动提示的识别窗口随之重开。
+      startupPromptsUntilRef.current = Date.now() + GENERIC_STARTUP_WINDOW_MS;
       snapshotApplied = false;
       bufferedOutput.length = 0;
       bufferedExit = null;
@@ -1008,7 +1036,14 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   // 与 markers 晚到的补投递同一套逻辑。
   const grammarKey = JSON.stringify(grammar ?? null);
   useEffect(() => {
-    const attention = terminalAttention(lastScreenRef.current || attentionTailRef.current, attentionMarkers, interactivePrompt, expectMenu, grammar);
+    const attention = terminalAttention(
+      lastScreenRef.current || attentionTailRef.current,
+      attentionMarkers,
+      interactivePrompt,
+      expectMenu,
+      grammar,
+      Date.now() < startupPromptsUntilRef.current,
+    );
     if (!attention) return;
     const signature = `${attention.id}\0${attention.text}\0${JSON.stringify(attention.options)}`;
     if (signature === attentionReportedRef.current) return;

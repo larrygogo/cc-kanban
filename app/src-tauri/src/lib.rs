@@ -345,6 +345,48 @@ async fn install_downloaded_update(app: tauri::AppHandle) -> Result<(), String> 
     .map_err(|e| e.to_string())?
 }
 
+/// 退出收尾：更新包已下载校验过但用户没点「重启并更新」时，趁退出静默安装，
+/// 下次手动启动即新版。任何一步失败都放弃——包只驻内存，下次启动照常重走下载。
+fn install_downloaded_on_exit(app: &tauri::AppHandle) {
+    // take：用户已点「重启并更新」的话 slot 为空，不会装第二遍。
+    let Some(downloaded) = app
+        .state::<AppState>()
+        .downloaded_update
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+    else {
+        return;
+    };
+    #[cfg(windows)]
+    {
+        // 不复用 update.install()：它固定追加 /R 让 NSIS 装完把应用重新拉起，而这里
+        // 用户的意图是退出。自己落盘后传 /S /UPDATE（同 updater 的静默升级路径，见
+        // installer.nsi $UpdateMode），不带 /R。本进程尚未死透不碍事：NSIS 侧
+        // CheckIfAppIsRunning 在静默模式下自行处理残留进程。
+        let path = std::env::temp_dir().join(format!(
+            "meowo-update-{}-setup.exe",
+            downloaded.update.version
+        ));
+        if std::fs::write(&path, &downloaded.bytes).is_err() {
+            return;
+        }
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new(&path)
+            .args(["/S", "/UPDATE"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // macOS 的 install 是原地覆盖 .app，不拉起新进程也不退出本进程，退出路径直接调。
+        let _ = downloaded.update.install(&downloaded.bytes);
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = downloaded;
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -575,6 +617,15 @@ fn run_cli_capture(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = cmd.spawn().ok()?;
+    // stdout 必须边跑边排水：不排水的话，子进程输出一超过管道缓冲（~64KB）写端就
+    // 阻塞，进程永远退不出——轮询只会等到超时把它 kill，还把空结果错误地进了缓存。
+    let mut stdout = child.stdout.take()?;
+    let drain = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -588,8 +639,11 @@ fn run_cli_capture(
             }
         }
     }
-    let out = child.wait_with_output().ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    // kill 之后也要 wait 收尸：写端句柄随进程退出关闭，读线程才能到 EOF；
+    // 超时前已读到的部分输出保留返回，不随 kill 一起丢。
+    let _ = child.wait();
+    let bytes = drain.join().ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// 已装 CLI 的版本，`<launch_argv> --version` 探测，**进程级缓存**（版本只随重装变化，而
@@ -1239,6 +1293,9 @@ pub fn run() {
             spawn_db_watcher(app.handle().clone(), path.clone());
             spawn_liveness_watch(app.handle().clone(), path.clone(), tx_cache.clone());
             spawn_first_import(app.handle().clone(), path.clone());
+            // %TEMP%\meowo-paste 没有任何 OS 侧回收（Windows 不清 %TEMP%），启动时后台
+            // 按 mtime 清过期附件（TTL 与回读方的取舍见 chat::PASTE_TTL）。
+            chat::spawn_paste_cleanup();
             // 首次启动（新装 / 老用户升级后第一次）自动弹使用引导。延迟一拍让贴纸先画出来，
             // 引导窗口叠在已成型的应用上；看完/关闭时前端置 onboarding_seen=true，之后只手动打开。
             if !crate::settings::load_settings().onboarding_seen {
@@ -1266,12 +1323,14 @@ pub fn run() {
             context
         })
         .expect("error while running tauri application")
-        .run(move |_app, event| {
+        .run(move |app, event| {
             // 托管 PTY 的子进程不随 GUI 一起死：不显式收尾就会被孤儿化（Windows 上 conhost
             // 一并残留）。同时删掉 approval-broker.json，否则下一个 reporter 会拿着已失效的
             // 端点去连一个可能已被回收的端口。
             if matches!(event, tauri::RunEvent::Exit) {
                 exit_ptys.shutdown();
+                // 收尾之后再装：安装器会杀残留进程，先把 PTY 善后做完。
+                install_downloaded_on_exit(app);
             }
         });
 }
@@ -1283,7 +1342,6 @@ mod tests {
         SessionRuntimeIndex, RESUME_GRACE_MS,
     };
     use crate::install::{bump_login_epoch, login_epoch};
-    use crate::proc::pid_is_agent;
     use crate::terminal::{
         normalize_tab_title, parse_wt_default_profile, path_has_exe, resume_argv_for,
         shell_join_for_windows, strip_jsonc_comments, tab_match_score,
@@ -1671,7 +1729,6 @@ mod tests {
     }
     use crate::settings::Settings;
     use crate::snap::{center_on, clamp_xy_to_work, edge_for_rect, intersection_area, Edge, Rect};
-    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
 
     const WORK1: Rect = Rect {
         x: 0,
@@ -1775,23 +1832,23 @@ mod tests {
     #[test]
     fn tab_class_excludes_disconnected_sessions() {
         // 连着：三类各归其位。
-        assert_eq!(tab_class(true, "running", None, None), Some("running"));
-        assert_eq!(tab_class(true, "waiting", None, None), Some("waiting"));
+        assert_eq!(tab_class(true, "running", None, None, || false), Some("running"));
+        assert_eq!(tab_class(true, "waiting", None, None, || false), Some("waiting"));
         // pending_review 压过 status：正在等用户批准，不算「自主运行中」。
         assert_eq!(
-            tab_class(true, "running", Some("approval"), None),
+            tab_class(true, "running", Some("approval"), None, || false),
             Some("waiting")
         );
 
         // 断开：一律不进这两个 tab，只作为历史留在「全部」里。
         // 尤其是这条——DB 里残留的 pending_review 曾让断开的会话挂在「待交互」里催人，
         // 点进去却只是个死掉的历史会话（兼容旧数据库中的 pending_review 残留）。
-        assert_eq!(tab_class(false, "running", Some("approval"), None), None);
-        assert_eq!(tab_class(false, "waiting", None, None), None);
-        assert_eq!(tab_class(false, "running", None, None), None);
+        assert_eq!(tab_class(false, "running", Some("approval"), None, || false), None);
+        assert_eq!(tab_class(false, "waiting", None, None, || false), None);
+        assert_eq!(tab_class(false, "running", None, None, || false), None);
 
         // 已结束/其它状态：本就不属于这两类。
-        assert_eq!(tab_class(true, "ended", None, None), None);
+        assert_eq!(tab_class(true, "ended", None, None, || false), None);
     }
 
     /// tab 归属与卡片状态环同源：屏幕检测（实时）压过 DB status（hook 驱动、滞后）。
@@ -1801,43 +1858,66 @@ mod tests {
     fn tab_class_lets_screen_state_override_db_status() {
         // 屏幕说了算：idle/blocked → 待交互，working → 运行中，无论 DB status 停在哪。
         assert_eq!(
-            tab_class(true, "running", None, Some("idle")),
+            tab_class(true, "running", None, Some("idle"), || false),
             Some("waiting")
         );
         assert_eq!(
-            tab_class(true, "running", None, Some("blocked")),
+            tab_class(true, "running", None, Some("blocked"), || false),
             Some("waiting")
         );
         assert_eq!(
-            tab_class(true, "waiting", None, Some("working")),
+            tab_class(true, "waiting", None, Some("working"), || false),
             Some("running")
         );
         // 审批（校正后仍在压着的）最优先——那是事实源，屏幕规则可能漏报 blocked。
         assert_eq!(
-            tab_class(true, "running", Some("approval"), Some("working")),
+            tab_class(true, "running", Some("approval"), Some("working"), || false),
             Some("waiting")
         );
         // 屏幕状态对 ended 也生效前提是 connected；ended + 屏幕 working 属于恢复窗口，
         // 由 PTY 存活判 connected，这里归运行中，与卡片绿环一致。
         assert_eq!(
-            tab_class(true, "ended", None, Some("working")),
+            tab_class(true, "ended", None, Some("working"), || false),
             Some("running")
         );
         // 断开永远优先于一切。
-        assert_eq!(tab_class(false, "running", None, Some("idle")), None);
+        assert_eq!(tab_class(false, "running", None, Some("idle"), || false), None);
+    }
+
+    /// 主回合停了(DB waiting / 屏幕 idle)但后台子任务还在跑 → 归「运行中」,不催人。
+    /// 实拍反馈:委派了后台审查 agent 的会话在等待区躺了半小时,其实一直在干活。
+    /// 但真要人的信号(审批/屏幕 blocked)不被后台忙碌掩盖——批准不点,后台跑完也白等。
+    #[test]
+    fn tab_class_busy_subagents_keep_session_running() {
+        assert_eq!(
+            tab_class(true, "waiting", None, None, || true),
+            Some("running")
+        );
+        assert_eq!(
+            tab_class(true, "running", None, Some("idle"), || true),
+            Some("running")
+        );
+        // 审批与屏幕 blocked 仍是待交互——那是用户必须处理的。
+        assert_eq!(
+            tab_class(true, "waiting", Some("approval"), None, || true),
+            Some("waiting")
+        );
+        assert_eq!(
+            tab_class(true, "running", None, Some("blocked"), || true),
+            Some("waiting")
+        );
+        // 断开的会话谈不上后台忙碌(子任务与主进程同生共死)。
+        assert_eq!(tab_class(false, "waiting", None, None, || true), None);
     }
 
     #[test]
-    fn pid_is_agent_rejects_non_claude_and_dead() {
-        let sys = System::new_with_specifics(
-            RefreshKind::new().with_processes(ProcessRefreshKind::new()),
-        );
-        // 当前测试进程存在但不叫 claude → 不算连接（pid 复用防护）
-        assert!(!pid_is_agent(&sys, std::process::id() as i64));
-        // 非法 / 已死的 pid
-        assert!(!pid_is_agent(&sys, 0));
-        assert!(!pid_is_agent(&sys, -1));
-        assert!(!pid_is_agent(&sys, 4_000_000_000));
+    fn agent_pids_snapshot_rejects_non_agent_processes() {
+        // 当前测试进程存在但不叫 claude → 不算连接（pid 复用防护）；
+        // 非法 pid 天然不在集合里。这是存活轮询与看板连接判定共用的事实源。
+        let pids = crate::proc::agent_pids_snapshot();
+        assert!(!pids.contains(&(std::process::id() as i64)));
+        assert!(!pids.contains(&0));
+        assert!(!pids.contains(&-1));
     }
 
     #[test]

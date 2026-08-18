@@ -11,7 +11,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use tauri::{Emitter, Manager};
 
@@ -32,6 +32,20 @@ const DETECT_TICK: std::time::Duration = std::time::Duration::from_millis(300);
 /// 待处理题面在 broker 侧的存活上限。取 150s：略早于前端题面卡自己的 180s 兜底过期，
 /// 保证「卡还在但表里已空」而不是反过来（表里残留会让轮询把答过的题重新弹出来）。
 const INTERACTIVE_QUESTION_TTL_MS: i64 = 150_000;
+
+/// 同时处于**握手阶段**的 attach 连接数上限。10s 读超时只保证单个连接不永久占线程，
+/// 挡不住超时窗口内的堆积；正常场景同时握手的连接是个位数，32 只挡失控/恶意建连。
+const MAX_ATTACH_HANDSHAKES: usize = 32;
+
+/// 一个已占用的握手名额：Drop 归还，handle_attach 的任何 return/panic 路径都不会漏还。
+/// 只计握手阶段，认证后的长驻转发不占名额。None 形态留给单测直连。
+struct HandshakeSlot(Arc<AtomicUsize>);
+
+impl Drop for HandshakeSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// vt100 标题回调：OSC 0/2 设置的窗口标题是检测证据（claude 用盲文 spinner/✳ 前缀）。
 /// 标题是不受信任的模型输出——过滤控制字符并限长；空 payload 视为清除。
@@ -1704,11 +1718,26 @@ impl PtyBroker {
         }
         let broker = self.clone();
         std::thread::spawn(move || {
+            // 线程 per 连接且鉴权在 spawn 之后：loopback 上任何本地进程都能 connect，
+            // 10s 握手读超时只保证单个连接不永久占线程，挡不住窗口内的无界堆积——
+            // 失控进程反复建连即可耗尽线程数。名额封顶，超了直接关连接（正常客户端会重试）。
+            let inflight = Arc::new(AtomicUsize::new(0));
             for stream in listener.incoming() {
-                let Ok(stream) = stream else { continue };
+                let Ok(stream) = stream else {
+                    // accept 出错（句柄耗尽等）多为持续状态，裸 continue 会热旋占满一个核。
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                };
+                // 单 accept 线程，load 后再 add 无竞争窗口。
+                if inflight.load(Ordering::Acquire) >= MAX_ATTACH_HANDSHAKES {
+                    drop(stream);
+                    continue;
+                }
+                inflight.fetch_add(1, Ordering::AcqRel);
+                let slot = HandshakeSlot(inflight.clone());
                 let broker = broker.clone();
                 std::thread::spawn(move || {
-                    let _ = broker.handle_attach(stream);
+                    let _ = broker.handle_attach(stream, Some(slot));
                 });
             }
         });
@@ -2158,7 +2187,11 @@ impl PtyBroker {
         }
     }
 
-    fn handle_attach(&self, mut stream: TcpStream) -> Result<(), String> {
+    fn handle_attach(
+        &self,
+        mut stream: TcpStream,
+        handshake_slot: Option<HandshakeSlot>,
+    ) -> Result<(), String> {
         stream.set_nodelay(true).ok();
         // 握手必须限时：loopback 上任何本地进程都能 connect，不设读超时的话，连上后
         // 一言不发就永久占住一个 handler 线程（每连接一线程），反复建连即可耗尽线程数。
@@ -2167,6 +2200,9 @@ impl PtyBroker {
             .set_read_timeout(Some(std::time::Duration::from_secs(10)))
             .ok();
         let handshake = read_handshake(&mut stream).map_err(|e| e.to_string())?;
+        // 握手字节已收齐——名额到此归还。后面是即时的解析/鉴权，或已认证的长驻转发/
+        // 审批等待，那些不该占握手名额（外部终端可以合法开很多个）。
+        drop(handshake_slot);
         let BrokerRequest::Attach {
             token,
             session_id,
@@ -2233,7 +2269,14 @@ impl PtyBroker {
                     pid: client_pid,
                     tx,
                 });
-            backlog.iter().copied().collect::<Vec<_>>()
+            // as_slices + extend_from_slice 确定走 memcpy（与 snapshot 同款理由）：
+            // 这里正持着 backlog + subscribers 两把锁，逐字节拷 1MiB 会把 PTY 读线程
+            // 卡在门外一整段肉眼可感的时间。
+            let (front, back) = backlog.as_slices();
+            let mut data: Vec<u8> = Vec::with_capacity(backlog.len());
+            data.extend_from_slice(front);
+            data.extend_from_slice(back);
+            data
         };
         // 回放给外部终端前滤掉历史查询(理由见 strip_dsr_queries):否则客户端 DsrFilter
         // 每次重开外部同步终端都会把它们再代答一遍。订阅之后的实时字节不过滤——
@@ -2446,19 +2489,14 @@ impl PtyBroker {
         }
         // DB 收尾 best-effort（与首次认领的 launch_args 落库同款容错）：失败只丢同卡
         // 折叠与选项回放，不阻断换绑——PTY 归属是主语义，必须先落。
+        // 「旧段结束 + 启动选项复制 + 接续链成对写入」在 store 层一个事务里原子完成
+        // （supersede_session）：此前是三笔独立事务，中途失败留半态——孤立的旧活卡，
+        // 或用户看不见、reaper 却还管着的行。整体失败时旧段由 agent 的 SessionEnd(clear)
+        // hook 兜底收尾，不依赖到达顺序。
         match crate::open_store(&crate::db_path()) {
             Ok(store) => {
-                // 旧段结束：agent 的 SessionEnd(clear) 也会写这条，不依赖其到达顺序。
-                if let Err(e) = store.end_session(old_sid, crate::now_ms()) {
-                    eprintln!("换代后回写旧会话结束状态失败（{old_sid}）: {e}");
-                }
-                // 启动选项跟着终端进程走：复制到新行，新段日后单独 resume 才能回放
-                // 权限模式等参数。
-                if let Ok(Some(args)) = store.session_launch_args(old_sid) {
-                    let _ = store.set_session_launch_args(new_sid, &args);
-                }
-                if let Err(e) = store.set_session_lineage(new_sid, old_sid) {
-                    eprintln!("换代接续链落库失败（{old_sid} → {new_sid}）: {e}");
+                if let Err(e) = store.supersede_session(old_sid, new_sid, crate::now_ms()) {
+                    eprintln!("换代收尾落库失败（{old_sid} → {new_sid}）: {e}");
                 }
             }
             Err(e) => eprintln!("换代后打开数据库失败（{old_sid} → {new_sid}）: {e}"),
@@ -3954,7 +3992,7 @@ mod tests {
         let server = broker.clone();
         let handle = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            server.handle_attach(stream).unwrap();
+            server.handle_attach(stream, None).unwrap();
         });
         let request = ApprovalRequest {
             session_id: 77,
@@ -3987,7 +4025,7 @@ mod tests {
         let server = broker.clone();
         let handle = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            server.handle_attach(stream).unwrap();
+            server.handle_attach(stream, None).unwrap();
         });
         let request = ApprovalRequest {
             session_id: 78,

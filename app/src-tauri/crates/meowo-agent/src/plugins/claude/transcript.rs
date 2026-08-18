@@ -48,6 +48,8 @@ fn task_notification_result(
             running: 0,
             completed: if failed { 0 } else { 1 },
             failed: if failed { 1 } else { 0 },
+            // 通知自带 tool-use-id，直接落到原委派上，无需再靠任务 id 路由。
+            task_id: None,
         }),
     })
 }
@@ -381,6 +383,13 @@ fn parse_events(line: &str, allow_sidechain: bool) -> Vec<TranscriptEvent> {
             if text.is_empty() {
                 return Vec::new();
             }
+            // 主 agent 正忙时后台任务的完成通知会走**排队**送入——不落普通 user 行,只有
+            // 这条 queued_command attachment(实拍:审查子任务完成于回合中途,通知经
+            // enqueue → 本行送达)。不认它,该子任务的徽标就永远「运行中」,通知原文还会
+            // 以一坨 XML 的样子出现在时间线里。与 user 行同款转译成合成回执。
+            if let Some(event) = task_notification_result(&text, base_id, timestamp.clone()) {
+                return vec![event];
+            }
             vec![TranscriptEvent::UserMessage {
                 id: base_id.to_string(),
                 timestamp,
@@ -479,26 +488,39 @@ pub(crate) fn classify_error(text: &str, synthetic: bool) -> Option<&'static str
 }
 
 /// 增量解析的累积状态：标题（custom/ai 分开存，custom 优先）、最近一条 assistant 正文、
-/// 最近一条 usage。逐行 fold，故对「只追加」的 transcript 可跨多次调用累积，无需重头扫。
+/// 最近一条 usage、还在跑的后台子任务集。逐行 fold，故对「只追加」的 transcript 可跨
+/// 多次调用累积，无需重头扫。
 #[derive(Default, Clone)]
 struct ParseState {
     custom: Option<String>,
     ai: Option<String>,
     last_text: Option<(String, bool)>, // (正文, model 是否 <synthetic>)
     last_usage: Option<u64>,           // 最近一条 assistant 的上下文已用 token
+    /// 已发启动回执、尚无结局信号的后台任务 id（启动回执的 agentId）。结局信号有三形:
+    /// user 行的 task-notification、排队送入的通知(queue-operation/attachment)、
+    /// TaskOutput 拉取回执。主回合结束后这里非空 = 后台还有活儿在跑。
+    running_tasks: std::collections::HashSet<String>,
 }
 
 impl ParseState {
-    /// 折叠一行 JSONL：只关心 title / assistant 行，其它快速跳过（不解析）。
+    /// 折叠一行 JSONL：只关心 title / assistant / 后台任务信号行，其它快速跳过（不解析）。
     fn fold_line(&mut self, line: &str) {
         let has_title = line.contains("-title");
         let has_assistant = line.contains("\"assistant\"");
-        if !has_title && !has_assistant {
+        // 后台任务的启动/结局信号:行形态各异(user 回执、排队通知、TaskOutput 回执),
+        // 先做廉价子串门卫,命中才付 JSON 解析。
+        let has_task_signal = line.contains("Async agent launched")
+            || line.contains("<task-notification>")
+            || line.contains("<retrieval_status>");
+        if !has_title && !has_assistant && !has_task_signal {
             return;
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             return;
         };
+        if has_task_signal {
+            self.fold_task_signals(&v);
+        }
         match v.get("type").and_then(|t| t.as_str()) {
             Some("custom-title") => {
                 if let Some(s) = v.get("customTitle").and_then(|x| x.as_str()) {
@@ -559,6 +581,97 @@ impl ParseState {
         }
     }
 
+    /// 折叠后台任务的启动/结局信号，维护 running_tasks 集。
+    ///
+    /// 启动:user 行里 `Async agent launched…agentId: xxx` 的工具回执。
+    /// 结局(移除):
+    /// - user 行的 `<task-notification>`(内容字符串或 text 块);
+    /// - **排队形态**的通知——主 agent 正忙时通知不落 user 行,记成 queue-operation
+    ///   enqueue(通知生成时结局已定,即为结束信号)与 attachment/queued_command(送达);
+    /// - TaskOutput 拉取回执(`<retrieval_status>` + 终态 status)。
+    ///
+    /// isSidechain 行不看:子任务自己的委派不算主会话的后台工作。
+    fn fold_task_signals(&mut self, v: &serde_json::Value) {
+        if v.get("isSidechain").and_then(|x| x.as_bool()) == Some(true) {
+            return;
+        }
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("user") => {
+                let content = v.pointer("/message/content");
+                if let Some(text) = content.and_then(|x| x.as_str()) {
+                    self.settle_from_notification(text);
+                    return;
+                }
+                for block in content.and_then(|x| x.as_array()).into_iter().flatten() {
+                    match block.get("type").and_then(|x| x.as_str()) {
+                        Some("tool_result") => {
+                            let text = text_from_content(
+                                block.get("content").unwrap_or(&serde_json::Value::Null),
+                            );
+                            self.fold_tool_result_text(&text);
+                        }
+                        Some("text") => {
+                            if let Some(text) = block.get("text").and_then(|x| x.as_str()) {
+                                self.settle_from_notification(text);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // enqueue 即结束信号;remove 是队列记账(送达/撤下),不重复处理。
+            Some("queue-operation") => {
+                if v.get("operation").and_then(|x| x.as_str()) == Some("enqueue") {
+                    if let Some(text) = v.get("content").and_then(|x| x.as_str()) {
+                        self.settle_from_notification(text);
+                    }
+                }
+            }
+            Some("attachment") => {
+                let prompt = v.pointer("/attachment/prompt");
+                if let Some(text) = prompt.and_then(|x| x.as_str()) {
+                    self.settle_from_notification(text);
+                    return;
+                }
+                for block in prompt.and_then(|x| x.as_array()).into_iter().flatten() {
+                    if let Some(text) = block.get("text").and_then(|x| x.as_str()) {
+                        self.settle_from_notification(text);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `<task-notification>` 正文 → 按 `<task-id>` 移除运行集。必须以标签开头才认——
+    /// 用户/助手**引用**通知文案的消息不该误消(讨论这套机制的会话里真会出现)。
+    fn settle_from_notification(&mut self, text: &str) {
+        if !text.trim_start().starts_with("<task-notification>") {
+            return;
+        }
+        if let Some(id) = tag_text(text, "task-id") {
+            self.running_tasks.remove(id);
+        }
+    }
+
+    /// 工具回执正文:启动回执入集,TaskOutput 拉取的终态回执出集(running/timeout 保持)。
+    fn fold_tool_result_text(&mut self, text: &str) {
+        if text.contains("Async agent launched") {
+            if let Some(id) = launch_agent_id(text) {
+                self.running_tasks.insert(id);
+            }
+            return;
+        }
+        if !text.trim_start().starts_with("<retrieval_status>") {
+            return;
+        }
+        if let (Some(id), Some(status)) = (tag_text(text, "task_id"), tag_text(text, "status")) {
+            if matches!(status, "completed" | "failed" | "killed") {
+                self.running_tasks.remove(id);
+            }
+        }
+    }
+
     /// 从累积状态产出 TranscriptInfo。
     fn to_info(&self) -> TranscriptInfo {
         let error = self.last_text.as_ref().and_then(|(text, synthetic)| {
@@ -583,6 +696,7 @@ impl ParseState {
             context_tokens: self.last_usage,
             context_pct,
             preview: self.last_text.as_ref().and_then(|(t, _)| preview_text(t)),
+            busy_subagents: self.running_tasks.len() as u32,
         }
     }
 }
@@ -688,24 +802,10 @@ fn managed_projects_dirs() -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+/// 数据根解析与目录枚举（含 symlink/junction 解引用）收敛在 `crate::managed_profile_dirs`，
+/// 与 kimi 侧共用同一份规则。
 fn managed_config_dirs() -> Vec<std::path::PathBuf> {
-    let Some(home) = crate::home_dir() else {
-        return Vec::new();
-    };
-    let root = std::env::var_os("MEOWO_DB")
-        .map(std::path::PathBuf::from)
-        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-        .unwrap_or_else(|| home.join(".meowo"))
-        .join("profiles")
-        .join("claude");
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .map(|entry| entry.path())
-        .collect()
+    crate::managed_profile_dirs(crate::id::CLAUDE.as_str())
 }
 
 /// 根据 cwd + session_id 重建 transcript 路径：
@@ -715,10 +815,14 @@ fn managed_config_dirs() -> Vec<std::path::PathBuf> {
 /// 即返回」：跨 profile 恢复会话时宿主把 transcript 复制进目标 CLAUDE_CONFIG_DIR，
 /// 原文件留在默认目录成为不再增长的陈旧副本——偏爱默认目录会让对话页从此只看到
 /// 副本的截止时刻，会话明明在跑、新消息却永远不出现。
+///
+/// **Some ⇒ 文件存在**（对齐 `TranscriptSpec::resolve_transcript_path` 的契约）：所有
+/// 候选都不存在时返回 None，而不是回吐一个不存在的默认路径——那会让调用方各自补
+/// `.filter(|p| p.exists())`，漏一处就把幻影路径当真（reporter 的测试曾直接 unwrap）。
 pub fn reconstruct_transcript_path(cwd: &str, session_id: &str) -> Option<std::path::PathBuf> {
     let relative = std::path::PathBuf::from(encode_cwd(cwd)).join(format!("{session_id}.jsonl"));
     let default = projects_dir()?.join(&relative);
-    std::iter::once(default.clone())
+    std::iter::once(default)
         .chain(
             managed_projects_dirs()
                 .into_iter()
@@ -726,7 +830,6 @@ pub fn reconstruct_transcript_path(cwd: &str, session_id: &str) -> Option<std::p
         )
         .filter(|path| path.exists())
         .max_by_key(|path| transcript_freshness(path))
-        .or(Some(default))
 }
 
 /// 候选副本的新鲜度：mtime 为主、字节数为副。跨 profile 恢复用 `fs::copy` 同步副本
@@ -767,7 +870,9 @@ pub fn find_transcript_by_session(session_id: &str) -> Option<std::path::PathBuf
                 .into_iter()
                 .flatten()
                 .flatten()
-                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                // path().is_dir() 解引用 symlink/junction（DirEntry::file_type 不会），
+                // 与 managed_profile_dirs 的枚举纪律一致。
+                .filter(|entry| entry.path().is_dir())
                 .map(|entry| entry.path().join(&file))
                 .filter(|candidate| candidate.exists())
                 .collect::<Vec<_>>()
@@ -815,10 +920,9 @@ fn resolve_path(
         }
     }
     if let Some(cwd) = cwd {
+        // reconstruct 的 Some 已保证文件存在，不必再验一次。
         if let Some(p) = reconstruct_transcript_path(cwd, session_id) {
-            if p.exists() {
-                return Some(p);
-            }
+            return Some(p);
         }
     }
     find_transcript_by_session(session_id)
@@ -1072,14 +1176,54 @@ impl SubagentSpec for ClaudeSubagents {
     /// 后台委派的**启动回执**:`Agent` 现版本默认异步,立即回一句
     /// `Async agent launched successfully. …`,此时子任务才刚开跑。没有这个信号,
     /// 前端「已回执=已完成」的兜底会把在跑的后台子任务标成完成(实拍反馈)。
-    /// 真结局由 `<task-notification>` 的合成回执后到覆盖(见 [`task_notification_result`])。
+    ///
+    /// 真结局有两条到达路径,必须都认:
+    /// 1. `<task-notification>` 合成回执(见 [`task_notification_result`]),自带 tool-use-id;
+    /// 2. 主 agent 用 `TaskOutput` 主动拉取——**拉过之后 CLI 不再注入通知**(实拍:一个会话
+    ///    7 次委派 4 次只有启动回执),只认通知会让这些子任务永远显示「运行中」。TaskOutput
+    ///    的回执挂在它自己的调用上,靠 `task_id`(= 启动回执里的 `agentId`)归回原委派。
     fn detect_result(&self, output: &str) -> Option<SubagentOutcome> {
-        output.contains("Async agent launched").then_some(SubagentOutcome {
-            running: 1,
-            completed: 0,
-            failed: 0,
+        if output.contains("Async agent launched") {
+            return Some(SubagentOutcome {
+                running: 1,
+                completed: 0,
+                failed: 0,
+                // 启动回执携带任务 id(`agentId: xxx …`),是 task_id → 委派 的映射来源。
+                task_id: launch_agent_id(output),
+            });
+        }
+        // TaskOutput 回执(实拍形态):`<retrieval_status>…</retrieval_status>` 开头,
+        // 带 `<task_id>` 与 `<status>completed|running|failed</status>`。
+        // 没有 task_id 的检索错误(<retrieval_status>error)不认——归不到任何委派。
+        if !output.trim_start().starts_with("<retrieval_status>") {
+            return None;
+        }
+        let task_id = tag_text(output, "task_id")?.to_string();
+        let status = tag_text(output, "status").unwrap_or("running");
+        let (running, completed, failed) = match status {
+            "completed" => (0, 1, 0),
+            "failed" | "killed" => (0, 0, 1),
+            // running / timeout 拉取:仍在跑,如实报 running(与启动回执一致)。
+            _ => (1, 0, 0),
+        };
+        Some(SubagentOutcome {
+            running,
+            completed,
+            failed,
+            task_id: Some(task_id),
         })
     }
+}
+
+/// 从启动回执正文抠任务 id:`agentId: a9b726e3a088bafea (internal ID …)`。
+/// 手写扫描,取 `agentId: ` 后的连续字母数字;形态变了返回 None,徽标退回纯 running。
+fn launch_agent_id(output: &str) -> Option<String> {
+    let rest = &output[output.find("agentId: ")? + "agentId: ".len()..];
+    let id: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+    (!id.is_empty()).then_some(id)
 }
 
 impl ClaudeSubagents {
@@ -1199,7 +1343,8 @@ impl TranscriptSpec for ClaudeTranscript {
     fn resolve_cwd(&self, cwd: Option<&str>, session_id: &str) -> Option<String> {
         let known = crate::transcript::default_resolve_cwd(cwd);
         if let Some(c) = &known {
-            if reconstruct_transcript_path(c, session_id).is_some_and(|p| p.exists()) {
+            // reconstruct 的 Some ⇒ 文件存在，即校验通过。
+            if reconstruct_transcript_path(c, session_id).is_some() {
                 return known;
             }
         }
@@ -1730,7 +1875,11 @@ mod tests {
 
         let _env = crate::env_guard();
         let old_home = std::env::var("USERPROFILE").ok();
+        // meowo PTY 里跑测试会带着指向真库的 MEOWO_DB——数据根解析优先读它，
+        // 不一并指进临时 home 的话，managed 目录会扫到真实 profile 而不是本用例造的。
+        let old_db = std::env::var("MEOWO_DB").ok();
         std::env::set_var("USERPROFILE", &home);
+        std::env::set_var("MEOWO_DB", home.join(".meowo").join("board.db"));
         assert_eq!(
             find_transcript_by_session(&sid).as_deref(),
             Some(transcript.as_path())
@@ -1742,6 +1891,10 @@ mod tests {
         match old_home {
             Some(value) => std::env::set_var("USERPROFILE", value),
             None => std::env::remove_var("USERPROFILE"),
+        }
+        match old_db {
+            Some(value) => std::env::set_var("MEOWO_DB", value),
+            None => std::env::remove_var("MEOWO_DB"),
         }
         let _ = std::fs::remove_dir_all(home);
     }
@@ -1773,7 +1926,11 @@ mod tests {
 
         let _env = crate::env_guard();
         let old_home = std::env::var("USERPROFILE").ok();
+        // 同 transcript_lookup_includes_managed_claude_profiles：MEOWO_DB 必须跟着指进
+        // 临时 home，否则 managed 目录解析到真库旁的 profiles，本用例的 fresh 副本扫不到。
+        let old_db = std::env::var("MEOWO_DB").ok();
         std::env::set_var("USERPROFILE", &home);
+        std::env::set_var("MEOWO_DB", home.join(".meowo").join("board.db"));
         assert_eq!(
             reconstruct_transcript_path(r"C:\shared\project", &sid).as_deref(),
             Some(fresh.as_path())
@@ -1792,6 +1949,10 @@ mod tests {
         match old_home {
             Some(value) => std::env::set_var("USERPROFILE", value),
             None => std::env::remove_var("USERPROFILE"),
+        }
+        match old_db {
+            Some(value) => std::env::set_var("MEOWO_DB", value),
+            None => std::env::remove_var("MEOWO_DB"),
         }
         let _ = std::fs::remove_dir_all(home);
     }
@@ -1825,7 +1986,10 @@ mod tests {
 
         let _env = crate::env_guard();
         let old_home = std::env::var("USERPROFILE").ok();
+        // 同上两例：MEOWO_DB 跟着指进临时 home，managed 侧候选才落在本用例的目录里。
+        let old_db = std::env::var("MEOWO_DB").ok();
         std::env::set_var("USERPROFILE", &home);
+        std::env::set_var("MEOWO_DB", home.join(".meowo").join("board.db"));
         assert_eq!(
             reconstruct_transcript_path(r"C:\shared\project", &sid).as_deref(),
             Some(in_managed.as_path())
@@ -1839,6 +2003,10 @@ mod tests {
         match old_home {
             Some(value) => std::env::set_var("USERPROFILE", value),
             None => std::env::remove_var("USERPROFILE"),
+        }
+        match old_db {
+            Some(value) => std::env::set_var("MEOWO_DB", value),
+            None => std::env::remove_var("MEOWO_DB"),
         }
         let _ = std::fs::remove_dir_all(home);
     }
@@ -1987,15 +2155,26 @@ mod tests {
 
     /// 后台委派(`Agent` 现版本默认异步)的立即回执只是「派出去了」,不是完成——
     /// 此前不带结局信号,前端「已回执=完成」的兜底把在跑的后台子任务标成完成(实拍反馈)。
-    /// 启动回执须标 running;真结局由 task-notification 的合成回执覆盖。
+    /// 启动回执须标 running 并带任务 id;真结局由 task-notification 或 TaskOutput 回执覆盖。
     #[test]
     fn async_launch_receipt_marks_subagent_running() {
-        let line = r#"{"type":"user","uuid":"u1","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully. (This tool result is internal metadata — never quote it.)"}]}]}}"#;
+        let line = r#"{"type":"user","uuid":"u1","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: a9b726e3a088bafea (internal ID - do not mention to user.)\noutput_file: C:\\tmp\\x.output"}]}]}}"#;
         let ChatItem::ToolResult { subagent, .. } = &parse_chat_items(line)[0] else {
             panic!("应解析成工具回执");
         };
         let outcome = subagent.as_ref().expect("启动回执应标 running");
         assert_eq!((outcome.running, outcome.completed, outcome.failed), (1, 0, 0));
+        // 任务 id 是 TaskOutput 回执归回原委派的唯一外键。
+        assert_eq!(outcome.task_id.as_deref(), Some("a9b726e3a088bafea"));
+
+        // 形态变了(没有 agentId 行)只丢外键,running 信号必须保住。
+        let no_id = r#"{"type":"user","uuid":"u1b","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg2","content":[{"type":"text","text":"Async agent launched successfully."}]}]}}"#;
+        let ChatItem::ToolResult { subagent, .. } = &parse_chat_items(no_id)[0] else {
+            panic!("应解析成工具回执");
+        };
+        let outcome = subagent.as_ref().unwrap();
+        assert_eq!(outcome.running, 1);
+        assert_eq!(outcome.task_id, None);
 
         // 同步委派的回执(真实结果文本)不带结局信号——「已回执=完成」的兜底对它成立。
         let sync = r#"{"type":"user","uuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_s","content":"探索完成:共 3 个文件"}]}}"#;
@@ -2003,6 +2182,39 @@ mod tests {
             panic!("应解析成工具回执");
         };
         assert!(subagent.is_none());
+    }
+
+    /// 主 agent 用 `TaskOutput` 拉取后台子任务结果时,CLI 不再注入 task-notification
+    /// (实拍:一个会话 7 次委派 4 次因此没有完成信号)——这条回执必须也被认成结局,
+    /// 靠 task_id 归回原委派,否则那些子任务永远显示「运行中」。
+    #[test]
+    fn taskoutput_receipt_carries_subagent_outcome() {
+        // completed(实拍形态,<output> 里是子任务全文,这里截断)。
+        let done = CLAUDE_SUBAGENTS.detect_result(
+            "<retrieval_status>success</retrieval_status>\n\n<task_id>a60a5992b1bf8b192</task_id>\n\n<task_type>local_agent</task_type>\n\n<status>completed</status>\n\n<output>\n核完了。\n</output>",
+        );
+        let done = done.expect("completed 拉取应产出结局");
+        assert_eq!((done.running, done.completed, done.failed), (0, 1, 0));
+        assert_eq!(done.task_id.as_deref(), Some("a60a5992b1bf8b192"));
+
+        // 超时拉取(任务还在跑):如实报 running,不误标完成。
+        let waiting = CLAUDE_SUBAGENTS
+            .detect_result("<retrieval_status>timeout</retrieval_status>\n\n<task_id>ad39aeb81d8552d59</task_id>\n\n<task_type>local_agent</task_type>\n\n<status>running</status>")
+            .expect("timeout 拉取也应带回执");
+        assert_eq!((waiting.running, waiting.completed, waiting.failed), (1, 0, 0));
+
+        // failed 变体。
+        let failed = CLAUDE_SUBAGENTS
+            .detect_result("<retrieval_status>success</retrieval_status>\n<task_id>abc</task_id>\n<status>failed</status>")
+            .expect("failed 拉取应产出结局");
+        assert_eq!((failed.running, failed.completed, failed.failed), (0, 0, 1));
+
+        // 检索错误没有 task_id → 归不到委派,不产出结局(宁缺毋错)。
+        assert!(CLAUDE_SUBAGENTS
+            .detect_result("<retrieval_status>error</retrieval_status>\nNo such task")
+            .is_none());
+        // 普通工具结果碰巧含尖括号不受影响。
+        assert!(CLAUDE_SUBAGENTS.detect_result("cat 输出:<status>completed</status>").is_none());
     }
 
     /// `<task-notification>` user 消息是后台任务的完成通知,不是用户说的话:
@@ -2092,6 +2304,74 @@ mod tests {
                 .is_empty()
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 主 agent 正忙时后台任务的完成通知走排队送入——不落 user 行,记成 queued_command
+    /// attachment(实拍取证)。必须同款转译成合成回执:不认它,子任务徽标永远「运行中」,
+    /// 通知原文还会以一坨 XML 出现在时间线里。
+    #[test]
+    fn queued_task_notification_becomes_synthetic_receipt() {
+        let line = r#"{"type":"attachment","uuid":"qn1","timestamp":"2026-08-18T05:22:59Z","isSidechain":false,"attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>a83e4da9cafca253c</task-id>\n<tool-use-id>toolu_q</tool-use-id>\n<status>completed</status>\n<summary>审查完成</summary>\n</task-notification>"}}"#;
+        let items = parse_chat_items(line);
+        let ChatItem::ToolResult { tool_use_id, subagent, .. } = &items[0] else {
+            panic!("排队通知应转译成合成回执,实际:{items:?}");
+        };
+        assert_eq!(tool_use_id.as_deref(), Some("toolu_q"));
+        assert_eq!(subagent.as_ref().unwrap().completed, 1);
+    }
+
+    /// busy_subagents:启动回执入集,三种结局信号(user 行通知/排队通知/TaskOutput 终态
+    /// 回执)任一到达即出集。主回合 Stop 后它非零 = 后台还有活儿,状态判定据此不把会话
+    /// 标成「等待中」。
+    #[test]
+    fn analyzer_tracks_busy_background_subagents() {
+        let launch = |id: &str, agent: &str| format!(
+            r#"{{"type":"user","uuid":"{id}","message":{{"content":[{{"type":"tool_result","tool_use_id":"t_{id}","content":[{{"type":"text","text":"Async agent launched successfully.\nagentId: {agent} (internal ID - do not mention to user.)"}}]}}]}}}}"#
+        );
+        // 两个后台委派在跑。
+        let mut content = format!("{}\n{}\n", launch("l1", "aaa111"), launch("l2", "bbb222"));
+        let p = write_tmp("busy_track", &content);
+        assert_eq!(analyze_transcript(p.to_str().unwrap()).busy_subagents, 2);
+
+        // user 行通知了结 aaa111。
+        content.push_str(r#"{"type":"user","uuid":"n1","message":{"content":"<task-notification>\n<task-id>aaa111</task-id>\n<tool-use-id>t_l1</tool-use-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>"}}"#);
+        content.push('\n');
+        std::fs::write(&p, &content).unwrap();
+        assert_eq!(analyze_transcript(p.to_str().unwrap()).busy_subagents, 1);
+
+        // 排队形态(enqueue)了结 bbb222——通知生成时结局已定,不必等送达。
+        content.push_str(r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-08-18T05:22:59Z","content":"<task-notification>\n<task-id>bbb222</task-id>\n<tool-use-id>t_l2</tool-use-id>\n<status>completed</status>\n</task-notification>"}"#);
+        content.push('\n');
+        std::fs::write(&p, &content).unwrap();
+        assert_eq!(analyze_transcript(p.to_str().unwrap()).busy_subagents, 0);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn analyzer_busy_settles_via_taskoutput_and_ignores_noise() {
+        let mut content = String::from(
+            r#"{"type":"user","uuid":"l1","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"Async agent launched successfully.\nagentId: ccc333 (internal ID)"}]}]}}"#,
+        );
+        content.push('\n');
+        // 噪声一:sidechain 里子任务自己的委派,不算主会话的后台工作。
+        content.push_str(r#"{"type":"user","uuid":"sc1","isSidechain":true,"message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":[{"type":"text","text":"Async agent launched successfully.\nagentId: zzz999 (internal ID)"}]}]}}"#);
+        content.push('\n');
+        // 噪声二:用户**引用**通知文案聊天(非开头),不得误消 ccc333。
+        content.push_str(r#"{"type":"user","uuid":"quote","message":{"content":"我看到日志里有 <task-notification><task-id>ccc333</task-id></task-notification> 这样的行"}}"#);
+        content.push('\n');
+        let p = write_tmp("busy_taskout", &content);
+        assert_eq!(analyze_transcript(p.to_str().unwrap()).busy_subagents, 1);
+
+        // TaskOutput 的 running 拉取不了结;completed 拉取了结。
+        content.push_str(r#"{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"to1","content":"<retrieval_status>timeout</retrieval_status>\n<task_id>ccc333</task_id>\n<status>running</status>"}]}}"#);
+        content.push('\n');
+        std::fs::write(&p, &content).unwrap();
+        assert_eq!(analyze_transcript(p.to_str().unwrap()).busy_subagents, 1);
+        content.push_str(r#"{"type":"user","uuid":"r2","message":{"content":[{"type":"tool_result","tool_use_id":"to2","content":"<retrieval_status>success</retrieval_status>\n<task_id>ccc333</task_id>\n<status>completed</status>\n<output>done</output>"}]}}"#);
+        content.push('\n');
+        std::fs::write(&p, &content).unwrap();
+        assert_eq!(analyze_transcript(p.to_str().unwrap()).busy_subagents, 0);
+        std::fs::remove_file(&p).ok();
     }
 
     /// 非 claude agent 走默认实现：直接采信 DB cwd，不去翻 ~/.claude/projects。

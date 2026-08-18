@@ -107,12 +107,15 @@ pub(super) static RULES: &[ScreenRule] = &[
     // 标题事件丢失时仍能判对）；970 压过 live_prompt_box（950）：运行中输入框照画
     // ❯，不能再被它判成可见 idle。注意新版括号里没有 esc to interrupt（该提示已被
     // 上游移除），不能沿用 codex/opencode 的中断提示锚。
+    // 字符类只收真实 spinner 帧（· ✢ ✳ ✶ ✻ ✽，实拍取证）：`*`/`+` 是最常见的
+    // Markdown 列表符，不是帧——收进来的话，已答完的末行
+    // `* 已修复三处… (2 个文件)` 会让空闲会话永远显示「运行中」（实拍回归）。
     ScreenRule::new(
         "status_line_working",
         ScreenState::Working,
         970,
         Region::BottomNonEmpty(6),
-        Matcher::LineRegex(r"^[·✢✳✶✻✽*+]\s+\S.*(…|\.\.\.)\s*\(\d+"),
+        Matcher::LineRegex(r"^[·✢✳✶✻✽]\s+\S.*(…|\.\.\.)\s*\(\d+"),
     )
     .visible(),
     // 提示框体内以 ❯ 开头且无任何审批文案 = 在等你输入的空闲态（可见证据）。

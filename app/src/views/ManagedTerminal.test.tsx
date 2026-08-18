@@ -253,7 +253,7 @@ describe("ManagedTerminal", () => {
       return Promise.resolve();
     });
     render(<ManagedTerminal sessionId={163} status="ended" />);
-    expect(await screen.findByRole("button", { name: "在 Meowo 中接管" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "恢复会话" })).toBeTruthy();
   });
 
   /// 后台会话「没画面」有两种成因：worker 真退了，或只是旁路没接上。此前一律说成
@@ -266,8 +266,8 @@ describe("ManagedTerminal", () => {
     render(<ManagedTerminal sessionId={163} status="running" background />);
     expect(await screen.findByText(/没接上后台会话的画面/)).toBeTruthy();
     expect(screen.queryByText(/后台会话已结束/)).toBeNull();
-    // 接管/启动对后台会话必然失败，不给；能做的只有再接一次。
-    expect(screen.queryByRole("button", { name: /接管/ })).toBeNull();
+    // 接管/恢复对后台会话必然失败，不给；能做的只有再接一次。
+    expect(screen.queryByRole("button", { name: /接管|恢复会话/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "重新接入" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("attach_background_session", { sessionId: 163 }));
   });
@@ -298,7 +298,7 @@ describe("ManagedTerminal", () => {
     // 居中卡片出现，带退出说明与接管按钮
     await waitFor(() => expect(container.querySelector(".managed-terminal-exit-card")).toBeTruthy());
     expect(screen.getByText(/Agent 进程已退出（退出码 1）/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "在 Meowo 中接管" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "恢复会话" })).toBeTruthy();
     // 遮罩层本体穿透（输出可滚可选），卡片自身可交互
     expect(container.querySelector(".managed-terminal-cover.is-exited")).toBeTruthy();
   });
@@ -823,7 +823,7 @@ describe("ManagedTerminal", () => {
       return Promise.resolve();
     });
     render(<ManagedTerminal sessionId={163} status="ended" />);
-    const takeover = await screen.findByRole("button", { name: "在 Meowo 中接管" });
+    const takeover = await screen.findByRole("button", { name: "恢复会话" });
     write.mockReset();
     takeover.click();
     await waitFor(() => expect(snapshots).toBe(2));

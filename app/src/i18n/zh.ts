@@ -289,9 +289,9 @@ export const zh = {
     restoreWindow: "还原",
     conversation: "对话",
     terminal: "终端",
-    terminalReady: "会话断开后可在这里接管继续",
+    terminalReady: "会话断开后可在这里恢复继续",
     terminalExternal: "会话在外部终端运行，这里只同步显示对话",
-    terminalStart: "在 Meowo 中接管",
+    terminalStart: "恢复会话",
     terminalBackgroundGone: "后台会话已结束，对话未写入文件，无法恢复。上方是它最后的输出。",
     // 没接上旁路 ≠ 会话结束：worker 可能还在跑，只是花名册/socket 暂时查不到。
     terminalBackgroundLost: "没接上后台会话的画面。它可能还在跑，试试重新接入。",
@@ -360,6 +360,9 @@ export const zh = {
     subagentTallyCompleted: (n: number) => `${n} 完成`,
     subagentTallyFailed: (n: number) => `${n} 失败`,
     subagentTallyRunning: (n: number) => `${n} 进行中`,
+    subagentDurationSec: (s: number) => `${s} 秒`,
+    subagentDurationMin: (m: number, s: number) => `${m} 分 ${s} 秒`,
+    subagentDurationHour: (h: number, m: number) => `${h} 小时 ${m} 分`,
     subagentLoading: "正在读取子任务记录…",
     subagentEmpty: "该子任务还没有留下记录",
     terminalStartExited: (code: number | null) => `Agent 启动后立即退出${code == null ? "" : `（退出码 ${code}）`}，请在终端页查看输出`,
@@ -784,6 +787,9 @@ export const zh = {
     install: "立即更新",
     download: "下载更新",
     ready: "更新已下载，可以重启安装",
+    // 退出时静默安装（lib.rs install_downloaded_on_exit）：点「稍后」的用户也要知道
+    // 更新不会丢，退出应用即完成。
+    readyHint: "现在不装也行，退出应用时会自动安装",
     restart: "重启并更新",
     // 重启会终止全部 Meowo 托管的 PTY 会话（退出收尾 shutdown，见 lib.rs RunEvent::Exit）——
     // 有托管会话在跑时必须先确认，不能静默杀掉。

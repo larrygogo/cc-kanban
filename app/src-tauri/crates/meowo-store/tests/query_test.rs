@@ -13,6 +13,7 @@ fn live_sessions_includes_ended_sessions() {
     store
         .set_session_status(s2, SessionStatus::Waiting, 210)
         .unwrap();
+    // stale 态已废除:写侧归一成 waiting(存量行由 v11 迁移归一),库里只有三种状态。
     let (s3, _) = store.start_session(pid, "st", 300).unwrap();
     store
         .set_session_status(s3, SessionStatus::Stale, 310)
@@ -26,8 +27,10 @@ fn live_sessions_includes_ended_sessions() {
     let statuses: Vec<&str> = live.iter().map(|l| l.session.status.as_str()).collect();
     assert!(statuses.contains(&"running"));
     assert!(statuses.contains(&"waiting"));
-    assert!(statuses.contains(&"stale"));
     assert!(statuses.contains(&"ended"));
+    assert!(!statuses.contains(&"stale"), "stale 已废除,写侧应归一成 waiting");
+    let st = live.iter().find(|l| l.session.cc_session_id == "st").unwrap();
+    assert_eq!(st.session.status, "waiting");
 }
 
 #[test]
@@ -263,13 +266,22 @@ fn live_counts_split_totals_from_connectivity_candidates() {
         .set_session_archived(archived_id.unwrap(), true, 600)
         .unwrap();
 
-    // 模拟旧版本数据库留下的「已结束、却还留着 pending_review」历史残留。
+    // 已结束会话上的迟到 PermissionRequest：写侧(set_pending_review 的 status<>'ended'
+    // 守卫)现在直接拒绝,不再产出「ended + pending_review」残留;候选集的 status!='ended'
+    // 防线只剩防旧版本库的历史数据。这里保留写入尝试,双向钉死该不变量。
     let (dead, _) = store.start_session(pid, "dead-with-residue", 700).unwrap();
     store.set_session_title(dead, "任务 dead", 700).unwrap();
     store.end_session(dead, 720).unwrap();
     store
         .set_pending_review(dead, meowo_store::PendingReview::Approval, 730)
         .unwrap();
+    let dead_row = store
+        .live_sessions(None, None, None, None, 1000)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.session.id == dead)
+        .unwrap();
+    assert_eq!(dead_row.pending_review, None, "ended 行上的 pending 写入应被拒");
 
     // 列表口径外的两条：ping 探针（哪怕 running）与已结束的未命名空壳。
     // 它们都不会出现在列表里，totals / candidates 也必须数不到。

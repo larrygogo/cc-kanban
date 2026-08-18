@@ -173,6 +173,10 @@ pub(crate) struct LiveItem {
     /// 由 live_sessions_blocking 在裁定 tab 归属（tab_class）的同一处填充——DTO 里的
     /// 屏幕状态与该卡的 tab 归属出自同一份快照，enrich 不经手；外库卡恒 None。
     screen_state: Option<&'static str>,
+    /// 还在跑的后台子任务数（transcript 分析，见 TranscriptInfo::busy_subagents）。
+    /// 前端卡片状态环与 tab 分组按它把「主回合停了但后台在干活」的会话画成运行中——
+    /// 必须与后端 tab_class 的 background_busy 同口径，否则环色与所在 tab 打架。
+    busy_subagents: u32,
     /// 来自**另一个实例的库**（dev 构建只读聚合安装版 `~/.meowo/board.db` 的会话，
     /// 见 [`foreign_live_items`]）。前端据此标注来源并收起全部操作入口——这些会话的
     /// PTY/审批/收尾都归安装版，本实例只有观察权。id 已加 [`FOREIGN_ID_OFFSET`] 防撞：
@@ -225,12 +229,14 @@ pub(crate) async fn get_live_sessions_counts(
     let approvals = state.ptys.approval_session_ids();
     let screen_states = state.ptys.screen_states();
     let runtimes = state.session_runtimes.clone();
+    let tx_cache = state.tx_cache.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let alive = snapshots.snapshot();
         let runtimes = runtimes.snapshot();
         let store = super::open_store(&db_path)?;
         let mut counts = counts_for_store(
             &store,
+            &tx_cache,
             &alive,
             &pty_live,
             &runtimes,
@@ -241,7 +247,7 @@ pub(crate) async fn get_live_sessions_counts(
         // include_foreign),数字必须与列表同视野,否则出现「待交互 0 但列表挂着一排
         // 待交互卡」的打架现场(实拍反馈)。险闸与失败降级同 foreign_live_items:
         // 聚合不上就只数本库,宁可少数不报错。
-        if let Some(foreign) = foreign_counts(&db_path, &alive, &runtimes) {
+        if let Some(foreign) = foreign_counts(&db_path, &tx_cache, &alive, &runtimes) {
             counts.total += foreign.total;
             counts.running += foreign.running;
             counts.waiting += foreign.waiting;
@@ -257,8 +263,10 @@ pub(crate) async fn get_live_sessions_counts(
 /// `pty_live`/`approvals`/`screen_states` 传空(那些是本实例 broker 的事实,对外库
 /// 会话无意义;审批校正按 broker 为空处理,与 foreign_live_items 同口径),其余判定
 /// (进程表、fleet 后台隐藏)观察的是全局事实,两库通用。
+#[allow(clippy::too_many_arguments)]
 fn counts_for_store(
     store: &meowo_store::Store,
+    tx_cache: &Mutex<meowo_agent::TranscriptCache>,
     alive: &std::collections::HashSet<i64>,
     pty_live: &std::collections::HashSet<i64>,
     runtimes: &SessionRuntimeIndex,
@@ -321,6 +329,14 @@ fn counts_for_store(
             &candidate.status,
             pending_review,
             screen_states.get(&candidate.id).copied(),
+            || {
+                subagents_busy(
+                    tx_cache,
+                    provider,
+                    candidate.cwd.as_deref(),
+                    &candidate.cc_session_id,
+                )
+            },
         ) {
             Some("waiting") => waiting += 1,
             Some("running") => running += 1,
@@ -338,6 +354,7 @@ fn counts_for_store(
 /// 外库的角标贡献。打开/险闸/查询任何一步失败都返回 None(只数本库)。
 fn foreign_counts(
     own_db: &Path,
+    tx_cache: &Mutex<meowo_agent::TranscriptCache>,
     alive: &std::collections::HashSet<i64>,
     runtimes: &SessionRuntimeIndex,
 ) -> Option<meowo_store::query::LiveSessionCounts> {
@@ -348,7 +365,7 @@ fn foreign_counts(
     }
     let empty = std::collections::HashSet::new();
     let no_screens = std::collections::HashMap::new();
-    counts_for_store(&store, alive, &empty, runtimes, &empty, &no_screens).ok()
+    counts_for_store(&store, tx_cache, alive, &empty, runtimes, &empty, &no_screens).ok()
 }
 
 #[tauri::command]
@@ -460,6 +477,18 @@ pub(crate) fn analyze_transcript(
     ))
 }
 
+/// 「后台还有子任务在跑」——tab 归属与卡片状态环的共用原料（[`tab_class`] 的懒参数）。
+/// 走 [`analyze_transcript`] 的共享 mtime 缓存：文件没动就是纯内存读。
+pub(crate) fn subagents_busy(
+    tx_cache: &Mutex<meowo_agent::TranscriptCache>,
+    provider: &str,
+    cwd: Option<&str>,
+    cc_session_id: &str,
+) -> bool {
+    analyze_transcript(tx_cache, provider, cwd, cc_session_id)
+        .is_some_and(|info| info.busy_subagents > 0)
+}
+
 /// Resume and newly-spawned sessions remain optimistically connected while hooks claim the PID.
 pub(crate) const RESUME_GRACE_MS: i64 = 120_000;
 
@@ -515,13 +544,16 @@ pub(crate) fn pending_review_live<'a>(
 ///
 /// 入参约定：`pending_review` 传**存活校正后**的值（[`pending_review_live`]），
 /// `screen_state` 传 broker 的实时屏幕状态（"working"|"idle"|"blocked"，非托管为 None）。
-/// 列表（live_sessions_blocking / foreign_live_items）与角标（counts_for_store）三处
-/// 必须喂完全相同的原料——任何一端少喂一样，数字就会与列表打架。
+/// `background_busy` 是「后台还有子任务在跑」的**懒**判定（要读 transcript，只在裁到
+/// 「等待中」边缘时才调用；mtime 缓存下稳态零 IO）。列表（live_sessions_blocking /
+/// foreign_live_items）与角标（counts_for_store）三处必须喂完全相同的原料——任何一端
+/// 少喂一样，数字就会与列表打架。
 pub(crate) fn tab_class(
     connected: bool,
     status: &str,
     pending_review: Option<&str>,
     screen_state: Option<&str>,
+    background_busy: impl FnOnce() -> bool,
 ) -> Option<&'static str> {
     if !connected {
         return None;
@@ -530,14 +562,19 @@ pub(crate) fn tab_class(
         return Some("waiting");
     }
     // 屏幕检测（300ms 级实时）优先于 DB status（hook 事件驱动、天然滞后）：
-    // blocked = 屏幕上挂着审批/提问，idle = agent 停下来等输入，都算「待交互」。
+    // blocked = 屏幕上挂着审批/提问，是真要人，后台再忙也得等交互。
+    // idle / DB waiting 只说明**主回合**停了——后台子任务还在独立干活时，把会话标成
+    // 「等你」是谎报（实拍反馈：委派了后台审查 agent 的会话在等待区躺了半小时）。
     match screen_state {
         Some("working") => return Some("running"),
-        Some("idle") | Some("blocked") => return Some("waiting"),
+        Some("blocked") => return Some("waiting"),
+        Some("idle") => {
+            return Some(if background_busy() { "running" } else { "waiting" });
+        }
         _ => {}
     }
     if status == "waiting" {
-        return Some("waiting");
+        return Some(if background_busy() { "running" } else { "waiting" });
     }
     (status == "running").then_some("running")
 }
@@ -644,6 +681,14 @@ pub(crate) fn live_sessions_blocking(
                     &session.session.status,
                     session.pending_review.as_deref(),
                     screen_state,
+                    || {
+                        subagents_busy(
+                            tx_cache,
+                            &session.provider,
+                            session.cwd.as_deref(),
+                            &session.session.cc_session_id,
+                        )
+                    },
                 ) == Some(filter);
             if class_ok {
                 let runtime = runtime_of(
@@ -733,6 +778,7 @@ fn enrich(
     let mut error_label = None;
     let mut error_raw = None;
     let mut preview = None;
+    let mut busy_subagents = 0;
     let info = analyze_transcript(
         tx_cache,
         &session.provider,
@@ -750,6 +796,7 @@ fn enrich(
             error_raw = Some(error.raw);
         }
         preview = info.preview;
+        busy_subagents = info.busy_subagents;
     }
     if dropped_from_list(db_title.trim(), connected, &session.todos) {
         return None;
@@ -772,6 +819,7 @@ fn enrich(
         profile_name: None,
         // 屏幕状态由 live_sessions_blocking 在 tab 归属裁定处填充（enrich 不经手）。
         screen_state: None,
+        busy_subagents,
         // 外库标记由 foreign_live_items 在聚合时置真，本库路径恒为 false。
         foreign: false,
     })
@@ -870,6 +918,14 @@ fn foreign_live_items(
                     &session.session.status,
                     session.pending_review.as_deref(),
                     None,
+                    || {
+                        subagents_busy(
+                            tx_cache,
+                            &session.provider,
+                            session.cwd.as_deref(),
+                            &session.session.cc_session_id,
+                        )
+                    },
                 ) != Some(filter)
             {
                 return None;

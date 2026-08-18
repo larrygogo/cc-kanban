@@ -148,12 +148,20 @@ function splitHighlightedHtml(html: string): string[] {
   return lines;
 }
 
+/// 超过这个总量不高亮、只转义：hljs 同步跑在渲染路径上，后端给面板的文件/diff 上限是
+/// 200KB，整篇送 hljs 会把主线程卡到接近秒级。阈值比对话区（ChatMarkdown 20K）宽——
+/// 这里每个文件只算一次（useMemo），不像流式消息每个 delta 都重来。
+const HIGHLIGHT_MAX_TOTAL_CHARS = 100_000;
+
 /**
  * 逐行高亮：行数组拼成整篇送 hljs（跨行状态保留），拆回后行数与输入一一对应。
  * 拆分结果行数对不上（拆分假设被打破）时宁可整体退纯文本，也不冒错位渲染的险。
  */
 export function highlightLines(lines: string[], lang: string | null): string[] {
   if (!lang || !hljs.getLanguage(lang)) return lines.map(escapeHtml);
+  let total = 0;
+  for (const line of lines) total += line.length + 1;
+  if (total > HIGHLIGHT_MAX_TOTAL_CHARS) return lines.map(escapeHtml);
   try {
     const html = hljs.highlight(lines.join("\n"), { language: lang, ignoreIllegals: true }).value;
     const split = splitHighlightedHtml(html);

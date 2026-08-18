@@ -119,6 +119,42 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// meowo 数据根：`MEOWO_DB` 的父目录；未设置（或父目录为空，如 `MEOWO_DB=board.db`
+/// 这种裸文件名——空父目录一 join 就成相对路径，随 cwd 漂移）时回退 `~/.meowo`。
+/// 与宿主 `meowo-app` 的 `db_path()` 同语义；跨 crate 收敛（经 wiring 注入）是后续项。
+pub(crate) fn meowo_data_root() -> Option<PathBuf> {
+    let home = home_dir()?;
+    Some(
+        std::env::var_os("MEOWO_DB")
+            .map(PathBuf::from)
+            .and_then(|path| {
+                path.parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .map(Path::to_path_buf)
+            })
+            .unwrap_or_else(|| home.join(".meowo")),
+    )
+}
+
+/// Meowo 管理的某 agent 的全部 profile 私有根（`<数据根>/profiles/<agent>/<id>`）。
+/// claude 的 transcript 查找与 kimi 的会话索引查找共用这一份枚举——多账号数据
+/// 「扫哪些目录」是同一个问题，规则只写一处。
+pub(crate) fn managed_profile_dirs(agent: &str) -> Vec<PathBuf> {
+    let Some(root) = meowo_data_root() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(root.join("profiles").join(agent)) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        // 用 path().is_dir() 而非 DirEntry::file_type()：后者不解引用 symlink/junction，
+        // 被 junction 挪到别的盘的 profile 会被静默跳过（其下会话从此定位不到）。
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.path())
+        .collect()
+}
+
 /// 按 `/` 分段拼接相对路径。直接 `join("a/b")` 在 Windows 上会拼出混合分隔符（`dir\a/b`），
 /// 虽多数 API 容忍，但比较/展示都会走样，故统一分段。
 pub(crate) fn join_rel(base: &Path, rel: &str) -> PathBuf {

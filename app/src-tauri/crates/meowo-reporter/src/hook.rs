@@ -8,6 +8,11 @@ pub struct HookEvent {
     pub session_id: String,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// SessionStart 的触发来源（claude：`startup` / `resume` / `clear` / `compact`）。
+    /// compact 是回合中途的续接：其 cwd 是 Bash 持久 shell cd 漂移后的当前目录，不是
+    /// 会话工作区，落库判断要靠它区分。其他 agent 无此字段时为 None。
+    #[serde(default)]
+    pub source: Option<String>,
     #[serde(default)]
     pub transcript_path: Option<String>,
     /// 用户输入。Claude 为纯字符串；kimi-code 为内容块数组 `[{"type":"text","text":...}]`。

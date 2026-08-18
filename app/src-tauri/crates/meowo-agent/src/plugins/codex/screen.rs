@@ -54,12 +54,16 @@ pub(super) static RULES: &[ScreenRule] = &[
         ]),
     )
     .visible(),
-    // 弱证据，不带 visible。
+    // 弱证据，不带 visible。区域锚定在最后一个 `›` 提示符之后（与 live_strong_blocker
+    // 同区）：codex 正在跑的命令回显（apt/npm 的 `[y/n]`、diff 里的 yes）都落在标记
+    // **之前**的输出区，不算数。优先级压在 screen_working_fallback(500) 之下：状态行
+    // 还写着 Working 时，屏上散落的疑似审批词绝不能把运行中翻成待交互——规则失准
+    // 只许少报 blocked，不许误报（标题无 spinner 时曾整段误报，实拍回归）。
     ScreenRule::new(
         "weak_blocker",
         ScreenState::Blocked,
-        600,
-        Region::WholeScreen,
+        400,
+        Region::AfterLastPromptMarker,
         Matcher::Any(&[
             Matcher::Contains(&["[y/n]"]),
             Matcher::Contains(&["yes (y)"]),

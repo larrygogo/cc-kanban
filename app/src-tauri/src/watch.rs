@@ -1,7 +1,7 @@
 //! 看板刷新合流 + DB 文件监听 + 会话存活轮询 + 去重桌面通知。从 lib.rs 抽出。
 //! 这里是「后台线程层」：所有向前端 board-changed / 通知的推送都收敛在此。
 
-use crate::proc::pid_is_agent;
+use crate::proc::agent_pids_snapshot;
 use crate::session_query::RESUME_GRACE_MS;
 use crate::settings::{load_settings, tr, ui_lang};
 #[cfg(target_os = "windows")]
@@ -11,11 +11,11 @@ use crate::window::update_tray_tooltip;
 use crate::{agent_transcript, now_ms};
 use meowo_store::Store;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use sysinfo::{ProcessRefreshKind, RefreshKind, System};
 use tauri::{Emitter, Manager};
 
 /// board-changed 的全局合流窗口。发出一次后的这段时间内，新来的事件不再各自 emit，
@@ -236,14 +236,20 @@ pub(crate) fn run_db_watch_loop(
 ///
 /// 终端被关/被 /clear 打断时 SessionEnd 往往不触发，会话状态会永远卡在 running/waiting；
 /// 进程都没了就该收尾。pid 为空的不动（可能是刚启动还没抓到 pid，宁可不臆测）。
-pub(crate) fn reap_and_alive_ids(store: &Store, sys: &System, now_ms: i64) -> (Vec<i64>, usize) {
+/// `agent_pids` 是一次 [`agent_pids_snapshot`] 的结果——调用方整轮共享同一份快照，
+/// 避免逐 pid 各扫一遍进程表。
+pub(crate) fn reap_and_alive_ids(
+    store: &Store,
+    agent_pids: &HashSet<i64>,
+    now_ms: i64,
+) -> (Vec<i64>, usize) {
     const PID_REAP_GRACE_MS: i64 = 10_000;
     let mut alive: Vec<i64> = Vec::new();
     let mut reaped = 0usize;
     for (id, pid, last_event_at) in store.live_session_liveness().unwrap_or_default() {
         match pid {
             Some(p) if p > 0 => {
-                if pid_is_agent(sys, p) {
+                if agent_pids.contains(&p) {
                     alive.push(id);
                 // 进程快照先于 DB 查询生成；刚启动的进程可能已由 hook 写入 DB、却尚未出现在该快照。
                 // 给新事件一个短宽限，下一轮快照即可确认。真正退出的进程最多晚 10s 收尾。
@@ -274,6 +280,10 @@ pub(crate) fn should_notify(prev: Option<&str>, cur: Option<&str>) -> bool {
 
 /// 待交互通知指纹:errored 或 has_pending 时不发(None,让位错误/待审批);
 /// status==waiting 且无错无 pending 时用 last_event_at 作指纹;其它状态 None。纯函数。
+///
+/// 该指纹能当去重键的前提是 store 层的不变量:Stop 置 waiting 后,迟到窗内的活动尾巴
+/// **不推进** last_event_at(见 store 的 ACTIVITY_TOUCH_SQL)——否则同一回合的
+/// 「等待你回复」会因指纹漂移弹两次。
 pub(crate) fn waiting_fingerprint(
     errored: bool,
     has_pending: bool,
@@ -543,16 +553,24 @@ pub(crate) fn spawn_liveness_watch(
         let mut last_tray: Option<(usize, usize)> = None;
         loop {
             if let Ok(store) = Store::open(&db_path) {
-                let sys = System::new_with_specifics(
-                    RefreshKind::new().with_processes(ProcessRefreshKind::new()),
-                );
+                // 每轮一份 agent 进程快照（Windows 走 Toolhelp，1-3ms），reap 与下面的
+                // 逐会话判活共享；此前这里是 sysinfo 全进程刷新（30-120ms，每 5 秒一次）。
+                let agent_pids = agent_pids_snapshot();
                 // 阈值与 session_connected 的 RESUME_GRACE_MS 对齐：pid 未知的会话「已连接」显示
                 // 在此窗口后回落断开，DB 的 status 也应同时收尾，否则会话会长期卡在错误的 tab 里
                 // （见 RESUME_GRACE_MS 文档：kimi 卸载后 resume「终端起来但命令失败」即命中此路径）。
+                // 托管 PTY 的会话作排除集传入：codex 这类 hook 迟迟不认领 pid 的会话正被本 GUI
+                // 托管着（进程必活），只按 `pid IS NULL` 判孤儿会把它误收尾——与
+                // session_connected/process_alive 的「pid 命中 ‖ 托管 PTY 活跃」四处同一口径。
+                // try_state：本线程可能早于 AppState 注册，拿不到就按空集处理（等同旧行为）。
+                let pty_live = app
+                    .try_state::<crate::AppState>()
+                    .map(|state| state.ptys.active_session_ids())
+                    .unwrap_or_default();
                 let orphaned = store
-                    .end_orphaned_idle(RESUME_GRACE_MS, now_ms())
+                    .end_orphaned_idle(RESUME_GRACE_MS, now_ms(), &pty_live)
                     .unwrap_or(0);
-                let (alive, reaped) = reap_and_alive_ids(&store, &sys, now_ms());
+                let (alive, reaped) = reap_and_alive_ids(&store, &agent_pids, now_ms());
                 if alive != last || reaped > 0 || orphaned > 0 {
                     emit_board_changed(&app, "liveness");
                     last = alive;
@@ -603,7 +621,7 @@ pub(crate) fn spawn_liveness_watch(
                         approvals.contains(&s.session.id),
                     )
                     .map(str::to_string);
-                    if s.session.status == "ended" || !pid_is_agent(&sys, s.pid.unwrap_or(0)) {
+                    if s.session.status == "ended" || !agent_pids.contains(&s.pid.unwrap_or(0)) {
                         continue;
                     }
                     let sid = s.session.cc_session_id.clone();

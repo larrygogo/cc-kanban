@@ -28,7 +28,10 @@ pub fn dispatch(
             if ev.session_id.is_empty() {
                 return Ok(());
             }
-            let sid = create_session(store, ev, cwd, provider, now_ms)?;
+            // compact 的 SessionStart 不可信任 cwd（回合中途，shell 已 cd 漂移）；
+            // 其余来源（startup/resume/clear，含无 source 字段的 agent）是新进程拉起，可覆写。
+            let overwrite_cwd = ev.source.as_deref() != Some("compact");
+            let sid = create_session(store, ev, cwd, provider, now_ms, overwrite_cwd)?;
             // resume 一个已结束会话时，SessionStart 也要复活它（置 running、清 ended_at），否则卡片停在
             // 断开态直到用户发首条消息才重连。
             store.revive_if_ended(sid, now_ms)?;
@@ -46,8 +49,9 @@ pub fn dispatch(
                     store.on_user_prompt(sid, &prompt, now_ms)?;
                     store.set_last_user_text(sid, &prompt, now_ms)?;
                 } else {
-                    // 纯图片内容块同样代表用户开启了新回合，也必须从 waiting/stale 转回 running。
-                    store.touch_session(sid, now_ms)?;
+                    // 纯图片内容块同样代表用户开启了新回合，也必须从 waiting 转回 running
+                    // ——走开回合版,不吃活动类 touch 的迟到窗。
+                    store.touch_session_turn_open(sid, now_ms)?;
                 }
                 // 给已注册（含压缩漏掉 SessionStart）的会话补抓 PID；每用户回合一次，开销可忽略。
                 if let Some(p) = crate::proc::owner_pid(provider) {
@@ -59,7 +63,15 @@ pub fn dispatch(
         }
         "PostToolUse" => {
             if let Some(sid) = lookup_or_create(store, ev, provider, now_ms)? {
-                store.clear_pending_review(sid, now_ms)?;
+                // 定向清除：PostToolUse 只证明**这个工具**跑完了,只注销它对应的那类等待
+                // （AskUserQuestion→question、ExitPlanMode→plan、其余→approval）。整清版
+                // 曾把同回合稍后事件刚挂上的别类等待一并抹掉（straggler 交错,通知全哑）。
+                let settled_kind = match ev.tool_name.as_deref() {
+                    Some("AskUserQuestion") => PendingReview::Question,
+                    Some("ExitPlanMode") => PendingReview::Plan,
+                    _ => PendingReview::Approval,
+                };
+                store.clear_pending_review_kind(sid, settled_kind, now_ms)?;
                 // 待办工具名由插件声明：kimi 叫 `TodoList`，claude 旧版叫 `TodoWrite`。
                 // 此前这里写死 `"TodoWrite"`，两家现版本都对不上，待办表一直是空的。
                 let todo_tool = ev.tool_name.as_deref().is_some_and(|name| {
@@ -157,6 +169,11 @@ pub fn dispatch(
         }
         "PermissionRequest" => {
             if let Some(sid) = lookup_session(store, ev)? {
+                // 误 reap 自愈:审批请求同样是「进程活着」的证据。revive 自带语义判据
+                // （reaper 留的 pid 墨迹 / 超出迟到窗）,正常 SessionEnd 后的迟到尾巴不会
+                // 被它复活——那种尾巴随后被 set_pending_review 的 status<>'ended' 守卫
+                // 丢弃,不会把 pending 写在尸体上（卡片消失、通知全哑、永不清除）。
+                store.revive_if_ended_running(sid, now_ms)?;
                 let kind = match ev.tool_name.as_deref() {
                     Some("ExitPlanMode") => PendingReview::Plan,
                     Some("AskUserQuestion") => PendingReview::Question,
@@ -173,6 +190,7 @@ pub fn dispatch(
                     _ => None, // 安装侧已用 matcher 限定;这里再兜一层防御
                 };
                 if let Some(kind) = kind {
+                    store.revive_if_ended_running(sid, now_ms)?; // 同 PermissionRequest
                     store.set_pending_review(sid, kind, now_ms)?;
                 }
             }
@@ -265,12 +283,19 @@ fn write_tab_token(store: &Store, sid: i64, ev: &HookEvent, provider: &str) {
 }
 
 /// 建会话（项目 upsert + 会话 + provider + cwd + 抓 PID），返回 sid。SessionStart 与懒创建共用。
+///
+/// `overwrite_cwd`：事件 cwd 是否可信到能覆写已有记录。hook 的 cwd 跟随 Bash 持久 shell
+/// 的 cd 漂移（实拍：auto-compact 的 SessionStart 带着 `cd` 到过的子目录，把会话工作区
+/// 从仓库根覆写成 `app\src-tauri`），故只有「新进程拉起」（startup/resume/clear——cwd 即
+/// 启动目录，且手动 resume 纠正搬家后陈旧 cwd 的自愈靠这次覆写）才传 true；compact 传
+/// false，退化为只填 NULL 的 backfill。
 fn create_session(
     store: &Store,
     ev: &HookEvent,
     cwd: &str,
     provider: &str,
     now_ms: i64,
+    overwrite_cwd: bool,
 ) -> Result<i64, StoreError> {
     let (root, name) = project_root_and_name(cwd);
     let pid = store.upsert_project_by_root(&root, &name, now_ms)?;
@@ -291,7 +316,11 @@ fn create_session(
             eprintln!("meowo-reporter: 记录会话 profile 失败（继续建会话）: {e}");
         }
     }
-    store.set_session_cwd(sid, cwd, now_ms)?;
+    if overwrite_cwd {
+        store.set_session_cwd(sid, cwd, now_ms)?;
+    } else {
+        store.backfill_session_cwd(sid, cwd)?;
+    }
     if let Some(p) = crate::proc::owner_pid(provider) {
         store.set_session_pid(sid, p as i64, now_ms)?;
     }
@@ -319,7 +348,8 @@ fn lookup_or_create(
     if let Some(sid) = store.find_session_id_pub(&ev.session_id)? {
         // 会话曾被误清成 ended（如 kimi 的 pid 一度不被 app 认作存活而被 reap），但仍有活动事件到来
         // → 统一自愈复活（清 ended_at、置 running），不再只在 UserPromptSubmit 一条路径上修。
-        store.revive_if_ended(sid, now_ms)?;
+        // 走 running 版:活动事件本身就是在干活的证明;SessionStart 的复活(拉起≠在跑)另走 waiting 版。
+        store.revive_if_ended_running(sid, now_ms)?;
         // cwd 只有建会话时写一次；SessionStart 落库中断过的半态会话（cwd 恒 NULL、识别不到
         // 工作区）靠后续任一带 cwd 的事件在此自愈。已有值不覆盖。
         if let Some(cwd) = ev.cwd.as_deref() {
@@ -328,7 +358,8 @@ fn lookup_or_create(
         return Ok(Some(sid));
     }
     match ev.cwd.as_deref() {
-        Some(cwd) => Ok(Some(create_session(store, ev, cwd, provider, now_ms)?)),
+        // 懒创建的行不存在旧值，覆写与否等价；传 true 保持「新行必写 cwd」。
+        Some(cwd) => Ok(Some(create_session(store, ev, cwd, provider, now_ms, true)?)),
         None => Ok(None),
     }
 }

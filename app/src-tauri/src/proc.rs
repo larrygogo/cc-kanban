@@ -1,10 +1,7 @@
 //! 进程存活探测：判定某 pid 是否仍是 agent 进程，并提供进程组/快照原语。
-//! Windows 走 Toolhelp 快照 + sysinfo，macOS/Unix 走 ps。供终端聚焦、看板连接判定、存活轮询共用。
+//! Windows 走 Toolhelp 快照，macOS/Unix 走 ps。供终端聚焦、看板连接判定、存活轮询共用。
 //! 从 lib.rs 抽出（纯进程逻辑，无窗口/DB 依赖）。
 
-#[cfg(target_os = "windows")]
-use sysinfo::Pid;
-use sysinfo::System;
 // 两个平台都要用：Windows 的 Toolhelp 快照，以及 agent_pids_snapshot 的返回类型。
 use std::collections::HashSet;
 
@@ -104,33 +101,7 @@ pub(crate) fn console_group_pids(root_pid: u32) -> HashSet<u32> {
     set
 }
 
-/// pid 对应的进程是否确实是 claude。
-///
-/// Windows 会复用 pid：会话结束后它的旧 pid 可能被别的进程（如 esbuild）占用，
-/// 只判断「pid 是否存在」会把已结束的会话误判为仍连接。故按进程名甄别是否仍是 agent 本体——
-/// 复用 meowo_agent::is_agent_process（取 basename **精确**匹配 claude/kimi 白名单，
-/// 与 owner_pid 写入侧同一事实源），避免子串误匹配（如名字恰含 kimi 的无关进程）。
-pub(crate) fn pid_is_agent(sys: &System, pid: i64) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        sys.process(Pid::from_u32(pid as u32))
-            .map(|p| meowo_agent::is_agent_process(&p.name().to_string_lossy()))
-            .unwrap_or(false)
-    }
-    // macOS/Unix：sysinfo 对进程的可见性不稳（实测 parent() 会过早返回 None、
-    // 最小刷新下 name 是否可靠也无保证），改用 ps 校验，与 meowo-reporter::owner_pid 一致。
-    // 仅对「非 ended 的活跃会话」调用，每轮就几个，ps 开销可忽略。
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = sys;
-        pid_is_agent_ps(pid)
-    }
-}
-
-/// macOS/Unix：单 pid 的 agent 判活（一次 ps 按 comm 校验）。pid_is_agent 的 Unix 分支与
+/// macOS/Unix：单 pid 的 agent 判活（一次 ps 按 comm 校验）。terminal 的 resume 前奏与
 /// macos::terminal 的 resume 回退守卫共用此单一实现，避免判活口径分叉（进程存活却被判死 →
 /// 回退 resume 对运行中会话 fork 出重复会话）。
 /// ps 自身 spawn 失败（瞬时故障）时保守地当「存活/未知」——调用方把 false 当「确认已死」：
@@ -297,8 +268,9 @@ pub(crate) fn kill_descendants(root: u32) {
 
 /// 一次进程表扫描 → **活着的 agent 进程 pid 集合**。
 ///
-/// 与 [`pid_is_agent`] 判定同源（都按 basename 精确匹配 agent 白名单，防 Windows pid 复用），
-/// 差别只在这里把整张表**物化成集合**：集合可以跨命令共享，`&System` 不行。
+/// 判定按 basename 精确匹配 agent 白名单（`meowo_agent::is_agent_process`，与 owner_pid
+/// 写入侧同一事实源）：Windows 会复用 pid，只判「pid 是否存在」会把已结束的会话误判为
+/// 仍连接。整张表**物化成集合**，跨命令/整轮轮询共享同一份快照。
 ///
 /// 为什么要能共享：一次界面刷新会并发打好几个后端命令（见 `session_query` 的快照缓存），
 /// 每个都要判活。各扫各的话，Windows 上就是好几次全进程表枚举，而且两次扫描之间进程可能退出，

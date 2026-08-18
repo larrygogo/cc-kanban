@@ -270,6 +270,12 @@ pub(crate) async fn get_relay_secret_status() -> Result<BTreeMap<String, bool>, 
 }
 
 /// 用户明确要求在本机设置页查看已保存密钥；仅通过本地 Tauri IPC 返回，不进入 Settings/日志。
+///
+/// 安全评审（S3）结论：**保留明文返回**。设置页把它回填进可编辑输入框（失焦即整值保存），
+/// 用户靠肉眼核对令牌排查 401——改成掩码不但砍掉该能力，掩码值还会在失焦时被原样存回、
+/// 直接写坏密钥。外泄前提是渲染层已被攻破 + 存在出网信道；后者已由 CSP 收紧
+/// （img-src 不再放行任意 https）切断。后续若要进一步收紧，应连同前端改成
+/// 「不回填、留空表示不变」，单改后端做不到。
 #[tauri::command]
 pub(crate) async fn get_relay_secrets() -> Result<BTreeMap<String, String>, String> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -301,6 +307,19 @@ pub(crate) async fn set_relay_secret(agent: String, secret: String) -> Result<()
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 渲染层要求的中转地址是否与已保存地址同源（scheme+host+port 全等）。
+/// 任一侧解析失败（未保存过 / 非法 URL / 非 http 系的 opaque origin）一律 false——
+/// 密钥宁可不发，也不发去没核对过的地方。路径允许不同：同源即同一中转服务。
+fn same_relay_origin(saved: &str, requested: &str) -> bool {
+    url::Url::parse(saved.trim())
+        .ok()
+        .zip(url::Url::parse(requested.trim()).ok())
+        .is_some_and(|(saved, requested)| {
+            // opaque origin（如 file:）互不相等，天然被拒；显式限定 http(s) 再加一道保险。
+            matches!(saved.scheme(), "http" | "https") && saved.origin() == requested.origin()
+        })
 }
 
 fn models_url(base_url: &str) -> Result<String, String> {
@@ -342,6 +361,12 @@ fn parse_model_ids(body: &str) -> Result<Vec<String>, String> {
 }
 
 /// 使用已保存的中转密钥查询兼容 `/models` 端点。密钥只在后端组装请求，不返回前端。
+///
+/// base_url 由渲染层传入，必须与**已落盘**的该 agent 中转地址同源（scheme+host+port）：
+/// 不校验的话，被攻破的渲染层可以把已存密钥打包发往任意 host（GET /models 即带
+/// Authorization），等于一条现成的密钥外泄信道。合法流程不受影响——设置页的地址字段
+/// 即改即存，前端发来的一定是已保存的 rule.base_url。同源不成立时直接拒绝，
+/// 也不发无密钥的裸请求（那是免费的 SSRF 探测面）。
 #[tauri::command]
 pub(crate) async fn list_relay_models(
     agent: String,
@@ -352,6 +377,15 @@ pub(crate) async fn list_relay_models(
     use meowo_agent::{Body, HttpError, HttpRequest};
 
     let id = crate::agent_id(&agent).ok_or_else(|| "未知 agent".to_string())?;
+    let saved_base_url = crate::settings::load_settings()
+        .relay
+        .per_agent
+        .get(id.as_str())
+        .map(|rule| rule.base_url.clone())
+        .unwrap_or_default();
+    if !same_relay_origin(&saved_base_url, &base_url) {
+        return Err("中转地址与已保存的中转配置不一致，请先保存中转地址".into());
+    }
     let plugin = meowo_agent::by_id(&agent).ok_or_else(|| "未知 agent".to_string())?;
     let cap = plugin
         .relay()
@@ -496,6 +530,35 @@ mod tests {
             Some("sk-abc")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// S2：密钥只随「已保存中转配置的 origin」出门。host/端口/scheme 任一不同、
+    /// 未保存过地址、任一侧非法都不放行；仅路径不同（同一服务的不同前缀）放行。
+    #[test]
+    fn relay_secret_only_travels_to_the_saved_origin() {
+        assert!(same_relay_origin(
+            "https://relay.example/v1",
+            "https://relay.example/v1"
+        ));
+        assert!(same_relay_origin(
+            "https://relay.example/v1",
+            "https://relay.example/other/path"
+        ));
+        assert!(!same_relay_origin(
+            "https://relay.example/v1",
+            "https://evil.example/v1"
+        ));
+        assert!(!same_relay_origin(
+            "https://relay.example/v1",
+            "http://relay.example/v1" // 降级到明文也算换了地方
+        ));
+        assert!(!same_relay_origin(
+            "https://relay.example/v1",
+            "https://relay.example:8443/v1"
+        ));
+        assert!(!same_relay_origin("", "https://relay.example/v1"));
+        assert!(!same_relay_origin("not-a-url", "https://relay.example/v1"));
+        assert!(!same_relay_origin("file:///tmp/x", "file:///tmp/x"));
     }
 
     #[test]

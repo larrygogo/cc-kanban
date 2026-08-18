@@ -1517,10 +1517,14 @@ fn corrected_model_choice(
 /// resume 的终端 spawn 失败时回滚乐观复活（收尾回 ended）：GUI 构建下 stderr 不可见，
 /// 至少让卡片立即回落「已断开」，而不是假显示「已连接」直到 120s 宽限过期。
 /// 只对 prepare_resume 返回 Some(确实复活过)的会话调用——未被本次复活的真连接会话不得误收尾。
+///
+/// 走 pid CAS 版（end_session_if_unclaimed,`pid IS NULL` 守卫）而非裸 end_session：
+/// 复活与回滚之间新进程的 hook 可能已认领 pid（会话真活了）,对称于 revive_for_resume 的
+/// `pid=?` 守卫,绝不误杀刚认领的活会话——裸时间戳守卫挡不住按到达时刻盖章的 hook。
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub(crate) fn rollback_failed_resume(sid: i64) {
     if let Ok(store) = open_store(&db_path()) {
-        let _ = store.end_session(sid, now_ms());
+        let _ = store.end_session_if_unclaimed(sid, now_ms());
     }
 }
 

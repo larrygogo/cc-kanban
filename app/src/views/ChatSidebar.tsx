@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type UIEvent } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirmStopSession, getLiveSessionsPage, getSessionLineage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, searchChatTranscripts, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LineageEntry, type LiveSession, type SessionTone, type TranscriptSearchHit } from "../api";
 import { useBoardRefresh } from "../hooks/useBoardRefresh";
 import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
-import { folderName, pathKey } from "../paths";
+import { folderName, parentSegment, pathKey } from "../paths";
 import { useMenuPopup } from "./menu";
 import { CardContextMenu } from "./sticker/CardContextMenu";
 import { editorKeyDown, useStarred } from "./sticker/helpers";
@@ -182,7 +182,7 @@ const STATE_GROUP_ORDER: SessionTone[] = ["error", "pending", "waiting", "runnin
 function groupByState(items: LiveSession[], t: Dict): DirGroup[] {
   const map = new Map<SessionTone, LiveSession[]>();
   for (const item of items) {
-    const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored);
+    const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored, item.busy_subagents);
     const bucket = map.get(tone);
     if (bucket) bucket.push(item);
     else map.set(tone, [item]);
@@ -366,8 +366,11 @@ function readFolded(): Set<string> {
  * （get_live_sessions_page），靠 board-changed 广播刷新——它已经过后端合流去抖，
  * 这里不再自设轮询。折叠状态由 ChatWindow 持有（收起后展开入口在标题栏），
  * 本组件收起时整个卸载，数据加载随之停止。
+ * memo：ChatWindow 每次击键/每秒审批倒计时都重渲染，不隔断的话上百条 item 的整棵
+ * 子树跟着全量重建；父层回调已换稳定引用（resetTo/collapseSidebar 等）配合生效。
  */
-export function ChatSidebar({ activeId, approvalAwaitingIds, visibleOrderRef, onSelect, onCollapse }: {
+export const ChatSidebar = memo(ChatSidebarImpl);
+function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSelect, onCollapse }: {
   activeId: number;
   /** 有待授权请求的非当前会话：靠这里的徽标召唤用户。后端 **会** 为 broker 接管的审批把
    *  窗口切到目标会话（见 pty.rs 的 ensure_approval_window），这里是切换竞态与
@@ -418,11 +421,7 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, visibleOrderRef, on
     return dirs.map((cwd) => {
       const name = folderName(cwd);
       if ((counts.get(name) ?? 0) <= 1) return { value: cwd, label: name };
-      const parts = cwd.split(/[\\/]+/).filter(Boolean);
-      let parent = parts.length >= 2 ? parts[parts.length - 2] : "";
-      // 上级目录只为消歧，不必全名：uuid 一类的长段（agent 沙箱的 codebase 目录）
-      // 会把菜单撑成一排乱码，取前 8 个字符足以区分彼此。
-      if (parent.length > 12) parent = `${parent.slice(0, 8)}…`;
+      const parent = parentSegment(cwd);
       return { value: cwd, label: parent ? `${parent}/${name}` : name };
     });
   }, [dirs]);
@@ -444,6 +443,10 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, visibleOrderRef, on
   // 不落盘——搜索是临时视图,残留的词会让下次打开的列表被静默过滤(看板踩过同款坑)。
   const [search, setSearch] = useState("");
   const searchRef = useRef("");
+  // searchRef 是防抖后（300ms）才落的 load 读源;深度搜索判活性要的是**当前**词,故另用
+  // 一个每渲染同步的镜像 ref(本仓 xxxRef.current = xxx 惯例),回包时与它比即可。
+  const searchLiveRef = useRef(search);
+  searchLiveRef.current = search;
   const searchInputRef = useRef<HTMLInputElement>(null);
   // 对话内容全文搜索(显式动作):LIKE 只覆盖标题/目录/便签/最近往来,正文要靠后端扫
   // transcript 文件——点「搜索对话内容」才发,不随击键。结果与词绑定,词一变即作废。
@@ -455,7 +458,9 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, visibleOrderRef, on
     if (!q || deepSearching) return;
     setDeepSearching(true);
     searchChatTranscripts(q)
-      .then((hits) => { if (mountedRef.current) setDeepHits(hits); })
+      // 词已变则丢弃回包(与 load() 的词校验同款):在途期间用户改了搜索词,
+      // useEffect([search]) 已把 deepHits 清成 null,旧词结果落地会在新词视图下显错命中。
+      .then((hits) => { if (mountedRef.current && searchLiveRef.current.trim() === q) setDeepHits(hits); })
       .catch(() => { if (mountedRef.current) setActionError(t.chat.sidebarActionFailed); })
       .finally(() => { if (mountedRef.current) setDeepSearching(false); });
   };
@@ -848,7 +853,7 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, visibleOrderRef, on
     // 与对话窗标题栏同一套口径(sessionTone,含 errored——贴纸的错误优先级由此
     // 对齐,不再出现「贴纸报错、侧栏亮绿点」)。offline/ended 不加点——图标置灰
     // (is-off)已表达「不活跃」,再叠一个灰点是噪声。
-    const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored);
+    const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored, item.busy_subagents);
     const showDot = tone === "running" || tone === "pending" || tone === "waiting" || tone === "error";
     // 待授权徽标优先于状态点：授权在等用户决策，比「在跑/待处理」都紧急；
     // 且不依附 connected——离线会话恢复的 agent 同样可能来要权限。
@@ -1079,7 +1084,7 @@ export function ChatSidebar({ activeId, approvalAwaitingIds, visibleOrderRef, on
               // 组头汇总点:折起来时它是这一组唯一的状态出口,取组内最强的召唤。
               const approval = group.items.some((item) => approvalAwaitingIds.has(item.session.id));
               const tone = group.items
-                .map((item) => sessionTone(item.connected, item.session.status, item.pending_review, item.errored))
+                .map((item) => sessionTone(item.connected, item.session.status, item.pending_review, item.errored, item.busy_subagents))
                 .reduce<SessionTone | null>((best, cur) => (best && TONE_RANK[best] >= TONE_RANK[cur] ? best : cur), null);
               const showDot = !!tone && TONE_RANK[tone] > 0;
               // 「未运行」= 已断开，且不是当前打开的这条，也不是置顶的那些——正开着的会话

@@ -240,6 +240,10 @@ pub struct TranscriptInfo {
     /// 最近一条 assistant 正文的轻推预览（合并空白、截断）——供卡片 hover 速览，
     /// 不切终端就能判断该会话在问什么/说了什么。无正文回合（纯 tool_use）时为 None。
     pub preview: Option<String>,
+    /// 还在跑的后台子任务数（claude：已发启动回执、尚无任何结局信号——task-notification
+    /// （含排队形态）/ TaskOutput 拉取都算结局）。主回合 Stop 后它们仍在独立干活，
+    /// 状态判定据此把「等待中」翻成「运行中」。不支持后台委派的 agent 恒 0。
+    pub busy_subagents: u32,
 }
 
 /// 增量解析单元：逐行 fold、按需产出 TranscriptInfo。

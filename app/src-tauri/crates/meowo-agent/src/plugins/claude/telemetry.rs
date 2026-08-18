@@ -36,10 +36,10 @@ impl TelemetryCap for ClaudeTelemetry {
 /// session_id 已由命令层校验为安全形态（无路径分隔符/穿越），此处直接拼路径。
 fn write_custom_title(session_id: &str, cwd: Option<&str>, title: &str) -> bool {
     use std::io::Write;
+    // reconstruct 的 Some ⇒ 文件存在，无需再 filter(exists)。
     let Some(path) = CLAUDE_TRANSCRIPT
         .resolve_cwd(cwd, session_id)
         .and_then(|c| ct::reconstruct_transcript_path(&c, session_id))
-        .filter(|p| p.exists())
         .or_else(|| ct::find_transcript_by_session(session_id))
     else {
         return false;

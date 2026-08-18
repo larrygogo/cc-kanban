@@ -73,7 +73,6 @@ tauri-plugin-wdio-webdriver = { version = "1", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 notify = { workspace = true }
-sysinfo = "0.32"
 # 剪贴板图像读写(原生图片附加:把附件写进剪贴板让 TUI 自己 Ctrl-V 读;发完还原快照)。
 # image-data 提供 get_image/set_image;关默认特性是去掉 Linux 的 wayland-data-control 附带依赖。
 arboard = { version = "3", default-features = false, features = ["image-data"] }
@@ -83,6 +82,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 percent-encoding = "2"
 url = "2"
 base64 = "0.22"
+# 非 UTF-8 文本兜底解码（fsutil::decode_text_bytes）：中文 Windows 上 GBK 源码文件常见，
+# diff/文件查看器无脑 lossy 会整屏 U+FFFD。只用 GBK 一档，不引入全量编码探测。
+encoding_rs = "0.8"
 # ureq 只服务 ports.rs 的 HttpPort 实现——插件层只认 trait，不依赖 HTTP 栈。
 # socks-proxy：SOCKS 支持在 ureq 是**编译期 feature**，不开的话 `socks5://` 代理能解析、
 # 但连接时才失败。Clash / V2Ray 用户用 socks5 是常态，必须开。

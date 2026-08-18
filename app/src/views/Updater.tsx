@@ -158,6 +158,7 @@ export function Updater() {
             ) : (
               <>
                 <div className="up-status">{t.updater.ready}</div>
+                <div className="up-hint">{t.updater.readyHint}</div>
                 {/* 「稍后」语义化关窗：此前关窗是唯一的推迟方式，但右上角 ✕ 读不出
                     「更新还在、随时可装」——并排给出两条路，主次分明。 */}
                 <div className="up-actions">

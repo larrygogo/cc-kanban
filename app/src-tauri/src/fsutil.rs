@@ -21,7 +21,8 @@ const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 /// 把 cwd + rel 解析成一个保证位于 cwd 内的绝对路径。
 /// canonicalize 要求目标存在——浏览/读取场景本来也只操作存在的路径。
-fn resolve_inside(cwd: &str, rel: &str) -> Result<PathBuf, String> {
+/// pub(crate)：git.rs 的未跟踪文件读取同样要挡 `..`/绝对路径逃逸，共用这一份校验。
+pub(crate) fn resolve_inside(cwd: &str, rel: &str) -> Result<PathBuf, String> {
     let dir = cwd.trim();
     if dir.is_empty() || !Path::new(dir).is_dir() {
         return Err("目录不存在".into());
@@ -32,6 +33,33 @@ fn resolve_inside(cwd: &str, rel: &str) -> Result<PathBuf, String> {
         return Err("路径超出工作目录".into());
     }
     Ok(full)
+}
+
+/// 把可能不是 UTF-8 的文本字节解码成 String：严格 UTF-8 成功则用之；失败按 GBK 解
+/// （中文 Windows 上 GBK 源码文件常见，无脑 lossy 会整屏 U+FFFD）；仍失败才 lossy 兜底。
+/// git.rs 的 diff 查看器与这里的文件查看器共用，两边口径必须一致。
+pub(crate) fn decode_text_bytes(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => return text.to_string(),
+        // error_len() == None：输入在一个合法多字节序列中间戛然而止——截断读取所致，
+        // 本质仍是 UTF-8。只丢不完整的尾巴，不能整体误判成 GBK。
+        Err(e) if e.error_len().is_none() => {
+            return String::from_utf8_lossy(&bytes[..e.valid_up_to()]).into_owned()
+        }
+        Err(_) => {}
+    }
+    let (text, had_errors) = encoding_rs::GBK.decode_without_bom_handling(bytes);
+    if !had_errors {
+        return text.into_owned();
+    }
+    // 截断也可能把 GBK 双字节字符切半（错误只在最后一字节）：去尾重试一次。
+    if !bytes.is_empty() {
+        let (text, had_errors) = encoding_rs::GBK.decode_without_bom_handling(&bytes[..bytes.len() - 1]);
+        if !had_errors {
+            return text.into_owned();
+        }
+    }
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// 列出 cwd 下 rel 目录的直接子条目（`.`/`..`/`.git` 除外），目录在前、同组按名称排序。
@@ -94,14 +122,11 @@ fn read_file_text_blocking(cwd: &str, rel: &str) -> Result<FileTextDto, String> 
     }
     if truncated {
         bytes.truncate(MAX_FILE_BYTES);
-        // 截断点可能落在多字节字符中间：回退到完整 UTF-8 前缀，避免末尾出现 U+FFFD。
-        while std::str::from_utf8(&bytes).is_err() {
-            bytes.pop();
-        }
     }
+    // 截断点落在多字节字符中间的回退（丢不完整尾巴而非报错）由 decode_text_bytes 统一处理。
     Ok(FileTextDto {
         rel_path: rel.to_string(),
-        text: String::from_utf8_lossy(&bytes).into_owned(),
+        text: decode_text_bytes(&bytes),
         truncated,
         binary: false,
     })
@@ -275,10 +300,24 @@ fn search_file_content(path: &Path, needle: &str) -> (Vec<SearchLineHitDto>, u32
         return NONE;
     }
     let text = String::from_utf8_lossy(&bytes);
+    // needle 已在入口整体小写过，逐行再 to_lowercase 是每行一次堆分配——大工作区一次
+    // 搜索就是数十万次。ASCII needle（绝大多数）走无分配的字节窗口比较；非 ASCII 退化
+    // 为整文件小写一次（单次分配）。小写不产生/吞掉换行，两份文本按行号对齐，
+    // 预览仍取原文行。
+    let lowered = (!needle.is_ascii()).then(|| text.to_lowercase());
     let mut lines = Vec::new();
     let mut total = 0u32;
-    for (index, line) in text.lines().enumerate() {
-        if !line.to_lowercase().contains(needle) {
+    for (index, (line, match_line)) in text
+        .lines()
+        .zip(lowered.as_deref().unwrap_or(&text).lines())
+        .enumerate()
+    {
+        let hit = if lowered.is_some() {
+            match_line.contains(needle)
+        } else {
+            ascii_contains_ignore_case(match_line, needle)
+        };
+        if !hit {
             continue;
         }
         total += 1;
@@ -290,6 +329,16 @@ fn search_file_content(path: &Path, needle: &str) -> (Vec<SearchLineHitDto>, u32
         }
     }
     (lines, total)
+}
+
+/// ASCII needle（须已小写）的大小写不敏感子串查找，零分配。
+/// needle 长度由入口保证 ≥2（windows(0) 会 panic，恰好被同一道门挡住）。
+fn ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 /// 命中行预览：窗口对准首个命中处——命中在行首附近就从头截，否则从命中前
@@ -650,6 +699,35 @@ mod tests {
     fn list_file_openers_empty_for_dirs() {
         let tmp = TempDir::new();
         assert!(list_file_openers_blocking(tmp.path(), "").unwrap().is_empty());
+    }
+
+    /// 三级解码口径：严格 UTF-8 → GBK → lossy；截断切半的多字节字符只丢尾巴。
+    #[test]
+    fn decode_text_bytes_handles_utf8_gbk_and_truncation() {
+        assert_eq!(decode_text_bytes("你好".as_bytes()), "你好");
+        // GBK 的「中文测试」解出正确中文，而不是整屏替换符。
+        let gbk: &[u8] = &[0xD6, 0xD0, 0xCE, 0xC4, 0xB2, 0xE2, 0xCA, 0xD4];
+        assert_eq!(decode_text_bytes(gbk), "中文测试");
+        // UTF-8 截断在多字节字符中间：丢不完整尾巴，不得整体误判成 GBK。
+        let utf8 = "中文".as_bytes();
+        assert_eq!(decode_text_bytes(&utf8[..4]), "中");
+        // GBK 截断在双字节字符中间：去尾重试，仍解出前面的中文。
+        assert_eq!(decode_text_bytes(&gbk[..3]), "中");
+        // 两种编码都解不动的字节：lossy 兜底，不 panic。
+        assert!(!decode_text_bytes(&[0xFF, 0x81, 0x00]).is_empty());
+    }
+
+    #[test]
+    fn read_file_text_decodes_gbk_files() {
+        let tmp = TempDir::new();
+        std::fs::write(
+            Path::new(tmp.path()).join("gbk.txt"),
+            [0xD6, 0xD0, 0xCE, 0xC4],
+        )
+        .unwrap();
+        let text = read_file_text_blocking(tmp.path(), "gbk.txt").unwrap();
+        assert_eq!(text.text, "中文");
+        assert!(!text.binary);
     }
 
     #[test]

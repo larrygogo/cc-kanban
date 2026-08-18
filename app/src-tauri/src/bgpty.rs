@@ -181,11 +181,43 @@ struct BgSession {
     /// 但条目已出表，画面/输入判定都不再看它，线程多躺一会儿只是有界泄漏。
     detached: AtomicBool,
     exit_code: Mutex<Option<u32>>,
+    /// 结束次序（0 = 仍活跃）。closed 条目按它逐出最老的（见 [`evict_closed`]）。
+    closed_seq: AtomicU64,
 }
 
 /// backlog 上限，与 [`crate::pty`] 的托管 PTY 取同一个数：同一个终端视图在拉它们，
 /// 回看长度不该因为「这个会话是谁起的」而不同。
 const BACKLOG_LIMIT: usize = 1024 * 1024;
+
+/// closed 条目的保留上限，与 pty.rs 对 completed 的封顶取同一个数。条目要留着给
+/// 前端读回执（最后一屏 + 退出码，见 read_loop 后的注释），但每个自然结束的会话
+/// 都躺着最多 1MiB backlog——不封顶就是随运行时长无限增长的泄漏。
+const CLOSED_LIMIT: usize = 24;
+
+/// closed 结束次序的发号器。从 1 起：0 被 [`BgSession::closed_seq`] 用作「仍活跃」。
+static CLOSED_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// closed 条目超出 [`CLOSED_LIMIT`] 时按结束次序逐出最老的。活跃条目（closed_seq==0）
+/// 永不逐出；最老的回执早被前端读走了，逐出只影响「翻很久以前结束的会话」这种场景，
+/// 那时画面本就该走 transcript。
+fn evict_closed(sessions: &Arc<Mutex<HashMap<i64, Arc<BgSession>>>>) {
+    let mut sessions = sessions.lock().unwrap_or_else(|error| error.into_inner());
+    let mut closed: Vec<(i64, u64)> = sessions
+        .iter()
+        .filter_map(|(id, session)| {
+            let seq = session.closed_seq.load(Ordering::Acquire);
+            (seq > 0).then_some((*id, seq))
+        })
+        .collect();
+    if closed.len() <= CLOSED_LIMIT {
+        return;
+    }
+    let excess = closed.len() - CLOSED_LIMIT;
+    closed.sort_by_key(|&(_, seq)| seq);
+    for (id, _) in closed.into_iter().take(excess) {
+        sessions.remove(&id);
+    }
+}
 
 impl BgSession {
     fn send(&self, frame: &Frame) -> Result<(), String> {
@@ -271,6 +303,7 @@ impl BgPtyRegistry {
             closed: AtomicBool::new(false),
             detached: AtomicBool::new(false),
             exit_code: Mutex::new(None),
+            closed_seq: AtomicU64::new(0),
         });
         // 登记要**持锁复核**一次：上面的 is_active 与这里之间有一整个 connect() 的窗口，
         // 而一次窗口打开就有三处并发调 attach（对话页的 attach effect、终端首帧 resize 的
@@ -293,6 +326,7 @@ impl BgPtyRegistry {
 
         let auth = endpoint.auth.clone();
         let worker = session.clone();
+        let table = Arc::clone(&self.sessions);
         // 阻塞读独占一个线程：命名管道的 read 没有超时，塞进任何共享池都会占死一个工位。
         std::thread::spawn(move || {
             read_loop(reader, &worker, auth.as_deref());
@@ -304,6 +338,17 @@ impl BgPtyRegistry {
             // 注意这个理由只适用于**自然断流**；托管 PTY 接管时必须走 detach 主动摘表，
             // 否则这份定格画面和大偏移会永久遮蔽新 PTY 的快照与实时输出。
             worker.closed.store(true, Ordering::Release);
+            // 断流后写端再无用武之地（pong/auth 只在读循环里发，resize/kill 走短连接）：
+            // 换成 sink 立刻还掉管道句柄，条目本身只留内存里的回执。
+            *worker
+                .writer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Box::new(std::io::sink());
+            // 回执条目留而不弃，但要封顶：不然每个自然结束的会话都永久躺一份 backlog。
+            worker
+                .closed_seq
+                .store(CLOSED_SEQ.fetch_add(1, Ordering::Relaxed), Ordering::Release);
+            evict_closed(&table);
         });
         Ok(())
     }
@@ -556,6 +601,7 @@ mod tests {
             closed: AtomicBool::new(false),
             detached: AtomicBool::new(false),
             exit_code: Mutex::new(None),
+            closed_seq: AtomicU64::new(0),
         })
     }
 
@@ -576,6 +622,31 @@ mod tests {
         assert!(session.detached.load(Ordering::Acquire), "读线程收到退出旗标");
         // 未接入的 id:no-op 不 panic。
         registry.detach(999);
+    }
+
+    /// closed 回执条目封顶：超出 CLOSED_LIMIT 的按结束次序逐出最老的；
+    /// 仍活跃的条目（closed_seq==0）绝不能被逐出。
+    #[test]
+    fn evict_closed_caps_finished_sessions_and_keeps_live_ones() {
+        let registry = BgPtyRegistry::default();
+        {
+            let mut sessions = registry.sessions.lock().unwrap();
+            for id in 0..(CLOSED_LIMIT as i64 + 3) {
+                let session = dummy_bg_session();
+                session.closed.store(true, Ordering::Release);
+                session.closed_seq.store((id + 1) as u64, Ordering::Release);
+                sessions.insert(id, session);
+            }
+            sessions.insert(999, dummy_bg_session()); // 活跃会话
+        }
+        evict_closed(&registry.sessions);
+        let sessions = registry.sessions.lock().unwrap();
+        assert_eq!(sessions.len(), CLOSED_LIMIT + 1);
+        assert!(sessions.contains_key(&999), "活跃会话不受封顶影响");
+        for id in 0..3 {
+            assert!(!sessions.contains_key(&id), "最早结束的 {id} 应被逐出");
+        }
+        assert!(sessions.contains_key(&3), "结束次序靠后的保留");
     }
 
     #[test]

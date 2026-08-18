@@ -391,7 +391,8 @@ fn refresh_todos(db_path: &Path, session_id: i64) -> Result<usize, String> {
         .collect();
     let count = inputs.len();
     store
-        .sync_todos(session_id, &inputs, super::now_ms())
+        // 被动重建:不刷会话活跃时刻、不把 waiting 顶回 running(打开对话窗不是会话活动)。
+        .sync_todos_rebuild(session_id, &inputs, super::now_ms())
         .map_err(|e| e.to_string())?;
     Ok(count)
 }
@@ -466,7 +467,8 @@ use meowo_agent::fsutil::{paste_root, PASTE_MAX_BYTES};
 /// 是「把路径列表交给 CLI 自己读」。落在系统临时目录的 meowo-paste 子目录，交给 OS 的
 /// 临时清理策略回收——CLI 在发送后的下一个回合就会读走它。
 /// 文件名只取 basename 并过滤路径分隔符（杜绝 `..\` 穿越），落进带时间戳的独立子目录，
-/// 既避免同名互踩，附件条上又能显示原始文件名。
+/// 既避免同名互踩，附件条上又能显示原始文件名。扩展名过白名单（见
+/// [`PASTE_EXT_ALLOWLIST`]）：名单外一律追加 `.bin`，杜绝可执行文件借「粘贴」落盘。
 #[tauri::command]
 pub(crate) async fn save_pasted_attachment(
     file_name: String,
@@ -479,6 +481,34 @@ pub(crate) async fn save_pasted_attachment(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 粘贴附件允许保留的扩展名（比较前先转小写）。粘贴进对话输入框的只可能是截图/图片
+/// 或文本片段，不存在合法的「粘贴一个可执行文件」场景；而落盘路径会进 transcript、
+/// 交给 CLI 读取，还能经 open_path_with 的 default 分支（explorer 系统关联）打开——
+/// 若放行 .exe/.bat/.lnk 等扩展名，「粘贴」就成了任意代码落盘再拉起的第一跳。
+/// 名单外（含无扩展名）不拒绝而是追加 `.bin`：内容原样保留、原始名字仍可辨认，
+/// 但系统不再按危险类型关联执行。`bin` 本身在名单内，避免兜底名被二次追加。
+const PASTE_EXT_ALLOWLIST: &[&str] = &[
+    // 图片
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "heic", "heif", "ico",
+    // 文本
+    "txt", "md", "markdown", "log", "json", "jsonl", "csv", "tsv", "xml", "yaml", "yml", "toml",
+    "ini", "patch", "diff", "bin",
+];
+
+/// 白名单外的扩展名（或没有扩展名）→ 追加 `.bin` 使其失去系统关联。大小写不敏感。
+fn neutralize_paste_name(safe: String) -> String {
+    let allowed = Path::new(&safe)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .is_some_and(|ext| PASTE_EXT_ALLOWLIST.contains(&ext.as_str()));
+    if allowed {
+        safe
+    } else {
+        format!("{safe}.bin")
+    }
 }
 
 fn save_pasted_attachment_blocking(
@@ -512,6 +542,8 @@ fn save_pasted_attachment_blocking(
     } else {
         safe
     };
+    // 扩展名白名单在 basename 化之后做：此刻名字已不含路径分隔符，判定的就是最终落盘名。
+    let safe = neutralize_paste_name(safe);
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = paste_root().join(format!("{}-{seq}", super::now_ms()));
@@ -519,6 +551,53 @@ fn save_pasted_attachment_blocking(
     let path = dir.join(safe);
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// meowo-paste 落盘的回收期限。「交给 OS 临时清理策略」在 Windows 上是空头支票——
+/// 默认没人清 %TEMP%，不主动清就永久累积。取 30 天而不是更短：这里的文件会被回读——
+/// `queued/` 下是 transcript 渲染的插话/用户消息图片（fsutil::persist_paste_bytes 的
+/// 消费方），粘贴目录的路径也进了 transcript 正文供历史附件展示，删早了历史对话里
+/// 的图就成了裂图。
+const PASTE_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+
+/// 启动时后台清理过期的粘贴/插话附件。全程尽力而为：任何一步失败都静默跳过，
+/// 绝不阻塞启动、不打扰用户。
+pub(crate) fn spawn_paste_cleanup() {
+    std::thread::spawn(|| {
+        let root = paste_root();
+        let Ok(entries) = std::fs::read_dir(&root) else { return };
+        let now = std::time::SystemTime::now();
+        let expired = |meta: &std::fs::Metadata| {
+            meta.modified()
+                .ok()
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .is_some_and(|age| age > PASTE_TTL)
+        };
+        for entry in entries.flatten() {
+            // queued/ 是长期目录（transcript 图片按内容名幂等复用，新旧文件混住）：
+            // 按整目录 mtime 删会把仍在被回读的新图连坐，按单个文件逐个清。
+            if entry.file_name() == "queued" {
+                let Ok(files) = std::fs::read_dir(entry.path()) else { continue };
+                for file in files.flatten() {
+                    if file.metadata().is_ok_and(|meta| expired(&meta)) {
+                        let _ = std::fs::remove_file(file.path());
+                    }
+                }
+                continue;
+            }
+            // 其余是 `{时间戳}-{序号}` 的一次性粘贴目录：落盘后不再写入，
+            // 目录 mtime 即落盘时间，过期整目录删。
+            let Ok(meta) = entry.metadata() else { continue };
+            if !expired(&meta) {
+                continue;
+            }
+            if meta.is_dir() {
+                let _ = std::fs::remove_dir_all(entry.path());
+            } else {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    });
 }
 
 /// 原生图片附加的剪贴板快照。发送时逐张把附件写进系统剪贴板（Ctrl-V 让 TUI 自己读、
@@ -531,13 +610,36 @@ struct ClipboardSnapshot {
 static CLIPBOARD_SNAPSHOT: std::sync::Mutex<Option<ClipboardSnapshot>> =
     std::sync::Mutex::new(None);
 
+/// 剪贴板图片的输入上限。附件路径可以是对话框/拖拽选中的任意本地图片（见下），
+/// 唯一能挡的是资源滥用：超大文件与解码炸弹（小 PNG 解出数 GB 位图）都在读盘/解码前拦下。
+const CLIPBOARD_IMAGE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const CLIPBOARD_IMAGE_MAX_PIXELS: u64 = 100_000_000;
+
 /// 把本地图片文件写进系统剪贴板（供紧随其后的 Ctrl-V 原生附加）。首次写入前自动快照
 /// 现有剪贴板内容。读文件/解码/写剪贴板任一步失败都报错——调用方据此回退指令文本，
 /// 绝不能照常发 Ctrl-V（那会把剪贴板里别人的内容附给 agent）。
+///
+/// 路径不走 resolve_inside：附件可来自粘贴落盘（meowo-paste）、文件对话框或拖拽，
+/// 后两者是用户显式选中的任意目录文件，没有可用的 cwd 前缀可校验。风险面有限：
+/// 内容必须能按图片解码才会进剪贴板，且后端不提供把剪贴板图片读回渲染层的命令，
+/// 构不成读任意文件的回传信道。这里只做尺寸/像素上限，防资源滥用。
 #[tauri::command]
 pub(crate) async fn clipboard_set_image(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        if size > CLIPBOARD_IMAGE_MAX_BYTES {
+            return Err("图片过大（上限 64MB）".into());
+        }
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        // 先只读图片头取尺寸，不解码：挡住「小文件解出巨幅位图」的解码炸弹。
+        let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?
+            .into_dimensions()
+            .map_err(|e| e.to_string())?;
+        if u64::from(width) * u64::from(height) > CLIPBOARD_IMAGE_MAX_PIXELS {
+            return Err("图片像素过多，无法写入剪贴板".into());
+        }
         let rgba = image::load_from_memory(&bytes)
             .map_err(|e| e.to_string())?
             .to_rgba8();
@@ -765,6 +867,30 @@ mod tests {
         let path = std::path::PathBuf::from(path);
         // basename 化 + 过滤分隔符：无论名字长什么样，都只能落在 meowo-paste 里。
         assert!(path.starts_with(std::env::temp_dir().join("meowo-paste")));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn pasted_attachment_neutralizes_dangerous_extensions() {
+        // 白名单外（可执行/脚本/快捷方式/无扩展名）一律追加 .bin，大小写不敏感；
+        // 白名单内的图片/文本名原样保留。
+        assert_eq!(neutralize_paste_name("pwn.exe".into()), "pwn.exe.bin");
+        assert_eq!(neutralize_paste_name("pwn.EXE".into()), "pwn.EXE.bin");
+        assert_eq!(neutralize_paste_name("run.bat".into()), "run.bat.bin");
+        assert_eq!(neutralize_paste_name("evil.lnk".into()), "evil.lnk.bin");
+        assert_eq!(neutralize_paste_name("noext".into()), "noext.bin");
+        assert_eq!(neutralize_paste_name("shot.PNG".into()), "shot.PNG");
+        assert_eq!(neutralize_paste_name("notes.md".into()), "notes.md");
+        assert_eq!(neutralize_paste_name("pasted.bin".into()), "pasted.bin");
+        // 全链路：落盘名与判定一致。
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD.encode(b"MZ");
+        let path = save_pasted_attachment_blocking("payload.exe".into(), data).unwrap();
+        let path = std::path::PathBuf::from(path);
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("payload.exe.bin")
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

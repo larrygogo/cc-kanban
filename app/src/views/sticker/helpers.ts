@@ -92,9 +92,12 @@ export function useStarred(): { starred: Set<string>; toggleStar: (ccSessionId: 
 function activity(l: Item): "pending" | "running" | "waiting" | null {
   if (l.pending_review || l.screen_state === "blocked") return "pending";
   if (l.screen_state === "working") return "running";
-  if (l.screen_state === "idle") return "waiting";
+  // 屏幕 idle / DB waiting 只说明**主回合**停了——后台子任务还在跑时是「运行中」,
+  // 不该催人(与后端 tab_class 的 background_busy 同口径,原料同为 busy_subagents)。
+  const busy = (l.busy_subagents ?? 0) > 0;
+  if (l.screen_state === "idle") return busy ? "running" : "waiting";
   if (l.session.status === "running") return "running";
-  if (l.session.status === "waiting") return "waiting";
+  if (l.session.status === "waiting") return busy ? "running" : "waiting";
   return null;
 }
 

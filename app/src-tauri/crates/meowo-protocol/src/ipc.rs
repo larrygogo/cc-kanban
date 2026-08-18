@@ -37,6 +37,11 @@ pub struct SubagentOutcome {
     pub running: u32,
     pub completed: u32,
     pub failed: u32,
+    /// 后台委派的任务 id（claude 启动回执里的 `agentId`）。后台子任务的真结局可能不走
+    /// task-notification，而是主 agent 用 `TaskOutput` 拉取——那条回执挂在 TaskOutput 自己的
+    /// 调用上，只有这个 id 能把它归回原委派。前端按「同 id 首见者为委派本体」路由。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 /// 一个子任务的完整时间线。一次委派可能对应多条（kimi 的 `AgentSwarm`），

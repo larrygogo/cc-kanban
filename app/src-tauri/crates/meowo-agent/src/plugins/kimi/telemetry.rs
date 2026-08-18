@@ -25,6 +25,47 @@ fn chat_id(prefix: &str, line: &str) -> String {
     format!("kimi-{prefix}-{hash:016x}")
 }
 
+/// epoch 毫秒 → ISO-8601 UTC 字符串（`2026-08-14T03:37:12.036Z`）。`ChatItem.timestamp`
+/// 是字符串，claude 侧填的就是这种 ISO 形态，kimi 的数字时间统一转成同一表示。
+/// 历法换算用 Howard Hinnant 的 civil_from_days（与 Unix 时间同样无闰秒），
+/// 不为一个字段引整只时间库。
+fn iso_from_epoch_ms(ms: i64) -> String {
+    let days = ms.div_euclid(86_400_000);
+    let rem = ms.rem_euclid(86_400_000);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rem / 3_600_000,
+        rem / 60_000 % 60,
+        rem / 1000 % 60,
+        rem % 1000
+    )
+}
+
+/// wire 行的时间。实档字段是 `time`（epoch 毫秒**数字**，kimi-code 0.19/0.2x 实测每行
+/// 都带）；此前误读成 `timestamp`，所有 kimi 消息无时间（实拍回归）。ISO 字符串形态的
+/// `timestamp` 保留成兼容兜底。
+fn line_timestamp(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("time")
+        .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+        .map(iso_from_epoch_ms)
+        .or_else(|| {
+            value
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+}
+
 fn value_text(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
@@ -162,10 +203,19 @@ fn parse_events(line: &str, wire_dir: Option<&Path>) -> Vec<TranscriptEvent> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
         return Vec::new();
     };
-    let timestamp = value
-        .get("timestamp")
+    let timestamp = line_timestamp(&value);
+    // 事件 id：宿主拿它当唯一身份（React key、水位线去重），整行内容哈希会让**内容相同
+    // 的两行**必然同 id。loop 事件自带全局唯一且跨读取稳定的 `event.uuid`（kimi-code
+    // 0.2x 实测；step.begin/end 成对共享 uuid，但那些行不产出事件），优先用它；其余行
+    // 兜底整行哈希——行里带毫秒级 `time` 字段，跨回合的同文案行天然不同。
+    let event_uuid = value
+        .pointer("/event/uuid")
         .and_then(|v| v.as_str())
-        .map(str::to_string);
+        .filter(|uuid| !uuid.is_empty());
+    let stable_id = |prefix: &str| match event_uuid {
+        Some(uuid) => format!("kimi-{prefix}-{uuid}"),
+        None => chat_id(prefix, line),
+    };
     match value.get("type").and_then(|v| v.as_str()).unwrap_or("") {
         "turn.prompt" => {
             let id = chat_id("user", line);
@@ -233,15 +283,21 @@ fn parse_events(line: &str, wire_dir: Option<&Path>) -> Vec<TranscriptEvent> {
                     .or_else(|| event.get("result"))
                     .map(value_text)
                     .unwrap_or_default();
+                let tool_call_id = event
+                    .get("callId")
+                    .or_else(|| event.get("call_id"))
+                    .or_else(|| event.get("toolCallId"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 return vec![TranscriptEvent::ToolResult {
-                    id: chat_id("result", line),
+                    // 实档的 tool.result 事件没有 uuid，callId 是它的稳定唯一键
+                    // （一次调用恰一份结果）；两者都缺才退回整行哈希。
+                    id: event_uuid
+                        .map(|uuid| format!("kimi-result-{uuid}"))
+                        .or_else(|| tool_call_id.as_ref().map(|id| format!("kimi-result-{id}")))
+                        .unwrap_or_else(|| chat_id("result", line)),
                     timestamp,
-                    tool_call_id: event
-                        .get("callId")
-                        .or_else(|| event.get("call_id"))
-                        .or_else(|| event.get("toolCallId"))
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
+                    tool_call_id,
                     // 子任务状态就写在这条结果里；顺手取出，折叠态才能显示进度。
                     subagent: KIMI_SUBAGENTS.detect_result(&text),
                     text,
@@ -270,7 +326,7 @@ fn parse_events(line: &str, wire_dir: Option<&Path>) -> Vec<TranscriptEvent> {
                     .and_then(|v| v.as_str())
                     .filter(|text| !text.is_empty())
                     .map(|text| TranscriptEvent::AssistantChunk {
-                        id: chat_id("assistant", line),
+                        id: stable_id("assistant"),
                         timestamp,
                         text: text.to_string(),
                     })
@@ -283,7 +339,7 @@ fn parse_events(line: &str, wire_dir: Option<&Path>) -> Vec<TranscriptEvent> {
                     .and_then(|v| v.as_str())
                     .filter(|text| !text.is_empty())
                     .map(|text| TranscriptEvent::ReasoningChunk {
-                        id: chat_id("reasoning", line),
+                        id: stable_id("reasoning"),
                         timestamp,
                         text: text.to_string(),
                     })
@@ -307,7 +363,7 @@ fn parse_events(line: &str, wire_dir: Option<&Path>) -> Vec<TranscriptEvent> {
                             .or_else(|| part.get("toolCallId"))
                             .and_then(|v| v.as_str())
                             .map(str::to_string)
-                            .unwrap_or_else(|| chat_id("tool", line)),
+                            .unwrap_or_else(|| stable_id("tool")),
                         timestamp,
                         name,
                         // 子任务的摘要取那句描述；否则整包 args（含上千字 prompt）会把摘要行淹掉。
@@ -684,6 +740,8 @@ impl SubagentSpec for KimiSubagents {
             running: 0,
             completed: 0,
             failed: 0,
+            // kimi 的结局直接写在委派自己的回执里，不存在需要跨调用路由的场景。
+            task_id: None,
         };
         for (_, status) in &states {
             match status.as_deref() {
@@ -792,25 +850,10 @@ pub fn kimi_share_dir() -> Option<PathBuf> {
 /// `plugins/kimi` 的 `PROFILE` 声明）。多账号会话的 `session_index.jsonl` 落在这些目录里，
 /// 而 meowo-app 进程没有 `KIMI_SHARE_DIR`——只查默认目录会让 profile 会话的
 /// 改名/摘要/上下文全部静默落空，故会话目录查找必须把它们纳入候选。
-/// 目录布局与 claude 侧 `managed_projects_dirs` 同源（`~/.meowo/profiles/<agent>/<id>`）。
+/// 目录布局与 claude 侧 `managed_projects_dirs` 同源（`~/.meowo/profiles/<agent>/<id>`），
+/// 数据根解析与目录枚举（含 symlink/junction 解引用）收敛在 `crate::managed_profile_dirs`。
 fn managed_share_dirs() -> Vec<PathBuf> {
-    let Some(home) = crate::home_dir() else {
-        return Vec::new();
-    };
-    let root = std::env::var_os("MEOWO_DB")
-        .map(PathBuf::from)
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| home.join(".meowo"))
-        .join("profiles")
-        .join("kimi");
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .map(|entry| entry.path())
-        .collect()
+    crate::managed_profile_dirs(crate::id::KIMI.as_str())
 }
 
 /// kimi 的启动 argv（单元素：可执行绝对路径；找不到回退裸名 "kimi" 走 PATH）。
@@ -1334,6 +1377,50 @@ mod tests {
         assert!(parse_chat_items(injected).is_empty());
     }
 
+    /// 回归：wire 行的时间字段是 `time`（epoch 毫秒**数字**，实档每行都带），不是
+    /// `timestamp`——读错字段时所有 kimi 消息无时间。转换成与 claude 一致的 ISO-8601
+    /// UTC 字符串；旧形态的 ISO 字符串 `timestamp` 保留兜底。
+    #[test]
+    fn line_time_epoch_ms_becomes_iso_timestamp() {
+        assert_eq!(iso_from_epoch_ms(0), "1970-01-01T00:00:00.000Z");
+        // 闰日边界。
+        assert_eq!(iso_from_epoch_ms(951_867_296_789), "2000-02-29T23:34:56.789Z");
+        // 实档取样值。
+        assert_eq!(iso_from_epoch_ms(1_786_678_632_036), "2026-08-14T03:37:12.036Z");
+
+        let line = r#"{"type":"turn.prompt","input":"hi","time":1786678632036}"#;
+        assert!(matches!(
+            &parse_chat_items(line)[0],
+            ChatItem::UserText { timestamp: Some(ts), .. } if ts == "2026-08-14T03:37:12.036Z"
+        ));
+        let legacy = r#"{"type":"turn.prompt","input":"hi","timestamp":"2026-07-18T01:02:03Z"}"#;
+        assert!(matches!(
+            &parse_chat_items(legacy)[0],
+            ChatItem::UserText { timestamp: Some(ts), .. } if ts == "2026-07-18T01:02:03Z"
+        ));
+    }
+
+    /// 回归：id 是宿主的唯一身份（React key、水位线去重），整行内容哈希会让内容相同的
+    /// 两条记录同 id。loop 事件用自带的 event.uuid（不同事件必不同 id）；同一行重放
+    /// （增量 reset）id 必须稳定；工具结果没有 uuid，callId 是它的稳定唯一键。
+    #[test]
+    fn chat_ids_are_unique_per_record_and_stable_across_reads() {
+        let first = r#"{"type":"context.append_loop_event","time":1,"event":{"type":"content.part","uuid":"u-1","part":{"type":"text","text":"好的"}}}"#;
+        let twin = r#"{"type":"context.append_loop_event","time":1,"event":{"type":"content.part","uuid":"u-2","part":{"type":"text","text":"好的"}}}"#;
+        let id_of = |line: &str| match &parse_chat_items(line)[0] {
+            ChatItem::AssistantDelta { id, .. } => id.clone(),
+            other => panic!("应是 AssistantDelta：{other:?}"),
+        };
+        assert_ne!(id_of(first), id_of(twin), "同文案不同事件必须不同 id");
+        assert_eq!(id_of(first), id_of(first), "同一行重放 id 必须稳定");
+
+        let result = r#"{"type":"context.append_loop_event","time":2,"event":{"type":"tool.result","toolCallId":"tool-9","result":{"output":"ok"}}}"#;
+        assert!(matches!(
+            &parse_chat_items(result)[0],
+            ChatItem::ToolResult { id, .. } if id == "kimi-result-tool-9"
+        ));
+    }
+
     /// 用户粘贴的图片在 wire.jsonl 里是 `image_url` part：blobref 指向 wire 旁的
     /// `blobs/<sha>`（无扩展名）。修复前只拼 text part——图片静默丢失、纯图消息整条消失
     /// （实拍反馈：kimi 会话的图在对话里看不到）。落盘到 paste_root/queued/（asset scope
@@ -1717,8 +1804,12 @@ mod tests {
 
         let old_userprofile = std::env::var("USERPROFILE").ok();
         let old_home = std::env::var("HOME").ok();
+        // meowo PTY 里跑测试会带着指向真库的 MEOWO_DB——数据根解析优先读它，
+        // 不一并指进临时 home 的话，managed 目录会扫到真实 profile 而不是本用例造的。
+        let old_db = std::env::var("MEOWO_DB").ok();
         std::env::set_var("USERPROFILE", &home);
         std::env::set_var("HOME", &home);
+        std::env::set_var("MEOWO_DB", home.join(".meowo").join("board.db"));
 
         // 默认目录的会话照常命中；profile 目录的会话也查得到（修复前这里返回 None）。
         assert_eq!(
@@ -1748,6 +1839,10 @@ mod tests {
         match old_home {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
+        }
+        match old_db {
+            Some(v) => std::env::set_var("MEOWO_DB", v),
+            None => std::env::remove_var("MEOWO_DB"),
         }
         let _ = std::fs::remove_dir_all(&home);
     }

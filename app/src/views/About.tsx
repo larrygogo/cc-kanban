@@ -422,15 +422,30 @@ const lineHeightOptions = (t: Dict): { value: TerminalLineHeight; label: string 
 function useSliderDraft(commit: (v: number) => void) {
   const [draft, setDraft] = useState<number | null>(null);
   const timer = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(timer.current), []);
+  // 待提交的草稿值。键盘方向键路径没有 pointerup,靠 240ms 兜底 timer 提交——若在兜底
+  // 落地前整段卸载(Esc 关设置页/切分区,main-body 带 key={sec}),clearTimeout 会把这次
+  // 调节静默丢掉。卸载时有 pending 就立即 flush,commit 经 ref 取最新闭包。
+  const pendingRef = useRef<number | null>(null);
+  const commitRef = useRef(commit);
+  commitRef.current = commit;
+  useEffect(() => () => {
+    window.clearTimeout(timer.current);
+    if (pendingRef.current != null) {
+      const v = pendingRef.current;
+      pendingRef.current = null;
+      commitRef.current(v);
+    }
+  }, []);
   const change = (v: number) => {
     setDraft(v);
+    pendingRef.current = v;
     window.clearTimeout(timer.current);
     // 键盘方向键调节没有 pointerup：静默 240ms 后兜底提交。
-    timer.current = window.setTimeout(() => { commit(v); setDraft(null); }, 240);
+    timer.current = window.setTimeout(() => { pendingRef.current = null; commit(v); setDraft(null); }, 240);
   };
   const release = (v: number) => {
     window.clearTimeout(timer.current);
+    pendingRef.current = null;
     commit(v);
     setDraft(null);
   };

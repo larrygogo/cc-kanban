@@ -715,7 +715,9 @@ fn unknown_provider_is_persisted_verbatim_not_coerced_to_default() {
 
 #[test]
 fn activity_event_revives_mis_reaped_ended_session() {
-    // 会话被误清成 ended（如 app 的 reap 一度不认 kimi pid）后，任一活动事件都应复活，不只 UserPromptSubmit。
+    // 会话被误 reap 成 ended（如 app 的 reap 一度不认 kimi pid）后，任一活动事件都应复活,
+    // 不只 UserPromptSubmit。误 reap 走 end_session_if_pid（reaper 路径,留 pid 作墨迹）——
+    // revive 靠该墨迹即刻自愈;正常 SessionEnd（清 pid）的迟到尾巴则不复活（见下一测试）。
     let store = Store::open_in_memory().unwrap();
     dispatch(
         &store,
@@ -725,7 +727,8 @@ fn activity_event_revives_mis_reaped_ended_session() {
     )
     .unwrap();
     let sid = store.find_session_id_pub("rv1").unwrap().unwrap();
-    store.end_session(sid, 150).unwrap(); // 模拟被误 reap
+    store.set_session_pid(sid, 999, 120).unwrap();
+    assert!(store.end_session_if_pid(sid, 999, 120, 150).unwrap()); // 模拟被误 reap
     dispatch(
         &store,
         &ev(
@@ -743,6 +746,152 @@ fn activity_event_revives_mis_reaped_ended_session() {
         .unwrap();
     assert_eq!(s.session.status, "running");
     assert_eq!(s.session.ended_at, None); // ended_at 被清，状态自洽
+}
+
+/// M3:正常 SessionEnd 之后排队迟到的同回合 PostToolUse 不得诈尸——曾复活成 running 且
+/// pid NULL,卡片假活 120s 才被 end_orphaned_idle 再收一次。
+#[test]
+fn straggler_posttooluse_after_session_end_does_not_resurrect() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"zz1","cwd":"/p"}"#),
+        100,
+    )
+    .unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionEnd","session_id":"zz1"}"#),
+        200,
+    )
+    .unwrap();
+    // SessionEnd 后 300ms 才被排队放行的回合尾巴。
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"PostToolUse","session_id":"zz1","cwd":"/p","tool_name":"Read"}"#),
+        500,
+    )
+    .unwrap();
+    let sid = store.find_session_id_pub("zz1").unwrap().unwrap();
+    assert_eq!(store.get_session(sid).unwrap().status, "ended", "尾巴不得诈尸");
+}
+
+/// M3:SessionEnd 后排队迟到的 Stop 尾巴同样不得诈尸——它绕过活动类 touch,走的是
+/// set_session_status(Waiting),该方法必须拒绝在 ended 行上翻状态（复活只归 revive_* 一族）。
+#[test]
+fn straggler_stop_after_session_end_does_not_resurrect() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"zz2","cwd":"/p"}"#),
+        100,
+    )
+    .unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionEnd","session_id":"zz2"}"#),
+        200,
+    )
+    .unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"Stop","session_id":"zz2"}"#),
+        400,
+    )
+    .unwrap();
+    let sid = store.find_session_id_pub("zz2").unwrap().unwrap();
+    let s = store.get_session(sid).unwrap();
+    assert_eq!(s.status, "ended", "Stop 尾巴不得把 ended 翻成 waiting");
+    assert!(s.ended_at.is_some());
+}
+
+/// M1:PermissionRequest/PreToolUse 打在已结束会话上（SessionEnd 后的迟到尾巴）不得把
+/// pending 写在尸体上——那样卡片看不见、通知全哑,且永远没人清它。
+#[test]
+fn permission_request_on_ended_session_is_dropped() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"pe1","cwd":"/p"}"#),
+        100,
+    )
+    .unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionEnd","session_id":"pe1"}"#),
+        200,
+    )
+    .unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"PermissionRequest","session_id":"pe1","tool_name":"Bash"}"#),
+        210,
+    )
+    .unwrap();
+    let sid = store.find_session_id_pub("pe1").unwrap().unwrap();
+    assert_eq!(store.get_session(sid).unwrap().status, "ended");
+    assert_eq!(
+        store.session_pending_review(sid).unwrap(),
+        None,
+        "尸体上不得挂 pending"
+    );
+}
+
+/// M1:误 reap 的会话来了 PermissionRequest——agent 正阻塞等授权,不会再有别的活动事件,
+/// 这条就是复活与通知的唯一机会,必须复活并置 pending。
+#[test]
+fn permission_request_revives_mis_reaped_session_and_sets_pending() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"pe2","cwd":"/p"}"#),
+        100,
+    )
+    .unwrap();
+    let sid = store.find_session_id_pub("pe2").unwrap().unwrap();
+    store.set_session_pid(sid, 777, 120).unwrap();
+    assert!(store.end_session_if_pid(sid, 777, 120, 150).unwrap()); // 误 reap(留 pid 墨迹)
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"PermissionRequest","session_id":"pe2","tool_name":"Bash"}"#),
+        200,
+    )
+    .unwrap();
+    let s = store.get_session(sid).unwrap();
+    assert_ne!(s.status, "ended");
+    assert_eq!(
+        store.session_pending_review(sid).unwrap().as_deref(),
+        Some("approval")
+    );
+}
+
+/// M7:Stop 置 waiting 后,迟到窗内的 PostToolUse 尾巴不得推进 last_event_at——
+/// 它是「等待你回复」通知的去重指纹,被尾巴推进会让同一回合弹两次。
+#[test]
+fn straggler_posttooluse_after_stop_keeps_waiting_fingerprint() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"fp1","cwd":"/p"}"#),
+        100,
+    )
+    .unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"Stop","session_id":"fp1"}"#),
+        200,
+    )
+    .unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"PostToolUse","session_id":"fp1","cwd":"/p","tool_name":"Read"}"#),
+        450,
+    )
+    .unwrap();
+    let sid = store.find_session_id_pub("fp1").unwrap().unwrap();
+    let s = store.get_session(sid).unwrap();
+    assert_eq!(s.status, "waiting", "回合尾巴不得顶回 running");
+    assert_eq!(s.last_event_at, 200, "通知指纹(last_event_at)不得被尾巴推进");
 }
 
 #[test]
@@ -797,4 +946,72 @@ fn event_with_cwd_backfills_half_created_session() {
         store.session_cwd(sid).unwrap().as_deref(),
         Some("/home/me/proj")
     );
+}
+
+/// hook 的 cwd 跟随 Bash 持久 shell 的 cd 漂移。auto-compact 会以同 session_id 在回合
+/// 中途重发 SessionStart(source=compact),带的是漂移后的当前目录——实拍事故:会话工作区
+/// 从仓库根被覆写成 `app\src-tauri`,transcript 路径重建从此落空。compact 不得覆写;
+/// startup/resume(新进程拉起,cwd=启动目录)保留覆写——手动 resume 纠正搬家后的陈旧
+/// cwd 的自愈靠它。
+#[test]
+fn compact_session_start_must_not_overwrite_cwd() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"cw1","source":"startup","cwd":"/repo"}"#),
+        100,
+    )
+    .unwrap();
+    let sid = store.find_session_id_pub("cw1").unwrap().unwrap();
+    assert_eq!(store.session_cwd(sid).unwrap().as_deref(), Some("/repo"));
+
+    // 回合中途 auto-compact:shell 已 cd 进子目录,cwd 不可信 → 保持启动目录。
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"cw1","source":"compact","cwd":"/repo/app/src-tauri"}"#),
+        200,
+    )
+    .unwrap();
+    assert_eq!(
+        store.session_cwd(sid).unwrap().as_deref(),
+        Some("/repo"),
+        "compact 的 SessionStart 不得用漂移 cwd 覆写工作区"
+    );
+
+    // 项目搬家后手动 resume:新进程在新目录拉起,覆写即自愈。
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"cw1","source":"resume","cwd":"/moved/repo"}"#),
+        300,
+    )
+    .unwrap();
+    assert_eq!(
+        store.session_cwd(sid).unwrap().as_deref(),
+        Some("/moved/repo"),
+        "resume 的 SessionStart 应保留覆写语义"
+    );
+
+    // 无 source 字段(其他 agent / 旧版):维持原覆写行为,不回退。
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"cw1","cwd":"/plain"}"#),
+        400,
+    )
+    .unwrap();
+    assert_eq!(store.session_cwd(sid).unwrap().as_deref(), Some("/plain"));
+}
+
+/// compact 的 SessionStart 撞上「行不存在」(hooks 中途装上、SessionStart 曾丢失):
+/// 新行没有旧值可保,backfill 也必须把 cwd 写上,不能留 NULL 半态。
+#[test]
+fn compact_session_start_still_fills_cwd_on_fresh_row() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"cw2","source":"compact","cwd":"/repo/sub"}"#),
+        100,
+    )
+    .unwrap();
+    let sid = store.find_session_id_pub("cw2").unwrap().unwrap();
+    assert_eq!(store.session_cwd(sid).unwrap().as_deref(), Some("/repo/sub"));
 }

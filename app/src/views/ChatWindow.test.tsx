@@ -201,7 +201,7 @@ describe("ChatWindow", () => {
   it("不展开也显示子任务状态：无回执=在跑，有回执=按结局统计", async () => {
     window.history.replaceState({}, "", "/?sessionId=17");
     const swarm = {
-      type: "tool_use", id: "tool_s", timestamp: null, name: "AgentSwarm", summary: "分组审查",
+      type: "tool_use", id: "tool_s", timestamp: "2026-08-18T04:00:00.000Z", name: "AgentSwarm", summary: "分组审查",
       subagent: { description: "分组审查", agent_type: "explore", count: 3 },
     };
     let done = false;
@@ -211,7 +211,7 @@ describe("ChatWindow", () => {
         supported: true, offset: 0, reset: false, pendingReview: null,
         items: done
           ? [swarm, {
-              type: "tool_result", id: "r1", timestamp: null, tool_use_id: "tool_s",
+              type: "tool_result", id: "r1", timestamp: "2026-08-18T04:06:40.000Z", tool_use_id: "tool_s",
               text: "done", is_error: false,
               subagent: { running: 0, completed: 2, failed: 1 },
             }]
@@ -228,11 +228,16 @@ describe("ChatWindow", () => {
     // 没有回执 → 三个都在跑，且**不必展开**（不该为一个徽标去读侧车流）。
     expect(await screen.findByText("3 进行中")).toBeTruthy();
     expect(invoke).not.toHaveBeenCalledWith("get_subagent_transcript", expect.anything());
+    // 在跑时图标脉冲——折叠状态下不必读徽标小字也能看出里面有活儿。
+    expect(document.querySelector(".chat-subagent-icon.is-running")).toBeTruthy();
 
     // 回执到达后按真实结局显示（靠历史轮询自然刷新，不手动重渲染）。
     done = true;
     await waitFor(() => expect(screen.getAllByText("2 完成 · 1 失败").length).toBeGreaterThan(0), { timeout: 3_000 });
     expect(screen.queryByText("3 进行中")).toBeNull();
+    // 结束后:图标停脉冲,显示「委派 → 最终回执」的执行时长(04:00:00 → 04:06:40)。
+    expect(document.querySelector(".chat-subagent-icon.is-running")).toBeNull();
+    expect(screen.getAllByText("6 分 40 秒").length).toBeGreaterThan(0);
     expect(invoke).not.toHaveBeenCalledWith("get_subagent_transcript", expect.anything());
   });
 
@@ -2481,6 +2486,36 @@ describe("ChatWindow", () => {
   });
 
   /**
+   * 面板收着时入口必须能看出里面有活儿(实拍反馈「入口上看不出在执行」):
+   * 有在跑的子任务 → 图标挂脉冲小点;面板里子任务行尾显示执行时长(结束的定格总用时)。
+   */
+  it("进度入口带活动小点,面板子任务行尾显示执行时长", async () => {
+    window.history.replaceState({}, "", "/?sessionId=99");
+    respondWithHistory({
+      sessionId: 99, title: "带时长", status: "running", provider: "claude", cwd: "C:/repo",
+      supported: true, offset: 0, reset: false, pendingReview: null, connected: true,
+      items: [
+        { type: "tool_use", id: "sa_run", timestamp: "2026-08-18T04:00:00.000Z", name: "Agent", summary: "在跑的委派", subagent: { description: "在跑的委派", agent_type: null, count: 1 } },
+        { type: "tool_use", id: "sa_done", timestamp: "2026-08-18T04:00:00.000Z", name: "Agent", summary: "完成的委派", subagent: { description: "完成的委派", agent_type: null, count: 1 } },
+        {
+          type: "tool_result", id: "sr_done", timestamp: "2026-08-18T04:02:05.000Z", tool_use_id: "sa_done",
+          text: "done", is_error: false, subagent: { running: 0, completed: 1, failed: 0 },
+        },
+      ],
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("带时长")).toBeTruthy());
+    // 有委派没回执 = 在跑 → 入口图标右上角有脉冲小点。
+    expect(document.querySelector(".chat-todo-btn .chat-todo-live")).toBeTruthy();
+    fireEvent.click(document.querySelector(".chat-todo-btn")!);
+    const panel = document.querySelector(".chat-todo-panel")!;
+    // 完成的委派定格总用时(04:00:00 → 04:02:05);在跑的行尾也有滴答的已耗时。
+    expect(panel.textContent).toContain("2 分 5 秒");
+    const times = panel.querySelectorAll(".chat-todo-panel-time");
+    expect(times.length).toBe(2);
+  });
+
+  /**
    * claude 新版任务列表(TaskCreate/TaskUpdate)不触发 hook,DB 恒空——面板必须能从
    * 时间线的工具调用/回执里累积重建:编号从回执文本抠,状态由 TaskUpdate 摘要 JSON 驱动。
    */
@@ -2557,6 +2592,8 @@ describe("ChatWindow", () => {
     await waitFor(() => expect(screen.getByText("无任务")).toBeTruthy());
     const btn = document.querySelector(".chat-todo-btn");
     expect(btn).toBeTruthy();
+    // 没有任何在跑的任务/子任务 → 不挂活动小点。
+    expect(document.querySelector(".chat-todo-live")).toBeNull();
     fireEvent.click(btn!);
     expect(document.querySelector(".chat-todo-skeleton")).toBeTruthy();
     expect(screen.getByText("任务进度将显示在这里")).toBeTruthy();
