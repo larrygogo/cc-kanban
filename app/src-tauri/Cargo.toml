@@ -101,6 +101,13 @@ vt100 = "0.16.2"
 # regex 本就在依赖树里（ureq/notify 等的传递依赖），提为直接依赖不增加编译体积。
 regex = "1"
 tauri-plugin-single-instance = "2.4.3"
+# 远程访问桥（remote.rs）：局域网/Tailscale 内手机浏览器经 HTTP 使用对话页。
+# axum 本就在依赖树（e2e 插件的传递依赖，lock 已锁 0.8.9），提为常驻不引新版本；
+# 关默认特性只留用到的四项，控制 release（opt-level="s"）的体积增量。
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+# tokio 经 tauri 传递引入，但 tauri 默认不开 net（现由 updater→reqwest 链传递打开）——
+# 远程桥的 TcpListener 依赖它，显式声明不把编译成败押在别人的依赖树上。
+tokio = { version = "1", features = ["net", "sync"] }
 # codex config.toml 的结构保持编辑（保注释与键序）。kimi 的已迁入 meowo-agent::config。
 # codex hook 预信任的 trusted_hash 计算（SHA-256）。
 

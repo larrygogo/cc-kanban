@@ -68,6 +68,10 @@ fn default_terminal_font_size() -> u32 {
 fn default_terminal_line_height() -> String {
     "normal".to_string()
 }
+/// 远程访问默认端口。避开常见服务端口段，可在设置里改。
+fn default_remote_port() -> u32 {
+    18620
+}
 
 /// 应用设置（持久化到 ~/.meowo/settings.json）。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -161,6 +165,18 @@ pub(crate) struct Settings {
     /// 看完（或点关闭）即置 true，之后只能从托盘/设置手动再看。
     #[serde(default)]
     pub(crate) onboarding_seen: bool,
+    /// 远程访问总开关（手机浏览器经局域网/Tailscale 使用对话页，见 remote.rs）。
+    /// 缺省关闭：这是唯一会监听非 loopback 端口的功能，必须显式打开。
+    #[serde(default)]
+    pub(crate) remote_access_enabled: bool,
+    /// 远程访问监听端口。缺省 18620，兼容老 settings.json。
+    #[serde(default = "default_remote_port")]
+    pub(crate) remote_access_port: u32,
+    /// 远程访问 token（64 位十六进制，remote::generate_token 严格生成）。空 = 未生成，
+    /// server 不会启动。随 Settings 序列化（settings-changed 事件只发给本机窗口，
+    /// 与 relay 密钥的「绝不序列化」不同级：token 的威胁面就是本机之外）。
+    #[serde(default)]
+    pub(crate) remote_access_token: String,
 }
 
 impl Default for Settings {
@@ -192,6 +208,9 @@ impl Default for Settings {
             default_profile_names: Default::default(),
             relay: crate::relay::RelaySettings::default(),
             onboarding_seen: false,
+            remote_access_enabled: false,
+            remote_access_port: default_remote_port(),
+            remote_access_token: String::new(),
         }
     }
 }
@@ -365,6 +384,9 @@ fn preserve_independently_managed_fields(incoming: &mut Settings, current: &Sett
     incoming.active_profile = current.active_profile.clone();
     incoming.default_profile_names = current.default_profile_names.clone();
     incoming.onboarding_seen = current.onboarding_seen;
+    // 远程 token 由 remote_access_info 惰性生成落盘；设置窗打开期间刚生成的 token
+    // 不得被旧快照的空串抹掉（enabled/port 是设置窗自己编辑的字段，仍以快照为准）。
+    incoming.remote_access_token = current.remote_access_token.clone();
 }
 
 #[tauri::command]
@@ -413,6 +435,8 @@ pub(crate) async fn set_settings(
         .map_err(|e| e.to_string())?;
     // 通知贴纸窗口实时套用新设置。
     let _ = app.emit("settings-changed", settings);
+    // 远程访问开关/端口热生效（fire-and-forget，内部自行读最新 settings 并比对差异）。
+    crate::remote::apply(&app);
     Ok(())
 }
 
@@ -669,6 +693,27 @@ mod tests {
         assert!(!text.contains("secret"));
     }
 
+    #[test]
+    fn old_settings_json_without_remote_access_defaults_off() {
+        // 老 settings.json 无远程字段：开关必须落关闭（唯一监听非 loopback 的功能，
+        // 绝不许升级后静默打开），端口落默认、token 落空。
+        let v: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!v.remote_access_enabled);
+        assert_eq!(v.remote_access_port, 18620);
+        assert!(v.remote_access_token.is_empty());
+    }
+
+    #[test]
+    fn remote_access_fields_round_trip_through_json() {
+        let src = r#"{"remote_access_enabled":true,"remote_access_port":9999,"remote_access_token":"deadbeef"}"#;
+        let v: Settings = serde_json::from_str(src).unwrap();
+        assert!(v.remote_access_enabled);
+        assert_eq!(v.remote_access_port, 9999);
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains(r#""remote_access_port":9999"#));
+        assert!(json.contains(r#""remote_access_token":"deadbeef""#));
+    }
+
     /// 设置窗口回传的是打开时的整对象快照：由独立命令维护的字段必须以磁盘最新值为准，
     /// 尤其 onboarding_seen——窗口打开期间刚完成引导，一次外观保存不得把它写回 false。
     #[test]
@@ -679,6 +724,7 @@ mod tests {
         };
         let mut current = Settings {
             onboarding_seen: true, // 窗口打开期间完成了引导
+            remote_access_token: "freshly-generated".into(), // 期间生成了远程 token
             ..Default::default()
         };
         current.profiles.insert("claude".into(), vec![]); // 期间建过账号
@@ -692,6 +738,10 @@ mod tests {
         preserve_independently_managed_fields(&mut incoming, &current);
 
         assert!(incoming.onboarding_seen, "引导标记不得被旧快照写回 false");
+        assert_eq!(
+            incoming.remote_access_token, "freshly-generated",
+            "远程 token 不得被旧快照的空串抹掉"
+        );
         assert!(incoming.profiles.contains_key("claude"));
         assert_eq!(
             incoming.active_profile.get("claude"),

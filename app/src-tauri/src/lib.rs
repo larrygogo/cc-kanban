@@ -21,6 +21,7 @@ mod seed;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod proxy;
+mod remote;
 mod settings;
 pub mod snap;
 mod term_script;
@@ -1287,6 +1288,10 @@ pub fn run() {
             } else {
                 eprintln!("Meowo dev: 跳过启动自动接线(hooks/statusline)；需要时用设置页「修复连接」或设 MEOWO_DEV_WIRE=1");
             }
+            // 远程访问桥（手机浏览器）：manage 生命周期状态后按 settings 决定是否启动。
+            // 默认关闭时 apply 是 no-op，不监听任何端口。
+            app.manage(remote::RemoteRuntime::default());
+            remote::apply(app.handle());
             // 先起合流线程：其余几个 spawn_* 都经 emit_board_changed 发事件，晚起会让它们的
             // 首批事件退化成直接 emit。
             spawn_board_notifier(app.handle().clone());
@@ -1424,6 +1429,7 @@ mod tests {
             ("proxy.rs", include_str!("proxy.rs")),
             ("pty.rs", include_str!("pty.rs")),
             ("relay.rs", include_str!("relay.rs")),
+            ("remote.rs", include_str!("remote.rs")),
             ("session_command.rs", include_str!("session_command.rs")),
             ("session_query.rs", include_str!("session_query.rs")),
             ("settings.rs", include_str!("settings.rs")),
