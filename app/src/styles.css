@@ -1827,55 +1827,36 @@ button.stab {
 
 /* 手机远程配对卡：端口窄输入 + 扫码区。 */
 .remote-port-input { width: 96px; text-align: center; }
-.remote-pairing {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-8);
-  padding: var(--sp-8) 0 0;
-  align-items: stretch;
-}
-/* 二维码居左,右侧竖排「选地址 → 可达性说明 → 地址+复制」,与码垂直居中对齐。 */
-.remote-pair-body {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-12);
-  min-width: 0;
-}
 /* 二维码白底留边:深色主题下纯 SVG 直贴会与背景糊在一起,扫不出来。 */
 .remote-qr {
   background: #fff;
-  padding: var(--sp-6);
+  padding: var(--sp-4);
   border-radius: var(--radius-md, 8px);
   line-height: 0;
   flex: none;
 }
-.remote-qr svg { width: 140px; height: 140px; display: block; }
-.remote-pair-side {
+.remote-qr svg { width: 120px; height: 120px; display: block; }
+.remote-ip-pick {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--sp-6);
-  flex: 1;
-  min-width: 0;
+  margin-top: var(--sp-6);
 }
-.remote-ip-pick { display: flex; align-items: center; gap: var(--sp-6); }
 .remote-url-row {
   display: flex;
   align-items: center;
   gap: var(--sp-6);
-  width: 100%;
+  margin-top: var(--sp-6);
   min-width: 0;
 }
-/* 地址单行省略:token 六十多字符,折行会把整卡撑高;完整值走复制按钮/悬停 title。 */
+/* 地址完整展示(折行 break-all):它就是配对凭据本体,截断了没法核对。 */
 .remote-url {
   font-size: 12px;
   color: var(--cc-text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  word-break: break-all;
+  user-select: all;
   flex: 1;
   min-width: 0;
-  user-select: all;
 }
 .remote-copy {
   flex: none;

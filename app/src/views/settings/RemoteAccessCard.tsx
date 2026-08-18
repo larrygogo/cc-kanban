@@ -109,48 +109,57 @@ export function RemoteAccessCard() {
         <PortInput value={port} onCommit={changePort} />
       </div>
 
-      {info?.lastError && <div className="sec-hint proxy-err">{t.remote.startError(info.lastError)}</div>}
-
-      {enabled && (
-        <div className="remote-pairing">
-          {url && svg ? (
-            <>
-              <div className="row-text">
-                <div className="row-label">{t.remote.scan}</div>
-                <div className="row-desc">{t.remote.scanHint}</div>
-              </div>
-              <div className="remote-pair-body">
-                {/* renderSVG 产出完整 <svg> 字符串，本地生成、不含用户可注入内容。 */}
-                <div className="remote-qr" dangerouslySetInnerHTML={{ __html: svg }} />
-                <div className="remote-pair-side">
-                  {ipOptions.length > 1 && (
-                    <div className="remote-ip-pick">
-                      <span className="row-desc">{t.remote.device}</span>
-                      <Dropdown value={selectedIp ?? ""} options={ipOptions} onChange={setSelectedIp} />
-                    </div>
-                  )}
-                  {selectedKind && (
-                    <div className="row-desc">
-                      {selectedKind === "tailscale" ? t.remote.hintTailscale : t.remote.hintLan}
-                    </div>
-                  )}
-                  <div className="remote-url-row">
-                    <code className="remote-url" title={url}>
-                      {url}
-                    </code>
-                    <button type="button" className="remote-copy" onClick={copy}>
-                      {copied ? t.remote.copied : t.remote.copy}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="sec-hint">{t.remote.noIp}</div>
-          )}
+      {info?.lastError && (
+        <div className="row">
+          <div className="row-text">
+            <div className="proxy-err">{t.remote.startError(info.lastError)}</div>
+          </div>
         </div>
       )}
-      {!enabled && <div className="sec-hint">{t.remote.offHint}</div>}
+
+      {enabled &&
+        (url && svg ? (
+          // 配对行与其余设置行同构:文字列居左,二维码当作行右侧的「控件」。
+          <div className="row remote-pair-row">
+            <div className="row-text">
+              <div className="row-label">{t.remote.scan}</div>
+              <div className="row-desc">{t.remote.scanHint}</div>
+              {ipOptions.length > 1 && (
+                <div className="remote-ip-pick">
+                  <span className="row-desc">{t.remote.device}</span>
+                  <Dropdown value={selectedIp ?? ""} options={ipOptions} onChange={setSelectedIp} />
+                </div>
+              )}
+              <div className="remote-url-row">
+                <code className="remote-url">{url}</code>
+                <button type="button" className="remote-copy" onClick={copy}>
+                  {copied ? t.remote.copied : t.remote.copy}
+                </button>
+              </div>
+              {selectedKind && (
+                <div className="row-desc">
+                  {selectedKind === "tailscale" ? t.remote.hintTailscale : t.remote.hintLan}
+                </div>
+              )}
+            </div>
+            {/* renderSVG 产出完整 <svg> 字符串，本地生成、不含用户可注入内容。 */}
+            <div className="remote-qr" dangerouslySetInnerHTML={{ __html: svg }} />
+          </div>
+        ) : (
+          <div className="row">
+            <div className="row-text">
+              <div className="row-label">{t.remote.scan}</div>
+              <div className="row-desc">{t.remote.noIp}</div>
+            </div>
+          </div>
+        ))}
+      {!enabled && (
+        <div className="row">
+          <div className="row-text">
+            <div className="row-desc">{t.remote.offHint}</div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
