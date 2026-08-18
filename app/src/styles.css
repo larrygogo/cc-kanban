@@ -1830,9 +1830,16 @@ button.stab {
 .remote-pairing {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-6);
+  gap: var(--sp-8);
   padding: var(--sp-8) 0 0;
-  align-items: flex-start;
+  align-items: stretch;
+}
+/* 二维码居左,右侧竖排「选地址 → 可达性说明 → 地址+复制」,与码垂直居中对齐。 */
+.remote-pair-body {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-12);
+  min-width: 0;
 }
 /* 二维码白底留边:深色主题下纯 SVG 直贴会与背景糊在一起,扫不出来。 */
 .remote-qr {
@@ -1840,20 +1847,34 @@ button.stab {
   padding: var(--sp-6);
   border-radius: var(--radius-md, 8px);
   line-height: 0;
+  flex: none;
 }
-.remote-qr svg { width: 180px; height: 180px; display: block; }
+.remote-qr svg { width: 140px; height: 140px; display: block; }
+.remote-pair-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-6);
+  flex: 1;
+  min-width: 0;
+}
 .remote-ip-pick { display: flex; align-items: center; gap: var(--sp-6); }
 .remote-url-row {
   display: flex;
   align-items: center;
   gap: var(--sp-6);
-  flex-wrap: wrap;
-  max-width: 100%;
+  width: 100%;
+  min-width: 0;
 }
+/* 地址单行省略:token 六十多字符,折行会把整卡撑高;完整值走复制按钮/悬停 title。 */
 .remote-url {
   font-size: 12px;
   color: var(--cc-text-dim);
-  word-break: break-all;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
   user-select: all;
 }
 .remote-copy {

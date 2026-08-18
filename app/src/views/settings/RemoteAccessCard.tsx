@@ -115,26 +115,34 @@ export function RemoteAccessCard() {
         <div className="remote-pairing">
           {url && svg ? (
             <>
-              <div className="row-label">{t.remote.scan}</div>
-              <div className="row-desc">{t.remote.scanHint}</div>
-              {/* renderSVG 产出完整 <svg> 字符串，本地生成、不含用户可注入内容。 */}
-              <div className="remote-qr" dangerouslySetInnerHTML={{ __html: svg }} />
-              {ipOptions.length > 1 && (
-                <div className="remote-ip-pick">
-                  <span className="row-desc">{t.remote.device}</span>
-                  <Dropdown value={selectedIp ?? ""} options={ipOptions} onChange={setSelectedIp} />
+              <div className="row-text">
+                <div className="row-label">{t.remote.scan}</div>
+                <div className="row-desc">{t.remote.scanHint}</div>
+              </div>
+              <div className="remote-pair-body">
+                {/* renderSVG 产出完整 <svg> 字符串，本地生成、不含用户可注入内容。 */}
+                <div className="remote-qr" dangerouslySetInnerHTML={{ __html: svg }} />
+                <div className="remote-pair-side">
+                  {ipOptions.length > 1 && (
+                    <div className="remote-ip-pick">
+                      <span className="row-desc">{t.remote.device}</span>
+                      <Dropdown value={selectedIp ?? ""} options={ipOptions} onChange={setSelectedIp} />
+                    </div>
+                  )}
+                  {selectedKind && (
+                    <div className="row-desc">
+                      {selectedKind === "tailscale" ? t.remote.hintTailscale : t.remote.hintLan}
+                    </div>
+                  )}
+                  <div className="remote-url-row">
+                    <code className="remote-url" title={url}>
+                      {url}
+                    </code>
+                    <button type="button" className="remote-copy" onClick={copy}>
+                      {copied ? t.remote.copied : t.remote.copy}
+                    </button>
+                  </div>
                 </div>
-              )}
-              {selectedKind && (
-                <div className="row-desc">
-                  {selectedKind === "tailscale" ? t.remote.hintTailscale : t.remote.hintLan}
-                </div>
-              )}
-              <div className="remote-url-row">
-                <code className="remote-url">{url}</code>
-                <button type="button" className="remote-copy" onClick={copy}>
-                  {copied ? t.remote.copied : t.remote.copy}
-                </button>
               </div>
             </>
           ) : (
