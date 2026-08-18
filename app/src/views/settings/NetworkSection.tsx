@@ -68,8 +68,10 @@ function UrlInput({
   useEffect(() => setText(value), [value]);
   const commit = () => {
     const u = text.trim();
-    // 空着不提交也不报错：用户可能还没填完。空 custom 由后端校验兜底。
-    if (u && u !== value) onCommit(u);
+    // 「没改动」跳过;「改成空」照样提交——删空是明确的清空操作,此前被当成「还没填完」
+    // 跳过,失焦后草稿又被磁盘值同步回来,旧代理原地复活。空串的落库语义由 onCommit
+    // 方决定(custom+空地址后端会拒,不能原样写)。
+    if (u !== value.trim()) onCommit(u);
   };
   return (
     <input
@@ -180,6 +182,15 @@ export function NetworkSection() {
   };
 
   const commitRowUrl = (id: string, url: string) => {
+    if (!url) {
+      // 删空 = 撤掉该 agent 的自定义代理。后端拒绝 custom+空地址,不能原样落库;
+      // 删掉条目即回到「跟随默认」,同时置 pending 让输入框留在原地等重填。
+      const per = { ...proxy.per_agent };
+      delete per[id];
+      setPending((p) => ({ ...p, [id]: true }));
+      save({ ...proxy, per_agent: per });
+      return;
+    }
     setPending((p) => ({ ...p, [id]: false }));
     save({ ...proxy, per_agent: { ...proxy.per_agent, [id]: { mode: "custom", url } } });
   };
@@ -225,6 +236,13 @@ export function NetworkSection() {
               value={proxy.url}
               placeholder={t.proxy.urlPlaceholder}
               onCommit={(url) => {
+                if (!url) {
+                  // 删空 = 清掉自定义代理。后端拒绝 custom+空地址,不能原样落库;存成
+                  // 直连并清掉旧地址(防复活),置 pending 让输入框留在原地等重填。
+                  setPending((p) => ({ ...p, "": true }));
+                  save({ ...proxy, mode: "off", url: "" });
+                  return;
+                }
                 setPending((p) => ({ ...p, "": false }));
                 save({ ...proxy, mode: "custom", url });
               }}

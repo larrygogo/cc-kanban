@@ -51,6 +51,8 @@ export function makeSession(p: {
     archived_at: p.archived ? NOW : null,
     cwd: `C:/dev/${p.project.split("/").pop()}`,
     errored: false,
+    // demo 会话没有后台子任务。
+    busy_subagents: 0,
     error_label: null,
     error_raw: null,
     preview: p.preview ?? null,

@@ -106,6 +106,8 @@ describe("Updater", () => {
     mocks.checkImpl = async () => mkUpdate({ downloadState: "ready" });
     render(<Updater />);
     expect(await screen.findByText(zh.updater.ready)).toBeTruthy();
+    // 退出时会静默安装的提示：点「稍后」的用户由此知道更新不会丢
+    expect(screen.getByText(zh.updater.readyHint)).toBeTruthy();
     fireEvent.click(screen.getByText(zh.updater.restart));
     await waitFor(() => expect(installed).toBe(true));
   });

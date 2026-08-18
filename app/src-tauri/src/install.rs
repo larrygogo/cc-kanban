@@ -795,15 +795,61 @@ pub(crate) fn resolve_install_body(
 
 /// 把取回的脚本原样写进临时文件（按 provider 命名，允许并行安装互不覆盖），返回其路径。
 /// **不再包一层 shell**：脚本本身已含错误处理，包装只会让「哪一行失败」更难看清。
+///
+/// 路径带随机后缀并用 `create_new`（O_CREAT|O_EXCL 语义，不跟随符号链接）独占创建：
+/// 固定路径 + 覆盖写是经典 TOCTOU——共享 /tmp 上另一账户可预先放同名符号链接，
+/// 写入被重定向到任意文件；或在写与执行的间隙换掉内容，让我们以当前用户身份执行它。
+/// 抢占防护由独占创建保证（已存在即失败换名重试），随机后缀只负责避免碰撞。
 pub(crate) fn write_install_script(
     provider: &str,
     body: &str,
     windows: bool,
 ) -> std::io::Result<String> {
+    use std::io::Write;
     let ext = if windows { "ps1" } else { "sh" };
-    let p = std::env::temp_dir().join(format!("meowo-install-{provider}.{ext}"));
-    std::fs::write(&p, body)?;
-    Ok(p.to_string_lossy().into_owned())
+    for _ in 0..16 {
+        let path = std::env::temp_dir().join(format!(
+            "meowo-install-{provider}-{:016x}.{ext}",
+            script_nonce()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Unix：0600——脚本按路径交给解释器读，无需执行位；共享 tmp 下也不给
+        // 其他账户在「写入与执行的间隙」读改的机会。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                file.write_all(body.as_bytes())?;
+                return Ok(path.to_string_lossy().into_owned());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "无法独占创建安装脚本临时文件",
+    ))
+}
+
+/// 临时脚本名的随机后缀。不为此引入 rand：防抢占靠 `create_new` 的独占语义，
+/// 后缀只需避免自撞——纳秒时钟 ⊕ 进程号 ⊕ 打散的递增计数足够。
+fn script_nonce() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let clock = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() ^ u64::from(d.subsec_nanos()))
+        .unwrap_or(0);
+    clock
+        ^ (u64::from(std::process::id()) << 32)
+        ^ SEQ
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
 /// 构造后台安装子进程（不弹窗口）。平台差异只在此：Windows 用 pwsh(优先)/powershell +

@@ -89,7 +89,20 @@ fn git_file_diff_blocking(cwd: &str, path: &str, untracked: bool) -> Result<GitF
     if !output.status.success() {
         return Err("git diff 执行失败".into());
     }
-    let (diff, truncated) = truncate_utf8(stdout_text(&output.stdout), MAX_DIFF_BYTES);
+    let text = stdout_text(&output.stdout);
+    // 跟踪文件里的二进制(图片、含 NUL 的源码等):git 只回「Binary files a/… and b/…
+    // differ」这一行,没有 hunk。原样透出会渲染成几行灰底 meta(看着像坏掉),归一成
+    // 与 untracked 分支同一个「(binary file)」占位,前端据此显示「二进制文件,无法显示
+    // diff」,而不是误报「文件与最新提交一致」。
+    if diff_is_binary(&text) {
+        return Ok(GitFileDiffDto {
+            path: path.to_string(),
+            status: "M".into(),
+            diff: "(binary file)\n".into(),
+            truncated: false,
+        });
+    }
+    let (diff, truncated) = truncate_utf8(text, MAX_DIFF_BYTES);
     Ok(GitFileDiffDto {
         path: path.to_string(),
         status: "M".into(),
@@ -98,10 +111,21 @@ fn git_file_diff_blocking(cwd: &str, path: &str, untracked: bool) -> Result<GitF
     })
 }
 
+/// `git diff` 对二进制文件只吐一行 `Binary files a/… and b/… differ`(新增/删除侧
+/// 是 `/dev/null`),没有 `@@` hunk。命中即视为二进制,归一到 `(binary file)` 占位。
+fn diff_is_binary(diff: &str) -> bool {
+    diff.lines()
+        .any(|line| line.starts_with("Binary files ") && line.ends_with(" differ"))
+}
+
 /// 未跟踪文件的伪 diff：读盘（封顶 MAX_DIFF_BYTES），二进制嗅探命中则只回占位行。
 fn untracked_file_diff(dir: &str, path: &str) -> Result<GitFileDiffDto, String> {
     use std::io::Read;
-    let full_path = Path::new(dir).join(path);
+    // path 正常来自 git status，但前端传什么都进得来：裸 join 时绝对路径会整个顶掉
+    // cwd，`..` 能一路爬出工作目录。统一走 resolve_inside（canonicalize + 前缀校验），
+    // 越界返回与文件页签同一句「路径超出工作目录」。tracked 分支不需要——那边 path
+    // 是 git 的 pathspec，git 自己限定在仓库内。
+    let full_path = crate::fsutil::resolve_inside(dir, path)?;
     let file = std::fs::File::open(&full_path).map_err(|e| format!("无法读取文件：{e}"))?;
     let mut bytes = Vec::new();
     file.take((MAX_DIFF_BYTES + 1) as u64)
@@ -119,7 +143,8 @@ fn untracked_file_diff(dir: &str, path: &str) -> Result<GitFileDiffDto, String> 
     if truncated {
         bytes.truncate(MAX_DIFF_BYTES);
     }
-    let text = String::from_utf8_lossy(&bytes);
+    // 与 stdout_text 同一解码口径：untracked 的 GBK 文件同样不能整屏替换符。
+    let text = crate::fsutil::decode_text_bytes(&bytes);
     let mut diff = format!("--- /dev/null\n+++ b/{path}\n");
     for line in text.lines() {
         diff.push('+');
@@ -146,8 +171,10 @@ fn git_output(dir: &str, args: &[&str]) -> std::io::Result<std::process::Output>
     command.output()
 }
 
+/// git 输出解码走 fsutil 的统一口径（严格 UTF-8 → GBK → lossy）：GBK 源码文件
+/// （中文 Windows 常见）的 diff 此前被无脑 lossy 解成整屏替换符。
 fn stdout_text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+    crate::fsutil::decode_text_bytes(bytes)
 }
 
 /// 截断到 cap 字节（落在 UTF-8 字符边界上），返回是否发生了截断。
@@ -234,12 +261,65 @@ mod tests {
     }
 
     #[test]
+    fn diff_is_binary_matches_git_binary_marker() {
+        // 修改中的二进制:git 的三行块(头 + index + Binary files … differ)。
+        let modified = "diff --git a/x.png b/x.png\nindex abc..def 100644\nBinary files a/x.png and b/x.png differ\n";
+        assert!(diff_is_binary(modified));
+        // 新增二进制:比对一侧是 /dev/null。
+        let added = "diff --git a/x.bin b/x.bin\nBinary files /dev/null and b/x.bin differ\n";
+        assert!(diff_is_binary(added));
+        // 正常文本 diff 不误判(即便正文里恰好有以 Binary files 开头的一行,也不以
+        //  differ 收尾)。
+        let text = "diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-old\n+Binary files list differ here, ok\n";
+        assert!(!diff_is_binary(text));
+        assert!(!diff_is_binary(""));
+    }
+
+    #[test]
     fn porcelain_z_skips_short_entries_and_keeps_utf8_paths() {
         let raw = b"\0M  \0?? \xe6\x96\xb0\xe5\xbb\xba.txt\0";
         let files = parse_porcelain_z(raw);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "新建.txt");
         assert_eq!(files[0].status, "U");
+    }
+
+    /// untracked 的 path 由前端透传，必须挡住 `..` 与绝对路径逃逸——两种目标都真实
+    /// 存在，确保拒绝来自包含校验（「路径超出工作目录」）而不是「路径不存在」。
+    #[test]
+    fn untracked_file_diff_rejects_paths_outside_cwd() {
+        let root = std::env::temp_dir().join(format!("meowo-git-escape-{}", std::process::id()));
+        let inside = root.join("repo");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::write(root.join("outside.txt"), "secret").unwrap();
+        std::fs::write(inside.join("ok.txt"), "hello").unwrap();
+        let cwd = inside.to_str().unwrap();
+        assert_eq!(
+            untracked_file_diff(cwd, "../outside.txt").unwrap_err(),
+            "路径超出工作目录"
+        );
+        // 绝对路径 join 会整个顶掉 cwd，是逃逸里最顺手的一种。
+        let abs = root.join("outside.txt");
+        assert_eq!(
+            untracked_file_diff(cwd, abs.to_str().unwrap()).unwrap_err(),
+            "路径超出工作目录"
+        );
+        // 仓库内的正常文件不受影响。
+        let ok = untracked_file_diff(cwd, "ok.txt").unwrap();
+        assert!(ok.diff.contains("+hello"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GBK 源码文件（中文 Windows 常见）的 diff 输出必须解出中文，而不是整屏 U+FFFD。
+    #[test]
+    fn stdout_text_decodes_gbk_bytes() {
+        let mut raw = b"+++ b/a.txt\n+".to_vec();
+        raw.extend_from_slice(&[0xD6, 0xD0, 0xCE, 0xC4]); // GBK 的「中文」
+        raw.push(b'\n');
+        let text = stdout_text(&raw);
+        assert!(text.contains("中文"), "GBK diff 被解成了：{text}");
+        // 纯 ASCII / UTF-8 输出照旧原样。
+        assert_eq!(stdout_text("diff --git 中".as_bytes()), "diff --git 中");
     }
 
     #[test]

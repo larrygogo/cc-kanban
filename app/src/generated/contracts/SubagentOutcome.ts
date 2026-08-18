@@ -4,4 +4,10 @@
  * 一次委派的结局统计。挂在**主链的工具结果**上，于是折叠状态下就能显示进度——
  * 不必先展开（展开要读侧车流，那是按需 I/O）。
  */
-export type SubagentOutcome = { running: number, completed: number, failed: number, };
+export type SubagentOutcome = { running: number, completed: number, failed: number, 
+/**
+ * 后台委派的任务 id（claude 启动回执里的 `agentId`）。后台子任务的真结局可能不走
+ * task-notification，而是主 agent 用 `TaskOutput` 拉取——那条回执挂在 TaskOutput 自己的
+ * 调用上，只有这个 id 能把它归回原委派。前端按「同 id 首见者为委派本体」路由。
+ */
+task_id?: string | null, };

@@ -48,7 +48,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { relayEnabledSignature, Sticker } from "./Sticker";
-import { match } from "./sticker/helpers";
+import { cardTone, match } from "./sticker/helpers";
 import { EmptyState } from "./sticker/EmptyState";
 import { UsageScreen } from "./sticker/UsageScreen";
 import type { LiveSession, ProviderUsage } from "../api";
@@ -155,6 +155,36 @@ describe("断开会话不再催人交互", () => {
     // 连着的照旧各归其位。
     expect(match("waiting", mk({ ...pending, connected: true }))).toBe(true);
     expect(match("running", mk({ connected: true }))).toBe(true);
+  });
+});
+
+describe("tab 归属与卡片状态环同源", () => {
+  // 实拍反馈：status=running 而屏幕已 idle 的会话，环是黄的（等你）、tab 却在「运行中」。
+  // 环和 tab 现在共用同一活动态阶梯（屏幕检测优先于 DB status），不可能再各说各话。
+  it("屏幕 idle 压过 DB running：黄环卡归待交互", () => {
+    const l = mk({ screen_state: "idle", connected: true });
+    expect(cardTone(l)).toBe("waiting");
+    expect(match("waiting", l)).toBe(true);
+    expect(match("running", l)).toBe(false);
+  });
+
+  it("屏幕 blocked 压过 DB running：闪烁黄环卡归待交互", () => {
+    const l = mk({ screen_state: "blocked", connected: true });
+    expect(cardTone(l)).toBe("pending");
+    expect(match("waiting", l)).toBe(true);
+    expect(match("running", l)).toBe(false);
+  });
+
+  it("屏幕 working 压过 DB waiting：绿环卡归运行中", () => {
+    const l = mk({ screen_state: "working", connected: true, session: { ...mk().session, status: "waiting" } });
+    expect(cardTone(l)).toBe("running");
+    expect(match("running", l)).toBe(true);
+    expect(match("waiting", l)).toBe(false);
+  });
+
+  it("无屏幕状态（非托管会话）回退 DB status，行为不变", () => {
+    expect(match("running", mk({ connected: true }))).toBe(true);
+    expect(match("waiting", mk({ connected: true, session: { ...mk().session, status: "waiting" } }))).toBe(true);
   });
 });
 

@@ -28,6 +28,7 @@ import {
 } from "../api";
 import { isMacPanel } from "../platform";
 import { appConfirm } from "../confirm";
+import { DevBadge } from "./DevBadge";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
@@ -182,8 +183,9 @@ export function Sticker({
   const tab = filter;
 
   const pick = (t: Tab) => {
+    // 切 tab 保留搜索词:搜索是「当前 tab 内全库搜」,与 tab 正交——搜到词后在
+    // 「运行中/等待中」之间切换对比是常见动线,无声清词等于逼用户重输(实拍反馈)。
     onFilterChange?.(t);
-    closeSearch(); // 切 tab 即退出搜索，避免 tab 高亮与过滤结果不一致
   };
 
   // tab 滑块按选中按钮实测定位（effect 在 counts 声明后注册，见下方 useLayoutEffect）。
@@ -356,6 +358,27 @@ export function Sticker({
     return () => window.clearTimeout(id);
   }, [focusNotice]);
 
+  // 归档撤销 toast 独立成数组:连续归档两张卡时,单槽 focusNotice 会让第二条直接覆盖
+  // 第一条的「撤销」窗口——每条各自渲染、各自 6s 消失,撤销互不相吞。
+  const [archivedToasts, setArchivedToasts] = useState<{ key: number; item: Item }[]>([]);
+  const archiveToastIdRef = useRef(0);
+  // 各 toast 的消失定时器：卸载时统一清掉，不让回调打在已卸载的组件上。
+  const archiveToastTimersRef = useRef<Set<number>>(new Set());
+  const pushArchivedToast = (item: Item) => {
+    archiveToastIdRef.current += 1;
+    const key = archiveToastIdRef.current;
+    setArchivedToasts((cur) => [...cur, { key, item }]);
+    const timer = window.setTimeout(() => {
+      archiveToastTimersRef.current.delete(timer);
+      setArchivedToasts((cur) => cur.filter((toast) => toast.key !== key));
+    }, 6_000);
+    archiveToastTimersRef.current.add(timer);
+  };
+  useEffect(() => {
+    const timers = archiveToastTimersRef.current;
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, []);
+
   // 窗口级快捷键：Ctrl/Cmd+F 打开搜索；Esc 按「toast → 搜索」回退（右键菜单的 Esc 由
   // CardContextMenu 自己消费并 preventDefault，先于本监听）。焦点在输入框里时 Esc 让位
   // 给各自的 onKeyDown（搜索框自己会关，编辑框是取消编辑）。此前贴纸没有任何快捷键，
@@ -379,13 +402,18 @@ export function Sticker({
         setFocusNotice(null);
         return;
       }
+      if (archivedToasts.length > 0) {
+        // 清最新一条(与视觉栈顶一致),再按 Esc 逐条收。
+        setArchivedToasts((cur) => cur.slice(0, -1));
+        return;
+      }
       if (searchOpen) closeSearch();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // closeSearch 每次渲染新建但内部只用稳定 setter；按状态位重挂即可。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusNotice, searchOpen]);
+  }, [focusNotice, archivedToasts.length, searchOpen]);
   const startNote = (l: Item) => {
     // 外库卡的便签只读:写入走本库 cc_session_id 查行,对外库会话必然落空。
     if (l.foreign) return;
@@ -507,14 +535,12 @@ export function Sticker({
       .catch((err) => setFocusNotice({ ...focusNotice, busy: false, kind: "failed", detail: formatBackendError(err, t.locale) }));
   };
 
-  // 归档撤销：toast 4s 窗口内点「撤销」把会话捞回来（后端 board-changed 会让卡片自己回来）。
-  const undoArchive = () => {
-    if (!focusNotice || focusNotice.busy) return;
-    const l = focusNotice.item;
-    setFocusNotice({ ...focusNotice, busy: true });
-    setArchived(l.session.id, false)
-      .then(() => setFocusNotice(null))
-      .catch(() => setFocusNotice({ kind: "failed", item: l, detail: t.sticker.archiveFailed }));
+  // 撤销归档:把会话捞回来（后端 board-changed 会让卡片自己回来）。toast 状态声明
+  // 在窗口级快捷键 effect 之前（见 archivedToasts）。
+  const undoArchiveToast = (key: number, item: Item) => {
+    setArchivedToasts((cur) => cur.filter((toast) => toast.key !== key));
+    setArchived(item.session.id, false)
+      .catch(() => setFocusNotice({ kind: "failed", item, detail: t.sticker.archiveFailed }));
   };
 
   const focusNoticeText = focusNotice
@@ -751,9 +777,23 @@ export function Sticker({
 
   return (
     <div className="sticker">
+      <DevBadge />
       {!isMacPanel() && <div className="drag" data-tauri-drag-region />}
       <div className="tabs">
-        <div className="tabseg" role="tablist" ref={tabsegRef}>
+        <div
+          className="tabseg"
+          role="tablist"
+          ref={tabsegRef}
+          // ARIA tabs 惯例:左右方向键切换并跟随焦点(roving),不能只有鼠标一条路。
+          onKeyDown={(e) => {
+            if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+            e.preventDefault();
+            const at = TAB_KEYS.indexOf(tab);
+            const next = TAB_KEYS[(at + (e.key === "ArrowRight" ? 1 : TAB_KEYS.length - 1)) % TAB_KEYS.length];
+            pick(next);
+            tabsegRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[TAB_KEYS.indexOf(next)]?.focus();
+          }}
+        >
           {/* 选中态立体滑块：切换时平滑滑到目标 tab。位置/宽度按选中按钮**实测**（见
               slider effect）——曾用 translateX(index*100%) + CSS 硬编码 1/3 宽，tab 数
               与 CSS 靠注释同步，且各 tab 文字宽度不等时滑块与视觉中心不重合。 */}
@@ -886,15 +926,18 @@ export function Sticker({
                       openTerminal(l);
                     }}
                     onContextMenu={(e) => {
-                      // 与卡片菜单按钮二选一：button 模式下右键只吞掉默认 webview 菜单、不弹卡片菜单。
+                      // 右键恒开菜单:卡片上右键出上下文菜单是通用惯例,不随设置失效——
+                      // card_menu_mode 只决定「⋯」按钮是否常驻,不再关掉右键这条路(与侧栏同款)。
                       // 外库卡不弹菜单:置顶/便签/重命名/归档全是本库操作,对它一律无效。
                       e.preventDefault();
-                      if (menuMode === "context" && !l.foreign) {
+                      if (!l.foreign) {
                         setCtxMenu({ sid: l.session.id, x: e.clientX, y: e.clientY });
                       }
                     }}
                     style={{ cursor: !buttonMode && canOpen(l) ? "pointer" : "default" }}
-                    data-tip={buttonMode ? "" : l.connected ? t.sticker.openSession : l.archived ? "" : t.sticker.resumeSession}
+                    // 断开卡的单击不是「查看」而是拉起 CLI 进程(1~3s):后果与普遍预期不对称,
+                    // tip 必须把它说出来,让「误点」发生在点击之前而不是之后。
+                    data-tip={buttonMode ? "" : l.connected ? t.sticker.openSession : l.archived ? "" : t.sticker.cardResumeTip}
                   >
                     <div className="stk-top">
                       <span className="stk-ind">{indicator}</span>
@@ -1101,7 +1144,7 @@ export function Sticker({
             // 字解释），补上失败提示，与重命名/便签同通道。
             onArchiveOptimistic?.(sessionId);
             setArchived(sessionId, target)
-              .then(() => { if (target) setFocusNotice({ kind: "archived", item }); })
+              .then(() => { if (target) pushArchivedToast(item); })
               .catch(() => {
                 onArchiveFailed?.();
                 setFocusNotice({ kind: "failed", item, detail: t.sticker.archiveFailed });
@@ -1147,11 +1190,6 @@ export function Sticker({
                     : t.sticker.reopenSupported}
                 </button>
               )}
-              {focusNotice.kind === "archived" && (
-                <button type="button" className="stk-focus-btn" disabled={focusNotice.busy} onClick={undoArchive}>
-                  {t.sticker.archiveUndo}
-                </button>
-              )}
             </div>
           </div>
           <button
@@ -1162,6 +1200,35 @@ export function Sticker({
           >
             <XIcon />
           </button>
+        </div>
+      )}
+      {/* 归档撤销 toast:逐条渲染(见 pushArchivedToast),连续归档时各自的撤销窗口互不相吞。 */}
+      {archivedToasts.length > 0 && (
+        <div className="stk-archive-toasts">
+          {archivedToasts.map(({ key, item }) => (
+            <div className="stk-focus-toast is-archive" role="status" key={key}>
+              <div className="stk-focus-body">
+                {/* 带上会话名:多条并存时「已归档」×2 分不清哪条对应哪张卡。 */}
+                <span className="stk-focus-text">
+                  {(item.task_title && item.task_title !== UNNAMED_SESSION_SENTINEL ? item.task_title : t.sticker.waitingFirstInput)
+                    + " · " + t.sticker.archivedNotice}
+                </span>
+                <div className="stk-focus-actions">
+                  <button type="button" className="stk-focus-btn" onClick={() => undoArchiveToast(key, item)}>
+                    {t.sticker.archiveUndo}
+                  </button>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="stk-focus-close"
+                aria-label={t.sticker.dismiss}
+                onClick={() => setArchivedToasts((cur) => cur.filter((toast) => toast.key !== key))}
+              >
+                <XIcon />
+              </button>
+            </div>
+          ))}
         </div>
       )}
       {/* 底栏:用量(左) + 搜索/设置/固定(右)聚为一处;搜索激活时整条变输入框。 */}

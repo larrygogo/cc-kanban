@@ -80,36 +80,49 @@ export function useStarred(): { starred: Set<string>; toggleStar: (ccSessionId: 
   return { starred, toggleStar };
 }
 
-/** 卡片状态徽标的统一口径（看板卡片指示器与折叠缩略条共用的单点判定）。
+/** 连接中会话的活动态阶梯——卡片状态环（cardTone）与 tab 归属（match）的**共同地基**，
+ *  与后端 session_query.rs 的 tab_class 同序同源：
+ *  审批/屏幕 blocked > 屏幕 working/idle > DB status。
  *  屏幕检测（screen_state，仅托管会话有值）优先于 DB status：DB 的 running 由 hook 事件
  *  驱动，agent 在屏幕上弹出审批/提问时它还停在上一个事件；屏幕状态 300ms 级实时。
  *  pending_review（broker 正压着的审批）仍最优先——那是事实源。
+ *  环与 tab 曾各看各的（环吃屏幕、tab 只看 status）：一条 status=running 而屏幕已 idle
+ *  的会话顶着黄环（等你）待在「运行中」tab 里，用户以为状态坏了（实拍反馈）——
+ *  阶梯必须住在这一处，环和 tab 共用。 */
+function activity(l: Item): "pending" | "running" | "waiting" | null {
+  if (l.pending_review || l.screen_state === "blocked") return "pending";
+  if (l.screen_state === "working") return "running";
+  // 屏幕 idle / DB waiting 只说明**主回合**停了——后台子任务还在跑时是「运行中」,
+  // 不该催人(与后端 tab_class 的 background_busy 同口径,原料同为 busy_subagents)。
+  const busy = (l.busy_subagents ?? 0) > 0;
+  if (l.screen_state === "idle") return busy ? "running" : "waiting";
+  if (l.session.status === "running") return "running";
+  if (l.session.status === "waiting") return busy ? "running" : "waiting";
+  return null;
+}
+
+/** 卡片状态徽标的统一口径（看板卡片指示器与折叠缩略条共用的单点判定）。
  *  缩略条曾自写一套只看 status 的映射，待审批会话在条上被画成绿色运行点、
  *  「有人在等你」的信号被抹掉（评审发现）——判定必须住在这一处。 */
 export type CardTone = "offline" | "error" | "pending" | "running" | "waiting" | "on";
 export function cardTone(l: Item): CardTone {
   if (!l.connected) return "offline";
   if (l.errored) return "error";
-  if (l.pending_review || l.screen_state === "blocked") return "pending";
-  if (l.screen_state === "working") return "running";
-  if (l.screen_state === "idle") return "waiting";
-  if (l.session.status === "running") return "running";
-  if (l.session.status === "waiting") return "waiting";
-  return "on";
+  return activity(l) ?? "on";
 }
 
 export function match(tab: Tab, l: Item): boolean {
   if (l.archived) return false; // 已归档的不上看板（管理入口在设置 → 会话）
   if (tab === "all") return true;
-  // running = AI 自主运行且无需用户介入；waiting = 等用户交互（status=waiting 或 pending_review）。
-  // 与后端 live_sessions / tab_class 语义保持一致。
+  // running = AI 自主运行且无需用户介入；waiting = 等用户交互（含 pending：审批/屏幕阻塞）。
+  // 判定走与卡片状态环相同的 activity 阶梯，也与后端 tab_class（列表分页 + 角标计数）
+  // 同口径——三端喂同一份原料（校正后的 pending_review + 屏幕状态 + status）。
   //
   // 断开的会话两类都不进：进程都没了，催用户去交互毫无意义（点进去只是个历史会话），显示成
-  // 在跑更是假的。DB 里残留的 pending_review 会让它们漏进 waiting——后台收尾只改 status、
-  // 不清 pending_review，而 waiting 的判定是 `status=waiting || pending_review != null`。
-  // 它们只作为历史留在「全部」里。
+  // 在跑更是假的。它们只作为历史留在「全部」里。
   if (!l.connected) return false;
-  if (tab === "waiting") return l.session.status === "waiting" || l.pending_review != null;
-  if (tab === "running") return l.session.status === "running" && l.pending_review == null;
+  const a = activity(l);
+  if (tab === "waiting") return a === "waiting" || a === "pending";
+  if (tab === "running") return a === "running";
   return true;
 }

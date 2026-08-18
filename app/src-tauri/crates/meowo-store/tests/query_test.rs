@@ -13,6 +13,7 @@ fn live_sessions_includes_ended_sessions() {
     store
         .set_session_status(s2, SessionStatus::Waiting, 210)
         .unwrap();
+    // stale 态已废除:写侧归一成 waiting(存量行由 v11 迁移归一),库里只有三种状态。
     let (s3, _) = store.start_session(pid, "st", 300).unwrap();
     store
         .set_session_status(s3, SessionStatus::Stale, 310)
@@ -26,8 +27,10 @@ fn live_sessions_includes_ended_sessions() {
     let statuses: Vec<&str> = live.iter().map(|l| l.session.status.as_str()).collect();
     assert!(statuses.contains(&"running"));
     assert!(statuses.contains(&"waiting"));
-    assert!(statuses.contains(&"stale"));
     assert!(statuses.contains(&"ended"));
+    assert!(!statuses.contains(&"stale"), "stale 已废除,写侧应归一成 waiting");
+    let st = live.iter().find(|l| l.session.cc_session_id == "st").unwrap();
+    assert_eq!(st.session.status, "waiting");
 }
 
 #[test]
@@ -263,13 +266,22 @@ fn live_counts_split_totals_from_connectivity_candidates() {
         .set_session_archived(archived_id.unwrap(), true, 600)
         .unwrap();
 
-    // 模拟旧版本数据库留下的「已结束、却还留着 pending_review」历史残留。
+    // 已结束会话上的迟到 PermissionRequest：写侧(set_pending_review 的 status<>'ended'
+    // 守卫)现在直接拒绝,不再产出「ended + pending_review」残留;候选集的 status!='ended'
+    // 防线只剩防旧版本库的历史数据。这里保留写入尝试,双向钉死该不变量。
     let (dead, _) = store.start_session(pid, "dead-with-residue", 700).unwrap();
     store.set_session_title(dead, "任务 dead", 700).unwrap();
     store.end_session(dead, 720).unwrap();
     store
         .set_pending_review(dead, meowo_store::PendingReview::Approval, 730)
         .unwrap();
+    let dead_row = store
+        .live_sessions(None, None, None, None, 1000)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.session.id == dead)
+        .unwrap();
+    assert_eq!(dead_row.pending_review, None, "ended 行上的 pending 写入应被拒");
 
     // 列表口径外的两条：ping 探针（哪怕 running）与已结束的未命名空壳。
     // 它们都不会出现在列表里，totals / candidates 也必须数不到。
@@ -371,7 +383,9 @@ fn live_sessions_cursor_loads_all_non_archived() {
 }
 
 #[test]
-fn live_sessions_waiting_includes_pending_review() {
+fn live_sessions_running_and_waiting_share_the_candidate_union() {
+    // running/waiting 的 SQL 是同一个候选并集：tab 归属由 app 层 tab_class 结合
+    // 屏幕状态/审批校正决定，store 只负责把「可能落入这两个 tab」的行都交出去。
     let store = Store::open_in_memory().unwrap();
     let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
 
@@ -393,13 +407,19 @@ fn live_sessions_waiting_includes_pending_review() {
         .set_pending_review(pending, meowo_store::PendingReview::Question, 320)
         .unwrap();
 
-    let waiting_page = store
-        .live_sessions(Some("waiting"), None, None, None, 100)
-        .unwrap();
-    let ids: std::collections::HashSet<i64> = waiting_page.iter().map(|l| l.session.id).collect();
-    assert!(ids.contains(&waiting), "status=waiting 应在 waiting 分页");
-    assert!(ids.contains(&pending), "pending_review 应在 waiting 分页");
-    assert!(!ids.contains(&running), "纯 running 不应在 waiting 分页");
+    let (ended, _) = store.start_session(pid, "ended", 400).unwrap();
+    store.end_session(ended, 410).unwrap();
+
+    for filter in ["waiting", "running"] {
+        let page = store
+            .live_sessions(Some(filter), None, None, None, 100)
+            .unwrap();
+        let ids: std::collections::HashSet<i64> = page.iter().map(|l| l.session.id).collect();
+        assert!(ids.contains(&waiting), "{filter}: status=waiting 在候选并集里");
+        assert!(ids.contains(&pending), "{filter}: pending_review 在候选并集里");
+        assert!(ids.contains(&running), "{filter}: status=running 在候选并集里");
+        assert!(!ids.contains(&ended), "{filter}: 已结束的不进候选");
+    }
 }
 
 #[test]
@@ -430,18 +450,53 @@ fn live_sessions_search_scoped_to_tab() {
         .live_sessions(Some("all"), Some("login"), None, None, 100)
         .unwrap();
     assert_eq!(all.len(), 2);
-    // running tab 搜 login：只命中 r（w 是 waiting，被 filter 排除）
-    let run = store
-        .live_sessions(Some("running"), Some("login"), None, None, 100)
+    // running/waiting 搜 login：候选并集内命中 r + w（r2 不含 login），
+    // r 与 w 的最终 tab 归属由 app 层 tab_class 再裁——store 不预分。
+    for filter in ["running", "waiting"] {
+        let hits = store
+            .live_sessions(Some(filter), Some("login"), None, None, 100)
+            .unwrap();
+        let ids: std::collections::HashSet<&str> = hits
+            .iter()
+            .map(|l| l.session.cc_session_id.as_str())
+            .collect();
+        assert_eq!(hits.len(), 2, "{filter}: 搜索作用于候选并集");
+        assert!(ids.contains("r") && ids.contains("w"), "{filter}: {ids:?}");
+    }
+}
+
+/// 搜索范围含便签与最近往来:便签是用户亲手写的记忆锚点,最近往来是「上次聊到哪」的
+/// 第一线索——只搜标题/目录时这两处的词搜不到,用户只能凭记忆逐个点开翻。
+#[test]
+fn live_sessions_search_matches_note_and_recent_texts() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 1).unwrap();
+    let (a, _) = store.start_session(pid, "a", 100).unwrap();
+    store.on_user_prompt(a, "无关标题", 110).unwrap();
+    store.set_session_note("a", "尾款发票相关", 120).unwrap();
+    let (b, _) = store.start_session(pid, "b", 200).unwrap();
+    store.on_user_prompt(b, "无关", 210).unwrap();
+    store.set_last_ai_text(b, "方案走灰度发布", 220).unwrap();
+    let (c, _) = store.start_session(pid, "c", 300).unwrap();
+    store.on_user_prompt(c, "别的", 310).unwrap();
+
+    let by_note = store
+        .live_sessions(Some("all"), Some("发票"), None, None, 100)
         .unwrap();
-    assert_eq!(run.len(), 1);
-    assert_eq!(run[0].session.cc_session_id, "r");
-    // waiting tab 搜 login：只命中 w
-    let wait = store
-        .live_sessions(Some("waiting"), Some("login"), None, None, 100)
+    assert!(by_note.iter().any(|l| l.session.cc_session_id == "a"));
+    assert_eq!(by_note.len(), 1, "便签命中只该有 a");
+
+    let by_ai = store
+        .live_sessions(Some("all"), Some("灰度"), None, None, 100)
         .unwrap();
-    assert_eq!(wait.len(), 1);
-    assert_eq!(wait[0].session.cc_session_id, "w");
+    assert!(by_ai.iter().any(|l| l.session.cc_session_id == "b"));
+    assert_eq!(by_ai.len(), 1, "最近 AI 正文命中只该有 b");
+
+    // last_user_text 由 on_user_prompt 落下:搜"别的"命中 c。
+    let by_user = store
+        .live_sessions(Some("all"), Some("别的"), None, None, 100)
+        .unwrap();
+    assert!(by_user.iter().any(|l| l.session.cc_session_id == "c"));
 }
 
 #[test]

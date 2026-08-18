@@ -27,6 +27,8 @@ const selection = vi.hoisted(() => ({ text: "" }));
 const pasteSpy = vi.hoisted(() => vi.fn());
 // terminal.scrollToBottom 的间谍（退出提示写入后必须滚底，否则上翻视口里提示在屏外）。
 const scrollToBottomSpy = vi.hoisted(() => vi.fn());
+// terminal.resize 的间谍（隐藏态网格对齐：快照带的 PTY 尺寸要直接钉到网格上）。
+const resizeGridSpy = vi.hoisted(() => vi.fn());
 vi.mock("@xterm/addon-web-links", () => ({
   WebLinksAddon: class {
     constructor(handler: (event: MouseEvent, uri: string) => void) { linkOpen.current = handler; }
@@ -53,11 +55,30 @@ vi.mock("@xterm/xterm", () => ({
     hasSelection = () => selection.text.length > 0;
     getSelection = () => selection.text;
     clearSelection = () => { selection.text = ""; };
+    // UnicodeGraphemesAddon 激活时会读写 unicode.activeVersion;哑实现只要可赋值。
+    unicode = { activeVersion: "6" };
     paste = (data: string) => pasteSpy(data);
     scrollToBottom = scrollToBottomSpy;
+    resize = (cols: number, rows: number) => { resizeGridSpy(cols, rows); this.cols = cols; this.rows = rows; };
   },
 }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); } }));
+// 终端内搜索:findNext/findPrevious 的返回值驱动「无匹配」提示,用可控 spy。
+const searchFindNext = vi.hoisted(() => vi.fn(() => true));
+const searchFindPrevious = vi.hoisted(() => vi.fn(() => true));
+vi.mock("@xterm/addon-search", () => ({
+  SearchAddon: class {
+    findNext = searchFindNext;
+    findPrevious = searchFindPrevious;
+  },
+}));
+// jsdom 无 WebGL:构造直接抛,组件必须静默回退 canvas(这正是要测的路径)。
+vi.mock("@xterm/addon-webgl", () => ({
+  WebglAddon: class {
+    constructor() { throw new Error("no webgl in jsdom"); }
+  },
+}));
+vi.mock("@xterm/addon-unicode-graphemes", () => ({ UnicodeGraphemesAddon: class {} }));
 // 接管确认走应用内原生小窗(invoke confirm_dialog),不再用 plugin-dialog / window.confirm。
 // 用 confirmAnswer 控制那次 invoke 的返回;plugin-dialog 仍被 mock 以防其它路径引用。
 vi.mock("@tauri-apps/plugin-dialog", () => ({ confirm: vi.fn(), open: vi.fn() }));
@@ -80,6 +101,9 @@ describe("ManagedTerminal", () => {
     writeCallbacks.queue = [];
     selection.text = "";
     scrollToBottomSpy.mockReset();
+    resizeGridSpy.mockReset();
+    searchFindNext.mockReset().mockReturnValue(true);
+    searchFindPrevious.mockReset().mockReturnValue(true);
     global.ResizeObserver = class {
       observe = vi.fn();
       disconnect = vi.fn();
@@ -127,6 +151,45 @@ describe("ManagedTerminal", () => {
     // macOS 的 Cmd+C 同理。
     expect(keyHandler.current!(key({ type: "keydown", code: "KeyC", metaKey: true }))).toBe(false);
     expect(writeText).toHaveBeenCalledTimes(3);
+  });
+
+  it("Ctrl+F 打开终端搜索:输入即搜、Enter/Shift+Enter 翻命中、Esc 关闭", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(noPty);
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(keyHandler.current).toBeTruthy());
+    const key = (init: Partial<KeyboardEvent> & { type: string; code: string }) => init as KeyboardEvent;
+    // Ctrl+F 被拦下（false = 不交给 xterm，^F 不落 PTY），搜索条出现。
+    expect(keyHandler.current!(key({ type: "keydown", code: "KeyF", ctrlKey: true }))).toBe(false);
+    const input = await screen.findByPlaceholderText("搜索终端输出");
+    // 逐字输入走 incremental（在当前选区上扩展匹配，不往后跳）。
+    fireEvent.change(input, { target: { value: "error" } });
+    expect(searchFindNext).toHaveBeenCalledWith("error", { incremental: true });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(searchFindNext).toHaveBeenLastCalledWith("error", { incremental: false });
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(searchFindPrevious).toHaveBeenCalledWith("error", { incremental: false });
+    // Esc 关闭搜索条（容器统一截停，不落到窗口级动作）。
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByPlaceholderText("搜索终端输出")).toBeNull();
+  });
+
+  it("终端搜索无匹配时显示提示;WebGL 构造失败静默回退不炸组件", async () => {
+    searchFindNext.mockReturnValue(false);
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(noPty);
+      return Promise.resolve();
+    });
+    // WebglAddon 的 mock 构造恒抛（jsdom 无 WebGL）——render 不抛即证明回退路径成立。
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(keyHandler.current).toBeTruthy());
+    const key = (init: Partial<KeyboardEvent> & { type: string; code: string }) => init as KeyboardEvent;
+    keyHandler.current!(key({ type: "keydown", code: "KeyF", ctrlKey: true }));
+    const input = await screen.findByPlaceholderText("搜索终端输出");
+    fireEvent.change(input, { target: { value: "nowhere" } });
+    expect(await screen.findByText("无匹配")).toBeTruthy();
   });
 
   it("链接走终端惯例：Ctrl/Cmd+点击经 open_link 打开，普通点击不动", async () => {
@@ -190,7 +253,7 @@ describe("ManagedTerminal", () => {
       return Promise.resolve();
     });
     render(<ManagedTerminal sessionId={163} status="ended" />);
-    expect(await screen.findByRole("button", { name: "在 Meowo 中接管" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "恢复会话" })).toBeTruthy();
   });
 
   /// 后台会话「没画面」有两种成因：worker 真退了，或只是旁路没接上。此前一律说成
@@ -203,8 +266,8 @@ describe("ManagedTerminal", () => {
     render(<ManagedTerminal sessionId={163} status="running" background />);
     expect(await screen.findByText(/没接上后台会话的画面/)).toBeTruthy();
     expect(screen.queryByText(/后台会话已结束/)).toBeNull();
-    // 接管/启动对后台会话必然失败，不给；能做的只有再接一次。
-    expect(screen.queryByRole("button", { name: /接管/ })).toBeNull();
+    // 接管/恢复对后台会话必然失败，不给；能做的只有再接一次。
+    expect(screen.queryByRole("button", { name: /接管|恢复会话/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "重新接入" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("attach_background_session", { sessionId: 163 }));
   });
@@ -235,7 +298,7 @@ describe("ManagedTerminal", () => {
     // 居中卡片出现，带退出说明与接管按钮
     await waitFor(() => expect(container.querySelector(".managed-terminal-exit-card")).toBeTruthy());
     expect(screen.getByText(/Agent 进程已退出（退出码 1）/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "在 Meowo 中接管" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "恢复会话" })).toBeTruthy();
     // 遮罩层本体穿透（输出可滚可选），卡片自身可交互
     expect(container.querySelector(".managed-terminal-cover.is-exited")).toBeTruthy();
   });
@@ -655,6 +718,50 @@ describe("ManagedTerminal", () => {
     expect(snapshots).toBe(2);
   });
 
+  /**
+   * 隐藏态挂载（后台屏幕识别 / 切会话时停在对话页）的花屏根因：宿主是屏外停靠盒
+   * （固定 1000×700），按它 fit 出的网格与 PTY 尺寸脱节，隐藏期到达的帧按错误宽度
+   * 换行、错行叠画；切回终端页时若 PTY 尺寸未变，resize 同值短路不触发 TUI 重画，
+   * 花屏永不自愈（实拍）。现约定：隐藏态网格向快照带的 PTY 尺寸对齐，且不反向
+   * 下发 PTY resize（对齐的是网格跟 PTY，不是 PTY 跟停靠盒）。
+   */
+  it("隐藏态挂载把网格钉到快照的 PTY 尺寸,不下发 PTY resize", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2, cols: 213, rows: 44 });
+      }
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" visible={false} />);
+    await waitFor(() => expect(resizeGridSpy).toHaveBeenCalledWith(213, 44));
+    expect(invoke.mock.calls.some(([command]) => command === "resize_managed_terminal")).toBe(false);
+  });
+
+  it("可见挂载不做快照网格对齐(fit 才是尺寸权威),尺寸未知(0)也不对齐", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        // 可见:即便快照带尺寸也不动网格——可见网格由 fit 按真实宿主算。
+        return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2, cols: 213, rows: 44 });
+      }
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    expect(resizeGridSpy).not.toHaveBeenCalled();
+    cleanup();
+    resizeGridSpy.mockClear();
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        // 隐藏但尺寸未知(如后台旁路,cols/rows=0):跳过,维持现状。
+        return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2, cols: 0, rows: 0 });
+      }
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" visible={false} />);
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    expect(resizeGridSpy).not.toHaveBeenCalled();
+  });
+
   it("confirm 通过后真的调用接管 invoke", async () => {
     // 回归：此前用 window.confirm——Tauri webview 会吞掉它、恒返回 false，接管按钮永远点不动；
     // 而旧测试只断言按钮渲染、从不点击，刚好放过了这个 bug。这里必须点下去走完全链路。
@@ -716,7 +823,7 @@ describe("ManagedTerminal", () => {
       return Promise.resolve();
     });
     render(<ManagedTerminal sessionId={163} status="ended" />);
-    const takeover = await screen.findByRole("button", { name: "在 Meowo 中接管" });
+    const takeover = await screen.findByRole("button", { name: "恢复会话" });
     write.mockReset();
     takeover.click();
     await waitFor(() => expect(snapshots).toBe(2));

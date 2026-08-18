@@ -67,6 +67,17 @@ const EXT_TO_LANG: Record<string, string> = {
   txt: "plaintext",
 };
 
+/** markdown 代码围栏的语言标注 → 已注册的 hljs 语言名。围栏里用户/模型写的常是
+ *  扩展名式别名（```ts、```py、```sh），先认注册名、再走扩展名别名表；都不认识
+ *  返回 null（按纯文本渲染，不做自动探测——文件头注释里说过为什么）。 */
+export function languageForFence(tag: string): string | null {
+  const lower = tag.trim().toLowerCase();
+  if (!lower) return null;
+  // 先查别名表拿规范名（hljs 的语言自带 aliases，"ts" 直接问 getLanguage 也命中，
+  // 但返回别名会让高亮缓存键分裂成 ts/typescript 两份）；表外的再问 hljs 兜底。
+  return EXT_TO_LANG[lower] ?? (hljs.getLanguage(lower) ? lower : null);
+}
+
 /** 路径 → 高亮语言；不认识/无扩展名/点文件（.gitignore 等）返回 null（按纯文本渲染）。 */
 export function languageForPath(path: string): string | null {
   const base = path.split("/").pop()?.toLowerCase() ?? "";
@@ -137,12 +148,20 @@ function splitHighlightedHtml(html: string): string[] {
   return lines;
 }
 
+/// 超过这个总量不高亮、只转义：hljs 同步跑在渲染路径上，后端给面板的文件/diff 上限是
+/// 200KB，整篇送 hljs 会把主线程卡到接近秒级。阈值比对话区（ChatMarkdown 20K）宽——
+/// 这里每个文件只算一次（useMemo），不像流式消息每个 delta 都重来。
+const HIGHLIGHT_MAX_TOTAL_CHARS = 100_000;
+
 /**
  * 逐行高亮：行数组拼成整篇送 hljs（跨行状态保留），拆回后行数与输入一一对应。
  * 拆分结果行数对不上（拆分假设被打破）时宁可整体退纯文本，也不冒错位渲染的险。
  */
 export function highlightLines(lines: string[], lang: string | null): string[] {
   if (!lang || !hljs.getLanguage(lang)) return lines.map(escapeHtml);
+  let total = 0;
+  for (const line of lines) total += line.length + 1;
+  if (total > HIGHLIGHT_MAX_TOTAL_CHARS) return lines.map(escapeHtml);
   try {
     const html = hljs.highlight(lines.join("\n"), { language: lang, ignoreIllegals: true }).value;
     const split = splitHighlightedHtml(html);

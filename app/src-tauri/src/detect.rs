@@ -485,6 +485,54 @@ mod tests {
         );
     }
 
+    /// CC 2.1.233 起标题 spinner 换成月相帧（◐◑，实拍取证）：运行中标题必须判
+    /// working——否则 ❯ 提示框会把正在跑的会话判成可见 idle，黄环「等你」错挂整个
+    /// 长任务（「状态不及时」实拍反馈的根因）。
+    #[test]
+    fn moon_title_wins_as_working() {
+        let s = snap_titled(&["  some output", " \u{276F}"], "\u{25D0} Claude Code");
+        assert_eq!(
+            state_of(evaluate("claude", &s)),
+            Some((ScreenState::Working, "osc_title_moon_working"))
+        );
+    }
+
+    /// 标题不可用时（用户自设终端标题、标题事件丢失），底部状态行
+    /// `✢ Brewing… (7s · ↓ 129 tokens)` 是第二运行证据，且必须压过 ❯ 提示框——
+    /// 运行中输入框照画。屏幕结构照 2.1.233 实拍逐行复刻。
+    #[test]
+    fn running_status_line_beats_prompt_box() {
+        let s = snap(&[
+            "  poem line above",
+            "\u{2722} Brewing\u{2026} (7s \u{00B7} \u{2193} 129 tokens)",
+            "────────────────────────",
+            " \u{276F}",
+            "────────────────────────",
+            "  Fable 5 · 25% ctx",
+        ]);
+        assert_eq!(
+            state_of(evaluate("claude", &s)),
+            Some((ScreenState::Working, "status_line_working"))
+        );
+    }
+
+    /// 回合结束行 `✻ Baked for 11s` 没有括号计时，不是运行证据——❯ 提示框正常
+    /// 判回可见 idle，状态跟着回合结束立即翻绿转黄，不再等下一个 hook 事件。
+    #[test]
+    fn finished_status_line_returns_to_idle() {
+        let s = snap(&[
+            "\u{273B} Baked for 11s",
+            "────────────────────────",
+            " \u{276F} ",
+            "────────────────────────",
+            "  Fable 5 · 25% ctx",
+        ]);
+        assert_eq!(
+            state_of(evaluate("claude", &s)),
+            Some((ScreenState::Idle, "live_prompt_box"))
+        );
+    }
+
     /// 分隔线后的选择型审批表单 → blocked（可见证据）。
     #[test]
     fn selection_form_after_rule_is_blocked() {

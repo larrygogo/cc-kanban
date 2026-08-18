@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { escapeHtml, highlightCode, highlightLines, languageForPath } from "./highlight";
+import { escapeHtml, highlightCode, highlightLines, languageForFence, languageForPath } from "./highlight";
+
+describe("languageForFence", () => {
+  it("accepts registered names and extension aliases", () => {
+    expect(languageForFence("rust")).toBe("rust");
+    expect(languageForFence("ts")).toBe("typescript");
+    expect(languageForFence("py")).toBe("python");
+    expect(languageForFence("sh")).toBe("bash");
+    expect(languageForFence("TOML")).toBe("ini");
+  });
+
+  it("returns null for unknown or empty tags", () => {
+    expect(languageForFence("meowo-lang")).toBeNull();
+    expect(languageForFence("")).toBeNull();
+    expect(languageForFence("  ")).toBeNull();
+  });
+});
 
 describe("languageForPath", () => {
   it("maps common extensions to registered languages", () => {

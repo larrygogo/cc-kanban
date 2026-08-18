@@ -1,12 +1,34 @@
-import { memo, useEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import { openLink } from "../api";
 import { useT } from "../i18n";
+// 语法高亮复用文件/diff 面板的同一套 hljs 基建（highlight.ts）：语言表、回退策略、
+// --cc-syn-* 主题变量全部现成，不另引第二套高亮引擎——两处不分叉。
+import { highlightCode, languageForFence } from "./chat/highlight";
 
 const PLUGINS = [remarkGfm];
+
+/// 超过这个规模的代码块不高亮：hljs 同步跑在渲染路径上，几百 KB 的日志粘贴会卡住
+/// 整窗；纯文本已有滚动限高，大块不上色是可接受的降级。
+const HIGHLIGHT_MAX_CHARS = 20_000;
+const HIGHLIGHT_MAX_LINES = 200;
+
+/// (lang, code) → hljs HTML 的模块级缓存：流式期间正文每个 delta 都让整条消息重新
+/// 渲染，同一批历史代码块会反复走到 code 组件；memo 只挡「text 未变」的整条消息，
+/// 挡不住变化那条里的旧块。上限防长会话膨胀，超限整表清空（重算成本可接受）。
+const highlightCache = new Map<string, string>();
+function cachedHighlight(code: string, lang: string): string {
+  const key = lang + String.fromCharCode(0) + code;
+  const hit = highlightCache.get(key);
+  if (hit !== undefined) return hit;
+  const html = highlightCode(code, lang);
+  if (highlightCache.size > 500) highlightCache.clear();
+  highlightCache.set(key, html);
+  return html;
+}
 
 /** 制表/框线/方块字符（U+2500–259F）。模型爱用它们画结构图。 */
 const BOX_DRAWING = /[─-▟]/;
@@ -115,8 +137,22 @@ const components: Components = {
   // 故检测到框线字符的代码块直接按网格重排（见 renderGrid）；普通代码块原样输出。
   code: ({ className, children }) => {
     const text = String(children);
-    if (!BOX_DRAWING.test(text)) return <code className={className}>{children}</code>;
-    return <code className={(className ? className + " " : "") + "chat-md-diagram"}>{renderGrid(text)}</code>;
+    // 框图优先于高亮：对齐比颜色重要，网格重排后的 span 结构也没法再叠 hljs 输出。
+    if (BOX_DRAWING.test(text)) {
+      return <code className={(className ? className + " " : "") + "chat-md-diagram"}>{renderGrid(text)}</code>;
+    }
+    // 块级代码（带 language-xxx 类）走 hljs 高亮；内联 code 没有语言类，自然跳过。
+    // 文件头「不要换成 dangerouslySetInnerHTML 方案」的禁令针对的是**渲染消息里的
+    // 原始 HTML**（XSS 面）；这里的 HTML 由 hljs 从纯文本转义生成（文本全部经它
+    // 转义、只插入无属性值注入面的 span），与那条禁令不冲突。
+    const tag = /language-([\w+-]+)/.exec(className ?? "")?.[1];
+    const lang = tag ? languageForFence(tag) : null;
+    if (!lang || text.length > HIGHLIGHT_MAX_CHARS || text.split("\n").length > HIGHLIGHT_MAX_LINES) {
+      return <code className={className}>{children}</code>;
+    }
+    // 围栏文本以 \n 收尾（remark 保留）,高亮前剥掉,免得末尾多渲染一个空行。
+    const html = cachedHighlight(text.replace(/\n$/, ""), lang);
+    return <code className={className} dangerouslySetInnerHTML={{ __html: html }} />;
   },
   // 链接绝不能让 webview 自己导航（这个窗口没有地址栏，跳走就回不来了）；
   // 交给后端在默认浏览器打开，scheme 校验也在后端。
@@ -179,6 +215,10 @@ function PreviewImage({ src, alt, width, height, resolve }: {
   const remote = !!src && /^https?:/i.test(src);
   const [url, setUrl] = useState<string | null>(remote ? src! : null);
   useEffect(() => {
+    // src 变了先归位:useState 只在首挂时取初值,effect 又只在 resolve 成功时 setUrl,
+    // 二者都不覆盖旧值。react-markdown 按位置复用节点时（切文件 A→B、同位置换图),
+    // remote→remote 会一直显示第一张,relative 换到解析失败的图则残留上一张——都得先清。
+    setUrl(remote ? src! : null);
     if (remote || !src) return;
     let alive = true;
     resolve(src)
@@ -204,12 +244,14 @@ export const FileMarkdown = memo(function FileMarkdown({ text, resolveImage }: {
   text: string;
   resolveImage: (src: string) => Promise<string | null>;
 }) {
-  const fileComponents: Components = {
+  // 同 FILE_REHYPE 的道理：components 每次渲染换新引用会让 react-markdown 重建管线,
+  // 外层 memo 形同虚设。依赖只有 resolveImage,按它缓存。
+  const fileComponents: Components = useMemo(() => ({
     ...components,
     img: ({ src, alt, width, height }) => (
       <PreviewImage src={src} alt={alt} width={width} height={height} resolve={resolveImage} />
     ),
-  };
+  }), [resolveImage]);
   return (
     <ReactMarkdown remarkPlugins={PLUGINS} rehypePlugins={FILE_REHYPE} components={fileComponents}>
       {text}

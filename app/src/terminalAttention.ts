@@ -60,6 +60,9 @@ export function modeFromScreen(visible: string, markers: { marker: string; value
 // 高信号启动提示；命中后 GUI 会显示 CLI 的原文，而不是猜测并重写它的选项。
 // 直接带 g 标志预编译：terminalAttention 跑在 150ms 节流扫描 / 80ms 启动轮询的热路径上，
 // 每次调用重新 new RegExp 是纯浪费；matchAll 不会改写 lastIndex，共享实例是安全的。
+// 组合式提示(关键词 + 按键提示)只认**同行或紧邻的下一行**:此前的 `[\s\S]{0,320}` 跨距
+// 匹配在 16KB 缓冲上每 150ms 回溯一次是纯浪费,而且会把相隔几段的正文(agent 读 auth
+// 文件打印的内容 + 无关的 press enter 提示)拼成一次误命中。
 const GENERIC_STARTUP_PROMPTS = [
   /restore[^\n]{0,100}(?:token|credential|authentication)/gi,
   /(?:token|credential|authentication)[^\n]{0,100}restore/gi,
@@ -68,8 +71,8 @@ const GENERIC_STARTUP_PROMPTS = [
   /run \/login to sign in/gi,
   /waiting for sign-in to complete/gi,
   /trust gateway/gi,
-  /(?:oauth|token|credential|authentication|sign-in|sign in|login|gateway)[\s\S]{0,320}press (?:enter|esc|escape) to/gi,
-  /press (?:enter|esc|escape) to[\s\S]{0,320}(?:oauth|token|credential|authentication|sign-in|sign in|login|gateway)/gi,
+  /(?:oauth|token|credential|authentication|sign-in|sign in|login|gateway)[^\n]{0,160}(?:\n[^\n]{0,160})?press (?:enter|esc|escape) to/gi,
+  /press (?:enter|esc|escape) to[^\n]{0,160}(?:\n[^\n]{0,160})?(?:oauth|token|credential|authentication|sign-in|sign in|login|gateway)/gi,
 ];
 
 /// 导航提示：菜单在等键盘选择的信号。要求同时出现「方向键/导航」与「回车确认」两类线索，
@@ -381,12 +384,17 @@ function detectAnchoredCursorMenu(
 /** 返回当前启动阻塞提示的可见原文；null 表示没有需要 GUI 接管的交互。 */
 /// `expectMenu`：刚发出一条会弹交互菜单的命令（如 `/model`）。只在这段窗口里认光标菜单——
 /// 常开的话，agent 平时画的任何带 ❯ 的列表都会弹成卡片，噪声大于价值。
+/// `startupPrompts`：是否启用 GENERIC_STARTUP_PROMPTS(登录/凭据类通用启动提示)。这些
+/// 提示只在**会话启动阶段**有意义——正跑着的会话输出里引用登录话术(读 auth 文件、讨论
+/// 登录流程)不该弹卡锁输入。启动路径(waitForTerminalReady/挂载后的启动窗口)传 true,
+/// 稳态 150ms 扫描传 false;provider 声明的 markers 与 attentionPatterns 不受影响。
 export function terminalAttention(
   text: string,
   markers: string[],
   interactivePrompt = false,
   expectMenu = false,
   grammar: AttentionGrammar = CLAUDE_GRAMMAR,
+  startupPrompts = true,
 ): TerminalAttention | null {
   if (!text) return null;
   const visible = visibleTerminalText(text);
@@ -406,7 +414,7 @@ export function terminalAttention(
     const index = lower.lastIndexOf(normalized);
     if (index >= 0 && (!best || index > best.index)) best = { index, id: `provider:${normalized}` };
   }
-  for (const pattern of GENERIC_STARTUP_PROMPTS) {
+  for (const pattern of startupPrompts ? GENERIC_STARTUP_PROMPTS : []) {
     for (const match of lower.matchAll(pattern)) {
       const index = match.index ?? -1;
       if (index >= 0 && (!best || index > best.index)) {

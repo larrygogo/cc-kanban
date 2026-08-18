@@ -40,7 +40,10 @@ bundler 渲染自定义模板时只把**渲染结果**写进 `target/release/nsi
 ## 必须保留的语义（升级时逐条核对）
 
 - `.onInit` / `un.onInit` 的命令行解析：`/P`→`$PassiveMode`、`/NS`→`$NoShortcutMode`、
-  `/UPDATE`→`$UpdateMode`。tauri-plugin-updater 自动更新时硬编码传 `/P /R /UPDATE /ARGS`。
+  `/UPDATE`→`$UpdateMode`。tauri-plugin-updater 的传参由 `tauri.conf.json` 的
+  `plugins.updater.windows.installMode` 决定：现配 `quiet` → `/S /R /UPDATE /ARGS`
+  （0.5.14→0.5.15 实测 passive 的 `/P` 会弹自绘进度窗且界面错乱，故更新链路改全静默；
+  `/P` 路径仍保留，仅手动运行 `-setup.exe` 时可达）。
 - `NSIS_HOOK_PREINSTALL` 在 `SetOutPath $INSTDIR` 之后、`CheckIfAppIsRunning` 之前；
   `NSIS_HOOK_POSTINSTALL` 在注册表与快捷方式写完之后（`../nsis-hooks.nsh` 依赖这两个位置）。
 - 寄存器分工：`$R0-$R3` 归 `utils.nsh` 的 `CheckIfAppIsRunning`；`$R4-$R9` 归 nsis-hooks.nsh；

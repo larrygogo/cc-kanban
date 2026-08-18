@@ -196,13 +196,27 @@ pub(crate) async fn confirm_dialog(
     Ok(ok)
 }
 
+/// 该调用是否来自 `confirm-<id>` 小窗自己。payload/result 两条命令都必须做这道校验:
+/// 确认框是删除会话/结束进程等破坏性操作的最后一道闸,而 Tauri 命令默认任何 webview
+/// 都能调——不校验来源的话,被攻破的主窗渲染层可以直接替用户「点同意」,模态形同虚设。
+/// 绑定窗口 label 后,只有后端亲手建出的那个小窗能给自己的确认作答。
+/// (这只挡「自答确认框」;被攻破的渲染层绕过确认、直调破坏性命令,须由后端授权层解决,
+/// 见 lib.rs 各破坏性命令——本文件管不到。)
+fn is_confirm_window(window: &tauri::Window, id: u64) -> bool {
+    window.label() == format!("confirm-{id}")
+}
+
 /// 小窗启动后取渲染内容。走命令而不是 URL 参数:标题/正文是任意用户语言文本,
-/// 省掉转义,也不把内容留在窗口 URL 里。
+/// 省掉转义,也不把内容留在窗口 URL 里。仅限对应小窗本人调用(见 is_confirm_window)。
 #[tauri::command]
 pub(crate) fn confirm_dialog_payload(
+    window: tauri::Window,
     state: tauri::State<'_, super::AppState>,
     id: u64,
 ) -> Result<ConfirmPayload, String> {
+    if !is_confirm_window(&window, id) {
+        return Err("确认请求不存在".into());
+    }
     state
         .confirms
         .pending
@@ -214,8 +228,17 @@ pub(crate) fn confirm_dialog_payload(
 }
 
 /// 小窗按钮的裁决。纯内存转发,同步命令(见 CLAUDE.md 线程纪律)。
+/// 仅限对应小窗本人调用:其它窗口伪造的答复一律丢弃(见 is_confirm_window)。
 #[tauri::command]
-pub(crate) fn confirm_dialog_result(state: tauri::State<'_, super::AppState>, id: u64, ok: bool) {
+pub(crate) fn confirm_dialog_result(
+    window: tauri::Window,
+    state: tauri::State<'_, super::AppState>,
+    id: u64,
+    ok: bool,
+) {
+    if !is_confirm_window(&window, id) {
+        return;
+    }
     if let Some(sender) = state.confirms.take_sender(id) {
         let _ = sender.try_send(ok);
     }

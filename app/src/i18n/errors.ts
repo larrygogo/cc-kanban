@@ -8,14 +8,17 @@ type ErrorEntry = {
   m: string;
   /** 精确匹配(默认按前缀)。 */
   exact?: boolean;
-  /** 前缀匹配时把匹配串之后的原文(通常是「：具体原因」)追加到译文后,不丢排障信息。 */
+  /** 子串匹配:后端把 agent id 拼在句首(「claude 的中转地址…」)时前缀够不着,按包含匹配。 */
+  anywhere?: boolean;
+  /** 非精确匹配时把匹配串之后的原文(通常是「：具体原因」)追加到译文后,不丢排障信息。 */
   tail?: boolean;
-  zh: string;
+  /** 缺省 = 原文照放(原文本就是中文,且句首常带 agent id 等有用前缀,替换反而丢信息)。 */
+  zh?: string;
   en: string;
 };
 
-/** 按声明顺序匹配:精确项放前、长前缀放短前缀前。 */
-const ENTRIES: ErrorEntry[] = [
+/** 按声明顺序匹配:精确项放前、长前缀放短前缀前。导出仅供对账测试(errors.parity.test.ts)。 */
+export const ENTRIES: ErrorEntry[] = [
   // ── 会话 / 终端 ──
   { m: "无效 session_id", exact: true, zh: "会话已失效，请重新打开", en: "Session is no longer valid; reopen it" },
   { m: "会话不存在", exact: true, zh: "会话不存在", en: "Session not found" },
@@ -59,7 +62,6 @@ const ENTRIES: ErrorEntry[] = [
   { m: "写后台会话", tail: true, zh: "消息没能送进后台会话，请重试", en: "Couldn't deliver to the background session; try again" },
   { m: "向后台会话发送失败", tail: true, zh: "消息没能送进后台会话，请重试", en: "Couldn't deliver to the background session; try again" },
   { m: "等待后台会话回执失败", tail: true, zh: "后台会话未确认收到消息", en: "The background session didn't acknowledge the message" },
-  { m: "后台会话没有回执", zh: "后台会话未确认收到消息，请稍后重试", en: "The background session didn't acknowledge the message; try again" },
   { m: "后台会话未确认收到消息", zh: "后台会话未确认收到消息，请稍后重试", en: "The background session didn't acknowledge the message; try again" },
   { m: "后台会话拒绝了这条消息", tail: true, zh: "后台会话拒绝了这条消息", en: "The background session rejected this message" },
   { m: "消息为空", exact: true, zh: "消息为空", en: "Empty message" },
@@ -95,6 +97,28 @@ const ENTRIES: ErrorEntry[] = [
   { m: "执行安装失败", tail: true, zh: "安装失败", en: "Installation failed" },
   { m: "启动安装失败", tail: true, zh: "无法启动安装", en: "Couldn't start the installation" },
   { m: "安装程序以退出码", zh: "安装程序执行失败", en: "The installer exited with an error" },
+  // ── API 中转(relay.rs)──
+  // 后端常把 agent id 拼在句首(「claude 的中转地址…」「claude 插件不支持…」),
+  // 前缀够不着,这批用 anywhere;zh 一律缺省(原文即中文,保留句首的 agent id)。
+  { m: "未知中转 agent", tail: true, zh: "未知的中转 Agent", en: "Unknown relay agent" },
+  { m: "插件不支持 API 中转", anywhere: true, en: "This agent's plugin doesn't support API relay" },
+  { m: "当前安装版本不支持 API 中转", exact: true, zh: "当前安装版本不支持 API 中转", en: "The installed version doesn't support API relay" },
+  { m: "中转地址必须以 http:// 或 https:// 开头", anywhere: true, en: "Relay URL must start with http:// or https://" },
+  { m: "中转地址格式无效", anywhere: true, en: "Invalid relay URL" },
+  { m: "中转地址缺少主机名", anywhere: true, en: "Relay URL is missing a host" },
+  { m: "中转地址与已保存的中转配置不一致", anywhere: true, zh: "中转地址与已保存的配置不一致，请先保存中转地址", en: "Relay URL doesn't match the saved relay config; save the relay URL first" },
+  { m: "中转模型不能为空", anywhere: true, en: "Relay model can't be empty" },
+  // 覆盖「请先保存中转密钥」与「请先保存 {id} 的中转密钥」两种形态。
+  { m: "中转密钥", anywhere: true, en: "Save the relay key first" },
+  { m: "安装形态", anywhere: true, en: "Couldn't determine the agent's install type" },
+  { m: "中转返回的模型列表不是有效 JSON", exact: true, zh: "中转返回的模型列表不是有效 JSON", en: "The relay returned invalid JSON for the model list" },
+  { m: "中转返回的模型列表格式不受支持", exact: true, zh: "中转返回的模型列表格式不受支持", en: "Unsupported model-list format from the relay" },
+  { m: "中转没有返回可用模型", exact: true, zh: "中转没有返回可用模型", en: "The relay returned no models" },
+  // 这两条会被「查询模型失败：{e}」包一层,anywhere+tail 把内层译出来、参数照带;
+  // 必须排在「查询模型失败」前缀项之前。
+  { m: "中转返回 HTTP", anywhere: true, tail: true, en: "The relay returned HTTP" },
+  { m: "连接中转失败", anywhere: true, tail: true, en: "Couldn't reach the relay" },
+  { m: "查询模型失败", tail: true, zh: "查询模型失败", en: "Couldn't fetch models" },
   // ── 代理 ──
   { m: "已选「自定义代理」，但代理地址为空", exact: true, zh: "已选自定义代理，请填写代理地址", en: "Custom proxy selected — enter a proxy address" },
   { m: "代理地址为空", exact: true, zh: "代理地址为空", en: "Proxy address is empty" },
@@ -119,6 +143,9 @@ const ENTRIES: ErrorEntry[] = [
   { m: "git status 执行失败", zh: "git status 执行失败", en: "git status failed" },
   { m: "git diff 执行失败", zh: "git diff 执行失败", en: "git diff failed" },
   { m: "未检测到该编辑器", exact: true, zh: "未检测到该编辑器", en: "Editor not found" },
+  { m: "不允许的链接", exact: true, zh: "不允许打开该链接", en: "This link isn't allowed" },
+  { m: "无效链接", exact: true, zh: "链接无效", en: "Invalid link" },
+  { m: "只支持 http/https 链接", exact: true, zh: "只支持 http/https 链接", en: "Only http/https links can be opened" },
   { m: "该文件类型没有关联应用", exact: true, zh: "该文件类型没有关联应用", en: "No app is associated with this file type" },
   { m: "该打开方式已不可用", exact: true, zh: "该打开方式已不可用", en: "That app is no longer available" },
   // ── 窗口 ──
@@ -139,11 +166,17 @@ export function formatBackendError(raw: unknown, locale: string): string {
   const text = raw instanceof Error ? raw.message : String(raw ?? "");
   const isZh = locale.startsWith("zh");
   for (const entry of ENTRIES) {
-    const hit = entry.exact ? text === entry.m : text.startsWith(entry.m);
-    if (!hit) continue;
+    const idx = entry.anywhere
+      ? text.indexOf(entry.m)
+      : entry.exact
+        ? (text === entry.m ? 0 : -1)
+        : (text.startsWith(entry.m) ? 0 : -1);
+    if (idx < 0) continue;
+    // zh 缺省:原文本就是中文,整句照放(不做 tail 拼接,保留句首前缀)。
     const base = isZh ? entry.zh : entry.en;
+    if (base === undefined) return text;
     // tail:把「：具体原因」原样带上——译文负责可读,原因负责排障。
-    return entry.tail && !entry.exact ? base + text.slice(entry.m.length) : base;
+    return entry.tail && !entry.exact ? base + text.slice(idx + entry.m.length) : base;
   }
   // 未命中:中文界面原样显示(原文本就是中文);英文界面遇到中文原文时降级为通用前缀,
   // 保留原文便于反馈排查——比一句纯中文可读。

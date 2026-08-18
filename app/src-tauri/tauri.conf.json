@@ -30,7 +30,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: https:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
       "assetProtocol": {
         "enable": true,
         "scope": ["$HOME/.claude/image-cache/**", "$TEMP/meowo-paste/**"]
@@ -70,7 +70,10 @@
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZCQURCRTg1RTBGNzJCNjUKUldSbEsvZmdoYjZ0YTQvWDg4cGI5ZjAxUTZhWVpUVTVBNk4rSFc3UW9JTTE2NmVKMlJUUmg2ZDMK",
       "endpoints": [
         "https://github.com/larrygogo/meowo/releases/latest/download/latest.json"
-      ]
+      ],
+      "windows": {
+        "installMode": "quiet"
+      }
     }
   }
 }

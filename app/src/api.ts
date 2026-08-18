@@ -116,6 +116,11 @@ export type LiveSession = Omit<LiveSessionDto, "session" | "todos" | "column" | 
   errored: boolean;
   error_label: string | null;
   error_raw: string | null;
+  /**
+   * 还在跑的后台子任务数（transcript 分析）。主回合停了（status=waiting/屏幕 idle）
+   * 但它非零时，卡片环与分组都按「运行中」处理——后台委派还在独立干活，不该催人。
+   */
+  busy_subagents: number;
   /** 最近一条 AI 正文的轻推预览（清洗+截断），hover 卡片时速览；无正文回合为 null。 */
   preview: string | null;
   /** 所属账号的展示名（profile 已删时回退 id 本身）；null = 默认账号，不显示徽章。 */
@@ -240,13 +245,15 @@ export type FocusSessionResult =
   | "process_ended";
 
 export type SessionTone = "running" | "pending" | "waiting" | "offline" | "ended" | "error";
-export function sessionTone(connected: boolean, status?: string, pendingReview?: unknown, errored?: boolean): SessionTone {
+export function sessionTone(connected: boolean, status?: string, pendingReview?: unknown, errored?: boolean, busySubagents?: number): SessionTone {
   if (status === "ended" && !connected) return "ended";
   if (!connected) return "offline";
   if (errored) return "error";
   if (pendingReview) return "pending";
   if (status === "running") return "running";
-  return "waiting";
+  // 主回合停了但后台子任务还在跑:不是「等你输入」——没有要输入的东西,工作还在进行。
+  // 与后端 tab_class 的 background_busy 同口径(LiveSession.busy_subagents,transcript 分析)。
+  return busySubagents && busySubagents > 0 ? "running" : "waiting";
 }
 
 export type ManagedTerminalSnapshot = ManagedTerminalSnapshotDto;
@@ -283,9 +290,10 @@ export function sessionLaunchSelections(sessionId: number): Promise<Record<strin
   return invoke<Record<string, string>>("session_launch_selections", { sessionId }).then((map) => map ?? {}).catch(() => ({}));
 }
 /** 把单个启动选项写进会话存档（合并写）。模型/权限是启动参数，resume/接管时回放
- *  ——对话页切换后不落库的话，每次重启都回默认档（1M 上下文档回落 200K，实拍）。 */
+ *  ——对话页切换后不落库的话，每次重启都回默认档（1M 上下文档回落 200K，实拍）。
+ *  写失败要让调用方知道（否则用户切了档、下次 resume 悄悄回默认），错误不在这里吞。 */
 export function setSessionLaunchSelection(sessionId: number, option: string, choice: string): Promise<void> {
-  return invoke<void>("set_session_launch_selection", { sessionId, option, choice }).catch(() => {});
+  return invoke<void>("set_session_launch_selection", { sessionId, option, choice });
 }
 /**
  * 取终端输出快照。`since` 传上次拿到的 endOffset，只回增量——不传则全量（首帧用）。
@@ -431,6 +439,20 @@ export function openPathWith(cwd: string, rel: string, opener: string): Promise<
 /** 在系统文件管理器里定位（选中）cwd 内的文件/目录。 */
 export function revealPathInFileManager(cwd: string, rel: string): Promise<void> {
   return invoke("reveal_path_in_file_manager", { cwd, rel });
+}
+
+/** 对话内容全文搜索的一条命中（后端 chat.rs 的 TranscriptSearchHit，serde camelCase）。 */
+export type TranscriptSearchHit = {
+  sessionId: number;
+  title: string;
+  projectName: string;
+  excerpt: string;
+};
+
+/** 对话内容全文搜索：扫最近会话的 transcript 文件（显式动作，不随击键触发）。
+ *  每会话至多一条命中，按活跃序返回，后端带扫描上限（秒级以内）。 */
+export function searchChatTranscripts(query: string): Promise<TranscriptSearchHit[]> {
+  return invoke("search_chat_transcripts", { query });
 }
 
 /** 打开「新建会话」独立窗；带 prefill 时预选目录与 agent。 */

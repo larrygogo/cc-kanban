@@ -34,6 +34,9 @@ pub struct LiveCandidate {
     /// 与常规会话别无二致,只有 agent 自己的花名册知道它还没被派活。
     pub cc_session_id: String,
     pub provider: Option<String>,
+    /// 会话工作目录:app 层按它重建 transcript 路径,tab 归属要看「后台子任务还在跑吗」
+    /// (transcript 分析),与列表侧 enrich 同一份原料。
+    pub cwd: Option<String>,
 }
 
 /// 当前活跃区的一张会话卡。
@@ -133,6 +136,8 @@ impl Store {
     /// 活跃区：按 filter（+ 可选 search，作用于当前 tab 内）取会话，附项目名、任务标题、进度。
     /// waiting tab 按 last_event_at ASC（等最久优先）、其它按 DESC；游标方向随排序翻转，cursor 为 null 取首页。
     /// filter: "all" | "running" | "waiting" | "archived"；其它值按 "all"。search 去空白后非空才生效。
+    /// running/waiting 返回的是**候选并集**（两者同一条 SQL），最终归属由 app 层 tab_class
+    /// 结合进程表/屏幕状态判定后再过滤——见谓词处注释。
     pub fn live_sessions(
         &self,
         filter: Option<&str>,
@@ -176,18 +181,20 @@ impl Store {
         // （链尾代表整条链；回看走 get_chat_history 按 id 直取，不受影响）。
         // 该谓词与 live_sessions_totals / live_totals_for / live_count_candidates
         // 四处口径必须同生共死，改任何一处都要同步其余三处。
+        //
+        // running/waiting 共用一个**候选并集**（与 live_count_candidates 逐字同口径）：
+        // 归属哪个 tab 由 app 层的 tab_class 决定——它要看屏幕检测状态（broker 内存里的
+        // 实时事实）与审批存活校正，SQL 都看不见。SQL 若按 status 预分 tab，一条
+        // status=running 而屏幕已 idle 的会话就会被钉死在运行中 tab，与卡片黄环打架
+        //（卡片状态与 tab 归属必须同源，见 session_query.rs 的 tab_class）。
         match filter {
             Some("all") => {
                 conditions.push("s.archived = 0 AND s.superseded_by IS NULL".into());
             }
-            Some("running") => conditions.push(
-                "s.status = 'running' AND s.pending_review IS NULL AND s.archived = 0 \
-                 AND s.superseded_by IS NULL"
-                    .into(),
-            ),
-            Some("waiting") => conditions.push(
-                "(s.status = 'waiting' OR s.pending_review IS NOT NULL) AND s.archived = 0 \
-                 AND s.superseded_by IS NULL"
+            Some("running") | Some("waiting") => conditions.push(
+                "s.status != 'ended' \
+                 AND (s.status IN ('running','waiting') OR s.pending_review IS NOT NULL) \
+                 AND s.archived = 0 AND s.superseded_by IS NULL"
                     .into(),
             ),
             Some("archived") => {
@@ -196,15 +203,18 @@ impl Store {
             _ => {} // None 不过滤（仅测试取证用，生产两处调用都传 Some）
         }
 
-        // 搜索（当前 tab 内 AND 搜索词）：title / cwd / project 名任一命中。%/_/\ 转义成字面量。
+        // 搜索（当前 tab 内 AND 搜索词）：title / cwd / project 名 / 便签 / 最近往来任一命中。
+        // %/_/\ 转义成字面量。便签是用户亲手写的记忆锚点、最近往来是「上次聊到哪」的
+        // 第一线索——这两处搜不到时用户只能凭记忆逐个点开翻。
         if let Some(q) = search.map(str::trim).filter(|s| !s.is_empty()) {
             let pat = format!("%{}%", escape_like(q));
             conditions.push(
-                "(t.title LIKE ? ESCAPE '\\' OR s.cwd LIKE ? ESCAPE '\\' OR p.name LIKE ? ESCAPE '\\')".into(),
+                "(t.title LIKE ? ESCAPE '\\' OR s.cwd LIKE ? ESCAPE '\\' OR p.name LIKE ? ESCAPE '\\' \
+                 OR sn.note LIKE ? ESCAPE '\\' OR s.last_user_text LIKE ? ESCAPE '\\' OR s.last_ai_text LIKE ? ESCAPE '\\')".into(),
             );
-            params.push(Value::Text(pat.clone()));
-            params.push(Value::Text(pat.clone()));
-            params.push(Value::Text(pat));
+            for _ in 0..6 {
+                params.push(Value::Text(pat.clone()));
+            }
         }
 
         // 目录过滤:斜杠归一 + 去尾斜杠后的精确比较(NOCASE 只管 ASCII,盘符/常见路径够用;
@@ -433,8 +443,9 @@ impl Store {
     ///
     /// 只吐出**判定 connected 所需的原料**，不做统计——见 [`Self::live_sessions_totals`] 的说明。
     ///
-    /// `status != 'ended'` 这一条不能省。当前生命周期边界会清 pending_review，但旧版本数据库
-    /// 仍可能存在「ended + pending_review」残留；查询必须防御这类历史数据，否则会把已结束会话捞进来。它们绝无可能算进
+    /// `status != 'ended'` 这一条不能省。写侧已把它做成不变量（set_pending_review 带
+    /// `status <> 'ended'` 守卫，生命周期边界也都清 pending_review），但旧版本数据库仍可能
+    /// 存在「ended + pending_review」残留；查询必须防御这类历史数据，否则会把已结束会话捞进来。它们绝无可能算进
     /// running/waiting（`session_connected` 对 ended 恒为 false），但会让候选集合随历史增长
     /// 而膨胀，白白拖着 app 层逐条判活——本该是个「只有活跃会话」的小集合。
     ///
@@ -443,7 +454,7 @@ impl Store {
     pub fn live_count_candidates(&self) -> Result<Vec<LiveCandidate>, StoreError> {
         let mut st = self.conn.prepare(
             "SELECT s.id, s.status, s.pending_review, s.pid, s.last_event_at,
-                    s.cc_session_id, s.provider FROM sessions s
+                    s.cc_session_id, s.provider, s.cwd FROM sessions s
              LEFT JOIN tasks t ON t.session_id = s.id
              WHERE s.archived = 0 AND s.status != 'ended' AND s.superseded_by IS NULL
                AND (s.status IN ('running','waiting') OR s.pending_review IS NOT NULL)
@@ -458,6 +469,7 @@ impl Store {
                 last_event_at: r.get(4)?,
                 cc_session_id: r.get(5)?,
                 provider: r.get(6)?,
+                cwd: r.get(7)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -469,13 +481,41 @@ impl Store {
     /// 仍是连接中，绝不能因空闲误杀）。但 pid 为空（reporter 没抓到 owner pid）的会话无法做存活校验，
     /// 若终端被直接关掉（SessionEnd 丢失），就会永远卡在 live。对这类会话退化为「空闲超时」清理：
     /// 真正活跃的会话每个事件都会刷新 last_event_at，到不了这个阈值。
-    pub fn end_orphaned_idle(&self, idle_ms: i64, now_ms: i64) -> Result<usize, StoreError> {
-        let n = self.conn.execute(
+    ///
+    /// `managed_session_ids`：本 GUI 正托管 PTY 的会话集合（进程是 meowo 自己 spawn 的,
+    /// 必然活着）。托管会话 hook 可能一直没认领 pid（codex 的 session_start 要到首个 turn
+    /// 才触发）,只看 `pid IS NULL` 会把正被托管的会话误收尾——与 session_connected/
+    /// process_alive 的「pid 命中 ‖ 托管 PTY 活跃」口径必须一致,这里把托管集作排除集传入。
+    pub fn end_orphaned_idle(
+        &self,
+        idle_ms: i64,
+        now_ms: i64,
+        managed_session_ids: &std::collections::HashSet<i64>,
+    ) -> Result<usize, StoreError> {
+        // 空集不能拼出 `NOT IN ()`（SQLite 语法错误）；无排除项时省掉整个子句。
+        let exclude = if managed_session_ids.is_empty() {
+            String::new()
+        } else {
+            let placeholders = vec!["?"; managed_session_ids.len()].join(",");
+            format!(" AND id NOT IN ({placeholders})")
+        };
+        let sql = format!(
             "UPDATE sessions SET status='ended', pending_review=NULL, ended_at=?1, last_event_at=?1
-             WHERE pid IS NULL AND status IN ('running','waiting','stale')
-               AND (?1 - last_event_at) > ?2",
-            rusqlite::params![now_ms, idle_ms],
-        )?;
+             WHERE pid IS NULL AND status IN ('running','waiting')
+               AND (?1 - last_event_at) > ?2{exclude}"
+        );
+        let mut params: Vec<rusqlite::types::Value> =
+            Vec::with_capacity(2 + managed_session_ids.len());
+        params.push(rusqlite::types::Value::Integer(now_ms));
+        params.push(rusqlite::types::Value::Integer(idle_ms));
+        params.extend(
+            managed_session_ids
+                .iter()
+                .map(|id| rusqlite::types::Value::Integer(*id)),
+        );
+        let n = self
+            .conn
+            .execute(&sql, rusqlite::params_from_iter(params))?;
         Ok(n)
     }
 }

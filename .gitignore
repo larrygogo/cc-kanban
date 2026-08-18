@@ -1,8 +1,11 @@
 .superpowers/
 node_modules/
 target/
-# 隔离校验用 cargo target(dev 实例占用 target/ 的 exe 时,CARGO_TARGET_DIR=target-check 跑测试)
+# 隔离校验用 cargo target(dev 实例占用 target/ 的 exe 时,CARGO_TARGET_DIR=<名> 跑测试)。
+# 两个名字都收:历史脚手架与部分会话用 target-verify,新约定用 target-check——
+# 任一未忽略都会让 git status -uall 灌进上万条产物、把「更改」计数撑爆。
 target-check/
+target-verify/
 dist/
 # 本项目用 bun(bun.lock)。npm 的 package-lock.json 只会是误跑 npm/npx 的产物,不入库。
 package-lock.json

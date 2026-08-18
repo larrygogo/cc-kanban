@@ -6,6 +6,28 @@ use crate::models::{
 use rusqlite::Connection;
 use std::path::Path;
 
+/// Stop 置 waiting 后,这段窗口内到达的**活动类**事件按「同回合迟到尾巴」处理,不把
+/// waiting 顶回 running(判定与理由见 [`Store::touch_session`])。窗口宽度权衡:太短挡不住
+/// 高负载下的 hook 进程排队,太长会拖慢「未经 UserPromptSubmit 的后台回合」亮起。
+const STOP_STRAGGLER_GRACE_MS: i64 = 5_000;
+
+/// 活动类 touch 的共用 SQL（`?1`=now、`?2`=session_id、`?3`=[`STOP_STRAGGLER_GRACE_MS`]）：
+/// waiting 仅在距上次事件超过迟到窗时才翻回 running——hook 是并发子进程、reporter 按
+/// **到达时刻**盖时间戳，回合末尾的 PostToolUse 完全可能晚于 Stop 落库。Stop 刚置
+/// waiting 的短窗内到达的活动事件是同一回合的迟到尾巴，把它当新活动会让已结束的回合
+/// 永远显示运行中（实拍：回合结束、last_ai_text 已是终稿，状态却卡 running）。
+///
+/// 关键：被判为迟到尾巴的那支（waiting 且窗内）**连 last_event_at 也不推进**——
+/// 「等待你回复」通知的去重指纹正是 last_event_at（watch.rs waiting_fingerprint），
+/// 尾巴若推进它，同一回合会弹两次；且每条尾巴都推进窗口锚点，窗口被越拖越长。
+/// 两个 CASE 都读**更新前**的行值（SQLite 语义），判定一致。
+const ACTIVITY_TOUCH_SQL: &str = "UPDATE sessions
+         SET status = CASE WHEN status = 'waiting' AND ?1 - last_event_at > ?3 THEN 'running'
+                           ELSE status END,
+             last_event_at = CASE WHEN status = 'waiting' AND ?1 - last_event_at <= ?3
+                                  THEN last_event_at ELSE ?1 END
+         WHERE id = ?2 AND last_event_at <= ?1";
+
 pub struct Store {
     pub(crate) conn: Connection,
 }
@@ -159,7 +181,10 @@ impl Store {
     ///     agent 侧编号，apply_todo_delta 靠它定位行）。
     /// v10: sessions 加 predecessor_id / superseded_by 两列（跨 provider 切换的接续链，
     ///     成对写入；superseded_by 非 NULL 的行从看板折叠隐藏）。
-    const USER_VERSION: i64 = 10;
+    /// v11: 废除 stale 会话态（全仓无写端,消费端 tab_class/候选集也不认它,是个只进不出的
+    ///     半死态）：历史遗留的 stale 行归一成 waiting,读写两侧的 stale 分支一并删除;
+    ///     此后合法 status 只有 running/waiting/ended。
+    const USER_VERSION: i64 = 11;
 
     /// 一次性建表 + 迁移 + 建索引，用 `PRAGMA user_version` 门控：已是最新版直接返回，
     /// 避免 statusline/hook 每次 open 都重跑 DDL 与注定失败的 ALTER（hot-path 浪费）。
@@ -218,6 +243,16 @@ impl Store {
                 eprintln!("meowo-store 建索引失败: {sql}: {e}");
                 return Ok(()); // 同上：不 bump，下次重试
             }
+        }
+        // v11 数据修正：stale 态废除后老库可能残留 stale 行,归一成 waiting——它们本就
+        // 「久未有事件、进程未必已死」,交给 reaper/end_orphaned_idle 按 waiting 口径收尾。
+        // 失败不 bump,下次 open 重试(与 ALTER/索引同一纪律)。
+        if let Err(e) = conn.execute(
+            "UPDATE sessions SET status = 'waiting' WHERE status = 'stale'",
+            [],
+        ) {
+            eprintln!("meowo-store stale 归一失败: {e}");
+            return Ok(());
         }
         let _ = conn.pragma_update(None, "user_version", Self::USER_VERSION);
         Ok(())
@@ -345,12 +380,18 @@ impl Store {
     ) -> Result<(i64, i64), StoreError> {
         // 事务保证「会话 + 占位任务」原子落库，避免中途失败留下无任务卡的半态会话。
         let tx = self.conn.unchecked_transaction()?;
-        // 会话幂等：已存在则复活为 running（resume/--continue 场景），清掉 ended_at。
+        // 会话幂等：已存在则复活（resume/--continue 场景），清掉 ended_at。复活的目标态是
+        // **waiting** 不是 running——SessionStart 只说明 CLI 拉起来了、停在输入框等人，没有
+        // 回合在跑（实拍反馈：每次恢复会话都被标成运行中，但并不真实）。running 由真实活动
+        // （UserPromptSubmit/工具事件的 touch_session）翻转。既有 running/waiting 的行原样
+        // 保留：auto-compact 会在回合中途发 SessionStart，此时降级成 waiting 才是说谎。
+        // 新插入仍以 running 起步：外部终端新起的会话紧接首回合，且 waiting 起步会让
+        // 「等待你回复」通知对每个外来新会话空响一次（watch.rs 的 waiting_fingerprint）。
         tx.execute(
             "INSERT INTO sessions (project_id, cc_session_id, status, started_at, last_event_at)
              VALUES (?1, ?2, 'running', ?3, ?3)
              ON CONFLICT(cc_session_id) DO UPDATE SET
-                 status = 'running',
+                 status = CASE WHEN sessions.status = 'ended' THEN 'waiting' ELSE sessions.status END,
                  last_event_at = excluded.last_event_at,
                  ended_at = NULL,
                  pending_review = NULL
@@ -545,16 +586,27 @@ impl Store {
             )?;
             // 非占位标题:不再把 prompt 写进 current_activity(改由 last_user_text 承担)。
         }
-        self.touch_session(session_id, now_ms)?;
+        // 用户开口 = 开新回合,无条件复活(不吃活动类 touch 的迟到窗)。
+        self.touch_session_turn_open(session_id, now_ms)?;
         Ok(())
     }
 
-    /// 更新会话 last_event_at；若处于 waiting/stale 恢复为 running。
+    /// 活动类 touch（PostToolUse/TodoWrite 一族）,语义见 [`ACTIVITY_TOUCH_SQL`]。
     pub fn touch_session(&self, session_id: i64, now_ms: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            ACTIVITY_TOUCH_SQL,
+            rusqlite::params![now_ms, session_id, STOP_STRAGGLER_GRACE_MS],
+        )?;
+        Ok(())
+    }
+
+    /// 开新回合的 touch（UserPromptSubmit 的文本/纯图片两条路）：无条件把 waiting
+    /// 复活为 running——用户开口就是新回合，不受迟到窗约束。
+    pub fn touch_session_turn_open(&self, session_id: i64, now_ms: i64) -> Result<(), StoreError> {
         self.conn.execute(
             "UPDATE sessions
              SET last_event_at = ?1,
-                 status = CASE WHEN status IN ('waiting','stale') THEN 'running' ELSE status END
+                 status = CASE WHEN status = 'waiting' THEN 'running' ELSE status END
              WHERE id = ?2 AND last_event_at <= ?1",
             rusqlite::params![now_ms, session_id],
         )?;
@@ -564,11 +616,36 @@ impl Store {
     // == Task 7: sync_todos + set_task_column + list_todos ==
 
     /// 用新列表整体替换某会话任务的 todos；未锁定时按 todo 推导列。
+    /// hook 路径专用（TodoWrite = 真实会话活动）：顺带做活动类 touch（刷新 last_event_at、
+    /// 迟到窗外把 waiting 复活为 running）。GUI 打开会话的被动重建走 `sync_todos_rebuild`。
     pub fn sync_todos(
         &self,
         session_id: i64,
         todos: &[TodoInput],
         now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.sync_todos_inner(session_id, todos, now_ms, true)
+    }
+
+    /// 被动重建版（GUI 打开/切换会话时从 agent 日志重建清单）：只同步 todos，**不**碰
+    /// sessions 行——重建是读侧行为，不是会话活动。复用 hook 版的 touch 曾把刚恢复成
+    /// waiting 的会话一开对话窗就顶回 running（实拍），还会伪造 last_event_at 给早已
+    /// 断开的会话续连接宽限。
+    pub fn sync_todos_rebuild(
+        &self,
+        session_id: i64,
+        todos: &[TodoInput],
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.sync_todos_inner(session_id, todos, now_ms, false)
+    }
+
+    fn sync_todos_inner(
+        &self,
+        session_id: i64,
+        todos: &[TodoInput],
+        now_ms: i64,
+        is_activity: bool,
     ) -> Result<(), StoreError> {
         let tid = self.task_id_of_session(session_id)?;
         // 不能沿用 `unchecked_transaction` 的 deferred BEGIN：WAL 下 SELECT 与 DELETE/INSERT
@@ -597,26 +674,36 @@ impl Store {
                 rusqlite::params![tid, t.content, t.status.as_str(), i as i64],
             )?;
         }
+        // 被动重建（GUI 读侧）**不推进 tasks.updated_at**：updated_at 是 sync_todos 挡迟到
+        // 快照的权威时钟,重建把它顶到 now 会让同期在途的真实 TodoWrite（now_ms 更早）被
+        // 上方守卫整份丢弃——读侧行为绝不写权威时间戳。列推导仍照做（重建的清单也要上板）。
         if !locked {
             let col = derive_column(todos);
-            self.conn.execute(
-                "UPDATE tasks SET column_name = ?1, updated_at = ?2 WHERE id = ?3",
-                rusqlite::params![col.as_str(), now_ms, tid],
-            )?;
-        } else {
+            if is_activity {
+                self.conn.execute(
+                    "UPDATE tasks SET column_name = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![col.as_str(), now_ms, tid],
+                )?;
+            } else {
+                self.conn.execute(
+                    "UPDATE tasks SET column_name = ?1 WHERE id = ?2",
+                    rusqlite::params![col.as_str(), tid],
+                )?;
+            }
+        } else if is_activity {
             self.conn.execute(
                 "UPDATE tasks SET updated_at = ?1 WHERE id = ?2",
                 rusqlite::params![now_ms, tid],
             )?;
         }
-        // touch_session 等价逻辑（事务内）：刷新 last_event_at，waiting/stale 复活为 running
-        self.conn.execute(
-            "UPDATE sessions
-             SET last_event_at = ?1,
-                 status = CASE WHEN status IN ('waiting','stale') THEN 'running' ELSE status END
-             WHERE id = ?2 AND last_event_at <= ?1",
-            rusqlite::params![now_ms, session_id],
-        )?;
+        // touch_session 等价逻辑（事务内,含迟到窗判定,见 ACTIVITY_TOUCH_SQL 注释）。
+        // 仅 hook 路径（真实活动）执行,被动重建跳过,理由见 sync_todos_rebuild。
+        if is_activity {
+            self.conn.execute(
+                ACTIVITY_TOUCH_SQL,
+                rusqlite::params![now_ms, session_id, STOP_STRAGGLER_GRACE_MS],
+            )?;
+        }
         tx.commit()
     }
 
@@ -730,12 +817,10 @@ impl Store {
                 rusqlite::params![now_ms, tid],
             )?;
         }
+        // 活动类 touch(事务内,含迟到窗判定,见 ACTIVITY_TOUCH_SQL 注释)。
         self.conn.execute(
-            "UPDATE sessions
-             SET last_event_at = ?1,
-                 status = CASE WHEN status IN ('waiting','stale') THEN 'running' ELSE status END
-             WHERE id = ?2 AND last_event_at <= ?1",
-            rusqlite::params![now_ms, session_id],
+            ACTIVITY_TOUCH_SQL,
+            rusqlite::params![now_ms, session_id, STOP_STRAGGLER_GRACE_MS],
         )?;
         tx.commit()
     }
@@ -776,9 +861,9 @@ impl Store {
         Ok(())
     }
 
-    // == Task 8: 会话状态变更与 stale 标记 ==
+    // == Task 8: 会话状态变更 ==
 
-    /// 手动设置会话状态（如 waiting / stale），同时更新 last_event_at。
+    /// 手动设置会话状态（如 waiting），同时更新 last_event_at。
     pub fn set_session_status(
         &self,
         session_id: i64,
@@ -788,14 +873,32 @@ impl Store {
         if status == SessionStatus::Ended {
             return self.end_session(session_id, now_ms);
         }
+        // stale 态已废除（v11,无写端也无消费端）：枚举变体仍在（跨 crate 契约,归 models.rs
+        // 的所有者删）,任何来路的 Stale 一律落成 waiting——保住「库里 status 只有
+        // running/waiting/ended」的不变量,tab_class/候选集才不会漏掉它。
+        let status = if status == SessionStatus::Stale {
+            SessionStatus::Waiting
+        } else {
+            status
+        };
+        // `status <> 'ended'` 守卫：本方法不做复活。SessionEnd 后排队迟到的 Stop 尾巴若在
+        // 此把 ended 翻成 waiting（且不清 ended_at）,就绕过了 revive_if_ended_running 的
+        // 窗口判据,诈尸 120s 等 end_orphaned_idle 再收——复活只走 revive_* 一族（自带
+        // pid 墨迹/时间窗判据）,真实的 Stop 到达前 lookup_or_create 已完成该复活。
         self.conn.execute(
-            "UPDATE sessions SET status = ?1, last_event_at = ?2 WHERE id = ?3 AND last_event_at <= ?2",
+            "UPDATE sessions SET status = ?1, last_event_at = ?2 \
+             WHERE id = ?3 AND last_event_at <= ?2 AND status <> 'ended'",
             rusqlite::params![status.as_str(), now_ms, session_id],
         )?;
         Ok(())
     }
 
     /// 设置待审批子态,同时刷新 last_event_at(让卡片排到最近活跃,并作为去重指纹)。
+    ///
+    /// `status <> 'ended'` 守卫：PermissionRequest/PreToolUse 走 lookup_session、可能命中
+    /// 已结束的行（正常 SessionEnd 后的迟到尾巴——revive 的窗口判据会拒绝复活它）。写在
+    /// 尸体上的 pending 卡片看不见、通知全哑,且没有任何生命周期事件会再清它,永久泄漏；
+    /// query.rs 候选集的 `status != 'ended'` 防线由此从「防历史残留」升级为真正的不变量。
     pub fn set_pending_review(
         &self,
         session_id: i64,
@@ -803,17 +906,42 @@ impl Store {
         now_ms: i64,
     ) -> Result<(), StoreError> {
         self.conn.execute(
-            "UPDATE sessions SET pending_review = ?1, last_event_at = ?2 WHERE id = ?3 AND last_event_at <= ?2",
+            "UPDATE sessions SET pending_review = ?1, last_event_at = ?2 \
+             WHERE id = ?3 AND last_event_at <= ?2 AND status <> 'ended'",
             rusqlite::params![kind.as_str(), now_ms, session_id],
         )?;
         Ok(())
     }
 
     /// 清除待审批子态(置 NULL)。不动 last_event_at——由同回合的兄弟调用负责时间戳。
+    ///
+    /// 守卫是**严格** `<`：set_pending_review 把 last_event_at 刷成置位时刻,同毫秒交错的
+    /// straggler 清除（上一工具的尾巴与新审批同 ms 落库）不得抹掉刚置位的真实审批——
+    /// 审批一旦被错误清掉,卡片与通知一起哑掉,agent 却还阻塞在等人。真正的清除事件
+    /// （用户回复/回合结束/GUI 决策）必然晚于置位,极罕见的同 ms 合法清除顶多推迟到
+    /// 下一个事件补清（审批展示侧另有 pending_review_live 的 broker 校正兜底）。
     pub fn clear_pending_review(&self, session_id: i64, now_ms: i64) -> Result<(), StoreError> {
         self.conn.execute(
-            "UPDATE sessions SET pending_review = NULL WHERE id = ?1 AND last_event_at <= ?2",
+            "UPDATE sessions SET pending_review = NULL WHERE id = ?1 AND last_event_at < ?2",
             rusqlite::params![session_id, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// [`Self::clear_pending_review`] 的定向版：只清指定 kind。PostToolUse 用——它只证明
+    /// 「某个工具跑完了」,只能注销与该工具对应的那一类等待（普通工具→approval、
+    /// AskUserQuestion→question、ExitPlanMode→plan）,不能顺手抹掉别的事件刚挂上的
+    /// 其它等待（如同回合稍后 PreToolUse 挂的 question）。
+    pub fn clear_pending_review_kind(
+        &self,
+        session_id: i64,
+        kind: PendingReview,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE sessions SET pending_review = NULL \
+             WHERE id = ?1 AND pending_review = ?2 AND last_event_at < ?3",
+            rusqlite::params![session_id, kind.as_str(), now_ms],
         )?;
         Ok(())
     }
@@ -859,21 +987,47 @@ impl Store {
     /// 复活被误判收尾的会话：仅当当前为 ended 时，置回 running 并清 ended_at、刷新时间。
     /// 用于「会话曾因 pid 未被认作存活而被 reap 成 ended，但用户其实还在该会话里继续发言」的自愈。
     pub fn revive_if_ended(&self, session_id: i64, now_ms: i64) -> Result<(), StoreError> {
+        // 复活为 waiting 而非 running：SessionStart 时 CLI 只是停在输入框，真跑起来由
+        // UserPromptSubmit/touch_session 翻转（与 start_session 的幂等分支同一语义）。
         self.conn.execute(
-            "UPDATE sessions SET status='running', ended_at=NULL, pending_review=NULL, last_event_at=?1 \
+            "UPDATE sessions SET status='waiting', ended_at=NULL, pending_review=NULL, last_event_at=?1 \
              WHERE id=?2 AND status='ended' AND last_event_at <= ?1",
             rusqlite::params![now_ms, session_id],
         )?;
         Ok(())
     }
 
-    /// 看板主动 resume 一个会话时调用：复活它(置 running、清 ended_at)、清空 pid、并把 last_event_at
-    /// 刷成 now(作为 app 侧「resume 乐观连接」宽限期的起点)。
+    /// 活动事件的懒查路径（reporter 的 lookup_or_create）用：被误收尾成 ended 的会话
+    /// （如 reap 一度不认 kimi pid）由任一活动事件复活时直接回 **running**——ended 不是
+    /// Stop 写的终态，活动事件本身就是「正在干活」的证明，走 waiting 会被活动类 touch
+    /// 的迟到窗压住、误 reap 自愈失效。Stop 经此复活后随手再置 waiting，语义不受影响。
+    ///
+    /// **不复活正常 SessionEnd 的迟到尾巴**：无条件复活曾让 SessionEnd 之后排队到达的同回合
+    /// PostToolUse 把会话诈尸成 running（pid 已被 end_session 清空,只能等 end_orphaned_idle
+    /// 120s 后再收）。判据取语义而非裸时间戳:
+    /// - `pid IS NOT NULL` = 该 ended 由 reaper 写（end_session_if_pid 留 pid 作墨迹,
+    ///   正常 SessionEnd 清 pid）——误 reap,任何时刻的活动事件都自愈;
+    /// - pid 为空时仅当事件晚于 ended_at 一个迟到窗以上才复活——正常收尾的尾巴都挤在
+    ///   SessionEnd 后的几秒内,而真实的后续活动（orphan 误收后用户继续用）来得更晚。
+    pub fn revive_if_ended_running(&self, session_id: i64, now_ms: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE sessions SET status='running', ended_at=NULL, pending_review=NULL, last_event_at=?1 \
+             WHERE id=?2 AND status='ended' AND last_event_at <= ?1 \
+               AND (pid IS NOT NULL OR ?1 - COALESCE(ended_at, 0) > ?3)",
+            rusqlite::params![now_ms, session_id, STOP_STRAGGLER_GRACE_MS],
+        )?;
+        Ok(())
+    }
+
+    /// 看板主动 resume 一个会话时调用：复活它(置 **waiting**、清 ended_at)、清空 pid、并把 last_event_at
+    /// 刷成 now(作为 app 侧「resume 乐观连接」宽限期的起点；session_connected 的宽限对 waiting
+    /// 同样生效,见 lib.rs 单测)。置 waiting 不置 running：刚拉起的 CLI 停在输入框等人,
+    /// 没有回合在跑——running 由首个 UserPromptSubmit/工具事件翻转。
     /// 清 pid 是关键——旧进程已死，留着会被 reaper 当「pid 已死」立即再收尾；清空后 reaper「pid 未知不臆测」
     /// 不动它(见 live_session_liveness 消费方)，等新进程首个 hook 用 set_session_pid 认领真实 pid。
     /// 解决 codex 这类「session_start hook 要到首个 turn 才触发」的 agent：resume 后不必等发消息即显示已连接。
     /// 命中条件「ended ‖ pid 为空 ‖ pid=已验证死亡的那个 pid」：pid 为空即没有任何 hook 认领过、不是真连接，
-    /// 可安全重置(含宽限过期后用户再次点 resume——此时 status 仍是 running 但 pid 空，须刷新 last_event_at
+    /// 可安全重置(含宽限过期后用户再次点 resume——此时 status 仍是 waiting 但 pid 空，须刷新 last_event_at
     /// 重启宽限)。`dead_pid` 由调用方校验「记录的该 pid 进程确已死亡」后传入——覆盖「进程刚死、reaper(5s 周期)
     /// 尚未收尾」的窗口：此时 status 仍是 running 且 pid 非空，若不强制复活，本次 resume 会静默 0 行更新，
     /// 随后被 reaper 收尾成 ended、卡片长期显示未连接(codex 要到首条消息 hook 才自愈)。
@@ -887,7 +1041,7 @@ impl Store {
         dead_pid: Option<i64>,
     ) -> Result<bool, StoreError> {
         let n = self.conn.execute(
-            "UPDATE sessions SET status='running', ended_at=NULL, pending_review=NULL, pid=NULL, last_event_at=?1 \
+            "UPDATE sessions SET status='waiting', ended_at=NULL, pending_review=NULL, pid=NULL, last_event_at=?1 \
              WHERE id=?2 AND last_event_at <= ?1 AND (status='ended' OR pid IS NULL OR pid=?3)",
             rusqlite::params![now_ms, session_id, dead_pid],
         )?;
@@ -946,9 +1100,16 @@ impl Store {
     /// 清 pid 是必须的：/clear 只换会话不换进程，SessionEnd 先于新会话认领 pid 到达时，
     /// 旧行若留着 pid，set_session_pid 的换代清理（只扫非 ended 行）摘不掉它——此后
     /// 接管守卫拿这个「活着但已归新会话」的 pid 判活，会把旧会话误判成「仍在外部终端运行」。
+    ///
+    /// **无时间戳守卫**：SessionEnd 是进程亲口报的终局,而 hook 时间戳是各进程到达时刻,
+    /// 高负载排队下 SessionEnd 的 now_ms 完全可能小于 straggler 刚盖上的 last_event_at——
+    /// 旧守卫（`last_event_at <= now`）会把整次收尾静默丢掉,而 end 是**唯一没有自愈**的
+    /// 转换,丢一次卡片就永远活着。误杀方向有自愈:resume 复活走 revive_for_resume/
+    /// revive_if_ended,新活动走 revive_if_ended_running。last_event_at 取 MAX 防时钟倒退。
     pub fn end_session(&self, session_id: i64, now_ms: i64) -> Result<(), StoreError> {
         self.conn.execute(
-            "UPDATE sessions SET status = 'ended', pending_review = NULL, pid = NULL, ended_at = ?1, last_event_at = ?1 WHERE id = ?2 AND last_event_at <= ?1",
+            "UPDATE sessions SET status = 'ended', pending_review = NULL, pid = NULL, \
+                 ended_at = ?1, last_event_at = MAX(last_event_at, ?1) WHERE id = ?2",
             rusqlite::params![now_ms, session_id],
         )?;
         Ok(())
@@ -956,6 +1117,12 @@ impl Store {
 
     /// 仅当会话仍持有调用方观察到的 pid 时收尾。用于进程快照 reaper，闭合“读旧 pid 后新进程
     /// 已重新认领同一会话”的 TOCTOU；返回 false 表示记录已变化，绝不能误杀新连接。
+    ///
+    /// 与 end_session 不同,**保留 pid 作墨迹**：reaper 写的 ended 是「快照里没看到进程」的
+    /// 推断,可能误 reap（历史:kimi 进程名一度不被快照认作 agent）。留着 pid,后续活动事件
+    /// 经 revive_if_ended_running 的 `pid IS NOT NULL` 判据即刻自愈;而正常 SessionEnd 清
+    /// pid,其迟到尾巴不会诈尸。pid 已归新会话的场景由 set_session_pid 换代驱逐与
+    /// pid_held_by_other_live 兜底,不受此墨迹影响。
     pub fn end_session_if_pid(
         &self,
         session_id: i64,
@@ -964,9 +1131,29 @@ impl Store {
         now_ms: i64,
     ) -> Result<bool, StoreError> {
         let n = self.conn.execute(
-            "UPDATE sessions SET status='ended', pending_review=NULL, ended_at=?1, last_event_at=?1, pid=NULL \
+            "UPDATE sessions SET status='ended', pending_review=NULL, ended_at=?1, last_event_at=?1 \
              WHERE id=?2 AND pid=?3 AND last_event_at=?4 AND status<>'ended'",
             rusqlite::params![now_ms, session_id, observed_pid, observed_last_event_at],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// resume 失败回滚专用：仅当会话**仍未被任何 hook 认领 pid** 时收尾。
+    ///
+    /// revive_for_resume 复活时清 pid;若随后 spawn 失败,回滚要把卡片收回「已断开」。
+    /// 但复活与回滚之间新进程的 hook 可能已认领 pid（乐观复活的窗口正是给它开的）——
+    /// 那说明会话真活了,回滚绝不能误杀。对称于 revive_for_resume 的 pid CAS:
+    /// `pid IS NULL` 在 DB 层原子闭合,不依赖调用方时序。返回是否真的收尾了。
+    pub fn end_session_if_unclaimed(
+        &self,
+        session_id: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET status='ended', pending_review=NULL, ended_at=?1, \
+                 last_event_at=MAX(last_event_at, ?1) \
+             WHERE id=?2 AND pid IS NULL AND status <> 'ended'",
+            rusqlite::params![now_ms, session_id],
         )?;
         Ok(n > 0)
     }
@@ -1184,6 +1371,12 @@ impl Store {
             ));
         }
         let tx = ImmediateTx::begin(&self.conn)?;
+        self.link_lineage_in_tx(new_sid, old_sid)?;
+        tx.commit()
+    }
+
+    /// 接续链成对写入的事务体（调用方持有事务）：set_session_lineage 与 supersede_session 共用。
+    fn link_lineage_in_tx(&self, new_sid: i64, old_sid: i64) -> Result<(), StoreError> {
         let claimed = self.conn.execute(
             "UPDATE sessions SET superseded_by = ?1 \
              WHERE id = ?2 AND superseded_by IS NULL",
@@ -1203,6 +1396,37 @@ impl Store {
                 "接替会话 {new_sid} 不存在"
             )));
         }
+        Ok(())
+    }
+
+    /// /clear 换代的**单事务**收尾：结束旧段 + 启动选项随进程复制到新段 + 接续链成对写入。
+    ///
+    /// 此前这是三笔独立事务（end_session → set_session_launch_args → set_session_lineage），
+    /// 任一步失败都留半态：旧卡孤立地活着,或用户看不见、reaper 却还管着的行。合成一个
+    /// IMMEDIATE 事务后要么全落、要么全不落——整体失败时旧段仍由 agent 的 SessionEnd(clear)
+    /// hook 兜底收尾,不留只走了一半的链。自环与分叉的拒绝语义与 set_session_lineage 一致
+    /// （并发换代只有先到者成链,失败方一行未写）。
+    pub fn supersede_session(
+        &self,
+        old_sid: i64,
+        new_sid: i64,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        if new_sid == old_sid {
+            return Err(StoreError::InvalidInput(
+                "接续链不允许自环（new_sid == old_sid）".into(),
+            ));
+        }
+        let tx = ImmediateTx::begin(&self.conn)?;
+        // 旧段结束（end_session 本体,在本事务内执行：无时间戳守卫,清 pid,MAX 防时钟倒退）。
+        self.end_session(old_sid, now_ms)?;
+        // 启动选项跟着终端进程走：旧段有存档才覆盖,新段日后单独 resume 才能回放权限模式等参数。
+        self.conn.execute(
+            "UPDATE sessions SET launch_args = (SELECT launch_args FROM sessions WHERE id = ?1) \
+             WHERE id = ?2 AND (SELECT launch_args FROM sessions WHERE id = ?1) IS NOT NULL",
+            rusqlite::params![old_sid, new_sid],
+        )?;
+        self.link_lineage_in_tx(new_sid, old_sid)?;
         tx.commit()
     }
 
@@ -1346,31 +1570,36 @@ impl Store {
     ) -> Result<(), StoreError> {
         // 事务保证「本会话认领 + 旧会话收尾」原子完成，避免交错留下两个会话同持一个 pid。
         let tx = self.conn.unchecked_transaction()?;
-        let claimed = tx.execute(
+        tx.execute(
             "UPDATE sessions SET pid = ?1, last_event_at = ?2 WHERE id = ?3 AND last_event_at <= ?2",
             rusqlite::params![pid, now_ms, session_id],
         )?;
-        if claimed == 0 {
-            tx.commit()?;
-            return Ok(());
-        }
         // 被同一进程的新会话顶替的旧会话：直接收尾为 ended（pid 清空、记 ended_at），
         // 这样 /clear 一发生旧会话立刻从 live 列表消失，而不是只摘 pid 留个空壳。
-        // 时间戳保护：只收尾 last_event_at 更旧的会话，迟到的旧会话 hook 无法反杀更活跃的新会话。
+        //
+        // 驱逐**不因认领失败而跳过**：认领 0 行只说明这条事件是本会话的迟到尾巴（时间戳
+        // 不推进），pid 归属事实不变——旧代次照样要驱逐。旧代码在此 return，/clear 后
+        // 恰好交错时旧行永远留着活卡（幽灵,无任何自愈路径）。
+        //
+        // 驱逐判据取**会话身份**优先于时间戳：`id < 认领方` = 更早创建的代次（/clear 换代、
+        // pid 复用场景恒成立），同毫秒也照驱逐——裸时间戳 `<` 曾让同 δ 的旧行漏网。
+        // 时间戳分支（严格 `<`）保住「同进程 /resume 回更早会话」时新近段的收尾;
+        // 等时刻且 id 更大的行不动,迟到的旧会话 hook 无法反杀刚认领的新会话。
         tx.execute(
-            "UPDATE sessions SET pid = NULL, status = 'ended', pending_review = NULL, ended_at = ?2, last_event_at = ?2 \
+            "UPDATE sessions SET pid = NULL, status = 'ended', pending_review = NULL, \
+                 ended_at = ?2, last_event_at = MAX(last_event_at, ?2) \
              WHERE pid = ?1 AND id <> ?3 AND status <> 'ended' \
-               AND last_event_at < (SELECT last_event_at FROM sessions WHERE id = ?3)",
+               AND (id < ?3 OR last_event_at < (SELECT last_event_at FROM sessions WHERE id = ?3))",
             rusqlite::params![pid, now_ms, session_id],
         )?;
         tx.commit()?;
         Ok(())
     }
 
-    /// 取所有 live(running/waiting/stale) 会话的 (id, pid, last_event_at)，供 app 做存活清理。
+    /// 取所有 live(running/waiting) 会话的 (id, pid, last_event_at)，供 app 做存活清理。
     pub fn live_session_liveness(&self) -> Result<Vec<(i64, Option<i64>, i64)>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, pid, last_event_at FROM sessions WHERE status IN ('running','waiting','stale')",
+            "SELECT id, pid, last_event_at FROM sessions WHERE status IN ('running','waiting')",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         let mut out = Vec::new();

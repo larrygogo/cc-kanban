@@ -4,11 +4,15 @@ import { appConfirm } from "../confirm";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { SearchAddon } from "@xterm/addon-search";
+import { WebglAddon } from "@xterm/addon-webgl";
+import { UnicodeGraphemesAddon } from "@xterm/addon-unicode-graphemes";
 // xterm 的样式跟着唯一使用者走(此前在 main.tsx 全局引入,贴纸窗也要付这份 CSS)。
 import "@xterm/xterm/css/xterm.css";
 import {
   attachBackgroundSession,
   clipboardText,
+  confirmStopSession,
   getSettings,
   isExternallyHeld,
   managedTerminalSnapshot,
@@ -24,6 +28,7 @@ import {
 } from "../api";
 import { useT } from "../i18n";
 import { formatBackendError } from "../i18n/errors";
+import { pushEscLayer } from "../escLayers";
 import type { PtyExitEvent as ExitEvent } from "../generated/contracts/PtyExitEvent";
 import type { PtyOutputEvent as OutputEvent } from "../generated/contracts/PtyOutputEvent";
 import { terminalAttention, visibleTerminalText, type AttentionGrammar, type TerminalAttention } from "../terminalAttention";
@@ -68,6 +73,11 @@ function hasVisibleOutput(bytes: Uint8Array): boolean {
 
 /// TUI 迟迟不画东西时的保底：宁可把黑屏交给用户，也不要让 spinner 永远转下去。
 const INITIALIZING_TIMEOUT_MS = 25_000;
+
+/// 通用启动提示(登录/凭据类)的识别窗口:挂载/就地重启起算。窗口内足够 attach 回放与
+/// 慢启动 CLI 画出登录页;窗口外这些整会话通用的规则不再参与扫描,防止正跑着的会话
+/// 因输出里引用登录话术被误锁(provider 声明的 markers/patterns 不受此窗限制)。
+const GENERIC_STARTUP_WINDOW_MS = 20_000;
 
 /// 重对齐增量超过它就跳尾（base64 字符数，≈256KB 原始字节）：落后这么多时把全量灌给
 /// xterm 是数秒级的渲染卡死，而终端是实时视图——落后就该直接看最新画面。
@@ -200,7 +210,51 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   // 输出流停滞检测(terminalStreamStalled):水位由 effect 闭包里的写入路径推进,
   // 判定由 5s 节拍读取——两头都要组件级 ref;status/active 同为镜像(节拍闭包不重建)。
   const [stalled, setStalled] = useState(false);
+  // 停滞横幅可手动收起(误报时用户不该只能干等新字节);新一轮停滞重新弹出。
+  const [stalledDismissed, setStalledDismissed] = useState(false);
+  useEffect(() => { if (!stalled) setStalledDismissed(false); }, [stalled]);
+  // 初始化 25s 超时:此前只撤遮罩留纯黑屏,零文字零出口。改为撤遮罩的同时挂提示横幅
+  // (画面若真有内容不会被盖住),真画出东西(markPainted)即收。
+  const [initTimedOut, setInitTimedOut] = useState(false);
+  // 横幅上的「结束会话」在途态:确认弹窗+kill 有往返,防连点。
+  const [stopping, setStopping] = useState(false);
+  const stopFromBanner = () => {
+    if (stopping) return;
+    setStopping(true);
+    void confirmStopSession(sessionId, { title: t.chat.endSession, message: t.chat.endSessionConfirm })
+      .catch((e) => setError(formatBackendError(e, t.locale)))
+      .finally(() => setStopping(false));
+  };
   const lastByteAtRef = useRef(Date.now());
+  // 终端内搜索(Ctrl+F,addon-search):搜索条状态归组件,addon 实例归挂载 effect。
+  // findNext 会选中命中并滚动到位——不用 decorations(它在部分 xterm 版本走
+  // proposed API,选区高亮已足够表达「当前命中在哪」)。
+  const searchAddonRef = useRef<SearchAddon | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchMiss, setSearchMiss] = useState(false);
+  const runSearch = (query: string, direction: "next" | "prev", incremental = false) => {
+    const addon = searchAddonRef.current;
+    if (!addon || !query) { setSearchMiss(false); return; }
+    // incremental:逐字输入时在当前选区上扩展匹配,而不是每敲一个字往后跳一个命中。
+    const found = direction === "next"
+      ? addon.findNext(query, { incremental })
+      : addon.findPrevious(query, { incremental });
+    setSearchMiss(!found);
+  };
+  const closeSearch = () => {
+    setSearchOpen(false);
+    setSearchQuery("");
+    setSearchMiss(false);
+    // 清掉命中选区,焦点还给终端——搜索完下一步几乎总是回去打字。
+    terminalRef.current?.clearSelection();
+    terminalRef.current?.focus();
+  };
+  // 搜索条开着期间注册 Esc 层:窗口级「Esc=拒绝审批」让位(与菜单/弹层同一纪律)。
+  useEffect(() => {
+    if (!searchOpen) return;
+    return pushEscLayer();
+  }, [searchOpen]);
   const statusRef = useRef(status);
   statusRef.current = status;
   const reviewPendingRef = useRef(reviewPending);
@@ -237,6 +291,10 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   const attentionTailRef = useRef("");
   const attentionReportedRef = useRef<string | null>(null);
   const lastScreenRef = useRef("");
+  // 通用启动提示(登录/凭据类,GENERIC_STARTUP_PROMPTS)只在启动窗口内参与识别:
+  // 挂载(attach 会回放当前屏,真在等登录的会话立刻能被扫到)与就地重启各开一窗。
+  // 窗口外正跑着的会话输出里引用登录话术(读 auth 文件等)不再弹卡锁输入。
+  const startupPromptsUntilRef = useRef(Date.now() + GENERIC_STARTUP_WINDOW_MS);
   onUserSubmitRef.current = onUserSubmit;
   onBackgroundInputRef.current = onBackgroundInput;
   backgroundRef.current = background;
@@ -279,7 +337,32 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // 纯文本 URL 的链接化。不装它 xterm 根本不识别正文里的 URL——「Ctrl+点击打不开链接」
     // 的第一层原因就是链接从未存在过。
     terminal.loadAddon(new WebLinksAddon(openTerminalLink));
+    // Unicode grapheme 宽表:emoji 与新式符号按正确列宽排。用 graphemes 版而不是
+    // Unicode11Addon——后者只更新裸码点宽表,不认 VS16 变体选择符,「⬆️」这类
+    // 基础字符+VS16 的 emoji 仍算 1 列,字形按 2 列画、被 WebGL 按单元格裁掉一半
+    // (实拍)。graphemes 版按字素簇处理 VS16/ZWJ 序列,与 CLI 侧 string-width 生态的
+    // 宽度口径一致;装载时自注册并激活 '15-graphemes',无需手动设 activeVersion。
+    try {
+      terminal.loadAddon(new UnicodeGraphemesAddon());
+    } catch { /* 环境不支持(测试哑实现)则维持默认宽表 */ }
+    // 终端内搜索(Ctrl+F 呼出搜索条,addon 实例交给组件级 ref)。
+    const searchAddon = new SearchAddon();
+    terminal.loadAddon(searchAddon);
+    searchAddonRef.current = searchAddon;
     terminal.open(host);
+    // WebGL 渲染器:长 backlog 回放/整屏重绘走 GPU,大画面滚动不再掉帧。必须在
+    // open 之后装(需要既有 renderer 可替换);构造或激活失败(无 GPU/驱动黑名单)
+    // 静默回退 canvas——渲染路径的降级不值得打扰用户。上下文丢失(驱动重置)时
+    // dispose 即回退,xterm 自动接管。
+    let webgl: WebglAddon | null = null;
+    try {
+      webgl = new WebglAddon();
+      webgl.onContextLoss(() => { webgl?.dispose(); webgl = null; });
+      terminal.loadAddon(webgl);
+    } catch {
+      try { webgl?.dispose(); } catch { /* 已释放 */ }
+      webgl = null;
+    }
     // 按键粘贴：xterm 把 Ctrl+V 当普通组合键吞掉（preventDefault 后向 PTY 发 ^V），
     // 浏览器的原生 paste 事件因此永远不触发——Windows/Linux 上按键粘贴整个失效。
     // 返回 false 让 xterm 完全放行这个 keydown：WebView 对聚焦的隐藏 textarea 执行原生
@@ -322,6 +405,13 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       const appNav = (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey
         && ["KeyK", "KeyB", "KeyN", "Digit1", "Digit2"].includes(event.code);
       if (appNav) return false;
+      // Ctrl/Cmd+F = 终端内搜索:拦下打开搜索条,不让 ^F(光标前移)落进 PTY。
+      // ChatSidebar 的窗口级 Ctrl+F 对 .managed-terminal 内的焦点已让位,互不抢。
+      const findCombo = (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.code === "KeyF";
+      if (findCombo) {
+        setSearchOpen(true);
+        return false;
+      }
       const paste = ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === "KeyV")
         || (event.shiftKey && !event.ctrlKey && !event.metaKey && event.code === "Insert");
       if (paste) return false;
@@ -353,7 +443,12 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // 文本存在时不动——bracketed paste 的既有通路优先。
     const pasteImageFallback = (event: ClipboardEvent) => {
       const data = event.clipboardData;
-      if (!data || data.getData("text") || data.files.length === 0) return;
+      if (!data || data.files.length === 0) return;
+      // 截图工具常在写入位图的同时写入文本(路径/HTML):此时用户的意图是贴图,文本
+      // 通路会把一串路径粘成正文、图片被丢。有位图就优先 ^V;无位图但有文本的
+      // (资源管理器复制文件列表)仍走既有文本通路。
+      const hasImage = Array.from(data.files).some((file) => file.type.startsWith("image/"));
+      if (!hasImage && data.getData("text")) return;
       event.preventDefault();
       void writeManagedTerminal(sessionId, "\x16").catch((e) => setError(formatBackendError(e, t.locale)));
     };
@@ -364,9 +459,8 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // 不拦传播,这里照常收到事件。粘贴读后端剪贴板(readText 在 WebView2 要权限弹窗,
     // arboard 零打扰),经 terminal.paste 走 bracketed paste 与 onData 既有下发通路。
     const onContextMenu = () => {
-      // 右键=复制/粘贴是 Windows 终端的惯例(实拍确认);macOS 终端的右键是菜单语义,
-      // Cmd+C/Cmd+V 已由上面的按键通道覆盖,这里不越俎代庖。
-      if (!/win/i.test(navigator.platform) && !/Windows/.test(navigator.userAgent)) return;
+      // 右键=复制/粘贴,全平台生效。macOS 终端右键本是菜单语义,但生产构建的默认菜单
+      // 已被 devtools-guard 整个封死——「有行为」好过「右键点下去毫无反应的黑洞」。
       if (exitedRef.current) return;
       if (terminal.hasSelection()) {
         copyTerminalSelection();
@@ -419,7 +513,12 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     }
     terminalRef.current = terminal;
     fitRef.current = fit;
-    requestAnimationFrame(() => fit.fit());
+    // 隐藏态挂载（后台屏幕识别 / 切会话时停在对话页）不 fit：宿主是屏外停靠盒
+    // （.is-background 固定 1000×700），按它 fit 出的网格与 PTY 尺寸脱节，隐藏期
+    // 到达的帧会按错误宽度换行、错行叠画——切回终端页看到的就是花屏，而且若
+    // PTY 尺寸未变，resize 同值短路不触发 TUI 重画，花屏永不自愈（实拍反馈）。
+    // 隐藏态的网格对齐交给快照的 cols/rows（见 inspectSnapshot）。
+    requestAnimationFrame(() => { if (visibleRef.current) fit.fit(); });
 
     const input = terminal.onData((data) => {
       // 历史回放窗口内，xterm 对回放查询的自动应答不得下发 PTY（见 stripTerminalReplies）。
@@ -452,6 +551,16 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // 输出流停滞检测节拍(判据见 terminalStreamStalled):挂载即重置水位——上一个
     // 会话/进程的旧水位不作数。
     lastByteAtRef.current = Date.now();
+    // 换会话重挂即重开通用启动提示的识别窗口(attach 回放的当前屏若真停在登录页,
+    // 首轮扫描就落在窗口内)。
+    startupPromptsUntilRef.current = Date.now() + GENERIC_STARTUP_WINDOW_MS;
+    // 识别态也随会话作废（本 effect 以 sessionId 为键,同一实例服务不同会话）:这三个
+    // ref 原先只在就地重启的 rearm 里清,换会话不清 → 上个会话的残屏会被晚到补扫读去,
+    // 对新会话弹一张不属于它的 attention 卡；attentionReportedRef 残留同签名还会反向
+    // 抑制,让新会话首张同文案的卡片发不出来。与 rearm 同款一并归零。
+    attentionReportedRef.current = null;
+    attentionTailRef.current = "";
+    lastScreenRef.current = "";
     const stallTimer = window.setInterval(() => {
       const candidate = terminalStreamStalled({
         active: activeRef.current,
@@ -495,10 +604,13 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       const size = terminal.options.fontSize ?? 12;
       terminal.options.fontSize = size + 1;
       terminal.options.fontSize = size;
-      fit.fit();
-      // 重测可能改变行列数，PTY 侧要跟着调，否则 TUI 按旧尺寸画、连输入框的位置都是错的。
-      if (visibleRef.current && terminal.cols > 1 && terminal.rows > 1) {
-        void resizeManagedTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {});
+      // 隐藏时跳过 fit（理由见 ResizeObserver 处）：切回时的 visible effect 会补。
+      if (visibleRef.current) {
+        fit.fit();
+        // 重测可能改变行列数，PTY 侧要跟着调，否则 TUI 按旧尺寸画、连输入框的位置都是错的。
+        if (terminal.cols > 1 && terminal.rows > 1) {
+          void resizeManagedTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {});
+        }
       }
     }).catch(() => {});
     // 终端样式（字号/行高）跟随设置：挂载时读一次，settings-changed 到达即热应用——
@@ -510,9 +622,12 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       if (terminal.options.fontSize === size && terminal.options.lineHeight === line) return;
       terminal.options.fontSize = size;
       terminal.options.lineHeight = line;
-      fit.fit();
-      if (visibleRef.current && terminal.cols > 1 && terminal.rows > 1) {
-        void resizeManagedTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {});
+      // 隐藏时跳过 fit（理由见 ResizeObserver 处）：切回时的 visible effect 会补。
+      if (visibleRef.current) {
+        fit.fit();
+        if (terminal.cols > 1 && terminal.rows > 1) {
+          void resizeManagedTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {});
+        }
       }
     };
     void getSettings().then((s) => { if (!cancelled) applyTermStyle(s); }).catch(() => {});
@@ -521,13 +636,23 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       if (cancelled) un();
       else unSettings = un;
     }).catch(() => {});
-    // 保底：TUI 一直不画东西也不能永远停在 spinner 上。
+    // 保底：TUI 一直不画东西也不能永远停在 spinner 上。撤遮罩的同时挂超时提示——
+    // 纯黑屏零解释时用户不知道是启动失败、还在等、还是自己该做什么。
+    let initTimerFired = false;
     const giveUpTimer = window.setTimeout(() => {
-      if (!cancelled) { painted = true; setInitialized(true); }
+      if (!cancelled) { painted = true; initTimerFired = true; setInitialized(true); setInitTimedOut(true); }
     }, INITIALIZING_TIMEOUT_MS);
     // 只有画得出东西的输出才算初始化完成；清屏/光标序列不算（见 hasVisibleOutput）。
     const markPainted = (bytes: Uint8Array) => {
-      if (painted || !hasVisibleOutput(bytes)) return;
+      if (painted) {
+        // 超时横幅挂着期间真画面来了:自动收横幅(误报自愈,与停滞横幅同一取向)。
+        if (initTimerFired && hasVisibleOutput(bytes)) {
+          initTimerFired = false;
+          setInitTimedOut(false);
+        }
+        return;
+      }
+      if (!hasVisibleOutput(bytes)) return;
       painted = true;
       window.clearTimeout(giveUpTimer);
       setInitialized(true);
@@ -542,7 +667,14 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     let clearPublished = false;
     const reportAttention = (text: string) => {
       if (text) lastScreenRef.current = text;
-      const attention = terminalAttention(text, attentionMarkersRef.current, interactivePromptRef.current, expectMenuRef.current, grammarRef.current);
+      const attention = terminalAttention(
+        text,
+        attentionMarkersRef.current,
+        interactivePromptRef.current,
+        expectMenuRef.current,
+        grammarRef.current,
+        Date.now() < startupPromptsUntilRef.current,
+      );
       if (!attention) {
         // 此前这里直接 return——attention 状态只置不清,误报或已在终端里处理过的提示会
         // 永久钉住卡片、锁死对话页输入框。现在:屏幕持续不匹配就发布 null 收卡,并重置
@@ -652,6 +784,14 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       setSnapshotReady(true);
       setActive(snapshot.active);
       setExitCode(snapshot.exited ? snapshot.exitCode : undefined);
+      // 隐藏态网格对齐：网格必须与 PTY 尺寸一致，隐藏期的帧才排得对（fit 的对象是
+      // 屏外停靠盒，不可用——见挂载处注释）。快照带的 cols/rows 是 PTY 当前生效尺寸
+      // （0 = 未知，如后台旁路，跳过）。挂载与每次重对齐都会走到这里，隐藏期 PTY
+      // 就地重启（对话页发送/切模式）后 rearm 重拉快照，同样被覆盖。
+      if (!visibleRef.current && snapshot.cols > 1 && snapshot.rows > 1
+        && (terminal.cols !== snapshot.cols || terminal.rows !== snapshot.rows)) {
+        terminal.resize(snapshot.cols, snapshot.rows);
+      }
       // 重对齐终局:请求的缺口段已被后端 1MiB backlog 淘汰(前端整体落后太多),
       // 字节永久丢失,重试无意义。reset 后按现存 backlog 全量重画(远超一屏,足以
       // 还原可见画面);回放的是历史,里面的查询都答过,拦 xterm 的重复应答。
@@ -788,6 +928,8 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       attentionReportedRef.current = null;
       attentionTailRef.current = "";
       lastScreenRef.current = "";
+      // 就地重启 = 新进程重新走一遍启动流程,通用启动提示的识别窗口随之重开。
+      startupPromptsUntilRef.current = Date.now() + GENERIC_STARTUP_WINDOW_MS;
       snapshotApplied = false;
       bufferedOutput.length = 0;
       bufferedExit = null;
@@ -844,8 +986,14 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     const observer = new ResizeObserver(() => {
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
+        // 隐藏期间不 fit：隐藏态宿主是屏外固定 1000×700 的停靠盒（.is-background），
+        // 按它 fit 会把网格改成与 PTY 列数脱节的尺寸，这期间到达的 TUI 帧全按错误
+        // 网格排版；切回终端时 fit 回原尺寸，行列数与上次下发一致则 resize 同值短路、
+        // 不发 SIGWINCH，TUI 不重画，乱掉的画面就一直留在屏上（实拍反馈）。
+        // 网格冻结在最后一次可见时的尺寸 = 与 PTY 一致，隐藏期的帧照常排对。
+        if (!visibleRef.current) return;
         fit.fit();
-        if (visibleRef.current && terminal.cols > 1 && terminal.rows > 1) {
+        if (terminal.cols > 1 && terminal.rows > 1) {
           resizeIfChanged(sessionId, terminal.cols, terminal.rows);
         }
       }, 80);
@@ -870,6 +1018,9 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       unOutput?.();
       unExit?.();
       unSettings?.();
+      // webgl 先于 terminal dispose(xterm 惯例:renderer addon 依赖 core 的 DOM 还在)。
+      try { webgl?.dispose(); } catch { /* 上下文丢失时已自释放 */ }
+      searchAddonRef.current = null;
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;
@@ -885,7 +1036,14 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   // 与 markers 晚到的补投递同一套逻辑。
   const grammarKey = JSON.stringify(grammar ?? null);
   useEffect(() => {
-    const attention = terminalAttention(lastScreenRef.current || attentionTailRef.current, attentionMarkers, interactivePrompt, expectMenu, grammar);
+    const attention = terminalAttention(
+      lastScreenRef.current || attentionTailRef.current,
+      attentionMarkers,
+      interactivePrompt,
+      expectMenu,
+      grammar,
+      Date.now() < startupPromptsUntilRef.current,
+    );
     if (!attention) return;
     const signature = `${attention.id}\0${attention.text}\0${JSON.stringify(attention.options)}`;
     if (signature === attentionReportedRef.current) return;
@@ -980,6 +1138,54 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   return (
     <div className="managed-terminal">
       <div className="managed-terminal-host" ref={hostRef} />
+      {/* 终端内搜索条(Ctrl+F):Enter=下一个、Shift+Enter=上一个、Esc 关闭还焦点。
+          Esc 统一在容器上截停(焦点在按钮上时输入框的 onKeyDown 接不到,RenameModal 同款课)。 */}
+      {searchOpen && (
+        <div
+          className="term-search"
+          role="search"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.stopPropagation();
+              closeSearch();
+            }
+          }}
+        >
+          <input
+            className="term-search-input"
+            autoFocus
+            value={searchQuery}
+            placeholder={t.chat.termSearchPlaceholder}
+            aria-label={t.chat.termSearchPlaceholder}
+            // IME 合成守卫:拼音中间态不触发搜索(与侧栏搜索框同款)。
+            onChange={(event) => {
+              if ((event.nativeEvent as InputEvent).isComposing) return;
+              setSearchQuery(event.target.value);
+              runSearch(event.target.value, "next", true);
+            }}
+            onCompositionEnd={(event) => {
+              setSearchQuery(event.currentTarget.value);
+              runSearch(event.currentTarget.value, "next", true);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                runSearch(searchQuery, event.shiftKey ? "prev" : "next");
+              }
+            }}
+          />
+          {searchMiss && searchQuery.length > 0 && (
+            <span className="term-search-miss" role="status">{t.chat.termSearchNoMatch}</span>
+          )}
+          <button type="button" className="term-search-btn" aria-label={t.chat.termSearchPrev} data-tip={t.chat.termSearchPrev} onClick={() => runSearch(searchQuery, "prev")}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6" /></svg>
+          </button>
+          <button type="button" className="term-search-btn" aria-label={t.chat.termSearchNext} data-tip={t.chat.termSearchNext} onClick={() => runSearch(searchQuery, "next")}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+          </button>
+          <button type="button" className="term-search-btn is-close" aria-label={t.chat.close} onClick={closeSearch}>×</button>
+        </div>
+      )}
       {initializing && (
         <div className="managed-terminal-cover is-initializing" role="status">
           <i className="managed-terminal-spinner" />
@@ -1036,12 +1242,27 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
           <button type="button" aria-label={t.chat.close} onClick={() => setError("")}>×</button>
         </div>
       )}
-      {active && stalled && !error && (
+      {active && stalled && !stalledDismissed && !error && (
         // 输出流停滞(ConPTY 管道疑似内核僵死,判据见 terminalStreamStalled):用户态无法
-        // 自愈,能做的是把「画面永远不会自己回来」说清楚并指路重启——否则用户只能对着
-        // 静止画面猜是卡了还是在思考。新字节抵达即自动收起(误报自愈)。
+        // 自愈。文案说「点结束会话再重启」,那个按钮就得在横幅里,不能让用户自己去别处找;
+        // 误报也要能手动收掉(×),不是只能干等新字节。新字节抵达仍自动收起(误报自愈)。
         <div className="managed-terminal-error is-stalled" role="alert">
           <span>{t.chat.terminalStreamStalled}</span>
+          <button type="button" disabled={stopping} onClick={stopFromBanner}>
+            {stopping ? t.chat.terminalStopping : t.chat.endSession}
+          </button>
+          <button type="button" aria-label={t.chat.close} onClick={() => setStalledDismissed(true)}>×</button>
+        </div>
+      )}
+      {active && initTimedOut && !stalled && !error && (
+        // 初始化 25s 仍无可见输出:撤遮罩后的黑屏必须有解释与出口,不能让用户对着
+        // 一片黑猜。真画面到达自动收(markPainted),也可手动收。
+        <div className="managed-terminal-error is-stalled" role="alert">
+          <span>{t.chat.terminalInitTimeout}</span>
+          <button type="button" disabled={stopping} onClick={stopFromBanner}>
+            {stopping ? t.chat.terminalStopping : t.chat.endSession}
+          </button>
+          <button type="button" aria-label={t.chat.close} onClick={() => setInitTimedOut(false)}>×</button>
         </div>
       )}
     </div>

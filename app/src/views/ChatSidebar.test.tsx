@@ -81,6 +81,21 @@ describe("ChatSidebar", () => {
       expect(screen.getByRole("button", { name: "显示 1 个未运行会话" })).toBeTruthy();
     });
 
+    /// 当前打开的会话结束后落进「已结束」组：组里没有任何在跑的,不能只因它被选中
+    /// 就把其余几十条折没——用户切过去一看,列表凭空缩成一条。
+    it("组里只有当前打开的这条『活』时不折叠", async () => {
+      localStorage.setItem("meowo-chat-sidebar-grouped", "1");
+      invoke.mockImplementation((command: string) =>
+        Promise.resolve(command === "get_live_sessions_page"
+          ? [session(8, "旧一"), session(9, "旧二"), session(10, "旧三")]
+          : undefined));
+      render(<ChatSidebar activeId={8} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
+      await screen.findByRole("button", { name: /旧一/ });
+      expect(screen.getByRole("button", { name: /旧二/ })).toBeTruthy();
+      expect(screen.getByRole("button", { name: /旧三/ })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: /显示 .* 个未运行会话/ })).toBeNull();
+    });
+
     /// 一条在跑的都没有时不收——展开分组后空空如也比排得长更难用。
     it("整组都没在跑时照常全列", async () => {
       localStorage.setItem("meowo-chat-sidebar-grouped", "1");
@@ -447,13 +462,15 @@ describe("ChatSidebar", () => {
 
     /// 触发方式与看板共用 card_menu_mode，且**二选一**：两个入口并存时，改了设置的人
     /// 会以为没生效（另一个还在），没改的人平白多一个不知从哪来的按钮。
-    it("按钮模式下才有「⋯」，右键交还给系统", async () => {
+    it("按钮模式下有「⋯」，右键同样弹菜单（惯例恒可用）", async () => {
       await renderList(1, "button");
       const menus = await screen.findAllByRole("button", { name: "更多操作" });
       expect(menus).toHaveLength(2);
+      // 右键恒开菜单：card_menu_mode 只决定「⋯」是否常驻，不再关掉右键这条路——
+      // 「右键出上下文菜单」是通用惯例，随设置失效会变成无反馈的黑洞。
       const contextEvent = fireEvent.contextMenu(screen.getByRole("button", { name: /旧任务/ }));
-      expect(contextEvent).toBe(true); // 未 preventDefault
-      expect(screen.queryByRole("menuitem", { name: "归档" })).toBeNull();
+      expect(contextEvent).toBe(false); // 已 preventDefault（自绘菜单接管）
+      expect(await screen.findByRole("menuitem", { name: "归档" })).toBeTruthy();
     });
 
     /// 菜单吃掉的 Esc 必须标记 preventDefault：对话窗有窗口级的「Esc = 拒绝审批」监听

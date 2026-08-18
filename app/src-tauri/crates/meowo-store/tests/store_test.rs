@@ -278,7 +278,27 @@ fn touch_session_revives_waiting_to_running() {
         .set_session_status(sid, meowo_store::SessionStatus::Waiting, 300)
         .unwrap();
     assert_eq!(store.get_session(sid).unwrap().status, "waiting");
+    // Stop(置 waiting)后的迟到窗内,活动类 touch 是同一回合的迟到尾巴,不得顶回 running
+    // ——hook 进程按到达时刻盖章,回合末尾的 PostToolUse 常晚于 Stop 落库(实拍:回合
+    // 已结束却永远显示运行中)。
     store.touch_session(sid, 400).unwrap();
+    assert_eq!(store.get_session(sid).unwrap().status, "waiting");
+    // 窗口之外的活动才算真活动(未经 UserPromptSubmit 的后台回合)。
+    store.touch_session(sid, 300 + 6_000).unwrap();
+    assert_eq!(store.get_session(sid).unwrap().status, "running");
+}
+
+#[test]
+fn turn_open_touch_revives_waiting_immediately() {
+    // UserPromptSubmit = 用户开口开新回合,无条件复活,不吃迟到窗——Stop 后 1 秒内
+    // 接着发下一句是最常见的操作。
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, _tid) = store.start_session(pid, "cc-turn", 200).unwrap();
+    store
+        .set_session_status(sid, meowo_store::SessionStatus::Waiting, 300)
+        .unwrap();
+    store.touch_session_turn_open(sid, 400).unwrap();
     assert_eq!(store.get_session(sid).unwrap().status, "running");
 }
 
@@ -420,6 +440,9 @@ fn conditional_reap_never_ends_a_session_reclaimed_by_a_new_pid() {
     assert!(!store.end_session_if_pid(sid, 222, 120, 140).unwrap());
     assert!(store.end_session_if_pid(sid, 222, 130, 140).unwrap());
     assert_eq!(store.get_session(sid).unwrap().status, "ended");
+    // reaper 写的 ended 保留 pid 作墨迹:误 reap 时后续活动事件靠它即刻自愈
+    // (revive_if_ended_running 的 pid IS NOT NULL 判据),正常 SessionEnd 才清 pid。
+    assert_eq!(store.session_pid(sid).unwrap(), Some(222));
 }
 
 #[test]
@@ -456,13 +479,14 @@ fn late_hooks_cannot_overwrite_newer_session_or_task_state() {
         .unwrap();
     store.set_last_ai_text(sid, "新回复", 1_100).unwrap();
     store
-        .set_session_status(sid, SessionStatus::Stale, 1_050)
+        .set_session_status(sid, SessionStatus::Running, 1_050)
         .unwrap();
     store.set_last_ai_text(sid, "旧回复", 1_050).unwrap();
     store
         .set_pending_review(sid, PendingReview::Approval, 1_050)
         .unwrap();
-    store.end_session(sid, 1_050).unwrap();
+    // 注意 end_session **不在**此列：SessionEnd 是进程亲口报的终局、唯一无自愈的转换,
+    // 刻意不吃时间戳守卫（见 end_session 文档与 late_session_end_still_ends_the_session）。
     store.set_session_pid(sid, 222, 1_200).unwrap();
     store.set_session_pid(sid, 111, 1_150).unwrap();
 
@@ -593,7 +617,7 @@ fn revive_for_resume_stale_dead_pid_does_not_clear_new_live_pid() {
 }
 
 #[test]
-fn end_orphaned_idle_only_reaps_pidless_stale_sessions() {
+fn end_orphaned_idle_only_reaps_pidless_idle_unmanaged_sessions() {
     let store = Store::open_in_memory().unwrap();
     let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
     // s1：无 pid 且空闲超阈值 → 应被收尾。
@@ -604,13 +628,24 @@ fn end_orphaned_idle_only_reaps_pidless_stale_sessions() {
     // s3：带 pid 且空闲很久（claude 在等用户输入）→ 绝不能误杀。
     let (s3, _) = store.start_session(pid, "connected-idle", 1000).unwrap();
     store.set_session_pid(s3, 1234, 1000).unwrap();
+    // s4：无 pid、空闲超阈值,但正被本 GUI 托管 PTY(codex 的 hook 到首个 turn 才认领 pid)
+    // → 进程是 meowo 自己 spawn 的、必然活着,绝不能按孤儿收尾(此前误收正在托管的 codex)。
+    let (s4, _) = store.start_session(pid, "managed-pidless", 1000).unwrap();
 
     // now=10000, idle阈值=2000。
-    let n = store.end_orphaned_idle(2000, 10000).unwrap();
+    let managed: std::collections::HashSet<i64> = [s4].into_iter().collect();
+    let n = store.end_orphaned_idle(2000, 10000, &managed).unwrap();
     assert_eq!(n, 1);
     assert_eq!(store.get_session(s1).unwrap().status, "ended");
     assert_eq!(store.get_session(s2).unwrap().status, "running");
     assert_ne!(store.get_session(s3).unwrap().status, "ended"); // 带 pid 不受空闲超时影响
+    assert_ne!(store.get_session(s4).unwrap().status, "ended"); // 托管 PTY 与判活口径一致
+
+    // 空排除集（AppState 未就绪的降级路径）不炸、语义同旧版。
+    let none = std::collections::HashSet::new();
+    let n2 = store.end_orphaned_idle(2000, 10000, &none).unwrap();
+    assert_eq!(n2, 1, "失去托管豁免后 s4 按孤儿收尾");
+    assert_eq!(store.get_session(s4).unwrap().status, "ended");
 }
 
 // == 审计修复测试 ==
@@ -622,12 +657,59 @@ fn session_start_revives_ended_session() {
     let (sid, _t) = store.start_session(pid, "s", 100).unwrap();
     store.end_session(sid, 200).unwrap();
     assert_eq!(store.get_session(sid).unwrap().status, "ended");
-    // resume：同 session_id 再次 SessionStart 应复活为 running 且清空 ended_at
+    // resume：同 session_id 再次 SessionStart 应复活且清空 ended_at。复活的目标态是
+    // waiting——CLI 停在输入框没有回合在跑,running 留给真实活动翻转(实拍反馈:
+    // 恢复会话被标成运行中但并不真实)。
     let (sid2, _t2) = store.start_session(pid, "s", 300).unwrap();
     assert_eq!(sid2, sid);
     let s = store.get_session(sid).unwrap();
-    assert_eq!(s.status, "running");
+    assert_eq!(s.status, "waiting");
     assert_eq!(s.ended_at, None);
+    // 用户开口(UserPromptSubmit → turn_open)才翻 running。
+    store.touch_session_turn_open(sid, 400).unwrap();
+    assert_eq!(store.get_session(sid).unwrap().status, "running");
+}
+
+#[test]
+fn sync_todos_rebuild_does_not_revive_or_touch_session() {
+    // GUI 打开会话时的被动重建(refresh_session_todos)不是会话活动:不得把刚恢复成
+    // waiting 的会话顶回 running,也不得伪造 last_event_at(那是连接宽限的燃料)。
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, _t) = store.start_session(pid, "s", 100).unwrap();
+    store.end_session(sid, 200).unwrap();
+    assert!(store.revive_for_resume(sid, 300, None).unwrap()); // resume → waiting
+    store
+        .sync_todos_rebuild(
+            sid,
+            &[TodoInput { content: "a".into(), status: TodoStatus::Pending }],
+            400,
+        )
+        .unwrap();
+    let s = store.get_session(sid).unwrap();
+    assert_eq!(s.status, "waiting"); // 没被顶回 running
+    assert_eq!(s.last_event_at, 300); // 活跃时刻没被伪造
+    // hook 版(真实活动,迟到窗之外)仍照旧翻转。
+    store
+        .sync_todos(
+            sid,
+            &[TodoInput { content: "a".into(), status: TodoStatus::Completed }],
+            300 + 6_000,
+        )
+        .unwrap();
+    assert_eq!(store.get_session(sid).unwrap().status, "running");
+}
+
+#[test]
+fn session_start_keeps_running_session_running() {
+    // auto-compact 会在回合中途发 SessionStart:此时会话真的在跑,幂等分支不得把它
+    // 降级成 waiting(只有 ended 才复活为 waiting)。
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, _t) = store.start_session(pid, "s", 100).unwrap(); // 新插入默认 running
+    let (sid2, _t2) = store.start_session(pid, "s", 200).unwrap();
+    assert_eq!(sid2, sid);
+    assert_eq!(store.get_session(sid).unwrap().status, "running");
 }
 
 // == archived ==
@@ -748,8 +830,17 @@ fn pending_review_set_and_clear() {
     assert_eq!(s.pending_review.as_deref(), Some("approval"));
     assert_eq!(s.session.last_event_at, 500);
 
-    // clear:置 NULL,且不改 last_event_at。
+    // 同毫秒的清除是上一回合尾巴的指纹,不得抹掉刚置位的审批(严格 < 守卫)。
     store.clear_pending_review(sid, 500).unwrap();
+    let live = store.live_sessions(None, None, None, None, 1000).unwrap();
+    let s = live
+        .iter()
+        .find(|l| l.session.cc_session_id == "cc1")
+        .unwrap();
+    assert_eq!(s.pending_review.as_deref(), Some("approval"), "同毫秒交错不得清掉真实审批");
+
+    // 更晚的清除:置 NULL,且不改 last_event_at。
+    store.clear_pending_review(sid, 501).unwrap();
     let live = store.live_sessions(None, None, None, None, 1000).unwrap();
     let s = live
         .iter()
@@ -757,6 +848,40 @@ fn pending_review_set_and_clear() {
         .unwrap();
     assert_eq!(s.pending_review, None);
     assert_eq!(s.session.last_event_at, 500);
+}
+
+/// M5 定向清除：PostToolUse 只证明「该工具跑完了」,只能注销与它对应的那类等待,
+/// 不得顺手抹掉别的事件刚挂上的其它等待。
+#[test]
+fn kind_scoped_clear_only_clears_matching_pending() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, _) = store.start_session(pid, "cc-kind", 100).unwrap();
+
+    store
+        .set_pending_review(sid, PendingReview::Question, 500)
+        .unwrap();
+    // 普通工具的 PostToolUse(approval 类)不清 question。
+    store
+        .clear_pending_review_kind(sid, PendingReview::Approval, 600)
+        .unwrap();
+    assert_eq!(
+        store.session_pending_review(sid).unwrap().as_deref(),
+        Some("question")
+    );
+    // 同毫秒的同类清除也挡（严格 < 守卫）。
+    store
+        .clear_pending_review_kind(sid, PendingReview::Question, 500)
+        .unwrap();
+    assert_eq!(
+        store.session_pending_review(sid).unwrap().as_deref(),
+        Some("question")
+    );
+    // 对应工具(AskUserQuestion)跑完:定向清除生效。
+    store
+        .clear_pending_review_kind(sid, PendingReview::Question, 600)
+        .unwrap();
+    assert_eq!(store.session_pending_review(sid).unwrap(), None);
 }
 
 #[test]
@@ -777,10 +902,16 @@ fn lifecycle_boundaries_clear_stale_pending_review() {
         .unwrap();
     assert_eq!(ended.pending_review, None, "结束边界应清理旧审批子态");
 
-    // 模拟旧版本数据库留下的 ended + pending_review 残留；resume 必须再次兜底清理。
+    // ended 行上的 set_pending_review 必须被拒（M1）：PermissionRequest 的迟到尾巴写在
+    // 尸体上,卡片看不见、通知全哑,且没有任何生命周期事件会再清它——永久泄漏。
     store
         .set_pending_review(sid, PendingReview::Plan, 250)
         .unwrap();
+    assert_eq!(
+        store.session_pending_review(sid).unwrap(),
+        None,
+        "已结束会话不得再挂 pending_review"
+    );
     assert!(store.revive_for_resume(sid, 300, None).unwrap());
     let resumed = store
         .live_sessions(None, None, None, None, 100)
@@ -788,7 +919,8 @@ fn lifecycle_boundaries_clear_stale_pending_review() {
         .into_iter()
         .find(|l| l.session.id == sid)
         .unwrap();
-    assert_eq!(resumed.session.status, "running");
+    // 复活的目标态是 waiting:resume 后 CLI 停在输入框,没有回合在跑。
+    assert_eq!(resumed.session.status, "waiting");
     assert_eq!(resumed.pending_review, None, "新运行周期不得继承旧审批子态");
 }
 
@@ -1002,6 +1134,276 @@ fn session_lineage_chain_returns_full_chain_from_any_node() {
     let solo = store.session_lineage_chain(d).unwrap();
     assert_eq!(solo.len(), 1);
     assert_eq!(solo[0].id, d);
+}
+
+// == 并发/竞态修复回归（hook 按到达时刻盖章、straggler 交错一族） ==
+
+/// M2:/clear 换代与新会话认领同毫秒落库(同 δ)——裸时间戳 `<` 曾放过等时刻的旧行,
+/// 留下永不消失的幽灵活卡(无任何自愈路径)。驱逐按会话身份(更早创建的代次)判定。
+#[test]
+fn set_pid_evicts_same_millisecond_old_generation() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (old, _) = store.start_session(pid, "gen-old", 100).unwrap();
+    store.set_session_pid(old, 7777, 500).unwrap();
+    let (new, _) = store.start_session(pid, "gen-new", 500).unwrap();
+    store.set_session_pid(new, 7777, 500).unwrap(); // 同一毫秒认领
+
+    assert_eq!(store.get_session(old).unwrap().status, "ended");
+    assert_eq!(store.session_pid(old).unwrap(), None);
+    assert_ne!(store.get_session(new).unwrap().status, "ended");
+    assert_eq!(store.session_pid(new).unwrap(), Some(7777));
+}
+
+/// M2:认领因迟到守卫落空(本行 last_event_at 已被别的 hook 顶到未来)时,驱逐不得跳过——
+/// pid 归属事实不随时间戳变,旧代次留着就是幽灵。旧代码在 claim==0 时直接 return。
+#[test]
+fn eviction_survives_failed_claim() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (old, _) = store.start_session(pid, "old", 100).unwrap();
+    store.set_session_pid(old, 8888, 200).unwrap();
+    let (new, _) = store.start_session(pid, "new", 300).unwrap();
+    store.touch_session_turn_open(new, 400).unwrap(); // 别的 hook 先把新行时钟顶到 400
+    store.set_session_pid(new, 8888, 350).unwrap(); // 迟到认领:claim 0 行
+
+    // 认领没推进时间戳(仍 400),但旧代次照样驱逐。
+    assert_eq!(store.get_session(new).unwrap().last_event_at, 400);
+    assert_eq!(store.get_session(old).unwrap().status, "ended");
+    assert_eq!(store.session_pid(old).unwrap(), None);
+}
+
+/// M2:SessionEnd 是进程亲口报的终局、唯一无自愈的转换——straggler 把 last_event_at 顶到
+/// 未来后,SessionEnd 的 now_ms 较小,旧的 `last_event_at <=` 守卫会把整次收尾静默丢掉。
+#[test]
+fn late_session_end_still_ends_the_session() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, _) = store.start_session(pid, "s", 100).unwrap();
+    store.touch_session(sid, 900).unwrap(); // straggler 已把时钟顶到 900
+    store.end_session(sid, 800).unwrap(); // SessionEnd 带着较早的到达章
+
+    let s = store.get_session(sid).unwrap();
+    assert_eq!(s.status, "ended");
+    assert_eq!(s.ended_at, Some(800));
+    assert_eq!(s.last_event_at, 900, "MAX 防时钟倒退");
+}
+
+/// M3:正常 SessionEnd(pid 已清)后的迟到尾巴不复活——曾把会话诈尸成 running 且 pid NULL,
+/// 只能等 end_orphaned_idle 的 120s 兜底再收一次。
+#[test]
+fn straggler_activity_does_not_revive_a_cleanly_ended_session() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, _) = store.start_session(pid, "s", 100).unwrap();
+    store.end_session(sid, 200).unwrap();
+
+    store.revive_if_ended_running(sid, 202).unwrap(); // SessionEnd 后 2ms 的排队尾巴
+    assert_eq!(store.get_session(sid).unwrap().status, "ended", "尾巴不得诈尸");
+
+    // 迟到窗之外的活动 = 真实后续使用(如 orphan 误收后用户继续用),照常自愈。
+    store.revive_if_ended_running(sid, 200 + 6_000).unwrap();
+    let s = store.get_session(sid).unwrap();
+    assert_eq!(s.status, "running");
+    assert_eq!(s.ended_at, None);
+}
+
+/// M3:reaper 误 reap(end_session_if_pid 留 pid 墨迹)后,活动事件**即刻**自愈,
+/// 不受迟到窗限制——误 reap 的会话正在干活,每一秒的 ended 都是撒谎。
+#[test]
+fn activity_revives_reaper_ended_session_immediately() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, _) = store.start_session(pid, "s", 100).unwrap();
+    store.set_session_pid(sid, 999, 110).unwrap();
+    assert!(store.end_session_if_pid(sid, 999, 110, 150).unwrap());
+
+    store.revive_if_ended_running(sid, 151).unwrap(); // 1ms 后的活动事件
+    let s = store.get_session(sid).unwrap();
+    assert_eq!(s.status, "running");
+    assert_eq!(s.ended_at, None);
+}
+
+/// M7:迟到窗内的活动尾巴连 last_event_at 都不推进——它是「等待你回复」通知的去重指纹,
+/// 尾巴推进它会让同一回合弹两次;且窗口锚点若被尾巴逐条拖长,waiting 恢复会被无限顺延。
+#[test]
+fn straggler_touch_freezes_last_event_at_and_window_anchor() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, _) = store.start_session(pid, "s", 100).unwrap();
+    store
+        .set_session_status(sid, SessionStatus::Waiting, 300)
+        .unwrap();
+
+    store.touch_session(sid, 400).unwrap();
+    let s = store.get_session(sid).unwrap();
+    assert_eq!(s.status, "waiting");
+    assert_eq!(s.last_event_at, 300, "尾巴不得推进指纹时间戳");
+
+    store.touch_session(sid, 4_000).unwrap(); // 仍在 Stop(300) 的迟到窗内
+    assert_eq!(store.get_session(sid).unwrap().last_event_at, 300);
+
+    // 锚点未被拖长:相对 300 已出窗,真活动照常翻 running 并推进时钟。
+    store.touch_session(sid, 5_400).unwrap();
+    let s = store.get_session(sid).unwrap();
+    assert_eq!(s.status, "running");
+    assert_eq!(s.last_event_at, 5_400);
+}
+
+/// M8:resume 失败回滚的 pid CAS——复活与回滚之间 hook 已认领 pid(会话真活了),
+/// 回滚绝不能误杀;没人认领才允许收尾。
+#[test]
+fn rollback_end_only_hits_unclaimed_sessions() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+
+    // 情形 A:复活后 hook 已认领 → 回滚拒绝。
+    let (claimed, _) = store.start_session(pid, "claimed", 100).unwrap();
+    store.end_session(claimed, 200).unwrap();
+    assert!(store.revive_for_resume(claimed, 300, None).unwrap());
+    store.set_session_pid(claimed, 4242, 350).unwrap();
+    assert!(!store.end_session_if_unclaimed(claimed, 400).unwrap());
+    assert_ne!(store.get_session(claimed).unwrap().status, "ended");
+    assert_eq!(store.session_pid(claimed).unwrap(), Some(4242));
+
+    // 情形 B:spawn 失败、没人认领 → 收尾回「已断开」。
+    let (bare, _) = store.start_session(pid, "bare", 100).unwrap();
+    store.end_session(bare, 200).unwrap();
+    assert!(store.revive_for_resume(bare, 300, None).unwrap());
+    assert!(store.end_session_if_unclaimed(bare, 400).unwrap());
+    assert_eq!(store.get_session(bare).unwrap().status, "ended");
+}
+
+/// M9:/clear 换代收尾单事务——旧段结束 + launch_args 随进程复制 + 接续链成对写入,
+/// 要么全落、要么全不落;分叉被拒时一行未写,不留半态。
+#[test]
+fn supersede_session_is_atomic() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (a, _) = store.start_session(pid, "a", 100).unwrap();
+    store
+        .set_session_launch_args(a, r#"{"permission":"bypassPermissions"}"#)
+        .unwrap();
+    let (b, _) = store.start_session(pid, "b", 200).unwrap();
+
+    store.supersede_session(a, b, 300).unwrap();
+    let old = store.get_session(a).unwrap();
+    assert_eq!(old.status, "ended");
+    assert_eq!(old.ended_at, Some(300));
+    assert_eq!(store.session_header(a).unwrap().superseded_by, Some(b));
+    assert_eq!(store.session_header(b).unwrap().predecessor_id, Some(a));
+    assert_eq!(
+        store.session_launch_args(b).unwrap().as_deref(),
+        Some(r#"{"permission":"bypassPermissions"}"#),
+        "启动选项跟着终端进程走"
+    );
+
+    // 失败路径:a 已被 b 接替,c 再换代是分叉 → 整体拒绝,c 一行未写(含 launch_args)。
+    let (c, _) = store.start_session(pid, "c", 400).unwrap();
+    assert!(store.supersede_session(a, c, 500).is_err());
+    assert_eq!(store.session_header(c).unwrap().predecessor_id, None);
+    assert_eq!(store.session_launch_args(c).unwrap(), None, "回滚必须连 launch_args 复制一起撤销");
+    assert_eq!(store.session_header(a).unwrap().superseded_by, Some(b));
+    // 自环拒绝。
+    assert!(store.supersede_session(c, c, 600).is_err());
+}
+
+/// M10:被动重建(GUI 读侧)不推进 tasks.updated_at——它是 sync_todos 挡迟到快照的权威
+/// 时钟,重建顶到 now 会让同期在途的真实 TodoWrite 被整份丢弃(界面永远停在旧状态)。
+#[test]
+fn rebuild_does_not_advance_todo_clock_nor_block_inflight_snapshots() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, tid) = store.start_session(pid, "s", 100).unwrap();
+    let snap = |status: TodoStatus| {
+        [TodoInput {
+            content: "任务".into(),
+            status,
+        }]
+    };
+
+    store.sync_todos(sid, &snap(TodoStatus::Pending), 300).unwrap();
+    assert_eq!(store.get_task(tid).unwrap().updated_at, 300);
+
+    // GUI 打开会话触发重建(墙钟 900,远超在途 hook 的到达章)。
+    store
+        .sync_todos_rebuild(sid, &snap(TodoStatus::Pending), 900)
+        .unwrap();
+    assert_eq!(
+        store.get_task(tid).unwrap().updated_at,
+        300,
+        "读侧重建不得写权威时钟"
+    );
+
+    // 在途的真实 TodoWrite(盖章 400)必须落库——重建若顶过时钟,这份就被丢了。
+    store
+        .sync_todos(sid, &snap(TodoStatus::Completed), 400)
+        .unwrap();
+    let todos = store.list_todos(tid).unwrap();
+    assert_eq!(todos[0].status, "completed", "在途快照不得被重建挡掉");
+    assert_eq!(store.get_task(tid).unwrap().updated_at, 400);
+}
+
+/// M6:stale 态废除。写侧一律归一成 waiting;v10 老库的存量 stale 行由迁移归一。
+#[test]
+fn deprecated_stale_status_is_normalized_to_waiting() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, _) = store.start_session(pid, "s", 100).unwrap();
+    store
+        .set_session_status(sid, SessionStatus::Stale, 200)
+        .unwrap();
+    assert_eq!(store.get_session(sid).unwrap().status, "waiting");
+}
+
+/// M6 迁移:v10 老库残留的 stale 行(无写端、无消费端的半死态)open 时归一成 waiting,
+/// 交给 reaper / end_orphaned_idle 按 waiting 口径接管。
+#[test]
+fn migrate_normalizes_stale_rows_in_v10_database() {
+    let path = std::env::temp_dir().join(format!("meowo-mig-v10-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id    INTEGER NOT NULL,
+                cc_session_id TEXT NOT NULL UNIQUE,
+                status        TEXT NOT NULL,
+                started_at    INTEGER NOT NULL,
+                last_event_at INTEGER NOT NULL,
+                ended_at      INTEGER,
+                pid           INTEGER,
+                cwd           TEXT,
+                archived      INTEGER NOT NULL DEFAULT 0,
+                archived_at   INTEGER,
+                pending_review TEXT,
+                last_ai_text   TEXT,
+                last_user_text TEXT,
+                provider       TEXT NOT NULL DEFAULT 'claude',
+                profile        TEXT,
+                launch_args    TEXT,
+                predecessor_id INTEGER,
+                superseded_by  INTEGER);
+             INSERT INTO sessions (project_id, cc_session_id, status, started_at, last_event_at)
+             VALUES (1, 's-stale', 'stale', 100, 100);
+             INSERT INTO sessions (project_id, cc_session_id, status, started_at, last_event_at)
+             VALUES (1, 's-running', 'running', 200, 200);
+             PRAGMA user_version = 10;",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let stale = store.find_session_id_pub("s-stale").unwrap().unwrap();
+    assert_eq!(store.get_session(stale).unwrap().status, "waiting");
+    // 其它状态不受迁移影响。
+    let running = store.find_session_id_pub("s-running").unwrap().unwrap();
+    assert_eq!(store.get_session(running).unwrap().status, "running");
+
+    drop(store);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
 }
 
 #[test]
