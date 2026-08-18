@@ -837,7 +837,12 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             let a = args!(A);
             reply(crate::install::check_provider_hooks(a.provider).await)
         }
-        "get_settings" => reply(crate::settings::get_settings().await),
+        // token 不回显给远端:调用方虽已持 token 过了鉴权,但「token 只在宿主机取得」
+        // 是审计线——回显会让未来的 token 轮换在换发瞬间被旧凭据读走新值。
+        "get_settings" => reply(crate::settings::get_settings().await.map(|mut s| {
+            s.remote_access_token = String::new();
+            s
+        })),
         "host_os" => reply_ok(crate::host_os()),
         // BRIDGED_COMMANDS 有而这里漏写的项落到此处：fail-closed，宁 404 不放行。
         _ => err_status(StatusCode::NOT_FOUND, "未知命令"),
