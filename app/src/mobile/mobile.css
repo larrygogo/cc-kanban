@@ -69,6 +69,104 @@ body.remote-ui .chat-topbar {
   body.remote-ui button {
     touch-action: manipulation;
   }
+
+  /* ── 移动端字号标尺(按 2026-08 全量清单逐类抬升) ──
+     桌面密度下 9–11.5px 的小字在手机上过小,而 16px 输入框(iOS 防缩放地板,降不得)
+     又把周边文字压得更显迷你。整体缩放两条路已证伪(--cc-ui 只动 token 半边、zoom 破
+     dvh),这里按层级重排:正文 14 / 标题与主控件 13–15 / 次要 12 / 地板 11。
+     只在触屏生效,桌面与桌面浏览器一像素不动。 */
+
+  /* 消息区:一问一答同号(用户气泡原 13 vs AI 正文 14);分隔线/辅助行抬到地板。 */
+  body.remote-ui .chat-message.is-user .chat-text { font-size: 14px; }
+  body.remote-ui .chat-day-sep,
+  body.remote-ui .chat-meta { font-size: 11px; }
+  body.remote-ui .chat-empty { font-size: 13px; }
+  body.remote-ui .chat-sync-warn,
+  body.remote-ui .chat-load-earlier button,
+  body.remote-ui .chat-jump-latest { font-size: 12px; }
+  body.remote-ui .chat-md pre code { font-size: 12.5px; }
+  body.remote-ui .chat-md-lang,
+  body.remote-ui .chat-md-pre-tools button { font-size: 11px; }
+  body.remote-ui .chat-tool summary,
+  body.remote-ui .chat-tool-name,
+  body.remote-ui .chat-tool-summary,
+  body.remote-ui .chat-activity-summary,
+  body.remote-ui .chat-todos > summary,
+  body.remote-ui .chat-subagent > summary,
+  body.remote-ui .chat-reasoning { font-size: 12px; }
+  body.remote-ui .chat-tool pre { font-size: 12px; }
+  body.remote-ui .chat-reasoning summary { font-size: 11px; }
+  body.remote-ui .chat-todos-list li,
+  body.remote-ui .chat-running { font-size: 13px; }
+  body.remote-ui .chat-command,
+  body.remote-ui .chat-image-chip { font-size: 12px; }
+
+  /* composer 工具行:16px 输入框旁 11.5px 的模型/权限/用量显得迷你;
+     触发钮抬到 13 后顺带修掉「钮 11.5 < 自己菜单项 12.5」的倒挂。 */
+  body.remote-ui .chat-model-button,
+  body.remote-ui .chat-context,
+  body.remote-ui .chat-model-item-name { font-size: 13px; }
+  body.remote-ui .chat-model-item-desc,
+  body.remote-ui .chat-model-group { font-size: 11.5px; }
+  body.remote-ui .chat-send-error,
+  body.remote-ui .chat-send-takeover { font-size: 12px; }
+  body.remote-ui .chat-queued,
+  body.remote-ui .chat-queued-head > button,
+  body.remote-ui .chat-queued-list li,
+  body.remote-ui .chat-queued-dismiss { font-size: 11.5px; }
+  body.remote-ui .chat-compose-gate { font-size: 12px; }
+
+  /* 审批/题面卡:按钮同时是触控目标,统一 13;标题 14 > 正文 13 > 注 11.5 的层级重排。 */
+  body.remote-ui .chat-approval { font-size: 13px; }
+  body.remote-ui .chat-approval-copy strong { font-size: 14px; }
+  body.remote-ui .chat-approval button,
+  body.remote-ui .chat-approval-options b { font-size: 13px; }
+  body.remote-ui .chat-approval-options small { font-size: 11.5px; }
+  body.remote-ui .chat-question-tabs button { font-size: 12px; }
+  body.remote-ui .chat-approval-copy pre { font-size: 11.5px; }
+  body.remote-ui .chat-approval-tool { font-size: 11px; }
+  body.remote-ui .chat-approval-tool code { font-size: 12px; }
+  body.remote-ui .chat-remote-hint { font-size: 12px; }
+
+  /* 侧栏抽屉:手机的主导航面。列表标题 13.5/副行 11,头部按钮与 16px 搜索框看齐。 */
+  body.remote-ui .chat-sidebar-new { font-size: 13px; }
+  body.remote-ui .chat-sidebar-name { font-size: 13.5px; }
+  body.remote-ui .chat-sidebar-meta,
+  body.remote-ui .chat-sidebar-note,
+  body.remote-ui .chat-sidebar-group-head,
+  body.remote-ui .chat-sidebar-error,
+  body.remote-ui .chat-sidebar-deep-head,
+  body.remote-ui .chat-sidebar-deep-excerpt { font-size: 11px; }
+  body.remote-ui .chat-sidebar-more,
+  body.remote-ui .chat-sidebar-empty,
+  body.remote-ui .chat-sidebar-deep-title { font-size: 12px; }
+  body.remote-ui .sf-menu .dd-item { font-size: 13px; }
+
+  /* 待办面板与顶栏弹层。 */
+  body.remote-ui .chat-todo-panel-title,
+  body.remote-ui .chat-todo-panel li { font-size: 13px; }
+  body.remote-ui .chat-todos-count,
+  body.remote-ui .chat-todo-panel-time { font-size: 11px; }
+  body.remote-ui .chat-todo-panel-collapse,
+  body.remote-ui .chat-todo-panel-hint { font-size: 12px; }
+  body.remote-ui .chat-modal-title { font-size: 14px; }
+  body.remote-ui .chat-modal-error { font-size: 12px; }
+
+  /* 通用下拉与新建会话 sheet:基准 14,主动作/浏览钮与 16px 输入框协调,标题对齐会话标题 15。 */
+  body.remote-ui .dd-btn,
+  body.remote-ui .dd-item { font-size: 13px; }
+  body.remote-ui .ns-window { font-size: 14px; }
+  body.remote-ui .ns-title { font-size: 15px; }
+  body.remote-ui .ns-label,
+  body.remote-ui .ns-option-label { font-size: 12px; }
+  body.remote-ui .ns-browse,
+  body.remote-ui .ns-btn { font-size: 14px; }
+  body.remote-ui .ns-agent { font-size: 13px; }
+  body.remote-ui .ns-recent-name,
+  body.remote-ui .ns-dirbrowse-path { font-size: 13px; }
+  body.remote-ui .ns-recent-path,
+  body.remote-ui .ns-dirbrowse-empty,
+  body.remote-ui .ns-profile-hint { font-size: 12px; }
 }
 
 /* 配对闸门(TokenGate)。首屏唯一界面,居中一张卡。 */
