@@ -124,14 +124,14 @@ export function RemoteAccessCard() {
             <div className="row-text">
               <div className="row-label">{t.remote.scan}</div>
               <div className="row-desc">{t.remote.scanHint}</div>
+              {/* 不配文字标签:选项本身是「Tailscale · IP」已自解释,窄列里标签只会被挤成竖排。 */}
               {ipOptions.length > 1 && (
                 <div className="remote-ip-pick">
-                  <span className="row-desc">{t.remote.device}</span>
                   <Dropdown value={selectedIp ?? ""} options={ipOptions} onChange={setSelectedIp} />
                 </div>
               )}
               <div className="remote-url-row">
-                <code className="remote-url">{url}</code>
+                <code className="remote-url" title={url}>{url}</code>
                 <button type="button" className="remote-copy" onClick={copy}>
                   {copied ? t.remote.copied : t.remote.copy}
                 </button>

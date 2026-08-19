@@ -668,7 +668,6 @@ export const zh = {
     portDesc: "手机连接用的端口，默认 18620",
     scan: "扫码连接",
     scanHint: "用手机扫码，或在浏览器打开下面的地址",
-    device: "选择地址",
     netTailscale: "Tailscale",
     netLan: "局域网",
     hintTailscale: "手机装有 Tailscale 就能连接",

@@ -1849,11 +1849,14 @@ button.stab {
   margin-top: var(--sp-6);
   min-width: 0;
 }
-/* 地址完整展示(折行 break-all):它就是配对凭据本体,截断了没法核对。 */
+/* 地址单行省略:IP:端口段可核对即可,token 尾巴本就没法人眼核对,折四行只剩吵。
+   user-select:all 点一下仍全选完整值,复制按钮同样拿全量。 */
 .remote-url {
   font-size: 12px;
   color: var(--cc-text-dim);
-  word-break: break-all;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   user-select: all;
   flex: 1;
   min-width: 0;
