@@ -48,8 +48,22 @@ body.remote-ui .chat-topbar {
   body.remote-ui textarea {
     -webkit-user-select: text;
     user-select: text;
-    /* iOS Safari 对 <16px 的输入框会自动放大整页,统一钉到 16px 起免抖。 */
-    font-size: max(16px, var(--fs-13, 13px));
+  }
+
+  body.remote-ui .chat-compose textarea { font-size: 14px; }
+  body.remote-ui .chat-sidebar-search input { font-size: 13px; }
+  body.remote-ui .chat-sidebar-edit { font-size: 13px; }
+  body.remote-ui .ns-input { font-size: 14px; }
+  body.remote-ui .chat-approval-custom input { font-size: 13px; }
+
+  /* iOS 对 <16px 的输入框聚焦会自动放大整页——但判定发生在聚焦时、:focus 样式已生效,
+     所以只在聚焦瞬间抬到 16px 即可豁免;静置时跟随上面的移动字号标尺,不再比周边文字
+     大一圈(此前恒 16px,搜索框比它筛出的列表标题还大 4px)。代价是聚焦时字号一跳,
+     与键盘弹起的布局位移同时发生,不显突兀。
+     必须排在按类基准之后:与它们特异性打平,靠源序压过,否则聚焦态吃不到 16px。 */
+  body.remote-ui input:focus,
+  body.remote-ui textarea:focus {
+    font-size: 16px;
   }
 
   /* 消息正文/代码块同样放开:HTTP 非 secure context 下 navigator.clipboard 不存在,

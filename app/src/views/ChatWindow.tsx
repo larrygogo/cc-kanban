@@ -3140,7 +3140,8 @@ export function ChatWindow() {
               ? t.chat.inputLocked
               : sendError && !history?.background
                 ? t.chat.inputUnavailable
-                : t.chat.inputPlaceholder
+                // 手机上 Enter/Shift+Enter 是不存在的键盘语义,占位只留一句短的。
+                : remoteUi() ? t.chat.inputPlaceholderRemote : t.chat.inputPlaceholder
           }
           onChange={(event) => {
             setPrompt(event.target.value);

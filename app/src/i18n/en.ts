@@ -229,6 +229,7 @@ export const en: Dict = {
     readOnly: "Conversation syncs live. Switch to Terminal to take over a disconnected session.",
     inputLabel: "Send a message to the Agent",
     inputPlaceholder: "Message the Agent directly (Enter to send, Shift+Enter for a new line)",
+    inputPlaceholderRemote: "Message the Agent",
     inputUnavailable: "Session not taken over yet; switch to the Terminal tab first",
     sendBackgroundSession: "You can message and end this background session here. Slash menus and approvals stay in the terminal that started it.",
     sendBackgroundKeysMovedYou: "Background sessions ignore terminal keystrokes. Send messages from here instead.",

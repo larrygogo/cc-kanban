@@ -239,6 +239,7 @@ export const zh = {
     readOnly: "对话实时同步。已断开的会话可切到终端接管。",
     inputLabel: "发送消息给 Agent",
     inputPlaceholder: "直接与 Agent 对话（Enter 发送，Shift+Enter 换行）",
+    inputPlaceholderRemote: "发消息给 Agent",
     inputUnavailable: "会话尚未接管，请先切到终端页",
     sendBackgroundSession: "后台会话可发消息和结束。斜杠菜单、审批等操作请回派出它的终端。",
     sendBackgroundKeysMovedYou: "后台会话不接受终端按键，请在这里直接发消息。",
