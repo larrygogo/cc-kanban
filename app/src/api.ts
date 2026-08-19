@@ -745,6 +745,20 @@ export function remoteAccessInfo(): Promise<RemoteAccessInfo> {
   return invoke("remote_access_info");
 }
 
+/** 远程新建会话的页内目录浏览（只列目录名）。path 为空 = 磁盘/根列表。 */
+export type DirListing = {
+  /** 当前目录规范化绝对路径；根列表时为空串。 */
+  path: string;
+  /** 上一级；空串 = 回磁盘列表；null = 已在顶层。 */
+  parent: string | null;
+  dirs: { name: string; path: string }[];
+};
+
+/** 仅远程模式可用：命令只在 /rpc 白名单登记，桌面 invoke 会被拒（桌面有系统对话框）。 */
+export function listSubdirectories(path?: string): Promise<DirListing> {
+  return invoke("list_subdirectories", { path: path ?? null });
+}
+
 // 纯函数：根据 todo 列表算完成度。
 export function todoProgress(todos: Todo[]): { done: number; total: number; percent: number } {
   const total = todos.length;

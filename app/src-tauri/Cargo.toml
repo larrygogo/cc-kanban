@@ -108,6 +108,9 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 # tokio 经 tauri 传递引入，但 tauri 默认不开 net（现由 updater→reqwest 链传递打开）——
 # 远程桥的 TcpListener 依赖它，显式声明不把编译成败押在别人的依赖树上。
 tokio = { version = "1", features = ["net", "sync"] }
+# 远程目录浏览（remote.rs list_subdirectories）：std canonicalize 在 Windows 回 \\?\
+# 前缀路径，展示难看且回填 cwd 后部分 agent 不认。已在依赖树（tauri 传递），零新增。
+dunce = "1"
 # codex config.toml 的结构保持编辑（保注释与键序）。kimi 的已迁入 meowo-agent::config。
 # codex hook 预信任的 trusted_hash 计算（SHA-256）。
 

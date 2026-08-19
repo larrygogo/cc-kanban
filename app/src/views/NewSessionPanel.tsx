@@ -15,6 +15,8 @@ import {
   agentName,
   getAccounts,
   isLoggedIn,
+  listSubdirectories,
+  type DirListing,
 } from "../api";
 import { agentAssets, tintStyle } from "../providers";
 import { normalizePath, pathKey } from "../paths";
@@ -210,6 +212,26 @@ export function NewSessionPanel({ onClose }: { onClose?: () => void } = {}): Rea
     if (typeof picked === "string") setCwd(normalizePath(picked));
   }
 
+  // 远程端页内目录浏览:系统目录对话框在浏览器里弹不起来,改为逐级下钻的就地列表。
+  const [browse, setBrowse] = useState<DirListing | null>(null);
+  function browseTo(path?: string) {
+    listSubdirectories(path)
+      .then(setBrowse)
+      .catch(() => {});
+  }
+  async function openRemoteBrowser() {
+    // 起点取当前输入的目录;不存在/为空则回退磁盘列表,列不了就保持手输。
+    try {
+      setBrowse(await listSubdirectories(cwd.trim() || undefined));
+    } catch {
+      try {
+        setBrowse(await listSubdirectories());
+      } catch {
+        /* 保持手输 */
+      }
+    }
+  }
+
   async function launch() {
     if (!cwd.trim() || busy || launchPendingRef.current) return;
     launchPendingRef.current = true;
@@ -308,13 +330,66 @@ export function NewSessionPanel({ onClose }: { onClose?: () => void } = {}): Rea
                 // Enter 直接启动（launch 内部对空目录/busy 有守卫），与账号页 API Key 输入框同规。
                 onKeyDown={(e) => { if (e.key === "Enter") void launch(); }}
               />
-              {/* 目录浏览走系统对话框(plugin-dialog),手机上无从弹起;远程只留手输 + 最近项。 */}
-              {!remoteUi() && (
+              {/* 桌面走系统目录对话框(plugin-dialog);远程在浏览器里弹不起来,换页内浏览器。 */}
+              {!remoteUi() ? (
                 <button type="button" className="ns-browse" onClick={pickDir}>
+                  {t.newSession.browse}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="ns-browse"
+                  onClick={() => (browse ? setBrowse(null) : void openRemoteBrowser())}
+                >
                   {t.newSession.browse}
                 </button>
               )}
             </div>
+            {browse && (
+              <div className="ns-dirbrowse" data-testid="ns-dirbrowse">
+                <div className="ns-dirbrowse-head">
+                  <button
+                    type="button"
+                    className="ns-browse"
+                    disabled={browse.parent === null}
+                    onClick={() => browseTo(browse.parent || undefined)}
+                  >
+                    {t.newSession.up}
+                  </button>
+                  <span className="ns-dirbrowse-path" title={browse.path}>
+                    {browse.path}
+                  </span>
+                  {browse.path && (
+                    <button
+                      type="button"
+                      className="ns-browse"
+                      onClick={() => {
+                        setCwd(normalizePath(browse.path));
+                        setBrowse(null);
+                      }}
+                    >
+                      {t.newSession.pickHere}
+                    </button>
+                  )}
+                </div>
+                <div className="ns-dirbrowse-list">
+                  {browse.dirs.map((d) => (
+                    <button
+                      key={d.path}
+                      type="button"
+                      className="ns-dirbrowse-item"
+                      onClick={() => browseTo(d.path)}
+                    >
+                      <FolderIcon />
+                      <span className="ns-dirbrowse-name">{d.name}</span>
+                    </button>
+                  ))}
+                  {browse.dirs.length === 0 && (
+                    <div className="ns-dirbrowse-empty">{t.newSession.noSubdirs}</div>
+                  )}
+                </div>
+              </div>
+            )}
             {recent.length > 0 && shownRecent.length > 0 && (
               <div className="ns-recent-list">
                 {shownRecent.map((r) => (

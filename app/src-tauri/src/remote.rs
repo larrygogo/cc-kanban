@@ -96,6 +96,7 @@ pub(crate) const BRIDGED_COMMANDS: &[&str] = &[
     "agent_models",
     "new_session",
     "check_provider_hooks",
+    "list_subdirectories",
     // 只读杂项
     "get_settings",
     "host_os",
@@ -246,6 +247,99 @@ pub(crate) async fn remote_access_info(
         token: settings.remote_access_token,
         ips,
         last_error,
+    })
+}
+
+/// 远程新建会话的目录浏览（只回目录名，不读文件内容）。远端持 token 者本就能以
+/// 任意 cwd 起会话（new_session 在白名单），列目录不扩大能力面；文件读取仍不下放。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DirListing {
+    /// 当前目录（规范化绝对路径）；列磁盘根时为空串。
+    path: String,
+    /// 上一级路径。磁盘根的上一级用空串表示「磁盘列表」；已在磁盘列表时为 None。
+    parent: Option<String>,
+    dirs: Vec<DirChild>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DirChild {
+    name: String,
+    path: String,
+}
+
+/// 仅经 /rpc 桥接调用（桌面有系统目录对话框，不需要它），故不做 #[tauri::command]。
+pub(crate) async fn list_subdirectories(path: Option<String>) -> Result<DirListing, String> {
+    tauri::async_runtime::spawn_blocking(move || list_subdirectories_sync(path.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 顶层入口：Windows 枚举实际存在的盘符，类 Unix 只有 `/`。
+fn filesystem_roots() -> Vec<PathBuf> {
+    if cfg!(windows) {
+        (b'A'..=b'Z')
+            .map(|c| PathBuf::from(format!("{}:\\", c as char)))
+            .filter(|p| p.is_dir())
+            .collect()
+    } else {
+        vec![PathBuf::from("/")]
+    }
+}
+
+fn list_subdirectories_sync(path: Option<&str>) -> Result<DirListing, String> {
+    let raw = path.map(str::trim).filter(|p| !p.is_empty());
+    let Some(raw) = raw else {
+        let dirs = filesystem_roots()
+            .into_iter()
+            .map(|p| DirChild {
+                name: p.display().to_string(),
+                path: p.display().to_string(),
+            })
+            .collect();
+        return Ok(DirListing {
+            path: String::new(),
+            parent: None,
+            dirs,
+        });
+    };
+    // dunce 而非 std::fs::canonicalize：后者在 Windows 回 \\?\ 前缀路径，
+    // 展示难看，回填成 cwd 后部分 agent 也不认。
+    let dir = dunce::canonicalize(raw).map_err(|_| "目录不存在或不可读".to_string())?;
+    if !dir.is_dir() {
+        return Err("不是目录".to_string());
+    }
+    let mut dirs = Vec::new();
+    for ent in std::fs::read_dir(&dir)
+        .map_err(|_| "目录不可读".to_string())?
+        .flatten()
+    {
+        // file_type 不追符号链接：目录软链下钻可能成环，跳过（手输路径仍可进）。
+        if !ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = ent.file_name().to_string_lossy().into_owned();
+        // 隐藏目录多为工具内部产物，浏览列表里是噪音；手输路径仍可进入。
+        if name.starts_with('.') {
+            continue;
+        }
+        dirs.push(DirChild {
+            path: ent.path().display().to_string(),
+            name,
+        });
+    }
+    dirs.sort_by_key(|d| d.name.to_lowercase());
+    // 防超大目录打爆载荷；远超一屏的列表本也没法浏览，靠手输缩小范围。
+    dirs.truncate(500);
+    let parent = dir
+        .parent()
+        .map(|p| p.display().to_string())
+        .or(Some(String::new()));
+    Ok(DirListing {
+        path: dir.display().to_string(),
+        parent,
+        dirs,
     })
 }
 
@@ -837,6 +931,16 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             let a = args!(A);
             reply(crate::install::check_provider_hooks(a.provider).await)
         }
+        "list_subdirectories" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct A {
+                #[serde(default)]
+                path: Option<String>,
+            }
+            let a = args!(A);
+            reply(list_subdirectories(a.path).await)
+        }
         // token 不回显给远端:调用方虽已持 token 过了鉴权,但「token 只在宿主机取得」
         // 是审计线——回显会让未来的 token 轮换在换发瞬间被旧凭据读走新值。
         "get_settings" => reply(crate::settings::get_settings().await.map(|mut s| {
@@ -1116,6 +1220,30 @@ mod tests {
         assert_eq!(c("0.0.0.0"), None);
         assert_eq!(c("8.8.8.8"), None); // 公网
         assert_eq!(c("fe80::1"), None); // v6 一律不收
+    }
+
+    /// 目录浏览契约:只列目录、藏点开头、按名排序;根列表(空参)给磁盘/根且无 parent。
+    #[test]
+    fn list_subdirectories_lists_sorted_dirs_and_hides_dotdirs() {
+        let base = std::env::temp_dir().join(format!("meowo-lsdir-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("beta")).unwrap();
+        std::fs::create_dir_all(base.join("Alpha")).unwrap();
+        std::fs::create_dir_all(base.join(".hidden")).unwrap();
+        std::fs::write(base.join("file.txt"), b"x").unwrap();
+
+        let l = list_subdirectories_sync(base.to_str()).unwrap();
+        let names: Vec<&str> = l.dirs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Alpha", "beta"]);
+        // 子项 path 可直接作下一跳参数;parent 存在(还没到根)。
+        assert!(l.dirs[0].path.ends_with("Alpha"), "{}", l.dirs[0].path);
+        assert!(l.parent.is_some());
+
+        let roots = list_subdirectories_sync(None).unwrap();
+        assert!(roots.parent.is_none() && !roots.dirs.is_empty());
+        assert!(list_subdirectories_sync(Some("::no-such-dir::")).is_err());
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
