@@ -745,6 +745,12 @@ export function remoteAccessInfo(): Promise<RemoteAccessInfo> {
   return invoke("remote_access_info");
 }
 
+/** 全部会话里正在等用户的清单(审批+同步题面)。远程徽标 3s 扫描用——push 事件到不了
+ *  浏览器,非当前会话的审批只能靠它点亮侧栏徽标;桌面走事件,不调这条。 */
+export function awaitingInteractionSessions(): Promise<number[]> {
+  return invoke("awaiting_interaction_sessions");
+}
+
 /** 远程新建会话的页内目录浏览（只列目录名）。path 为空 = 磁盘/根列表。 */
 export type DirListing = {
   /** 当前目录规范化绝对路径；根列表时为空串。 */

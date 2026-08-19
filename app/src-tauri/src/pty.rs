@@ -2037,6 +2037,17 @@ impl PtyBroker {
             .map(|pending| pending.request.clone())
     }
 
+    /// 此刻挂着同步题面(AskUserQuestion)的会话(批量版,供远程徽标扫描)。
+    /// 与 [`Self::interactive_question`] 同一 TTL 口径:过期条目就地清掉,不点亮徽标。
+    pub(crate) fn interactive_question_session_ids(&self) -> HashSet<i64> {
+        let Ok(mut questions) = self.attach.interactive_questions.lock() else {
+            return HashSet::new();
+        };
+        let now = crate::now_ms();
+        questions.retain(|_, (_, at)| now.saturating_sub(*at) < INTERACTIVE_QUESTION_TTL_MS);
+        questions.keys().copied().collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn resolve_approval(
         &self,

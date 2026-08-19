@@ -84,6 +84,7 @@ pub(crate) const BRIDGED_COMMANDS: &[&str] = &[
     "set_session_launch_selection",
     // 审批/交互提问
     "pending_interaction",
+    "awaiting_interaction_sessions",
     "register_approval_consumer",
     "unregister_approval_consumer",
     "resolve_pending_approval",
@@ -812,6 +813,10 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
                 a.session_id,
             ))
         }
+        // 无参命令,载荷忽略(同 get_settings/host_os)。
+        "awaiting_interaction_sessions" => reply_ok(
+            crate::managed_terminal::awaiting_interaction_sessions(state),
+        ),
         "register_approval_consumer" => {
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase", deny_unknown_fields)]

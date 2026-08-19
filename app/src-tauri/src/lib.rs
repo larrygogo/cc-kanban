@@ -61,7 +61,7 @@ use install::{
     install_agent, login_agent, logout_agent, repair_provider_hooks,
 };
 use managed_terminal::{
-    dismiss_interactive_question, managed_terminal_binding,
+    awaiting_interaction_sessions, dismiss_interactive_question, managed_terminal_binding,
     managed_terminal_snapshot, attach_background_session, open_attached_terminal,
     pending_interaction, register_approval_consumer, register_terminal_viewer,
     resize_managed_terminal, screen_detect_explain, screen_detect_explain_text,
@@ -1058,6 +1058,7 @@ pub fn run() {
             screen_detect_explain_text,
             pending_interaction,
             dismiss_interactive_question,
+            awaiting_interaction_sessions,
             stop_managed_terminal,
             register_terminal_viewer,
             unregister_terminal_viewer,

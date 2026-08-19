@@ -366,6 +366,18 @@ pub(crate) fn dismiss_interactive_question(state: State<'_, super::AppState>, se
     state.ptys.clear_interactive_question(session_id);
 }
 
+/// 全部会话里「正在等用户」的清单（审批 + 同步题面），供远程端徽标轮询——push 事件
+/// 到不了浏览器，非当前会话的审批只能靠周期扫描点亮侧栏徽标。数据源取 broker 实时
+/// 事实（DB 的 pending_review 会在工具放行后滞留，不可用）。纯内存读，同步命令合规。
+#[tauri::command]
+pub(crate) fn awaiting_interaction_sessions(state: State<'_, super::AppState>) -> Vec<i64> {
+    let mut ids = state.ptys.approval_session_ids();
+    ids.extend(state.ptys.interactive_question_session_ids());
+    let mut out: Vec<i64> = ids.into_iter().collect();
+    out.sort_unstable();
+    out
+}
+
 /// chat 窗终端视图声明「正在看」哪个会话——emitter 只对它推送 pty-output 实时帧
 /// （见 PtyBroker::viewed_session）。纯原子写，同步命令合规。
 #[tauri::command]
