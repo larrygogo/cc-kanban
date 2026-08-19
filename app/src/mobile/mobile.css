@@ -115,7 +115,8 @@ body.remote-ui .chat-topbar {
 .remote-new-session-overlay {
   position: fixed;
   inset: 0;
-  z-index: 50;
+  /* 压过窄屏侧栏抽屉(scrim 60 / 抽屉 61):抽屉未收或再拉开时,sheet 仍在最上层。 */
+  z-index: 70;
   background: var(--cc-window-bg);
 }
 

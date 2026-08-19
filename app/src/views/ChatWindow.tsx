@@ -34,7 +34,7 @@ import { ManagedTerminal } from "./ManagedTerminal";
 import { WindowControls } from "./WindowControls";
 import { DevBadge } from "./DevBadge";
 import { isMac } from "../platform";
-import { remoteUi } from "../remoteMode";
+import { remoteUi, NEW_SESSION_EVENT } from "../remoteMode";
 import { appendTerminalText, modeFromScreen, terminalAttention as detectTerminalAttention, visibleTerminalText, type AttentionGrammar, type TerminalAttention, type TerminalAttentionOption } from "../terminalAttention";
 import { Dropdown, useMenuPopup } from "./menu";
 // 恢复时的权限改选需要 agent 的启动选项声明表（与新建会话面板同源）。
@@ -854,6 +854,13 @@ export function ChatWindow() {
   // 失效——composer 每个字符都重建整张会话列表(上百条 item)就是这么来的。
   const collapseSidebar = useCallback(() => toggleSidebarRef.current(), []);
   const closeOverlaySidebar = useCallback(() => setOverlaySidebar(false), []);
+  // 远程:侧栏点「新建会话」派发页内导航事件(RemoteApp 据此叠加渲染 sheet)。窄屏抽屉
+  // 层级(z 61)在 sheet 之上,不收就盖住 sheet——收到事件即收抽屉。桌面此事件永不派发。
+  useEffect(() => {
+    const close = () => setOverlaySidebar(false);
+    window.addEventListener(NEW_SESSION_EVENT, close);
+    return () => window.removeEventListener(NEW_SESSION_EVENT, close);
+  }, []);
   // Ctrl/Cmd+K 快速切换器（QuickSwitcher）。
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // ? 打开快捷键速查表（输入框内的 ? 是正文，不拦）。

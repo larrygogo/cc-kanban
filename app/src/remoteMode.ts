@@ -19,3 +19,8 @@ export function markRemoteUi(): void {
 export function remoteUi(): boolean {
   return (globalThis as Record<string, unknown>)[FLAG] === true;
 }
+
+/** open_new_session_window 在远程转成的页内导航事件（transport 派发、mobile 入口渲染
+ *  sheet、ChatWindow 借它收窄屏抽屉）。放这里而非 mobile/transport：桌面组件也要监听,
+ *  不能反向 import 移动端模块。 */
+export const NEW_SESSION_EVENT = "meowo:remote-new-session";

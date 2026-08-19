@@ -11,11 +11,13 @@
 //     或转成页内事件(新建会话),其余静默 no-op。
 //  3. convertFileSrc —— 图片资源。桌面走 asset:// 协议,远程改指 `/file?path=&token=`(Message.tsx 零改)。
 import { mockIPC, mockWindows, mockConvertFileSrc } from "@tauri-apps/api/mocks";
+// open_new_session_window 转成的页内导航事件。常量本体在 remoteMode(ChatWindow 也要
+// 监听它收抽屉,不能反向 import 移动端模块),这里转出口保持 mobile 侧引用不变。
+import { NEW_SESSION_EVENT } from "../remoteMode";
 
 const TOKEN_KEY = "meowo.remote.token";
 const AUTH_LOST_EVENT = "meowo:remote-auth-lost";
-/** open_new_session_window 转成的页内导航事件:mobile 入口监听后叠加渲染 NewSessionPanel。 */
-export const NEW_SESSION_EVENT = "meowo:remote-new-session";
+export { NEW_SESSION_EVENT };
 
 export function getToken(): string | null {
   try {
