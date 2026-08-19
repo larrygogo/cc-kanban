@@ -126,3 +126,24 @@ body.remote-ui .chat-topbar {
   padding-bottom: env(safe-area-inset-bottom, 0);
   box-sizing: border-box;
 }
+
+/* 宽屏(桌面浏览器开远程页、平板/手机横屏):全屏 sheet 会大得离谱,还原桌面独立窗
+   的观感——460x520 固定居中卡(window.rs open_new_session_window 的原生尺寸)+ 压暗
+   背景。窄竖屏保持全屏 sheet。 */
+@media (min-width: 700px) {
+  .remote-new-session-overlay {
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: rgba(0, 0, 0, 0.55);
+  }
+
+  .remote-new-session-overlay .ns-window {
+    width: 460px;
+    height: min(520px, 100%);
+    padding-top: 0;
+    padding-bottom: 0;
+    border-radius: 12px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+  }
+}
