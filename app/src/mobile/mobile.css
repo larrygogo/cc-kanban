@@ -31,10 +31,10 @@ body.remote-ui .chat-topbar {
    行内小钮)会被它拉变形,触控热区靠整体 zoom 放大来保。 */
 @media (pointer: coarse) {
   body.remote-ui {
-    /* 整体等比放大:ChatWindow 的字号是「token + 硬编码 px」混排,只在 1 倍下协调。
-       不能用 --cc-ui(那是贴纸窗专用阶梯,只缩放 token 半边,会放出错乱的字号),
-       必须用标准 zoom 统一提——新式 zoom 下 viewport 单位不缩放,100dvh 布局不受影响。 */
-    zoom: 1.15;
+    /* 刻意不做整体放大。试过两条路都不行:--cc-ui 是贴纸窗专用阶梯,只缩放走 token
+       的半边字号(硬编码 px 原样),放出错乱的大小;zoom 对 100dvh 的语义各引擎实现
+       不一,移动端实测内容整体超高 15%,底部输入框被裁出屏。1:1 密度下字号协调,
+       手机上略紧凑但可用;要放大交给系统级缩放,不在这层赌浏览器行为。 */
     /* 长按选中/系统放大镜在聊天操作里多是误触,输入框单独放开。 */
     -webkit-user-select: none;
     user-select: none;
