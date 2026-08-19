@@ -5,6 +5,7 @@
  */
 import { useEffect, useLayoutEffect, useState } from "react";
 import { openProjectDir } from "../../api";
+import { remoteUi } from "../../remoteMode";
 import { useT } from "../../i18n";
 import { useMenuPopup } from "../menu";
 import { ArchiveIcon, ChevronDownIcon, TopIcon } from "../sticker/icons";
@@ -42,7 +43,8 @@ export function ChatTitleMenu({ title, cwd, archived, archiving, starred, onTogg
             <span className="chat-title-action-ico"><TopIcon /></span>
             <span className="dd-label">{starred ? t.sticker.unstar : t.sticker.star}</span>
           </button>
-          {cwd && (
+          {/* open_project_dir 开的是宿主文件管理器,/rpc 拒绝项——远程隐藏(侧栏同款动作同款门控)。 */}
+          {cwd && !remoteUi() && (
             // 菜单内刻意用原生 title：TooltipLayer 对 .dd-menu 区域静默（自绘提示会糊在菜单上）。
             <button type="button" role="menuitem" className="dd-item" title={cwd} onClick={() => pick(() => void openProjectDir(cwd).catch(() => {}))}>
               <span className="chat-title-action-ico">

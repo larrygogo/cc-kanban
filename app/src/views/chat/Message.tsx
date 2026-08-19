@@ -136,10 +136,12 @@ function Lightbox({ src, name, onClose }: { src: string; name: string; onClose: 
         onMouseLeave={onMouseUp}
         onDoubleClick={reset}
       >
+        {/* no-referrer:远程模式下 src 是带 token 的 /file URL,不许经 Referer 外泄。 */}
         <img
           src={src}
           alt={name}
           draggable={false}
+          referrerPolicy="no-referrer"
           style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }}
         />
       </div>
@@ -174,7 +176,7 @@ export function ImageRef({ path }: { path: string }) {
   return (
     <>
       <button type="button" className="chat-image-thumb-btn" title={name} onClick={() => setExpanded(true)}>
-        <img className="chat-image-thumb" src={src} alt={name} loading="lazy" onError={() => setFailed(true)} />
+        <img className="chat-image-thumb" src={src} alt={name} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} />
       </button>
       {/* 灯箱走 portal（在 Lightbox 内）：消息块开着 content-visibility（paint 包含），
           fixed 覆盖层留在消息里会被裁剪在消息框内。 */}

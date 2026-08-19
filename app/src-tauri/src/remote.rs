@@ -100,6 +100,9 @@ pub(crate) const BRIDGED_COMMANDS: &[&str] = &[
     // 只读杂项
     "get_settings",
     "host_os",
+    // 账号载荷只有展示字段(email/plan/登录方式标签),无任何密钥;新建会话页
+    // 靠它提示「当前用的是非默认账号」,不加白会静默丢提示。
+    "get_accounts",
 ];
 
 /// server 运行态。独立 `app.manage`（不进 AppState：那是命令数据面的托管，这里是
@@ -948,6 +951,9 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             s
         })),
         "host_os" => reply_ok(crate::host_os()),
+        // reply_ok 前提:get_accounts 返回 Vec 而非 Result(Result 会被 serde 包成
+        // {"Ok":…} 且照样 200)——改它签名时这里必须复检。
+        "get_accounts" => reply_ok(crate::get_accounts().await),
         // BRIDGED_COMMANDS 有而这里漏写的项落到此处：fail-closed，宁 404 不放行。
         _ => err_status(StatusCode::NOT_FOUND, "未知命令"),
     }
@@ -981,7 +987,12 @@ async fn file_handler(State(ctx): State<Ctx>, Query(q): Query<FileQuery>) -> Res
     match bytes {
         Ok(Ok(bytes)) => {
             let mime = mime_for(sniff_image_ext(&bytes));
-            ([("content-type", mime)], bytes).into_response()
+            // no-store:该 URL 的 query 里带 token,不许进浏览器磁盘缓存/中间缓存。
+            (
+                [("content-type", mime), ("cache-control", "no-store")],
+                bytes,
+            )
+                .into_response()
         }
         Ok(Err(status)) => err_status(status, "无法读取"),
         Err(_) => err_status(StatusCode::INTERNAL_SERVER_ERROR, "内部错误"),

@@ -264,6 +264,7 @@ export const zh = {
     queuedAnswerHint: (label: string) => `已选「${label}」，表单就绪后自动作答`,
     questionExternalHint: "请回到运行它的终端作答，完成后本卡自动关闭",
     questionMultiHint: "多选表单请到终端作答，完成后本卡自动关闭",
+    answerOnDesktop: "请在桌面端作答，完成后本卡自动关闭",
     customAnswerPlaceholder: "输入其他回答",
     addCustomAnswer: "添加回答",
     submitAnswer: "提交选择",
@@ -464,6 +465,7 @@ export const zh = {
     modeUnreachable: "没能切到该模式，当前账号或参数下不可用",
     modelProbing: "正在读取模型清单…",
     modelListUnavailable: (command: string) => `读不到模型清单，点这里到终端页用 ${command} 切换`,
+    modelListUnavailableRemote: (command: string) => `读不到模型清单，请在桌面端用 ${command} 切换`,
     modelGoTerminal: "去终端页切换模型",
     // 跨 provider 切换（切换引擎）：模型下拉的分组标题、确认文案与交接注入语。
     switchProvider: "切换引擎",

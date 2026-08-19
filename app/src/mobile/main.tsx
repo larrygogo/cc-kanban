@@ -31,9 +31,13 @@ const NewSessionPanel = React.lazy(() =>
 
 function RemoteApp() {
   // 新建会话在桌面开独立窗;远程转页内事件,这里叠加渲染 NewSessionPanel(会话列表/对话仍在底层)。
-  const [newSession, setNewSession] = React.useState(false);
+  // 事件 detail 里带卡片菜单的 cwd/provider 预填——桌面走 URL query / ns-prefill,远程两条都不通。
+  const [newSession, setNewSession] = React.useState<null | { cwd?: string | null; provider?: string | null }>(null);
   React.useEffect(() => {
-    const open = () => setNewSession(true);
+    const open = (e: Event) => {
+      const d = (e as CustomEvent).detail as { cwd?: string | null; provider?: string | null } | undefined;
+      setNewSession({ cwd: d?.cwd, provider: d?.provider });
+    };
     window.addEventListener(NEW_SESSION_EVENT, open);
     return () => window.removeEventListener(NEW_SESSION_EVENT, open);
   }, []);
@@ -42,7 +46,7 @@ function RemoteApp() {
       <ChatWindow />
       {newSession && (
         <div className="remote-new-session-overlay">
-          <NewSessionPanel onClose={() => setNewSession(false)} />
+          <NewSessionPanel onClose={() => setNewSession(null)} prefill={newSession} />
         </div>
       )}
     </>

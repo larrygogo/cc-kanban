@@ -552,7 +552,8 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // 声明「正在看」:后端 emitter 只对已注册的会话推 pty-output 实时帧,其余托管会话
     // 不再白付 base64 与 IPC(N 会话齐跑时那正是压垮前端的部分)。失败静默——快照轮询
     // 兜底,最多退化为无实时帧;卸载时注销走后端 CAS,重挂竞态下不会误清新实例的注册。
-    void registerTerminalViewer(sessionId).catch(() => {});
+    // 远程收不到 pty-output 推送(走快照轮询),且该命令不在 /rpc 白名单——短路省 404。
+    if (!remoteUi()) void registerTerminalViewer(sessionId).catch(() => {});
     // 输出流停滞检测节拍(判据见 terminalStreamStalled):挂载即重置水位——上一个
     // 会话/进程的旧水位不作数。
     lastByteAtRef.current = Date.now();
@@ -1017,7 +1018,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
 
     return () => {
       cancelled = true;
-      void unregisterTerminalViewer(sessionId).catch(() => {});
+      if (!remoteUi()) void unregisterTerminalViewer(sessionId).catch(() => {});
       window.clearInterval(remotePollTimer);
       window.clearInterval(stallTimer);
       window.clearTimeout(snapshotTimer);

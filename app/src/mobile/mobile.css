@@ -49,6 +49,19 @@ body.remote-ui .chat-topbar {
     font-size: max(16px, var(--fs-13, 13px));
   }
 
+  /* 消息正文/代码块同样放开:HTTP 非 secure context 下 navigator.clipboard 不存在,
+     复制按钮走 execCommand 回退,手动框选是最后一条兜底——全禁了内容一个字拿不走。 */
+  body.remote-ui .chat-message,
+  body.remote-ui .chat-md-pre {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* 全面屏 home 横条(~34px)会压住 composer 底边,补 safe-area 留白。 */
+  body.remote-ui .chat-compose {
+    margin-bottom: calc(var(--sp-18, 18px) + env(safe-area-inset-bottom, 0));
+  }
+
   /* 双击缩放在聊天操作里全是误触;不设 min-height,热区已随 zoom 变大。 */
   body.remote-ui button {
     touch-action: manipulation;
@@ -83,6 +96,12 @@ body.remote-ui .chat-topbar {
   opacity: 0.75;
   font-size: 14px;
   line-height: 1.5;
+}
+
+.remote-gate-card .remote-gate-err {
+  opacity: 1;
+  color: #e5484d;
+  font-size: 13px;
 }
 
 .remote-gate-card input {

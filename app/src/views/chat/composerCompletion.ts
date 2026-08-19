@@ -15,6 +15,7 @@ import {
 } from "react";
 import { listDirEntries, searchProjectFiles } from "../../api";
 import { pushEscLayer } from "../../escLayers";
+import { remoteUi } from "../../remoteMode";
 
 /** 光标前的 @token(无空白)。全角 ＠ 一并触发(中文输入法下 Shift+2 常打出全角)。 */
 export function detectAtToken(value: string, caret: number): string | null {
@@ -38,7 +39,9 @@ export function useAtFileCompletion({ cwd, prompt, setPrompt, promptInputRef }: 
   const atSeqRef = useRef(0);
   const atActive = atFiles.length ? Math.min(atIndex, atFiles.length - 1) : -1;
   useEffect(() => {
-    if (atQuery === null || !cwd) { setAtFiles([]); return; }
+    // 远程:list_dir_entries / search_project_files 是 /rpc 拒绝项(v1 砍文件浏览),
+    // 补全永远给不出候选——干脆不出菜单,免得看着像坏了。
+    if (atQuery === null || !cwd || remoteUi()) { setAtFiles([]); return; }
     const seq = ++atSeqRef.current;
     // 两种模式:
     // - 目录浏览:`@` 一打出立即列 cwd 顶层(Claude Code 惯例——不是打满 2 个字符才有

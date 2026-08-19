@@ -69,6 +69,49 @@ describe("remote transport", () => {
     off();
   });
 
+  it("空 token 的 401 不广播——那是「还没配对」,不是「令牌失效」", async () => {
+    // 首帧竞态的钉子:bootAppearance 在 TokenGate 存 token 前就发 get_settings,
+    // 若这发 401 触发清态,会把随后扫码存好的合法 token 一并清掉。
+    mockFetch({ status: 401, body: "" });
+    const lost = vi.fn();
+    const off = onAuthLost(lost);
+
+    await expect(invoke("get_settings", {})).rejects.toThrow();
+    expect(lost).not.toHaveBeenCalled();
+    // 请求在途中用户完成配对:后到的 401 同样不许动新 token。
+    setToken("fresh");
+    expect(getToken()).toBe("fresh");
+    off();
+  });
+
+  it("装桥即收取 hash 里的 token 并清 hash", () => {
+    window.location.hash = "#token=tok-from-qr";
+    installRemoteTransport();
+    expect(getToken()).toBe("tok-from-qr");
+    expect(window.location.hash).toBe("");
+  });
+
+  it("200 + 非 JSON(网关劫持页)按错误抛,不给调用方一坨字符串", async () => {
+    setToken("tok");
+    mockFetch({ status: 200, body: "<html>portal</html>" });
+    await expect(invoke("get_settings", {})).rejects.toThrow(/非 JSON/);
+  });
+
+  it("非 2xx 的非 JSON 响应收敛为状态码,不把整页 HTML 抛上 UI", async () => {
+    setToken("tok");
+    mockFetch({ status: 500, body: "<html><body>Internal Error</body></html>" });
+    await expect(invoke("get_settings", {})).rejects.toThrow("远程请求失败(500)");
+  });
+
+  it("数组/非对象参数在前端就拒,不发 400 去后端", async () => {
+    setToken("tok");
+    const fetchFn = mockFetch({ status: 200, body: "null" });
+    await expect(invoke("get_chat_history", [1] as unknown as Record<string, unknown>)).rejects.toThrow(
+      "只接受对象参数",
+    );
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
   it("open_new_session_window 不落网,转页内导航事件", async () => {
     const fetchFn = mockFetch({ status: 200, body: "" });
     const onNew = vi.fn();

@@ -647,7 +647,8 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
   // 时,改设置的人会以为没生效(另一个还在),不改的人则平白多一个不知从哪来的按钮。
   // 首帧占位与后端真实默认(button)一致,与看板同步改过——占位 context 会让 ⋯ 按钮延迟弹入。
   const [menuMode, setMenuMode] = useState<CardMenuMode>("button");
-  useSettingsEffect((s) => setMenuMode(s.card_menu_mode ?? "button"));
+  // 远程钉死 button 档:桌面设置若是 context(仅右键),触屏根本够不着菜单。
+  useSettingsEffect((s) => setMenuMode(remoteUi() ? "button" : (s.card_menu_mode ?? "button")));
   // 菜单内容按 id 现查:刷新后置顶/便签/归档态自动跟上,会话消失则菜单自然收起。
   const ctxItem = ctxMenu ? (sessions ?? []).find((s) => s.session.id === ctxMenu.sid) ?? null : null;
   // 置顶与看板共用同一份 localStorage(键沿用 meowo-starred,改键会丢用户已有数据),
@@ -1213,8 +1214,9 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
           onNewSession={() => void openNewSessionWindow({ cwd: ctxItem.cwd, provider: ctxItem.provider }).catch(() => {})}
           onOpenDir={!remoteUi() && ctxItem.cwd ? () => void openProjectDir(ctxItem.cwd!).catch(() => {}) : null}
           // 结束会话只对本 GUI 托管的 PTY 开放（与看板同一门控）：外部终端里跑的会话
-          // 杀不了，后台会话杀了也会被 supervisor 拉回来。
-          onEndSession={ctxItem.pty_managed && !ctxItem.background ? () => endSession(ctxItem) : null}
+          // 杀不了，后台会话杀了也会被 supervisor 拉回来。远程再叠一层门控:
+          // stop_managed_terminal 是 /rpc 拒绝项,点了必 404。
+          onEndSession={!remoteUi() && ctxItem.pty_managed && !ctxItem.background ? () => endSession(ctxItem) : null}
           onClose={() => setCtxMenu(null)}
         />
       )}

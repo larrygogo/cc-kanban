@@ -111,7 +111,22 @@ function CopyablePre({ children }: { children?: ReactNode }) {
     };
     if (navigator.clipboard?.writeText) {
       void navigator.clipboard.writeText(text).then(done).catch(() => {});
+      return;
     }
+    // 回退:远程页跑在明文 HTTP(局域网 IP 非 secure context),navigator.clipboard
+    // 直接是 undefined——没有这条回退,手机上代码一个字都拿不走。
+    const stage = document.createElement("textarea");
+    stage.value = text;
+    stage.style.position = "fixed";
+    stage.style.opacity = "0";
+    document.body.appendChild(stage);
+    stage.select();
+    try {
+      if (document.execCommand("copy")) done();
+    } catch {
+      /* 连 execCommand 都没有就没辙了 */
+    }
+    stage.remove();
   };
   // 语言角标：react-markdown 给 code 子元素挂 language-xxx 类，从子节点 props 里读。
   let lang: string | null = null;

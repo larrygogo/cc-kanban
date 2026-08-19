@@ -76,8 +76,9 @@ function pickFilesViaInput(): Promise<File[]> {
       resolve(files);
     };
     input.addEventListener("change", () => done(input.files ? Array.from(input.files) : []));
-    // 用户点「取消」:多数浏览器不发 change,只在窗口重新获焦后能判定放弃。延一拍让 change 先赢。
-    const onFocus = () => setTimeout(() => done([]), 300);
+    // 用户点「取消」:多数浏览器不发 change,只在窗口重新获焦后能判定放弃。延迟要给足:
+    // iOS/低端安卓的 change 可比 refocus 晚数百毫秒,300ms 会把真选中的照片静默吞掉。
+    const onFocus = () => setTimeout(() => done([]), 1000);
     window.addEventListener("focus", onFocus, { once: true });
     document.body.appendChild(input);
     input.click();
@@ -992,7 +993,8 @@ export function ChatWindow() {
     setDiffOpen(false);
     setDiffCollapsed(false);
     setDiffMaximized(false);
-    if (!cwd) { setGitSummary(null); return; }
+    // 远程无 GitDiff 入口且命令不在 /rpc 白名单:短路,别每次换会话白打一发 404。
+    if (!cwd || remoteUi()) { setGitSummary(null); return; }
     let cancelled = false;
     getGitDiffSummary(cwd)
       .then((result) => { if (!cancelled) setGitSummary(result); })
@@ -1207,7 +1209,9 @@ export function ChatWindow() {
   const currentAgentDescriptor = provider
     ? agentsForOptions?.find((agent) => agent.id === provider) ?? null
     : null;
-  const switchTargets = currentAgentDescriptor?.supports_chat_export
+  // switch_session_provider 会 spawn 宿主进程,是 /rpc 拒绝项——远程直接不给切换引擎分组,
+  // 免得用户走完不可逆确认后收一句 404。
+  const switchTargets = !remoteUi() && currentAgentDescriptor?.supports_chat_export
     ? (agentsForOptions ?? []).filter((agent) => agent.installed && agent.id !== provider)
     : [];
   // ── 接续会话的前序段历史（跨 provider 切换的连续性）──
@@ -1967,7 +1971,8 @@ export function ChatWindow() {
     // 剪贴板让 TUI 自己读(kimi/claude 的 composer 都支持多张图连续粘贴)。含非图片附件、
     // 或任一张落地失败(剪贴板写不进、占位符超时)都静默退回指令文本——那条路径对所有
     // agent 恒可用。
-    const clipMarker = chatUi?.clipboard_image_paste;
+    // 远程跳过:clipboard_set_image 是 /rpc 拒绝项,必 404 再回退——省掉每张图两发白请求。
+    const clipMarker = !remoteUi() && chatUi?.clipboard_image_paste;
     if (clipMarker && attachments.length > 0 && attachments.every((file) => file.image)) {
       if (await sendWithClipboardImages(prompt.trim(), clipMarker, attachments)) {
         setPrompt("");
@@ -2124,7 +2129,7 @@ export function ChatWindow() {
     modelProbeTimerRef.current = window.setTimeout(() => {
       endSilentProbe();
       setModelProbeFailed(true);
-      setSendError(t.chat.modelListUnavailable(modelMenuCommand));
+      setSendError(remoteUi() ? t.chat.modelListUnavailableRemote(modelMenuCommand) : t.chat.modelListUnavailable(modelMenuCommand));
     }, 12_000);
   };
   /// 结束静默探测：收掉 CLI 菜单、关识别窗口、清忙态。
@@ -2663,7 +2668,8 @@ export function ChatWindow() {
             {gitSummary && gitSummary.isRepo && gitSummary.files.length > 0 && <span className="chat-diff-btn-count">{gitSummary.files.length}</span>}
           </button>
         )}
-        {history?.ptyManaged && (
+        {/* stop_managed_terminal 是 /rpc 明确拒绝项(宿主进程生杀),远程按钮点了必 404——隐藏。 */}
+        {!remoteUi() && history?.ptyManaged && (
           <button type="button" className="chat-end" disabled={endingSession} onClick={() => void endSession()}>
             {endingSession ? t.chat.terminalStopping : t.chat.endSession}
           </button>
@@ -2705,7 +2711,8 @@ export function ChatWindow() {
               : <div className="chat-empty">{sessionId < 0
                   ? <div>
                       <div>{t.chat.emptyStarting}</div>
-                      {startingSlow && (
+                      {/* 远程没有终端视图(setView 被无害化),不给死按钮。 */}
+                      {startingSlow && !remoteUi() && (
                         /* 目的性跳转，不写视图偏好。 */
                         <button type="button" className="chat-empty-cta" onClick={() => setView("terminal")}>{t.chat.openTerminal}</button>
                       )}
@@ -2944,7 +2951,7 @@ export function ChatWindow() {
         title={t.chat.questionTitle}
         badge={t.chat.questionPending}
         sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setStructuredQuestion(null)}>{t.chat.attentionDismiss}</button>}
-        actions={history?.ptyManaged && <button type="button" className="is-allow" onClick={() => setView("terminal")}>{t.chat.answerInTerminal}</button>}
+        actions={!remoteUi() && history?.ptyManaged && <button type="button" className="is-allow" onClick={() => setView("terminal")}>{t.chat.answerInTerminal}</button>}
       >
         {/* 可点选排队的条件很严：托管会话（GUI 持有 PTY 才写得进按键）+ 单问题
             + 单选。多问题表单绝不可点——queuedAnswer 是单值、且匹配只按 label 不带
@@ -2958,9 +2965,10 @@ export function ChatWindow() {
           onToggle={(label) => setQueuedAnswer((current) => current === label ? null : label)}
         />
         <span>{!history?.ptyManaged
-          ? t.chat.questionExternalHint
+          ? (remoteUi() ? t.chat.answerOnDesktop : t.chat.questionExternalHint)
           : !answerableInCard
-          ? t.chat.questionMultiHint
+          // 远程没有终端视图,「去终端作答」的指路改成「回桌面端」。
+          ? (remoteUi() ? t.chat.answerOnDesktop : t.chat.questionMultiHint)
           : queuedAnswer
           ? t.chat.queuedAnswerHint(queuedAnswer)
           : t.chat.questionFormLoading}</span>
@@ -2996,7 +3004,9 @@ export function ChatWindow() {
             {escArmed ? t.chat.denyConfirmEsc : t.chat.deny}<kbd aria-hidden="true">Esc</kbd>
           </button>
           <button type="button" className="is-allow" disabled={resolvingApproval} onClick={() => void decideApproval("allow_once")}>{t.chat.allowOnce}</button>
-        </> : <button type="button" onClick={() => setView("terminal")}>{t.chat.openTerminal}</button>}
+        </> : remoteUi()
+          ? <span className="chat-remote-hint">{t.chat.answerOnDesktop}</span>
+          : <button type="button" onClick={() => setView("terminal")}>{t.chat.openTerminal}</button>}
       >
         {approval ? <>
           <div className="chat-approval-tool"><span>{t.chat.approvalTool}</span><code>{approval.toolName}</code></div>
@@ -3286,12 +3296,13 @@ export function ChatWindow() {
                   role="menuitem"
                   className="chat-model-item"
                   onClick={() => {
-                    if (modelProbeFailed) { setModelMenu(false); setView("terminal"); }
+                    // 远程没有终端页可去,探测失败也只给「重试探测」(探测走 PTY,远程可用)。
+                    if (modelProbeFailed && !remoteUi()) { setModelMenu(false); setView("terminal"); }
                     else void probeModelMenu();
                   }}
                 >
                   <span className="chat-model-item-text">
-                    <span className="chat-model-item-name">{modelProbeFailed ? t.chat.modelGoTerminal : t.chat.switchModel}</span>
+                    <span className="chat-model-item-name">{modelProbeFailed && !remoteUi() ? t.chat.modelGoTerminal : t.chat.switchModel}</span>
                   </span>
                 </button>
               )}
@@ -3554,14 +3565,14 @@ export function ChatWindow() {
             忙态只体现在模型按钮上。用户主动发的斜杠菜单命令照旧显示。 */}
         {menuWatching && !modelProbing && !terminalAttention && <div className="chat-send-error" role="status">
           <span>{t.chat.slashMenuOpened}</span>
-          <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>
+          {!remoteUi() && <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>}
           <button type="button" className="chat-send-takeover" onClick={cancelTerminalMenu}>{t.chat.slashMenuDismiss}</button>
         </div>}
         {/* 软拦非阻断横幅:消息已发出,提示终端可能有未识别的交互等待,给跳终端/收起两个出口。
             terminalAttention 出现说明识别成功变成了卡片,此横幅即让位。 */}
         {softPromptNotice && !terminalAttention && <div className="chat-send-error" role="status">
           <span>{t.chat.unrecognizedPromptNotice}</span>
-          <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>
+          {!remoteUi() && <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>}
           <button type="button" className="chat-send-takeover" onClick={() => setSoftPromptNotice(false)}>{t.chat.slashMenuDismiss}</button>
         </div>}
         </>}

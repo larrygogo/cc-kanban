@@ -2627,6 +2627,13 @@ button.stab {
 }
 .ns-browse:hover { background: var(--cc-surface-hover); color: var(--cc-text); }
 
+/* 远程端替代「去终端」类按钮的指路说明(卡片 actions 槽位里的短句)。 */
+.chat-remote-hint {
+  font-size: var(--fs-11);
+  color: var(--cc-text-faint);
+  align-self: center;
+}
+
 /* 远程端页内目录浏览(系统目录对话框在浏览器里弹不起来,改逐级下钻的就地列表)。
    融入 ns-picker 容器,与「最近」列表同构:不自带外框,展开时顶掉最近列表。 */
 .ns-dirbrowse { border-top: 1px solid var(--cc-border); }

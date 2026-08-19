@@ -253,6 +253,7 @@ export const en: Dict = {
     queuedAnswerHint: (label: string) => `Picked "${label}" — it will be applied once the form is ready`,
     questionExternalHint: "Answer in the terminal running this session; the card closes automatically",
     questionMultiHint: "Answer multi-select forms in the terminal; the card closes automatically",
+    answerOnDesktop: "Answer on the desktop; the card closes automatically",
     customAnswerPlaceholder: "Type another answer",
     addCustomAnswer: "Add answer",
     submitAnswer: "Submit choices",
@@ -437,6 +438,7 @@ export const en: Dict = {
     modeUnreachable: "Couldn't switch — unavailable for this account or launch flags",
     modelProbing: "Reading model list…",
     modelListUnavailable: (command: string) => `Can't read the model list — use ${command} on the Terminal tab`,
+    modelListUnavailableRemote: (command: string) => `Can't read the model list — use ${command} on the desktop`,
     modelGoTerminal: "Switch model in terminal",
     switchProvider: "Switch engine",
     switchProviderConfirm: (from: string, to: string) =>

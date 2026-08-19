@@ -74,13 +74,19 @@ function saveStoredOpts(provider: string, opts: Record<string, string>) {
   }
 }
 
-export function NewSessionPanel({ onClose }: { onClose?: () => void } = {}): ReactElement {
+export function NewSessionPanel({ onClose, prefill }: {
+  onClose?: () => void;
+  /** 远程页内打开时的预填(桌面走 URL query / ns-prefill 事件,远程两条都不通,改走 props)。 */
+  prefill?: { cwd?: string | null; provider?: string | null };
+} = {}): ReactElement {
+  const startCwd = prefill?.cwd != null ? normalizePath(prefill.cwd) : initialCwd;
+  const startProvider = (prefill?.provider ?? initialProvider) as AgentId | null;
   const t = useT();
   // 窗口以 visible:false 创建（window.rs），首帧渲染后再显示，消除打开瞬间的白框闪烁。
   useShowWhenReady();
-  const [cwd, setCwd] = useState(initialCwd);
+  const [cwd, setCwd] = useState(startCwd);
   // 首帧种子（settings.default_agent resolve 前）。真实默认值由后端给。
-  const [provider, setProvider] = useState<AgentId>(initialProvider ?? "claude");
+  const [provider, setProvider] = useState<AgentId>(startProvider ?? "claude");
   const [recent, setRecent] = useState<string[]>([]);
   const [hooks, setHooks] = useState<Record<string, HooksStatus>>({});
   const [busy, setBusy] = useState(false);
@@ -155,7 +161,7 @@ export function NewSessionPanel({ onClose }: { onClose?: () => void } = {}): Rea
 
   useEffect(() => {
     // 若从会话卡片菜单带 provider 参数打开，保留该参数；否则回退到设置里的默认 agent。
-    if (!initialProvider) {
+    if (!startProvider) {
       getSettings()
         .then((s) => setProvider(s.default_agent))
         .catch(() => {});
