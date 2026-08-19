@@ -130,8 +130,8 @@ export function RemoteAccessCard() {
                   <Dropdown value={selectedIp ?? ""} options={ipOptions} onChange={setSelectedIp} />
                 </div>
               )}
+              {/* 地址不明文上屏(那串 token 又长又吵还含凭据),只给复制按钮;二维码即是地址本体。 */}
               <div className="remote-url-row">
-                <code className="remote-url" title={url}>{url}</code>
                 <button type="button" className="remote-copy" onClick={copy}>
                   {copied ? t.remote.copied : t.remote.copy}
                 </button>

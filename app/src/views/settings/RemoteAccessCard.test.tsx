@@ -26,7 +26,7 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("RemoteAccessCard", () => {
-  it("开启后展示扫码地址且 URL 含 token 与端口;有 Tailscale 默认选它", async () => {
+  it("开启后二维码在场,复制拿到含 token 的完整地址;有 Tailscale 默认选它", async () => {
     api.getSettings.mockResolvedValue({
       ...SETTINGS_DEFAULTS,
       remote_access_enabled: true,
@@ -45,10 +45,18 @@ describe("RemoteAccessCard", () => {
       ],
       lastError: null,
     });
+    // 标注入参:vi.fn 零参推断会让 mock.calls[0][0] 变成空元组取值报 TS2493。
+    const writeText = vi.fn((_text: string) => Promise.resolve());
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     render(<RemoteAccessCard />);
 
-    const url = await screen.findByText(/^http:\/\/100\.64\.0\.7:18620\/#token=/);
-    expect(url.textContent).toContain(`#token=${TOKEN}`);
+    // 地址不明文上屏(含 token 的凭据串),入口只有复制按钮与二维码本体。
+    fireEvent.click(await screen.findByText(zh.remote.copy));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const copied = writeText.mock.calls[0][0];
+    expect(copied).toMatch(/^http:\/\/100\.64\.0\.7:18620\/#token=/);
+    expect(copied).toContain(`#token=${TOKEN}`);
+    expect(screen.queryByText(copied)).toBeNull();
     // 二维码就地生成(uqr renderSVG),扫码区确有 <svg>。
     expect(document.querySelector(".remote-qr svg")).toBeTruthy();
     // 选中候选的可达性说明如实标注。

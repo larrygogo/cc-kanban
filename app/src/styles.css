@@ -1842,24 +1842,11 @@ button.stab {
   gap: var(--sp-6);
   margin-top: var(--sp-6);
 }
+/* 地址不明文上屏,行内只剩复制按钮(完整地址走剪贴板)。 */
 .remote-url-row {
   display: flex;
   align-items: center;
-  gap: var(--sp-6);
   margin-top: var(--sp-6);
-  min-width: 0;
-}
-/* 地址单行省略:IP:端口段可核对即可,token 尾巴本就没法人眼核对,折四行只剩吵。
-   user-select:all 点一下仍全选完整值,复制按钮同样拿全量。 */
-.remote-url {
-  font-size: 12px;
-  color: var(--cc-text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  user-select: all;
-  flex: 1;
-  min-width: 0;
 }
 .remote-copy {
   flex: none;

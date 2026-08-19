@@ -630,7 +630,7 @@ export const en: Dict = {
     port: "Port",
     portDesc: "Port the phone connects to, default 18620",
     scan: "Scan to connect",
-    scanHint: "Scan with your phone, or open the address below in a browser",
+    scanHint: "Scan with your phone, or copy the address into a browser",
     netTailscale: "Tailscale",
     netLan: "LAN",
     hintTailscale: "Reachable whenever the phone has Tailscale",
