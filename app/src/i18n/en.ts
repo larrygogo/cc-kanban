@@ -109,6 +109,7 @@ export const en: Dict = {
     browse: "Browse…",
     up: "Up",
     pickHere: "Use this folder",
+    drives: "Pick a drive",
     noSubdirs: "No subfolders",
     recent: "Recent",
     agent: "Agent",

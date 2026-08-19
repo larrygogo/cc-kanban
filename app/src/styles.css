@@ -2627,13 +2627,9 @@ button.stab {
 }
 .ns-browse:hover { background: var(--cc-surface-hover); color: var(--cc-text); }
 
-/* 远程端页内目录浏览(系统目录对话框在浏览器里弹不起来,改逐级下钻的就地列表)。 */
-.ns-dirbrowse {
-  margin-top: var(--sp-6);
-  border: 1px solid var(--cc-border);
-  border-radius: var(--r-md);
-  overflow: hidden;
-}
+/* 远程端页内目录浏览(系统目录对话框在浏览器里弹不起来,改逐级下钻的就地列表)。
+   融入 ns-picker 容器,与「最近」列表同构:不自带外框,展开时顶掉最近列表。 */
+.ns-dirbrowse { border-top: 1px solid var(--cc-border); }
 .ns-dirbrowse-head {
   display: flex;
   align-items: center;
@@ -2642,33 +2638,27 @@ button.stab {
 }
 .ns-dirbrowse-head .ns-browse { border-left: none; }
 .ns-dirbrowse-head .ns-browse:disabled { opacity: 0.4; cursor: default; }
+.ns-dirbrowse-pick,
+.ns-dirbrowse-pick:hover { color: var(--cc-accent-text); }
 .ns-dirbrowse-path {
   flex: 1;
   min-width: 0;
-  font-size: var(--fs-11);
-  color: var(--cc-text-faint);
+  text-align: center;
+  font-size: var(--fs-12);
+  font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.ns-dirbrowse-list { max-height: 220px; overflow-y: auto; }
-.ns-dirbrowse-item {
+.ns-dirbrowse-list {
   display: flex;
-  align-items: center;
-  gap: var(--sp-6);
-  width: 100%;
-  padding: var(--sp-6) var(--sp-10);
-  border: none;
-  background: transparent;
-  color: var(--cc-text);
-  font-size: var(--fs-12);
-  font-family: inherit;
-  cursor: pointer;
-  text-align: left;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-height: 200px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--sp-2) var(--sp-3);
 }
-.ns-dirbrowse-item:hover { background: var(--cc-surface-hover); }
-.ns-dirbrowse-item > svg { flex: none; color: var(--cc-text-faint); }
-.ns-dirbrowse-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ns-dirbrowse-empty {
   padding: var(--sp-8) var(--sp-10);
   font-size: var(--fs-11);

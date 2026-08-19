@@ -114,6 +114,7 @@ export const zh = {
     browse: "浏览…",
     up: "上一级",
     pickHere: "用这个目录",
+    drives: "选择磁盘",
     noSubdirs: "没有子目录",
     recent: "最近",
     agent: "Agent",

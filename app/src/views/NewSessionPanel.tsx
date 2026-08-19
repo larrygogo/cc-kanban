@@ -356,13 +356,16 @@ export function NewSessionPanel({ onClose }: { onClose?: () => void } = {}): Rea
                   >
                     {t.newSession.up}
                   </button>
+                  {/* 只显当前目录名:整条路径在窄屏必被截断,反而遮住最有信息量的末段。 */}
                   <span className="ns-dirbrowse-path" title={browse.path}>
-                    {browse.path}
+                    {browse.path
+                      ? (browse.path.split(/[\\/]/).filter(Boolean).pop() ?? browse.path)
+                      : t.newSession.drives}
                   </span>
                   {browse.path && (
                     <button
                       type="button"
-                      className="ns-browse"
+                      className="ns-browse ns-dirbrowse-pick"
                       onClick={() => {
                         setCwd(normalizePath(browse.path));
                         setBrowse(null);
@@ -377,11 +380,11 @@ export function NewSessionPanel({ onClose }: { onClose?: () => void } = {}): Rea
                     <button
                       key={d.path}
                       type="button"
-                      className="ns-dirbrowse-item"
+                      className="ns-recent-item"
                       onClick={() => browseTo(d.path)}
                     >
                       <FolderIcon />
-                      <span className="ns-dirbrowse-name">{d.name}</span>
+                      <span className="ns-recent-name">{d.name}</span>
                     </button>
                   ))}
                   {browse.dirs.length === 0 && (
@@ -390,7 +393,8 @@ export function NewSessionPanel({ onClose }: { onClose?: () => void } = {}): Rea
                 </div>
               </div>
             )}
-            {recent.length > 0 && shownRecent.length > 0 && (
+            {/* 浏览器展开时顶掉「最近」列表:两块可滚列表叠放又挤又乱。 */}
+            {!browse && recent.length > 0 && shownRecent.length > 0 && (
               <div className="ns-recent-list">
                 {shownRecent.map((r) => (
                   <button
