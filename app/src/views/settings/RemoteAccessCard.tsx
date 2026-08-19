@@ -5,7 +5,8 @@
 // 落盘后由后端 remote::apply 热生效；token 由 remote_access_info 惰性生成（首次开启才产生）。
 import { useCallback, useEffect, useState } from "react";
 import { renderSVG } from "uqr";
-import { remoteAccessInfo, type RemoteAccessInfo } from "../../api";
+import { regenerateRemoteToken, remoteAccessInfo, type RemoteAccessInfo } from "../../api";
+import { appConfirm } from "../../confirm";
 import { useT } from "../../i18n";
 import { useSettingsState } from "./state";
 import { Switch } from "./widgets";
@@ -134,6 +135,19 @@ export function RemoteAccessCard() {
               <div className="remote-url-row">
                 <button type="button" className="remote-copy" onClick={copy}>
                   {copied ? t.remote.copied : t.remote.copy}
+                </button>
+                {/* 换发即吊销:apply 比对 token 差异重启 server,已配对手机全部 401 回配对页。 */}
+                <button
+                  type="button"
+                  className="remote-copy"
+                  onClick={() => {
+                    void appConfirm(t.remote.regenerateConfirm, { title: t.remote.regenerate, danger: true }).then((yes) => {
+                      if (!yes) return;
+                      void regenerateRemoteToken().then(() => refresh()).catch(() => {});
+                    });
+                  }}
+                >
+                  {t.remote.regenerate}
                 </button>
               </div>
               {selectedKind && (

@@ -101,6 +101,8 @@ pub(crate) const BRIDGED_COMMANDS: &[&str] = &[
     // 只读杂项
     "get_settings",
     "host_os",
+    // /file 降级凭据领取:须持主 token 才调得动,回的是只够读图片目录的次级凭据。
+    "file_access_token",
     // 账号载荷只有展示字段(email/plan/登录方式标签),无任何密钥;新建会话页
     // 靠它提示「当前用的是非默认账号」,不加白会静默丢提示。
     "get_accounts",
@@ -126,6 +128,8 @@ struct RuntimeInner {
 struct Running {
     port: u16,
     token: String,
+    /// /file 降级凭据(见 Ctx::file_token)。每次启动新发,重启即吊销旧值。
+    file_token: String,
     /// notify_one 存 permit：serve 任务尚未开始等也不会丢关停信号。
     shutdown: Arc<tokio::sync::Notify>,
 }
@@ -360,6 +364,22 @@ fn list_subdirectories_sync(path: Option<&str>) -> Result<DirListing, String> {
     })
 }
 
+/// 设置页「重新生成令牌」（**桌面专用命令，不进 /rpc 白名单**——远端不许自己续命）。
+/// 换发即吊销：apply 比对 token 差异会重启 server，所有已配对手机 401 回配对页。
+#[tauri::command]
+pub(crate) async fn regenerate_remote_token(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        crate::settings::update_settings(|s| {
+            s.remote_access_token = generate_token()?;
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    apply(&app);
+    Ok(())
+}
+
 /// 常量时间比较（逐字节 |= 异或）。长度不同直接 false——token 长度本就是公开信息
 /// （generate_token 恒 64 字符），不构成泄露。
 fn token_matches(expected: &str, provided: &str) -> bool {
@@ -443,12 +463,22 @@ async fn apply_with(app: &tauri::AppHandle, enabled: bool, port: u32, token: Str
         }
     };
     let shutdown = Arc::new(tokio::sync::Notify::new());
-    let router = build_router(app.clone(), token.clone());
+    // /file 降级凭据:RNG 不可用就直接不启动(与主 token 同一严格标准——静默退化成
+    // 「file_token 恒空串」会让空 token 匹配逻辑埋雷)。
+    let file_token = match generate_token() {
+        Ok(t) => t,
+        Err(e) => {
+            set_error(Some(format!("生成图片凭据失败：{e}")));
+            return;
+        }
+    };
+    let router = build_router(app.clone(), token.clone(), file_token.clone());
     {
         let mut inner = runtime.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.running = Some(Running {
             port: port16,
             token,
+            file_token,
             shutdown: shutdown.clone(),
         });
         inner.last_error = None;
@@ -468,9 +498,14 @@ async fn apply_with(app: &tauri::AppHandle, enabled: bool, port: u32, token: Str
 struct Ctx {
     app: tauri::AppHandle,
     token: Arc<str>,
+    /// /file 专用降级凭据(每次 server 启动随机新发,经 /rpc file_access_token 领取):
+    /// <img src> 的 query 里不再携带主 token——它泄露(devtools/长按开新页/截图)只丢
+    /// 「读两个图片目录」的能力,不丢 /rpc 全量能力。主 token 在 /file 上仍被接受
+    /// (领取前的首屏图片经它回退加载)。
+    file_token: Arc<str>,
 }
 
-fn build_router(app: tauri::AppHandle, token: String) -> Router {
+fn build_router(app: tauri::AppHandle, token: String, file_token: String) -> Router {
     Router::new()
         .route("/rpc/{command}", post(rpc_handler))
         .route("/file", get(file_handler))
@@ -479,6 +514,7 @@ fn build_router(app: tauri::AppHandle, token: String) -> Router {
         .with_state(Ctx {
             app,
             token: token.into(),
+            file_token: file_token.into(),
         })
 }
 
@@ -968,6 +1004,15 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
                 .map(strip_remote_token),
         ),
         "host_os" => reply_ok(crate::host_os()),
+        "file_access_token" => {
+            let runtime = app.state::<RemoteRuntime>();
+            let inner = runtime.inner.lock().unwrap_or_else(|e| e.into_inner());
+            match &inner.running {
+                Some(r) => reply_ok(r.file_token.clone()),
+                // 请求既然进得来,server 必在跑;此臂只是锁竞态下的兜底。
+                None => err_status(StatusCode::SERVICE_UNAVAILABLE, "服务未就绪"),
+            }
+        }
         // reply_ok 前提:get_accounts 返回 Vec 而非 Result(Result 会被 serde 包成
         // {"Ok":…} 且照样 200)——改它签名时这里必须复检。
         "get_accounts" => reply_ok(crate::get_accounts().await),
@@ -997,7 +1042,9 @@ struct FileQuery {
 /// tauri.conf.json 的 assetProtocol scope（`$HOME/.claude/image-cache/**` 与
 /// `$TEMP/meowo-paste/**`）——桌面端 convertFileSrc 本来也只放行这两处。
 async fn file_handler(State(ctx): State<Ctx>, Query(q): Query<FileQuery>) -> Response {
-    if !token_matches(&ctx.token, &q.token) {
+    // 主 token 或 /file 降级凭据(见 Ctx::file_token)均可:降级凭据是 <img src> 的
+    // 常规载体,主 token 只在前端尚未领到降级凭据的首屏回退时出现。
+    if !token_matches(&ctx.token, &q.token) && !token_matches(&ctx.file_token, &q.token) {
         return err_status(StatusCode::UNAUTHORIZED, "未授权");
     }
     let bytes = tauri::async_runtime::spawn_blocking(move || read_scoped_file(&q.path)).await;

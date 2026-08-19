@@ -5,7 +5,7 @@
 // 令牌失效(rpc 收 401)时 transport 广播 auth-lost,这里清态退回配对页,并说明原因——
 // 静默弹回而不解释,用户只会反复点「连接」。
 import { useEffect, useState, type ReactNode } from "react";
-import { getToken, setToken, clearToken, onAuthLost, probeToken } from "./transport";
+import { getToken, setToken, clearToken, onAuthLost, probeToken, primeFileToken } from "./transport";
 
 export function TokenGate({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState<boolean>(() => getToken() != null);
@@ -32,6 +32,7 @@ export function TokenGate({ children }: { children: ReactNode }) {
       setChecking(false);
       if (ok) {
         setToken(t);
+        primeFileToken();
         setReady(true);
       } else {
         setError("invalid");

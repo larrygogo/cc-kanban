@@ -1845,10 +1845,11 @@ button.stab {
   gap: var(--sp-6);
   margin-top: var(--sp-6);
 }
-/* 地址不明文上屏,行内只剩复制按钮(完整地址走剪贴板)。 */
+/* 地址不明文上屏,行内是复制与重新生成两颗按钮(完整地址走剪贴板)。 */
 .remote-url-row {
   display: flex;
   align-items: center;
+  gap: var(--sp-6);
   margin-top: var(--sp-6);
 }
 .remote-copy {

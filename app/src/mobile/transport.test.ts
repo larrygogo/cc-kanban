@@ -8,6 +8,7 @@ import {
   setToken,
   clearToken,
   onAuthLost,
+  primeFileToken,
   NEW_SESSION_EVENT,
 } from "./transport";
 
@@ -170,5 +171,18 @@ describe("remote transport", () => {
     expect(src).toContain("/file?path=");
     expect(src).toContain(encodeURIComponent("C:/img/a.png"));
     expect(src).toContain("token=tok-xyz");
+  });
+
+  it("领到 /file 降级凭据后,图片 URL 不再携带主 token", async () => {
+    setToken("main-tok");
+    const fetchFn = mockFetch({ status: 200, body: JSON.stringify("file-tok") });
+    primeFileToken();
+    await vi.waitFor(() => expect(fetchFn).toHaveBeenCalledTimes(1));
+    // rpc 的 then 链要跨多个微任务,等到 URL 真切换为止。
+    await vi.waitFor(() => expect(convertFileSrc("C:/img/a.png")).toContain("token=file-tok"));
+    expect(convertFileSrc("C:/img/a.png")).not.toContain("main-tok");
+    // 主 token 换代(重配对)即弃旧降级凭据,回退主 token 直至重领。
+    setToken("next-main");
+    expect(convertFileSrc("C:/img/a.png")).toContain("token=next-main");
   });
 });

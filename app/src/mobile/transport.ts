@@ -33,8 +33,10 @@ export function setToken(token: string): void {
   } catch {
     /* 隐私模式禁写:留内存态,刷新即回配对页,可接受 */
   }
-  // 重新配对 = 解除失效闩,后续 401 才能再次触发回闸门。
+  // 重新配对 = 解除失效闩,后续 401 才能再次触发回闸门;主 token 换代通常意味着
+  // server 已重启,旧 /file 降级凭据一并作废,清掉待重领。
   authLostAnnounced = false;
+  fileToken = null;
 }
 
 export function clearToken(): void {
@@ -43,6 +45,7 @@ export function clearToken(): void {
   } catch {
     /* ignore */
   }
+  fileToken = null;
 }
 
 /** 首帧从 URL fragment 收取 token 并立即清 hash(令牌不进服务器日志、不留地址栏历史)。
@@ -93,6 +96,22 @@ export async function probeToken(token: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** /file 降级凭据:图片 <img src> 的 query 里不再携带主 token(泄露只丢「读图片目录」
+ *  能力,不丢 /rpc 全量)。每次 server 启动新发,持主 token 经 /rpc 领取;领到前
+ *  convertFileSrc 回退主 token(首屏短暂窗口,与旧行为等价)。 */
+let fileToken: string | null = null;
+
+export function primeFileToken(): void {
+  if (fileToken || !getToken()) return;
+  void rpc("file_access_token", {})
+    .then((t) => {
+      if (typeof t === "string" && t) fileToken = t;
+    })
+    .catch(() => {
+      /* 领不到就一直用主 token 回退,功能不受损 */
+    });
 }
 
 /** 请求超时护栏:挂起的 fetch 永不 settle 会把自调度轮询链(审批 tick、对话流 busyRef)
@@ -187,6 +206,8 @@ async function rpc(cmd: string, args: unknown): Promise<unknown> {
 export function installRemoteTransport(): void {
   // 先收 hash 里的 token 再装桥:装完桥的下一行(bootAppearance)就会发第一发 rpc。
   primeTokenFromHash();
+  // 已配对(含刚从 hash 收取):顺手领 /file 降级凭据;未配对时 TokenGate 验证通过后再领。
+  primeFileToken();
   mockWindows("chat");
   mockConvertFileSrc("windows");
 
@@ -196,7 +217,8 @@ export function installRemoteTransport(): void {
   }).__TAURI_INTERNALS__;
   if (internals) {
     internals.convertFileSrc = (path: string) => {
-      const token = getToken() ?? "";
+      // 优先降级凭据(primeFileToken 领取);未就绪时回退主 token,保首屏图片可加载。
+      const token = fileToken ?? getToken() ?? "";
       return `/file?path=${encodeURIComponent(path)}&token=${encodeURIComponent(token)}`;
     };
   }

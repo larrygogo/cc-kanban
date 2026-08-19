@@ -745,6 +745,11 @@ export function remoteAccessInfo(): Promise<RemoteAccessInfo> {
   return invoke("remote_access_info");
 }
 
+/** 重新生成远程访问令牌（桌面专用）。换发即吊销:server 重启,已配对手机全部回配对页。 */
+export function regenerateRemoteToken(): Promise<void> {
+  return invoke("regenerate_remote_token");
+}
+
 /** 全部会话里正在等用户的清单(审批+同步题面)。远程徽标 3s 扫描用——push 事件到不了
  *  浏览器,非当前会话的审批只能靠它点亮侧栏徽标;桌面走事件,不调这条。 */
 export function awaitingInteractionSessions(): Promise<number[]> {

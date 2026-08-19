@@ -3643,7 +3643,7 @@ export function ChatWindow() {
         {/* 软拦非阻断横幅:消息已发出,提示终端可能有未识别的交互等待,给跳终端/收起两个出口。
             terminalAttention 出现说明识别成功变成了卡片,此横幅即让位。 */}
         {softPromptNotice && !terminalAttention && <div className="chat-send-error" role="status">
-          <span>{t.chat.unrecognizedPromptNotice}</span>
+          <span>{remoteUi() ? t.chat.unrecognizedPromptNoticeRemote : t.chat.unrecognizedPromptNotice}</span>
           {!remoteUi() && <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>}
           <button type="button" className="chat-send-takeover" onClick={() => setSoftPromptNotice(false)}>{t.chat.slashMenuDismiss}</button>
         </div>}
