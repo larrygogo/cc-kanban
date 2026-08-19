@@ -10,16 +10,9 @@ body {
 }
 
 body.remote-ui {
-  /* 整体等比放大:ChatWindow 的字号是「token + 硬编码 px」混排,只在 1 倍下协调。
-     不能用 --cc-ui(那是贴纸窗专用阶梯,只缩放 token 半边,会放出错乱的字号),
-     必须用标准 zoom 统一提——新式 zoom 下 viewport 单位不缩放,100dvh 布局不受影响。 */
-  zoom: 1.15;
   /* 移动端浏览器地址栏收放会改 vh;用 dvh 让根容器贴合实际可视高度,避免底部输入框被顶栏截。 */
   height: 100dvh;
   overflow: hidden;
-  /* 长按选中/系统放大镜在聊天操作里多是误触,输入框单独放开。 */
-  -webkit-user-select: none;
-  user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -32,19 +25,34 @@ body.remote-ui .chat-topbar {
   padding-top: env(safe-area-inset-top, 0);
 }
 
-/* 输入框/文本域放开选择与缩放,否则手机上无法选中已输入文本、粘贴不便。 */
-body.remote-ui input,
-body.remote-ui textarea {
-  -webkit-user-select: text;
-  user-select: text;
-  /* iOS Safari 对 <16px 的输入框会自动放大整页,统一钉到 16px 起免抖。 */
-  font-size: max(16px, var(--fs-13, 13px));
-}
+/* 触屏专属调优。远程页也会被桌面浏览器打开(同一局域网的另一台电脑),鼠标环境必须
+   按 1:1 桌面密度渲染——这些规则无条件套用时,16px 输入框会撑肥侧栏搜索框、禁选中
+   会让鼠标无法复制聊天文本。刻意不做钝器式 button min-height:紧凑图标按钮(筛选、
+   行内小钮)会被它拉变形,触控热区靠整体 zoom 放大来保。 */
+@media (pointer: coarse) {
+  body.remote-ui {
+    /* 整体等比放大:ChatWindow 的字号是「token + 硬编码 px」混排,只在 1 倍下协调。
+       不能用 --cc-ui(那是贴纸窗专用阶梯,只缩放 token 半边,会放出错乱的字号),
+       必须用标准 zoom 统一提——新式 zoom 下 viewport 单位不缩放,100dvh 布局不受影响。 */
+    zoom: 1.15;
+    /* 长按选中/系统放大镜在聊天操作里多是误触,输入框单独放开。 */
+    -webkit-user-select: none;
+    user-select: none;
+  }
 
-/* 触控热区:桌面按钮多为 hover 精瞄尺寸,手指需要 ≥40px 命中面。只补内边距不改视觉高度基线。 */
-body.remote-ui button {
-  min-height: 40px;
-  touch-action: manipulation;
+  /* 输入框/文本域放开选择与缩放,否则手机上无法选中已输入文本、粘贴不便。 */
+  body.remote-ui input,
+  body.remote-ui textarea {
+    -webkit-user-select: text;
+    user-select: text;
+    /* iOS Safari 对 <16px 的输入框会自动放大整页,统一钉到 16px 起免抖。 */
+    font-size: max(16px, var(--fs-13, 13px));
+  }
+
+  /* 双击缩放在聊天操作里全是误触;不设 min-height,热区已随 zoom 变大。 */
+  body.remote-ui button {
+    touch-action: manipulation;
+  }
 }
 
 /* 配对闸门(TokenGate)。首屏唯一界面,居中一张卡。 */
