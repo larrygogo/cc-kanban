@@ -188,6 +188,7 @@ export const zh = {
     // 新建会话认领前（负数临时 id）：CLI 正在冷启动，说「没有记录」是谎报。
     emptyStarting: "会话正在启动…",
     loading: "正在读取对话…",
+    pickSession: "从侧栏选择一个会话",
     loadEarlier: "加载更早的对话",
     loadingEarlier: "正在加载…",
     loadError: "读取对话失败，正在重试",

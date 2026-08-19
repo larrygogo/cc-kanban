@@ -180,6 +180,7 @@ export const en: Dict = {
     emptyWorking: "The agent is already working — the conversation will appear shortly",
     emptyStarting: "Starting session…",
     loading: "Loading conversation…",
+    pickSession: "Pick a session from the sidebar",
     loadEarlier: "Load earlier messages",
     loadingEarlier: "Loading…",
     loadError: "Could not read the conversation. Retrying…",

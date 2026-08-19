@@ -42,10 +42,19 @@ import { listAgents, type AgentDescriptor } from "../api";
 // 「切换引擎」分组的目标 agent 图标（前端资产表，未知 id 走中性兜底）。
 import { agentAssets, tintStyle } from "../providers";
 
+/** 远程刷新后回到上次看的会话(桌面开窗恒带 ?sessionId,不落到这条)。 */
+const REMOTE_LAST_SESSION_KEY = "meowo-remote-last-session";
+
 function initialSessionId(): number {
   const value = new URLSearchParams(window.location.search).get("sessionId");
   const id = Number(value);
-  return Number.isSafeInteger(id) && id !== 0 ? id : 0;
+  if (Number.isSafeInteger(id) && id !== 0) return id;
+  if (remoteUi()) {
+    const stored = Number(localStorage.getItem(REMOTE_LAST_SESSION_KEY));
+    if (Number.isSafeInteger(stored) && stored > 0) return stored;
+  }
+  // 0 = 尚未选中任何会话(仅远程首开会出现):渲染「去侧栏选会话」空态,不是加载态。
+  return 0;
 }
 
 const SIDEBAR_COLLAPSED_KEY = "meowo-chat-sidebar-collapsed";
@@ -862,6 +871,21 @@ export function ChatWindow() {
     window.addEventListener(NEW_SESSION_EVENT, close);
     return () => window.removeEventListener(NEW_SESSION_EVENT, close);
   }, []);
+  // 远程首开没有会话上下文:窄屏自动拉开抽屉让用户先选,别对着「去侧栏选会话」空态干瞪眼。
+  // 只在「未选中」时生效;用户手动收起抽屉不会被强行重开(依赖没变,effect 不重跑)。
+  useEffect(() => {
+    if (remoteUi() && sessionId === 0 && narrow) setOverlaySidebar(true);
+  }, [sessionId, narrow]);
+  // 远程记住最后看的会话:刷新/重开页面直接回到它(桌面开窗恒带 query,不用这条)。
+  useEffect(() => {
+    if (remoteUi() && sessionId > 0) {
+      try {
+        localStorage.setItem(REMOTE_LAST_SESSION_KEY, String(sessionId));
+      } catch {
+        /* 隐私模式禁写:退化为每次都要手选 */
+      }
+    }
+  }, [sessionId]);
   // Ctrl/Cmd+K 快速切换器（QuickSwitcher）。
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // ? 打开快捷键速查表（输入框内的 ? 是正文，不拦）。
@@ -1373,7 +1397,9 @@ export function ChatWindow() {
 
   const refresh = useCallback(async () => {
     if (sessionId <= 0 || busyRef.current) {
-      if (sessionId < 0) setLoading(false);
+      // 0(远程未选会话)与负数(冷启动临时 id)都不该停留在加载态——0 漏掉的话
+      // 「正在读取对话…」会永远挂着。
+      if (sessionId <= 0) setLoading(false);
       return;
     }
     busyRef.current = true;
@@ -2691,7 +2717,8 @@ export function ChatWindow() {
         {failed && items.length > 0 && (
           <div className="chat-sync-warn" role="status">{t.chat.loadError}</div>
         )}
-        {loading ? <div className="chat-empty">{t.chat.loading}</div>
+        {sessionId === 0 ? <div className="chat-empty">{t.chat.pickSession}</div>
+          : loading ? <div className="chat-empty">{t.chat.loading}</div>
           : failed && items.length === 0 ? <div className="chat-empty is-error">{t.chat.loadError}</div>
           : history && !history.supported ? (
             /* 不提供结构化 transcript 的 agent：hook 落库的最近往来仍然是真实数据，先渲染它，
@@ -3018,7 +3045,8 @@ export function ChatWindow() {
         {/* 降级分支仅托管会话可达(渲染条件已含 ptyManaged),文案恒为「正在读取终端」。 */}
         </> : <span>{t.chat.approvalReadingTerminal}</span>}
       </ApprovalCard>}
-      {view === "chat" && <footer ref={composeRef} className={"chat-compose" + (composerLocked ? " is-locked" : "") + (composerGated || supersededTo != null ? " is-gated" : "")}>
+      {/* sessionId=0(远程未选会话)没有可发送的对象,composer 整体不渲染。 */}
+      {view === "chat" && sessionId !== 0 && <footer ref={composeRef} className={"chat-compose" + (composerLocked ? " is-locked" : "") + (composerGated || supersededTo != null ? " is-gated" : "")}>
         {supersededTo != null ? <div className="chat-compose-gate">
           <span>{t.chat.supersededBanner}</span>
           <div className="chat-compose-gate-actions">
