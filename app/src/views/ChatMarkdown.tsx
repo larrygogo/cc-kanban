@@ -115,12 +115,18 @@ function CopyablePre({ children }: { children?: ReactNode }) {
     }
     // 回退:远程页跑在明文 HTTP(局域网 IP 非 secure context),navigator.clipboard
     // 直接是 undefined——没有这条回退,手机上代码一个字都拿不走。
+    // iOS Safari 三件套:readOnly(否则弹键盘且可能不建选区)、钉在 (0,0)(fixed 不给
+    // 坐标会落在静态位,select 把页面滚走)、setSelectionRange(iOS 对 select() 不认账)。
     const stage = document.createElement("textarea");
     stage.value = text;
+    stage.readOnly = true;
     stage.style.position = "fixed";
+    stage.style.top = "0";
+    stage.style.left = "0";
     stage.style.opacity = "0";
     document.body.appendChild(stage);
-    stage.select();
+    stage.focus();
+    stage.setSelectionRange(0, stage.value.length);
     try {
       if (document.execCommand("copy")) done();
     } catch {

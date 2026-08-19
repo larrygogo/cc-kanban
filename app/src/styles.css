@@ -1827,6 +1827,9 @@ button.stab {
 
 /* 手机远程配对卡：端口窄输入 + 扫码区。 */
 .remote-port-input { width: 96px; text-align: center; }
+/* 配对行:二维码钉在行右控件位,不随 .row 通用规则漂移(此前该类无定义,布局全靠
+   .row 撑——自审 L9)。 */
+.remote-pair-row .remote-qr { margin-left: auto; }
 /* 二维码白底留边:深色主题下纯 SVG 直贴会与背景糊在一起,扫不出来。 */
 .remote-qr {
   background: #fff;
@@ -2661,6 +2664,7 @@ button.stab {
   font-size: var(--fs-11);
   color: var(--cc-text-faint);
 }
+.ns-dirbrowse-err { color: var(--cc-err); }
 
 /* 文本输入 / 下拉：统一的深色控件，focus 时翡翠绿描边。 */
 .ns-input {
@@ -4260,6 +4264,8 @@ select.ns-input {
   background: var(--cc-text);
 }
 .chat-compose .chat-send-button:disabled { color: var(--cc-text-faint); background: color-mix(in srgb, var(--cc-text) 9%, var(--cc-bg)); opacity: 1; }
+/* 远程有草稿时的独立停止钮(触屏无 Ctrl+Enter,主钮此时是发送):小一号,居于主钮左侧。 */
+.chat-compose .chat-send-button.chat-stop-secondary { width: 32px; height: 32px; }
 /* 停止态：主圆钮原地变成停止键，不换位置也不换形状——回合运行中输入框是空的时，右下角
    这颗钮唯一合理的动作就是「停」。常态仍是发送键的实心底色（免得一个常驻按钮把 composer
    染成告警区），hover 才亮出中止红。

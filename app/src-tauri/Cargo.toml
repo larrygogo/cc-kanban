@@ -115,7 +115,7 @@ dunce = "1"
 # codex hook 预信任的 trusted_hash 计算（SHA-256）。
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader"] }
 uiautomation = "0.25"
 tauri-winrt-notification = "0.7"
 # 点击 toast 后从"通知中心"移除本应用的已投递通知（tauri-winrt-notification 本身不暴露历史清除）。

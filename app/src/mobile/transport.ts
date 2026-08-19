@@ -76,7 +76,9 @@ function announceAuthLost(): void {
   window.dispatchEvent(new CustomEvent(AUTH_LOST_EVENT));
 }
 
-/** 配对前的令牌试探(供 TokenGate 提交时先验后放行):打一发最轻的白名单命令。 */
+/** 配对前的令牌试探(供 TokenGate 提交时先验后放行):打一发最轻的白名单命令。
+ *  与主路径同一判据:200 + 非 JSON 是门户/反代劫持页,不算验证通过——否则闸门
+ *  放行错令牌,用户进到一个每发请求都炸的界面。 */
 export async function probeToken(token: string): Promise<boolean> {
   try {
     const res = await fetch("/rpc/host_os", {
@@ -85,7 +87,9 @@ export async function probeToken(token: string): Promise<boolean> {
       body: "{}",
       signal: rpcSignal(8_000),
     });
-    return res.ok;
+    if (!res.ok) return false;
+    JSON.parse(await res.text());
+    return true;
   } catch {
     return false;
   }
@@ -110,6 +114,19 @@ export function onAuthLost(fn: () => void): () => void {
 // 给个自增数即可满足 @tauri-apps/api/event 的类型契约(它会 await 这个 Promise<number>)。
 let fakeListenerId = 0;
 
+/** 允许跑满 90s 的慢命令:大附件上传、spawn/接管类(new_session 冷启动 CLI 在慢机上
+ *  轻松超 20s——客户端 abort 不撤销服务端副作用,超时误杀会导致「以为失败去重试,
+ *  实际起了两个会话」)、深搜/大历史。其余命令(多为轮询)20s 封顶。 */
+const SLOW_COMMANDS = new Set([
+  "save_pasted_attachment",
+  "new_session",
+  "start_managed_terminal",
+  "takeover_managed_terminal",
+  "attach_background_session",
+  "search_chat_transcripts",
+  "get_chat_history",
+]);
+
 async function rpc(cmd: string, args: unknown): Promise<unknown> {
   const token = getToken();
   // 只接受普通对象载荷:数组/TypedArray/字符串 stringify 后必被后端结构体拒收(400),
@@ -126,8 +143,7 @@ async function rpc(cmd: string, args: unknown): Promise<unknown> {
         "X-Meowo-Token": token ?? "",
       },
       body: JSON.stringify(args ?? {}),
-      // 大附件上传给足余量,其余命令 20s 封顶。
-      signal: rpcSignal(cmd === "save_pasted_attachment" ? 60_000 : 20_000),
+      signal: rpcSignal(SLOW_COMMANDS.has(cmd) ? 90_000 : 20_000),
     });
   } catch (e) {
     const name = (e as { name?: string } | null)?.name;

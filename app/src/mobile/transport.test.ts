@@ -72,6 +72,10 @@ describe("remote transport", () => {
   it("空 token 的 401 不广播——那是「还没配对」,不是「令牌失效」", async () => {
     // 首帧竞态的钉子:bootAppearance 在 TokenGate 存 token 前就发 get_settings,
     // 若这发 401 触发清态,会把随后扫码存好的合法 token 一并清掉。
+    // 先 setToken 复位失效闩再清掉:上一条用例广播过一次,闩不复位的话本用例
+    // 的 not.toHaveBeenCalled 是空跑(把守卫整条删掉照样绿——自审 H2)。
+    setToken("reset-latch");
+    clearToken();
     mockFetch({ status: 401, body: "" });
     const lost = vi.fn();
     const off = onAuthLost(lost);
@@ -81,6 +85,26 @@ describe("remote transport", () => {
     // 请求在途中用户完成配对:后到的 401 同样不许动新 token。
     setToken("fresh");
     expect(getToken()).toBe("fresh");
+    off();
+  });
+
+  it("失效后续发 401 不重复广播;重新配对(setToken)后再失效仍能广播", async () => {
+    setToken("stale");
+    mockFetch({ status: 401, body: "" });
+    const lost = vi.fn();
+    const off = onAuthLost(lost);
+
+    // 四五条并发轮询同时 401 的缩影:首发广播并清 token,后续 401 不再触发
+    // (反复清态会让闸门反复重挂)。
+    await expect(invoke("get_settings", {})).rejects.toThrow();
+    await expect(invoke("get_settings", {})).rejects.toThrow();
+    await expect(invoke("get_settings", {})).rejects.toThrow();
+    expect(lost).toHaveBeenCalledTimes(1);
+
+    // 重新配对复位失效闩:换发的 token 再失效,仍要能把用户带回闸门。
+    setToken("renewed");
+    await expect(invoke("get_settings", {})).rejects.toThrow();
+    expect(lost).toHaveBeenCalledTimes(2);
     off();
   });
 

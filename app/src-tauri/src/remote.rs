@@ -254,8 +254,21 @@ pub(crate) async fn remote_access_info(
     })
 }
 
+/// /rpc get_settings 的出口消毒:token 不回显给远端。调用方虽已持 token 过了鉴权,
+/// 但「token 只在宿主机取得」是审计线——回显会让未来的 token 轮换在换发瞬间被旧
+/// 凭据读走新值。纯函数,便于单测钉住这条安全语义。
+fn strip_remote_token(mut s: crate::settings::Settings) -> crate::settings::Settings {
+    s.remote_access_token = String::new();
+    s
+}
+
 /// 远程新建会话的目录浏览（只回目录名，不读文件内容）。远端持 token 者本就能以
 /// 任意 cwd 起会话（new_session 在白名单），列目录不扩大能力面；文件读取仍不下放。
+///
+/// 已知取舍(自审 M7):这确实给了持 token 者「枚举整机目录名」的读信息面,与 /file
+/// 的严格 scope 不同调。判定:配对 token 的信任模型本就是「设备主人」(它能发消息、
+/// 起会话、批审批),目录名相对这些能力不是更高密级;真正的密级线是文件**内容**,
+/// 仍锁死在 /file 的两个图片目录。若未来引入低权限分享 token,此命令须随之分级。
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DirListing {
@@ -949,12 +962,11 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             let a = args!(A);
             reply(list_subdirectories(a.path).await)
         }
-        // token 不回显给远端:调用方虽已持 token 过了鉴权,但「token 只在宿主机取得」
-        // 是审计线——回显会让未来的 token 轮换在换发瞬间被旧凭据读走新值。
-        "get_settings" => reply(crate::settings::get_settings().await.map(|mut s| {
-            s.remote_access_token = String::new();
-            s
-        })),
+        "get_settings" => reply(
+            crate::settings::get_settings()
+                .await
+                .map(strip_remote_token),
+        ),
         "host_os" => reply_ok(crate::host_os()),
         // reply_ok 前提:get_accounts 返回 Vec 而非 Result(Result 会被 serde 包成
         // {"Ok":…} 且照样 200)——改它签名时这里必须复检。
@@ -1196,9 +1208,28 @@ mod tests {
             "get_chat_history",
             "write_managed_terminal",
             "pending_interaction",
+            "awaiting_interaction_sessions",
+            "list_subdirectories",
+            "get_accounts",
         ] {
             assert!(BRIDGED_COMMANDS.contains(&cmd), "{cmd} 应在白名单");
         }
+    }
+
+    /// /rpc get_settings 的出口消毒:remote_access_token 绝不回显(安全语义,曾无测试
+    /// 裸奔——自审)。其余字段原样。
+    #[test]
+    fn strip_remote_token_blanks_only_the_token() {
+        let s = crate::settings::Settings {
+            remote_access_token: "1f1325d4deadbeef".into(),
+            remote_access_port: 18621,
+            remote_access_enabled: true,
+            ..Default::default()
+        };
+        let out = strip_remote_token(s);
+        assert_eq!(out.remote_access_token, "");
+        assert_eq!(out.remote_access_port, 18621);
+        assert!(out.remote_access_enabled);
     }
 
     /// 前端 RemoteAccessInfo 类型按 camelCase 读 `lastError`：serde rename 一旦失守,

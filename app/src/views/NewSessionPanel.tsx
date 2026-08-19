@@ -220,10 +220,15 @@ export function NewSessionPanel({ onClose, prefill }: {
 
   // 远程端页内目录浏览:系统目录对话框在浏览器里弹不起来,改为逐级下钻的就地列表。
   const [browse, setBrowse] = useState<DirListing | null>(null);
+  // 下钻失败(权限拒绝/断链网络盘)要说出来:静默吞掉的话,点了没反应像卡死(自审 L12)。
+  const [browseError, setBrowseError] = useState<string | null>(null);
   function browseTo(path?: string) {
     listSubdirectories(path)
-      .then(setBrowse)
-      .catch(() => {});
+      .then((listing) => {
+        setBrowse(listing);
+        setBrowseError(null);
+      })
+      .catch((error) => setBrowseError(formatBackendError(error, t.locale)));
   }
   async function openRemoteBrowser() {
     // 起点取当前输入的目录;不存在/为空则回退磁盘列表,列不了就保持手输。
@@ -381,6 +386,7 @@ export function NewSessionPanel({ onClose, prefill }: {
                     </button>
                   )}
                 </div>
+                {browseError && <div className="ns-dirbrowse-empty ns-dirbrowse-err">{browseError}</div>}
                 <div className="ns-dirbrowse-list">
                   {browse.dirs.map((d) => (
                     <button

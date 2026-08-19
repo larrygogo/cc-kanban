@@ -50,21 +50,15 @@ body.remote-ui .chat-topbar {
     user-select: text;
   }
 
+  /* 输入框跟随移动字号标尺(此前恒 16px,搜索框比它筛出的列表标题还大 4px)。
+     iOS 的「聚焦 <16px 输入框自动放大整页」由 viewport meta 的 maximum-scale=1
+     压制(mobile.html),不需要字号侧再防——曾试过 :focus 抬 16px 的方案,但 WebKit
+     的判定时机存疑且聚焦跳字号是确定代价,撤销(自审 M8)。 */
   body.remote-ui .chat-compose textarea { font-size: 14px; }
   body.remote-ui .chat-sidebar-search input { font-size: 13px; }
   body.remote-ui .chat-sidebar-edit { font-size: 13px; }
   body.remote-ui .ns-input { font-size: 14px; }
   body.remote-ui .chat-approval-custom input { font-size: 13px; }
-
-  /* iOS 对 <16px 的输入框聚焦会自动放大整页——但判定发生在聚焦时、:focus 样式已生效,
-     所以只在聚焦瞬间抬到 16px 即可豁免;静置时跟随上面的移动字号标尺,不再比周边文字
-     大一圈(此前恒 16px,搜索框比它筛出的列表标题还大 4px)。代价是聚焦时字号一跳,
-     与键盘弹起的布局位移同时发生,不显突兀。
-     必须排在按类基准之后:与它们特异性打平,靠源序压过,否则聚焦态吃不到 16px。 */
-  body.remote-ui input:focus,
-  body.remote-ui textarea:focus {
-    font-size: 16px;
-  }
 
   /* 消息正文/代码块同样放开:HTTP 非 secure context 下 navigator.clipboard 不存在,
      复制按钮走 execCommand 回退,手动框选是最后一条兜底——全禁了内容一个字拿不走。 */
@@ -79,9 +73,21 @@ body.remote-ui .chat-topbar {
     margin-bottom: calc(var(--sp-18, 18px) + env(safe-area-inset-bottom, 0));
   }
 
-  /* 双击缩放在聊天操作里全是误触;不设 min-height,热区已随 zoom 变大。 */
+  /* 双击缩放在聊天操作里全是误触。触控热区用 ::after 外扩 6px 而非 min-height:
+     后者会把紧凑图标钮拉变形(实拍),外扩只加命中面不动视觉(全仓无 button::after
+     既有用法,不冲突)。曾随 zoom 方案一起误删过 min-height 版本(自审 H1),此为回补。
+     position 用 :where() 归零特异性:绝对定位的小钮(如审批卡右上的收起 ✕)自带
+     position,不能被这里的 relative 反超打回文档流。 */
   body.remote-ui button {
     touch-action: manipulation;
+  }
+  :where(body.remote-ui button) {
+    position: relative;
+  }
+  :where(body.remote-ui button)::after {
+    content: "";
+    position: absolute;
+    inset: -6px;
   }
 
   /* ── 移动端字号标尺(按 2026-08 全量清单逐类抬升) ──

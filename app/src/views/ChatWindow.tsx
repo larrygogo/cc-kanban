@@ -44,6 +44,9 @@ import { agentAssets, tintStyle } from "../providers";
 
 /** 远程刷新后回到上次看的会话(桌面开窗恒带 ?sessionId,不落到这条)。 */
 const REMOTE_LAST_SESSION_KEY = "meowo-remote-last-session";
+/** initialSessionId 若用了存储恢复,记下该 id:恢复目标可能已被删/归档,首次加载
+ *  失败要放弃恢复回空态,而不是卡在「读取失败」(自审 M4)。 */
+let restoredSessionId = 0;
 
 function initialSessionId(): number {
   const value = new URLSearchParams(window.location.search).get("sessionId");
@@ -51,7 +54,10 @@ function initialSessionId(): number {
   if (Number.isSafeInteger(id) && id !== 0) return id;
   if (remoteUi()) {
     const stored = Number(localStorage.getItem(REMOTE_LAST_SESSION_KEY));
-    if (Number.isSafeInteger(stored) && stored > 0) return stored;
+    if (Number.isSafeInteger(stored) && stored > 0) {
+      restoredSessionId = stored;
+      return stored;
+    }
   }
   // 0 = 尚未选中任何会话(仅远程首开会出现):渲染「去侧栏选会话」空态,不是加载态。
   return 0;
@@ -872,9 +878,15 @@ export function ChatWindow() {
     return () => window.removeEventListener(NEW_SESSION_EVENT, close);
   }, []);
   // 远程首开没有会话上下文:窄屏自动拉开抽屉让用户先选,别对着「去侧栏选会话」空态干瞪眼。
-  // 只在「未选中」时生效;用户手动收起抽屉不会被强行重开(依赖没变,effect 不重跑)。
+  // 一次性:横竖屏切换会翻转 narrow 重跑 effect,不加闩的话手动收起的抽屉会被强行
+  // 重开(自审 L13)。
+  const autoDrawerDoneRef = useRef(false);
   useEffect(() => {
-    if (remoteUi() && sessionId === 0 && narrow) setOverlaySidebar(true);
+    if (autoDrawerDoneRef.current) return;
+    if (remoteUi() && sessionId === 0 && narrow) {
+      autoDrawerDoneRef.current = true;
+      setOverlaySidebar(true);
+    }
   }, [sessionId, narrow]);
   // 远程记住最后看的会话:刷新/重开页面直接回到它(桌面开窗恒带 query,不用这条)。
   useEffect(() => {
@@ -1441,7 +1453,23 @@ export function ChatWindow() {
       setItems((prev) => next.items.length || reset ? reduceChatEvents(prev, next.items, reset) : prev);
       setLoading(false);
       setFailed(false);
+      // 存储恢复的会话加载成功:解除恢复标记,此后的瞬时失败按普通失败处理。
+      if (restoredSessionId === sessionId) restoredSessionId = 0;
     } catch {
+      // 远程从 localStorage 恢复的会话可能已被删/归档:恒失败会卡在「读取失败」,
+      // 空态与自动拉抽屉都进不去。首败即放弃恢复回「选会话」空态(误伤瞬时网络
+      // 抖动可接受——抽屉在场,点回去即可);用户手选的会话不受此影响。
+      if (restoredSessionId === sessionId) {
+        restoredSessionId = 0;
+        try {
+          localStorage.removeItem(REMOTE_LAST_SESSION_KEY);
+        } catch {
+          /* ignore */
+        }
+        setSessionId(0);
+        setLoading(false);
+        return;
+      }
       setLoading(false);
       setFailed(true);
     } finally {
@@ -3551,6 +3579,21 @@ export function ChatWindow() {
               Ctrl+Enter=打断并发送的说明只剩 textarea 的 onKeyDown 行为本身,不再有
               可见挂点(此前挂这里的 tooltip 随文字一起去掉:零宽元素 hover 不到)。 */}
           <span className="chat-compose-hint" />
+          {/* 触屏没有 Ctrl+Enter:有草稿时主圆钮已是发送,回合还在跑的话停止另给一颗——
+              否则手机上必须先清空输入框才能叫停。桌面有快捷键与空框停止,不渲染。 */}
+          {remoteUi() && canInterrupt && hasDraft && (
+            <button
+              type="button"
+              className="chat-send-button is-stop chat-stop-secondary"
+              aria-label={interrupting ? t.chat.interrupting : t.chat.interruptNow}
+              onClick={() => sendInterrupt()}
+              disabled={interrupting}
+            >
+              {interrupting
+                ? <span className="chat-model-spinner" aria-hidden="true" />
+                : <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="4.5" /></svg>}
+            </button>
+          )}
           {/* 主圆钮双身份:回合运行中且输入框是空的 → 它就是停止键(黑圆方块,一按停当前
               回合)。发出去的消息撤不回,能叫停的只有这个键,它不该藏在草稿或次级按钮后面。
               一旦开始打字,身份让回「发送」——那时用户要的是把话递进去,停回合走左边的

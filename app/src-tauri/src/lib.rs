@@ -934,6 +934,14 @@ pub fn run() {
         return;
     }
     harden_dll_search_path();
+    // 关掉系统级「严重错误」模态:空光驱/断链网络盘在被探测(如远程目录浏览的盘符
+    // 枚举 is_dir)时,默认会在宿主机弹「请将磁盘插入驱动器」硬模态并卡住调用线程。
+    // 进程级一次设定,让这类探测安静地返回错误。
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows_sys::Win32::System::Diagnostics::Debug::{GetErrorMode, SetErrorMode, SEM_FAILCRITICALERRORS};
+        SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS);
+    }
     // ConPTY 来源诊断:应用目录里有打包的 conpty.dll(随安装分发 + OpenConsole.exe 宿主,
     // 见 scripts/fetch-conpty.mjs)时 portable-pty 会优先加载它——新版实现修掉了系统
     // conhost 的一批僵死死锁(输出停滞/Resize/Close 挂起),是管道卡死的治本项。缺失则
