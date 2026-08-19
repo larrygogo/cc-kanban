@@ -7,6 +7,9 @@ body {
   margin: 0;
   height: 100%;
   overscroll-behavior: none;
+  /* 页面画布与应用同底色:viewport-fit=cover 下状态栏/浏览器工具栏后面的区域由
+     html 背景填充,不设的话 dark 配色默认纯黑,和 --cc-window-bg 的深灰撞出上下黑边。 */
+  background: var(--cc-window-bg, #16171b);
 }
 
 body.remote-ui {
