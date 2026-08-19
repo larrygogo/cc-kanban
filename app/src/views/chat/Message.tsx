@@ -47,13 +47,18 @@ function splitUserText(text: string): { body: string; images: { path: string; ke
   const body: string[] = [];
   for (let i = 0; i < kept.length; i++) {
     const line = kept[i];
-    if (!ATTACHMENT_INSTRUCTION_HEADERS.has(line.trim())) {
+    // CC 把粘贴图片的光杆指代「[Image #N]」挪到提交文本最前,常与指令头粘成一行
+    // (「[Image #1]请读取并结合…」)——判头前先剥掉它,否则精确比对失配,整段
+    // 样板漏进气泡(远程发图实拍)。带 source 的完整引用行已在上一轮抽走。
+    const bareStripped = line.replace(/\[Image #\d+\]\s*/g, "");
+    if (!ATTACHMENT_INSTRUCTION_HEADERS.has(bareStripped.trim())) {
       body.push(line);
       continue;
     }
     let j = i + 1;
     while (j < kept.length && kept[j].trim() === "-") j++;
-    if (kept[j]?.trim().startsWith("- ")) body.push(line);
+    // 头要保留(还有非图片附件行)时也用剥过指代的版本:图片已是缩略图,光杆指代无信息。
+    if (kept[j]?.trim().startsWith("- ")) body.push(bareStripped);
     i = j - 1;
   }
   return { body: body.join("\n").trim(), images };

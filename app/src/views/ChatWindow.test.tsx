@@ -2163,6 +2163,24 @@ describe("ChatWindow", () => {
     expect(screen.queryByText(/^-$/)).toBeNull();
   });
 
+  /** CC 还会把光杆指代「[Image #N]」挪到提交文本最前,与指令头粘成一行
+   *  (「[Image #1]请读取并结合…」)——精确比对指令头会失配,整段样板漏进气泡
+   *  (远程发图实拍)。判头前须先剥光杆指代。 */
+  it("光杆 [Image #N] 粘在指令头行首时,样板照样剥净", async () => {
+    window.history.replaceState({}, "", "/?sessionId=45");
+    respondWithHistory({
+      sessionId: 45, title: "贴图粘头", status: "running", provider: "claude", cwd: "C:/repo",
+      supported: true, offset: 1, reset: false, pendingReview: null,
+      items: [
+        { type: "user_text", id: "u1", timestamp: null, text: "[Image #1]请读取并结合以下本地附件完成任务（图片请使用图像读取能力）：\n-" },
+      ],
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("贴图粘头")).toBeTruthy());
+    expect(screen.queryByText(/本地附件/)).toBeNull();
+    expect(screen.queryByText(/\[Image #1\]/)).toBeNull();
+  });
+
   /** 多问题题面用 tab 切换：全部竖排会把卡片堆得比对话区还高、把输入框挤出可视区。 */
   it("多问题题面渲染成 tab,一次只显示一题", async () => {
     window.history.replaceState({}, "", "/?sessionId=43");
