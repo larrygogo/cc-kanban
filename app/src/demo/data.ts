@@ -71,5 +71,7 @@ export function makeSession(p: {
     foreign: false,
     // demo 无跨 provider 接续链（不渲染链徽标）。
     predecessor_id: null,
+    // demo 全是单目录会话（不渲染「+N」附加目录标）。
+    extra_dirs: [],
   };
 }

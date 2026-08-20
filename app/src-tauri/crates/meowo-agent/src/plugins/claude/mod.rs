@@ -48,7 +48,9 @@ static EVENTS: [HookEvent; 8] = [
     HookEvent::matched("Stop", "*"),
     HookEvent::matched("SessionEnd", "*"),
     HookEvent::matched("PermissionRequest", "*").with_timeout(310),
-    HookEvent::matched("PreToolUse", "AskUserQuestion"),
+    // AskUserQuestion 的代答桥挂在这条上（reporter 阻塞等 GUI 作答），超时与
+    // PermissionRequest 同一量纲：310 > reporter 读 305 > broker 等 300。
+    HookEvent::matched("PreToolUse", "AskUserQuestion").with_timeout(310),
     HookEvent::matched("PreToolUse", "ExitPlanMode"),
 ];
 
@@ -302,10 +304,15 @@ impl AgentPlugin for Claude {
     fn resume_args(&self) -> &'static [&'static str] {
         &["--resume"]
     }
+    /// 一个会话访问多个目录（实测 `claude --help`）：每个附加目录一对 `--add-dir <dir>`。
+    /// 跨仓同一需求开一个会话的基座——agent 在同一上下文里协调所有仓的改动。
+    fn extra_dir_flag(&self) -> Option<&'static str> {
+        Some("--add-dir")
+    }
     fn slash_commands(&self) -> &'static [&'static str] {
         &[
-            "/clear", "/compact", "/config", "/cost", "/help", "/init", "/mcp", "/memory",
-            "/model", "/resume", "/review", "/status",
+            "/add-dir", "/clear", "/compact", "/config", "/cost", "/help", "/init", "/mcp",
+            "/memory", "/model", "/resume", "/review", "/status",
         ]
     }
     /// 启动选项（实测 `claude --help`）：`--model <alias>` 与 `--permission-mode
@@ -759,17 +766,18 @@ mod tests {
             .iter()
             .filter(|e| e.name != "PreToolUse")
             .all(|e| e.matcher == Some("*")));
-        assert_eq!(
-            EVENTS
-                .iter()
-                .find(|e| e.name == "PermissionRequest")
-                .unwrap()
-                .timeout,
-            310
-        );
-        assert!(EVENTS
-            .iter()
-            .filter(|e| e.name != "PermissionRequest")
-            .all(|e| e.timeout == 5));
+        // 长超时恰两条：都在等人（PermissionRequest 等审批、PreToolUse:AskUserQuestion
+        // 等代答），其余 hook 是纯落库、5s 足够。
+        for event in EVENTS.iter() {
+            let waits_on_user = event.name == "PermissionRequest"
+                || (event.name == "PreToolUse" && event.matcher == Some("AskUserQuestion"));
+            assert_eq!(
+                event.timeout,
+                if waits_on_user { 310 } else { 5 },
+                "{} {:?}",
+                event.name,
+                event.matcher
+            );
+        }
     }
 }

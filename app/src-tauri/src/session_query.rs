@@ -518,8 +518,9 @@ pub(crate) fn session_connected(
 /// 可 DB 里的 `pending_review` 要等下一个 hook 事件（PostToolUse/Stop）才清：被放行的工具
 /// 跑 20 分钟，对话页就错挂 20 分钟「Agent 请求权限」，而终端里 agent 正忙着干活。
 ///
-/// Question/Plan 不做这个校正：它们由 `PreToolUse`（AskUserQuestion/ExitPlanMode）落库、
-/// 不经 broker，而那两个工具本身就是「停下来等人」——等的期间 DB 标记正是对的。
+/// Question/Plan 不做这个校正：那两个工具本身就是「停下来等人」，无论提问此刻挂在
+/// broker 上（AskUserQuestion 的 PreToolUse 代答挂起）还是表单已落在终端里，等的期间
+/// DB 标记都正是对的；代答/作答后由 reporter（settled）与 resolve 命令当场清位。
 pub(crate) fn pending_review_live<'a>(
     provider: &str,
     pending_review: Option<&'a str>,

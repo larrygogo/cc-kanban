@@ -107,6 +107,9 @@ pub(crate) async fn switch_session_provider(
             target.id().as_str(),
             &selections,
             Some(session_id),
+            // 附加目录不随换代继承:目标 agent 未必声明该 flag,argv 也在本函数按目标
+            // agent 重新构造——静默带过去等于对用户谎报访问范围。
+            &[],
         )?;
         crate::watch::emit_board_changed(&app, "switch_provider");
         Ok(SwitchStartedDto {

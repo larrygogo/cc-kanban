@@ -75,7 +75,7 @@ describe("NewSessionPanel (独立窗口)", () => {
     render(<NewSessionPanel />);
     fireEvent.change(await screen.findByTestId("ns-dir"), { target: { value: "C:/proj" } });
     fireEvent.click(screen.getByTestId("ns-launch"));
-    await waitFor(() => expect(api.newSession).toHaveBeenCalledWith("C:/proj", "claude", {}));
+    await waitFor(() => expect(api.newSession).toHaveBeenCalledWith("C:/proj", "claude", {}, []));
     await waitFor(() => expect(closeMock).toHaveBeenCalled());
   });
 
@@ -147,11 +147,45 @@ describe("NewSessionPanel (独立窗口)", () => {
     fireEvent.click(screen.getByTestId("ns-launch"));
     // 只回传 choice id；翻译成 CLI flag 是后端按同一张声明表做的事。
     await waitFor(() => expect(api.newSession).toHaveBeenCalledWith(
-      "C:/proj", "claude", { model: "opus", permission: "plan" },
+      "C:/proj", "claude", { model: "opus", permission: "plan" }, [],
     ));
     // kimi 未声明启动选项 → 整块不渲染，也不会把 claude 的残留选择带过去。
     fireEvent.click(screen.getByTestId("ns-agent-kimi"));
     await waitFor(() => expect(screen.queryByTestId("ns-options")).toBeNull());
+  });
+
+  /// 跨仓同一需求 = 一个会话 + 附加目录:Ctrl+点击最近项附加,启动把附加目录交给后端
+  /// 拼 --add-dir;主目录本身不重复附加。
+  it("Ctrl+点击最近项加为附加目录,启动带 extraDirs", async () => {
+    api.newSession.mockResolvedValue(undefined);
+    // 清掉前序用例经 saveStoredOpts 记住的启动选项,免得 opts 断言串场。
+    localStorage.removeItem("meowo-launch-selections");
+    // 盘符路径经 normalizePath 统一成反斜杠,断言按归一后的形态。
+    api.recentCwds.mockResolvedValue(["C:/w/web", "C:/w/api", "C:/w/proto"]);
+    render(<NewSessionPanel />);
+    // claude 支持附加目录 → 入口可见。
+    await screen.findByTestId("ns-extra-add");
+    fireEvent.click(await screen.findByTitle(/w\\api/), { ctrlKey: true });
+    fireEvent.click(screen.getByTitle(/w\\proto/), { ctrlKey: true });
+    expect(screen.getByTestId("ns-extra-list").textContent).toContain("api");
+    // 主目录默认预填首个最近项(C:\w\web),Ctrl+点它不该重复附加。
+    fireEvent.click(screen.getByTitle(/w\\web/), { ctrlKey: true });
+    fireEvent.click(screen.getByTestId("ns-launch"));
+    await waitFor(() => expect(api.newSession).toHaveBeenCalledWith(
+      "C:\\w\\web", "claude", {}, ["C:\\w\\api", "C:\\w\\proto"],
+    ));
+  });
+
+  it("不支持附加目录的 agent 不显示入口,切换过去时清空已选", async () => {
+    api.recentCwds.mockResolvedValue(["C:/w/web", "C:/w/api"]);
+    render(<NewSessionPanel />);
+    await screen.findByTestId("ns-extra-add");
+    fireEvent.click(await screen.findByTitle(/w\\api/), { ctrlKey: true });
+    expect(screen.getByTestId("ns-extra-list")).toBeTruthy();
+    // kimi 未声明附加目录 flag → 入口消失、已选清空(静默带过去会被后端如实拒绝)。
+    fireEvent.click(screen.getByTestId("ns-agent-kimi"));
+    await waitFor(() => expect(screen.queryByTestId("ns-extra-add")).toBeNull());
+    expect(screen.queryByTestId("ns-extra-list")).toBeNull();
   });
 
   it("一个都没装时提示 + 启动禁用", async () => {

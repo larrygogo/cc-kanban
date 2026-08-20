@@ -2696,7 +2696,7 @@ dependencies = [
 
 [[package]]
 name = "meowo-app"
-version = "0.5.16"
+version = "0.6.1"
 dependencies = [
  "arboard",
  "axum",
@@ -2737,6 +2737,7 @@ dependencies = [
  "ureq",
  "url",
  "vt100",
+ "webview2-com",
  "windows 0.61.3",
  "windows-sys 0.59.0",
  "winreg 0.55.0",

@@ -7,8 +7,8 @@ use meowo_store::{
 fn open_in_memory_creates_tables() {
     let store = Store::open_in_memory().expect("open");
     let count: i64 = store.raw_table_count().expect("count tables");
-    // projects / sessions / tasks / todos / events / session_context / session_notes
-    assert_eq!(count, 7);
+    // projects / sessions / tasks / todos / events / session_context / session_notes / work_groups
+    assert_eq!(count, 8);
 }
 
 // == Task 4 ==
@@ -1073,6 +1073,82 @@ fn migrate_adds_lineage_columns_to_v9_database() {
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
+}
+
+/// v11 老库 open 后:SCHEMA 重跑 + ALTER 补列(v12 工作组遗留结构 + v13 附加目录),
+/// extra_dirs 读写全链路可用。
+#[test]
+fn migrate_adds_v12_v13_columns_to_v11_database() {
+    let path = std::env::temp_dir().join(format!("meowo-mig-v11-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id    INTEGER NOT NULL,
+                cc_session_id TEXT NOT NULL UNIQUE,
+                status        TEXT NOT NULL,
+                started_at    INTEGER NOT NULL,
+                last_event_at INTEGER NOT NULL,
+                ended_at      INTEGER,
+                pid           INTEGER,
+                cwd           TEXT,
+                archived      INTEGER NOT NULL DEFAULT 0,
+                archived_at   INTEGER,
+                pending_review TEXT,
+                last_ai_text   TEXT,
+                last_user_text TEXT,
+                provider       TEXT NOT NULL DEFAULT 'claude',
+                profile        TEXT,
+                launch_args    TEXT,
+                predecessor_id INTEGER,
+                superseded_by  INTEGER);
+             PRAGMA user_version = 11;",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 1).unwrap();
+    let (sid, _) = store.start_session(pid, "s", 1).unwrap();
+    store
+        .set_session_extra_dirs(sid, r#"["C:/w/api"]"#)
+        .expect("v11 老库 open 后 extra_dirs 列应已补上");
+    assert_eq!(
+        store.session_extra_dirs(sid).unwrap().as_deref(),
+        Some(r#"["C:/w/api"]"#)
+    );
+
+    drop(store);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+/// 已有会话中途附加目录:merge 去重(斜杠/大小写/尾斜杠归一),与主 cwd 相同的拒绝,
+/// 重复添加 no-op(返回 false,调用方据此免发广播)。
+#[test]
+fn add_session_extra_dir_merges_and_dedupes() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, _) = store.start_session(pid, "s", 100).unwrap();
+    store.set_session_cwd(sid, r"C:\w\web", 110).unwrap();
+
+    assert!(store.add_session_extra_dir(sid, r"C:\w\api").unwrap());
+    // 斜杠写法不同的同一目录 = 重复;主 cwd 也拒绝。
+    assert!(!store.add_session_extra_dir(sid, "C:/w/api/").unwrap());
+    assert!(!store.add_session_extra_dir(sid, "C:/w/web").unwrap());
+    assert!(store.add_session_extra_dir(sid, r"C:\w\proto").unwrap());
+
+    let json = store.session_extra_dirs(sid).unwrap().unwrap();
+    let dirs: Vec<String> = serde_json::from_str(&json).unwrap();
+    assert_eq!(dirs, vec![r"C:\w\api".to_string(), r"C:\w\proto".to_string()]);
+
+    // 移除:斜杠写法不同也定位得到(与 add 同一归一口径);清单清空写回 NULL。
+    assert!(store.remove_session_extra_dir(sid, "C:/w/API").unwrap());
+    assert!(!store.remove_session_extra_dir(sid, "C:/w/api").unwrap(), "重复移除 no-op");
+    assert!(store.remove_session_extra_dir(sid, r"C:\w\proto").unwrap());
+    assert_eq!(store.session_extra_dirs(sid).unwrap(), None, "清空后回到 NULL");
 }
 
 // == 跨 provider 接续链 ==

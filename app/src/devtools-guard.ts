@@ -1,5 +1,23 @@
 // 正式构建下封死 WebView 的「调试入口」：屏蔽右键菜单 + DevTools 快捷键。
 // dev 构建（bun run dev）原样放行，方便开发期调试。
+
+// Ctrl/Cmd+F（及 F3 查找下一个）会呼出 WebView 自带的页内查找条，与应用内搜索
+// （贴纸/对话侧栏、托管终端）撞车。捕获层统一按掉默认行为；不 stopPropagation，
+// 应用内的 Ctrl+F 监听与 xterm 的自定义键处理照常收到事件。dev 构建同样生效——
+// 查找条不是调试入口，是各构建一致的行为缺陷，故不并入 lockdownInProduction。
+export function suppressNativeFind() {
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      const findCombo = (e.ctrlKey || e.metaKey) && !e.altKey && e.code === "KeyF";
+      // F3 在托管终端内是发往 PTY 的功能键（xterm 自行消费并 preventDefault），不代拦。
+      const findNext = e.code === "F3" && !document.activeElement?.closest(".managed-terminal");
+      if (findCombo || findNext) e.preventDefault();
+    },
+    { capture: true }
+  );
+}
+
 export function lockdownInProduction() {
   if (!import.meta.env.PROD) return;
 

@@ -46,7 +46,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- （谓词 superseded_by IS NULL，见 query.rs——四处口径必须同生共死），
     -- 但按 id 直取的回看路径（get_chat_history / session_header）不受影响。
     predecessor_id INTEGER,
-    superseded_by  INTEGER
+    superseded_by  INTEGER,
+    -- 工作组挂靠(v12,功能已移除):列保留,全仓无读写端(降版本要再做一版迁移,不值)。
+    work_group_id  INTEGER REFERENCES work_groups(id),
+    -- 附加目录（JSON 字符串数组）：一个会话经 agent 的附加目录 flag（claude --add-dir）
+    -- 访问的其它仓。resume/接管重启时回放——不回放的话恢复的进程就丢了这些仓的访问权。
+    -- NULL = 单目录会话。旧库由 migrate 的 ALTER 补齐。
+    extra_dirs     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -99,5 +105,13 @@ CREATE TABLE IF NOT EXISTS session_notes (
     cc_session_id TEXT PRIMARY KEY,
     note          TEXT NOT NULL,
     updated_at    INTEGER NOT NULL
+);
+
+-- work_groups(v12,功能已移除):多会话聚合的「工作组」,跨仓需求已收敛为单会话 +
+-- 附加目录(sessions.extra_dirs)。表保留,全仓无读写端。
+CREATE TABLE IF NOT EXISTS work_groups (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT NOT NULL,
+    created_at INTEGER NOT NULL
 );
 "#;

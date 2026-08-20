@@ -55,4 +55,9 @@ profile: string | null,
  * 跨 provider 接续链：本会话接替的上一段会话 id。Some = 卡片渲染链徽标
  *（点开可回看链上历史各段）；None = 普通会话。
  */
-predecessor_id: number | null, };
+predecessor_id: number | null, 
+/**
+ * 附加目录（一个会话经 --add-dir 访问的其它仓）。空 = 单目录会话。
+ * 卡片按它显示「+N」；JSON 解析在此层做，前端拿到即用。
+ */
+extra_dirs: Array<string>, };

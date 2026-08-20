@@ -111,6 +111,11 @@ export const zh = {
     title: "新建会话",
     dir: "工作目录",
     dirPlaceholder: "选择或输入项目目录",
+    // 附加目录:跨仓同一需求开一个会话(--add-dir),仅声明支持的 agent 显示入口。
+    extraDirsAdd: "附加目录",
+    extraDirsTip: "同一会话访问多个仓库",
+    extraDirsHint: "Ctrl+点击加为附加目录",
+    extraDirRemove: "移除附加目录",
     browse: "浏览…",
     up: "上一级",
     pickHere: "用这个目录",
@@ -271,6 +276,9 @@ export const zh = {
     customAnswerPlaceholder: "输入其他回答",
     addCustomAnswer: "添加回答",
     submitAnswer: "提交选择",
+    questionAnswered: "已作答",
+    questionAnswerReady: "提交后 Agent 立即继续",
+    questionAnswerIncomplete: (count: number) => `还有 ${count} 题未作答`,
     chatAboutThis: "先和 Agent 讨论",
     planTitle: "Agent 正在等待计划审批",
     approvalDetails: "查看请求详情",
@@ -441,6 +449,10 @@ export const zh = {
     sidebarDirAll: "全部目录",
     sidebarShowIdle: (n: number) => `显示 ${n} 个未运行会话`,
     sidebarHideIdle: "收起未运行会话",
+    // 标题菜单「目录」小节:主仓 + 附加目录的完整清单,尾接附加动作。
+    dirsSection: "目录",
+    // 中途附加目录(标题菜单):/add-dir 即时生效 + 落库供恢复回放。
+    addExtraDir: "附加目录",
     sidebarNoDir: "未记录目录",
     groupNone: "不分组",
     groupByDir: "按目录",

@@ -598,4 +598,21 @@ describe("ChatSidebar", () => {
     expect(onSelect).toHaveBeenCalledWith(20);
     expect(onSelect).not.toHaveBeenCalledWith(21);
   });
+
+  /// 与贴纸卡的 +N 同款:跨仓单会话(--add-dir)在侧栏条目上也要看得出目录数。
+  it("附加目录会话显示 +N 小标,单目录会话不显示", async () => {
+    invoke.mockImplementation((command: string) =>
+      Promise.resolve(command === "get_live_sessions_page"
+        ? [
+            session(1, "跨仓会话", { connected: true, extra_dirs: ["C:/w/api", "C:/w/proto"] } as Partial<LiveSession>),
+            session(2, "单仓会话", { connected: true } as Partial<LiveSession>),
+          ]
+        : undefined));
+    render(<ChatSidebar activeId={1} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
+    await screen.findByRole("button", { name: /跨仓会话/ });
+    const badge = screen.getByTestId("sidebar-extradirs");
+    expect(badge.textContent).toBe("+2");
+    expect(badge.getAttribute("data-tip")).toContain("C:/w/api");
+    expect(screen.getAllByTestId("sidebar-extradirs").length).toBe(1);
+  });
 });

@@ -49,6 +49,9 @@ export const ENTRIES: ErrorEntry[] = [
   { m: "Agent 启动后立即退出", tail: true, zh: "Agent 启动后立即退出", en: "The agent exited right after starting; check the Terminal tab —" },
   { m: "该会话所属账号", zh: "会话所属账号已被删除，无法恢复", en: "This session's account was deleted; it can't be resumed" },
   { m: "请选择工作目录", exact: true, zh: "请选择工作目录", en: "Pick a working directory" },
+  // anywhere:覆盖「该 Agent 不支持附加目录」与「{display_name} 不支持附加目录」两种形态。
+  { m: "不支持附加目录", anywhere: true, en: "This agent doesn't support extra directories" },
+  { m: "目录不能为空", exact: true, zh: "目录不能为空", en: "Directory can't be empty" },
   { m: "无法定位当前账号目录", exact: true, zh: "找不到当前账号的数据目录", en: "Couldn't locate the current account directory" },
   { m: "内部状态异常", zh: "内部状态异常，请重启 Meowo", en: "Internal error — restart Meowo" },
   // ── 审批 ──

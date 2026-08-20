@@ -226,6 +226,12 @@ fn parse_events(line: &str, allow_sidechain: bool) -> Vec<TranscriptEvent> {
                             // 的合成回执(见 user 分支)后到覆盖。同步委派的回执没有结局
                             // 信号,如实留空,前端按「已回执=完成」处理。
                             let subagent = CLAUDE_SUBAGENTS.detect_result(&text);
+                            // GUI 代答 AskUserQuestion 走 PreToolUse deny,CC 把答案记成
+                            // error 回执——对用户它是「已作答」不是失败,按哨兵压平,
+                            // 否则对话流红块 + handoff 标 [失败]。在截断前的原始文本上
+                            // 判(哨兵在文首,截断本伤不到,防御截断策略变化)。
+                            let answered_by_meowo =
+                                text.contains(meowo_protocol::broker::QUESTION_ANSWER_MARKER);
                             Some(TranscriptEvent::ToolResult {
                                 id: format!("{base_id}:{i}"),
                                 timestamp: timestamp.clone(),
@@ -237,7 +243,8 @@ fn parse_events(line: &str, allow_sidechain: bool) -> Vec<TranscriptEvent> {
                                 is_error: block
                                     .get("is_error")
                                     .and_then(|x| x.as_bool())
-                                    .unwrap_or(false),
+                                    .unwrap_or(false)
+                                    && !answered_by_meowo,
                                 subagent,
                             })
                         }
@@ -656,7 +663,7 @@ impl ParseState {
 
     /// 工具回执正文:启动回执入集,TaskOutput 拉取的终态回执出集(running/timeout 保持)。
     fn fold_tool_result_text(&mut self, text: &str) {
-        if text.contains("Async agent launched") {
+        if is_launch_receipt(text) {
             if let Some(id) = launch_agent_id(text) {
                 self.running_tasks.insert(id);
             }
@@ -1183,7 +1190,7 @@ impl SubagentSpec for ClaudeSubagents {
     ///    7 次委派 4 次只有启动回执),只认通知会让这些子任务永远显示「运行中」。TaskOutput
     ///    的回执挂在它自己的调用上,靠 `task_id`(= 启动回执里的 `agentId`)归回原委派。
     fn detect_result(&self, output: &str) -> Option<SubagentOutcome> {
-        if output.contains("Async agent launched") {
+        if is_launch_receipt(output) {
             return Some(SubagentOutcome {
                 running: 1,
                 completed: 0,
@@ -1213,6 +1220,16 @@ impl SubagentSpec for ClaudeSubagents {
             task_id: Some(task_id),
         })
     }
+}
+
+/// 这段工具回执是不是后台委派的**启动回执**。必须**行首锚定**而不是 contains——
+/// 与 settle_from_notification 对 `<task-notification>` 的纪律同源:讨论/排查这套机制的
+/// 会话里,Read/Grep 源码或别的 transcript 的工具结果会**引用**这句话(连同注释里的
+/// `agentId: xxx` 示例),contains 会据此记入幽灵任务,而幽灵永远等不到结局信号——
+/// 会话从此恒挂「运行中」(2026-08-18 实拍:本仓 dogfooding 会话查完子任务链路后自己
+/// 被钉死在运行中)。真回执的正文以这句话开头,行首锚定天然免疫行号/注释前缀的引用。
+fn is_launch_receipt(text: &str) -> bool {
+    text.trim_start().starts_with("Async agent launched")
 }
 
 /// 从启动回执正文抠任务 id:`agentId: a9b726e3a088bafea (internal ID …)`。
@@ -1396,6 +1413,27 @@ mod tests {
 
         let sidechain = r#"{"type":"assistant","uuid":"sub","isSidechain":true,"message":{"content":[{"type":"text","text":"hidden"}]}}"#;
         assert!(parse_chat_items(sidechain).is_empty());
+    }
+
+    /// GUI 代答 AskUserQuestion 的 deny 回执带哨兵前缀:对用户它是「已作答」不是工具
+    /// 失败——is_error 压平(红色错误块与 handoff 的 [失败] 前缀一并消失)。
+    /// 无哨兵的真错误不受影响。
+    #[test]
+    fn meowo_answered_question_receipt_is_not_an_error() {
+        let answered = format!(
+            r#"{{"type":"user","uuid":"u1","message":{{"content":[{{"type":"tool_result","tool_use_id":"tool-1","content":"{}晚饭吃什么? → 火锅","is_error":true}}]}}}}"#,
+            meowo_protocol::broker::QUESTION_ANSWER_MARKER
+        );
+        assert!(matches!(
+            &parse_chat_items(&answered)[0],
+            ChatItem::ToolResult { is_error: false, .. }
+        ));
+
+        let failed = r#"{"type":"user","uuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"tool-2","content":"command not found","is_error":true}]}}"#;
+        assert!(matches!(
+            &parse_chat_items(failed)[0],
+            ChatItem::ToolResult { is_error: true, .. }
+        ));
     }
 
     /// 排队插话被 CLI 送入时不落普通 user 行，而是 attachment/queued_command——
@@ -2182,6 +2220,14 @@ mod tests {
             panic!("应解析成工具回执");
         };
         assert!(subagent.is_none());
+
+        // 工具结果里**引用**回执文案(Read/Grep 源码的输出,行首是行号)不是启动回执:
+        // contains 判据会给这类回执错挂 running 徽标(见 is_launch_receipt 注释)。
+        let quoted = r#"{"type":"user","uuid":"u3","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_g","content":[{"type":"text","text":"1184  /// `Async agent launched successfully. …`,此时子任务才刚开跑。"}]}]}}"#;
+        let ChatItem::ToolResult { subagent, .. } = &parse_chat_items(quoted)[0] else {
+            panic!("应解析成工具回执");
+        };
+        assert!(subagent.is_none());
     }
 
     /// 主 agent 用 `TaskOutput` 拉取后台子任务结果时,CLI 不再注入 task-notification
@@ -2358,6 +2404,11 @@ mod tests {
         content.push('\n');
         // 噪声二:用户**引用**通知文案聊天(非开头),不得误消 ccc333。
         content.push_str(r#"{"type":"user","uuid":"quote","message":{"content":"我看到日志里有 <task-notification><task-id>ccc333</task-id></task-notification> 这样的行"}}"#);
+        content.push('\n');
+        // 噪声三:Read/Grep 源码或别的 transcript 的工具结果**引用**了启动回执文案
+        // (行首是行号/注释,不是回执本身)——contains 判据会把 xxx 记成幽灵任务且
+        // 永远等不到结局,会话恒挂「运行中」(2026-08-18 dogfooding 实拍)。
+        content.push_str(r#"{"type":"user","uuid":"srcread","message":{"content":[{"type":"tool_result","tool_use_id":"tr1","content":[{"type":"text","text":"586  /// 启动:user 行里 `Async agent launched…agentId: xxx` 的工具回执。"}]}]}}"#);
         content.push('\n');
         let p = write_tmp("busy_taskout", &content);
         assert_eq!(analyze_transcript(p.to_str().unwrap()).busy_subagents, 1);

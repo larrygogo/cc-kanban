@@ -72,6 +72,11 @@ supports_context: boolean,
  */
 supports_chat_export: boolean, 
 /**
+ * 这个 agent 支不支持**一个会话访问多个目录**（＝插件声明了 `extra_dir_flag`）。
+ * 为 true 时新建面板给「附加目录」入口（跨仓同一需求开一个会话）；false 不显示。
+ */
+supports_extra_dirs: boolean, 
+/**
  * 新建会话的启动选项（选择 → CLI flag 映射，由插件声明）。空 = 面板不给选项栏。
  * 前端只回传 choice id，翻译成 argv 在后端按这张表进行——用户输入进不了命令行。
  */

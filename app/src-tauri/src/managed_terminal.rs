@@ -356,7 +356,8 @@ pub(crate) fn pending_interaction(
 ) -> meowo_protocol::ipc::PendingInteractionDto {
     meowo_protocol::ipc::PendingInteractionDto {
         approval: state.ptys.pending_approval(session_id).map(Into::into),
-        question: state.ptys.interactive_question(session_id).map(Into::into),
+        // 题面走带 answerable 的出口：broker 是否仍持有请求（可代答）由它动态计算。
+        question: state.ptys.interactive_question_dto(session_id),
     }
 }
 
@@ -421,8 +422,12 @@ pub(crate) async fn resolve_pending_approval(
         // reporter 收到决策后也会清 pending_review，但 codex 的 hook 可能继承只读沙箱、
         // 清不掉——标记会一直挂到下一个 hook 事件才被顺带清理。app 进程写库没有这种
         // 限制，这里当场兜底清掉（best-effort：清不掉也不影响已送达的决策）。
-        if let Ok(store) = super::open_store(&db_path) {
-            let _ = store.clear_pending_review(session_id, super::now_ms());
+        // 「去终端作答」（pass）例外：用户还没答，提问仍悬着（表单即将转到终端），
+        // 标记必须留着。
+        if choice != "pass" {
+            if let Ok(store) = super::open_store(&db_path) {
+                let _ = store.clear_pending_review(session_id, super::now_ms());
+            }
         }
         Ok(())
     })

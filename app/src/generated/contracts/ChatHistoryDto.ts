@@ -9,7 +9,12 @@ export type ChatHistoryDto = { sessionId: number,
  * CLI 侧会话 id：前端以它为键的动作（重命名 rename_session、置顶 STAR_KEY）
  * 从对话窗标题菜单发起时需要，数字主键替代不了。
  */
-ccSessionId: string, title: string, status: string, provider: string, cwd: string | null, supported: boolean, items: Array<ChatItem>, offset: number, reset: boolean, pendingReview: PendingReviewKind | null, model: string | null, agentModes: Array<AgentModeDto>, contextPct: number | null, contextWindow: number | null, currentActivity: string | null, 
+ccSessionId: string, title: string, status: string, provider: string, cwd: string | null, 
+/**
+ * 附加目录(--add-dir):会话除 cwd 外还能访问的仓。空 = 单目录会话。
+ * 标题菜单按它列出完整目录清单——加了目录必须看得见。
+ */
+extraDirs: Array<string>, supported: boolean, items: Array<ChatItem>, offset: number, reset: boolean, pendingReview: PendingReviewKind | null, model: string | null, agentModes: Array<AgentModeDto>, contextPct: number | null, contextWindow: number | null, currentActivity: string | null, 
 /**
  * 会话进程是否仍被认为存活（与看板 `session_connected` 同口径：pid 在进程表里，
  * 或距最近事件不足宽限期）。status 是 hook 驱动的离散快照，进程死后 reaper 收尾前

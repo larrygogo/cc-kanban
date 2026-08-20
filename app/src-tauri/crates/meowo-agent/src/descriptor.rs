@@ -59,6 +59,9 @@ pub struct AgentDescriptor {
     /// 会话没有可交接的历史，跨 provider 切换只能以它为**目标**、不能以它为来源。
     /// 前端不得按 id 判断——这正是守卫测试盯着的那类分支。
     pub supports_chat_export: bool,
+    /// 这个 agent 支不支持**一个会话访问多个目录**（＝插件声明了 `extra_dir_flag`）。
+    /// 为 true 时新建面板给「附加目录」入口（跨仓同一需求开一个会话）；false 不显示。
+    pub supports_extra_dirs: bool,
     /// 新建会话的启动选项（选择 → CLI flag 映射，由插件声明）。空 = 面板不给选项栏。
     /// 前端只回传 choice id，翻译成 argv 在后端按这张表进行——用户输入进不了命令行。
     pub launch_options: &'static [crate::LaunchOption],
@@ -90,6 +93,7 @@ impl AgentDescriptor {
                 .telemetry()
                 .and_then(|telemetry| telemetry.transcript())
                 .is_some_and(|spec| spec.supports_chat()),
+            supports_extra_dirs: plugin.extra_dir_flag().is_some(),
             launch_options: plugin.launch_options(),
             relay,
         }

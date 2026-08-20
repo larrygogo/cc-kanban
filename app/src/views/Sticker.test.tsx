@@ -46,7 +46,6 @@ const invokeMock = vi.hoisted(() =>
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (cmd: string, args?: unknown) => invokeMock(cmd, args),
 }));
-
 import { relayEnabledSignature, Sticker } from "./Sticker";
 import { cardTone, match } from "./sticker/helpers";
 import { EmptyState } from "./sticker/EmptyState";

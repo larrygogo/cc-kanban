@@ -59,7 +59,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let dispatch_error = dispatch(&store, &ev, now, &provider).err();
     if canonical_event == "SessionStart" {
         if let Some(session_id) = store.find_session_id_pub(&ev.session_id)? {
-            attach::notify_claim(session_id);
+            // claim 带上会话本体 pid：broker 靠它区分「/clear 原地换代」与「会话内 Bash
+            // 起的嵌套 agent 继承 PTY 环境变量后误认领」（见 app 侧 pty.rs 的换代守卫）。
+            attach::notify_claim(session_id, meowo_reporter::proc::owner_pid(&provider));
         }
     }
     // GUI 审批桥只对「PermissionRequest hook 会阻塞等待并采纳决策输出」的 provider 生效
@@ -76,6 +78,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ev.tool_name.as_deref().unwrap_or("Tool"),
                 ev.tool_input.as_ref(),
                 &ev.permission_suggestions,
+                false,
             ) {
                 let (output, settled) = approval_outcome(decision);
                 if let Some(output) = output {
@@ -87,6 +90,36 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 //
                 // best-effort（吞错）：codex 的 hook 可能继承只读沙箱（见上方 dispatch 的注释），
                 // 清不掉绝不能影响已经打给 agent 的决策输出。
+                if settled {
+                    let _ = store.clear_pending_review(session_id, now_ms());
+                }
+            }
+        }
+    }
+    // AskUserQuestion 代答桥：PreToolUse 是唯一能在表单渲染前拦下提问的闸门
+    // （PermissionRequest 层的 allow+updatedInput / deny 都拦不住表单，2.1.234 实测）。
+    // broker 挂起等 GUI 作答；答案以 DenyWith 回来 → 输出 permissionDecision deny +
+    // reason（模型把它当答复采纳继续）。Allow/Pass 都不输出 → 工具继续、表单照常出现
+    // （Allow 正是旧 broker 自动放行段的回包，跨版本兼容在此闭合）。ExitPlanMode 的
+    // PreToolUse 不进此分支。
+    if canonical_event == "PreToolUse"
+        && ev.tool_name.as_deref() == Some("AskUserQuestion")
+        && hook_decides
+    {
+        if let Some(session_id) = store.find_session_id_pub(&ev.session_id)? {
+            if let Some(decision) = attach::request_approval(
+                session_id,
+                &provider,
+                "AskUserQuestion",
+                ev.tool_input.as_ref(),
+                &[],
+                true,
+            ) {
+                let (output, settled) = pretooluse_outcome(decision);
+                if let Some(output) = output {
+                    println!("{output}");
+                }
+                // 已代答 → 提问不再悬着，当场清「待回答」（与审批桥同一时序理由）。
                 if settled {
                     let _ = store.clear_pending_review(session_id, now_ms());
                 }
@@ -173,13 +206,54 @@ fn approval_outcome(
             })),
             true,
         ),
+        // 审批桥不会产生带文本的拒绝（那是提问代答的形态），到达即按普通拒绝处理、
+        // 文本透传——比丢弃决策（放行被拒的工具）安全。
+        Decision::DenyWith(message) => (
+            Some(serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
+                        "behavior": "deny",
+                        "message": message,
+                    }
+                }
+            })),
+            true,
+        ),
         Decision::Pass => (None, false),
+    }
+}
+
+/// AskUserQuestion 代答桥的决策 → （PreToolUse hook 输出，提问是否已了结）。
+///
+/// 与 `approval_outcome` 的关键差异：这里**只有 DenyWith（GUI 已代答）产生输出**。
+/// Allow/Pass 都静默——工具继续执行、TUI 表单照常出现，提问仍悬着等人（Allow 是旧
+/// broker 自动放行段的回包，Pass 是挂起超时/无消费者的降级）；PreToolUse 输出 allow
+/// 反而会跳过后续权限流程，绝不能发。
+fn pretooluse_outcome(
+    decision: meowo_protocol::broker::ApprovalDecision,
+) -> (Option<serde_json::Value>, bool) {
+    use meowo_protocol::broker::ApprovalDecision as Decision;
+    match decision {
+        Decision::DenyWith(reason) => (
+            Some(serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            })),
+            true,
+        ),
+        Decision::Allow | Decision::AllowWithPermissions(_) | Decision::Deny | Decision::Pass => {
+            (None, false)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::approval_outcome;
+    use super::{approval_outcome, pretooluse_outcome};
     use meowo_protocol::broker::ApprovalDecision;
 
     /// Allow/Deny = 决策落地：既要输出 hook 决策，也要清「待批准」。此前没有第二个分量，
@@ -219,5 +293,47 @@ mod tests {
         let (output, settled) = approval_outcome(ApprovalDecision::Pass);
         assert!(output.is_none());
         assert!(!settled);
+    }
+
+    /// 代答桥只有 DenyWith 产生 PreToolUse 输出（deny+reason=答案直达模型并了结提问）；
+    /// Allow（旧 broker 自动放行回包）/Pass（超时降级）/裸 Deny 一律静默——工具继续、
+    /// 表单照常、提问仍悬着。PreToolUse 绝不能输出 allow（会跳过后续权限流程）。
+    #[test]
+    fn pretooluse_only_answers_settle_the_question() {
+        let (output, settled) =
+            pretooluse_outcome(ApprovalDecision::DenyWith("【Meowo 代答】晚饭 → 火锅".into()));
+        assert!(settled);
+        let out = output.unwrap();
+        assert_eq!(
+            out["hookSpecificOutput"]["hookEventName"],
+            "PreToolUse"
+        );
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+            "【Meowo 代答】晚饭 → 火锅"
+        );
+
+        for decision in [
+            ApprovalDecision::Allow,
+            ApprovalDecision::AllowWithPermissions(vec![]),
+            ApprovalDecision::Deny,
+            ApprovalDecision::Pass,
+        ] {
+            let (output, settled) = pretooluse_outcome(decision);
+            assert!(output.is_none());
+            assert!(!settled);
+        }
+    }
+
+    /// 审批桥收到 DenyWith（不该发生但协议允许）按普通拒绝处理并透传文本，
+    /// 不得静默丢弃决策放行被拒的工具。
+    #[test]
+    fn approval_outcome_passes_deny_with_message_through() {
+        let (output, settled) = approval_outcome(ApprovalDecision::DenyWith("原因".into()));
+        assert!(settled);
+        let out = output.unwrap();
+        assert_eq!(out["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        assert_eq!(out["hookSpecificOutput"]["decision"]["message"], "原因");
     }
 }

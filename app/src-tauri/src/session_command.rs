@@ -92,6 +92,83 @@ pub(crate) async fn set_session_note(
     .map_err(|e| e.to_string())?
 }
 
+/// 已有会话中途附加目录:落库(merge 进 sessions.extra_dirs,resume/接管重启时回放)
+/// + **尽力即时生效**——会话有托管 PTY 时直接把 `/add-dir <dir>`(agent 自己的运行时
+/// 命令)写进去,运行中的进程当场拿到访问权;没有托管 PTY(断开/外部终端)只落库,
+/// 下次恢复回放兜底。目录校验与新建同规;按会话 provider 查能力声明,不支持的 agent
+/// 如实拒绝。
+#[tauri::command]
+pub(crate) async fn add_session_extra_dir(
+    app: tauri::AppHandle,
+    state: State<'_, super::AppState>,
+    session_id: i64,
+    dir: String,
+) -> Result<bool, String> {
+    let db_path = state.db_path.clone();
+    let ptys = state.ptys.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let d = crate::terminal::validate_new_session_cwd(&dir)?;
+        let store = super::open_store(&db_path)?;
+        let provider = store
+            .session_provider(session_id)
+            .map_err(|error| error.to_string())?;
+        let supported = meowo_agent::resolve(Some(&provider))
+            .and_then(|agent| agent.extra_dir_flag())
+            .is_some();
+        if !supported {
+            return Err("该 Agent 不支持附加目录".into());
+        }
+        let added = store
+            .add_session_extra_dir(session_id, &d)
+            .map_err(|error| error.to_string())?;
+        if added {
+            // 即时生效 best-effort:写失败(无托管 PTY/队列满)不报错——库里已记,
+            // resume 回放兜底,报错反而会让用户以为整个动作失败了。
+            //
+            // **绝不盲注**:终端正挂着审批/提问模态(broker 有在途审批,或屏幕检测
+            // blocked)时,注入串尾的 \r 会按在模态的高亮项上——等于替用户批准一条
+            // 从未过目的命令。此时只落库,恢复回放兜底。
+            //
+            // 路径恒加引号(Windows 路径不含引号字符):不加的话含空格路径在 CLI 的
+            // slash 参数解析处断开,进程实际没拿到访问权而库里已记,UI 会说谎。
+            // "/add-dir" 是 claude 的运行时命令;将来第二个声明 extra_dir_flag 的
+            // agent 落地时,运行时命令串也要纳入插件声明,不得沿用这里的字面量。
+            let modal = ptys.approval_session_ids().contains(&session_id)
+                || ptys.screen_states().get(&session_id).copied() == Some("blocked");
+            if !modal {
+                let _ = ptys.write(session_id, format!("/add-dir \"{d}\"\r").as_bytes());
+            }
+            super::watch::emit_board_changed(&app, "extra_dirs");
+        }
+        Ok(added)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 移除一个附加目录（落库侧）。语义是「下次恢复不再带上」——运行中进程已持有的权限
+/// 没有运行时撤销命令,收不回;不做目录存在性校验(目录已被删掉正是要移除它的理由)。
+#[tauri::command]
+pub(crate) async fn remove_session_extra_dir(
+    app: tauri::AppHandle,
+    state: State<'_, super::AppState>,
+    session_id: i64,
+    dir: String,
+) -> Result<bool, String> {
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let removed = super::open_store(&db_path)?
+            .remove_session_extra_dir(session_id, &dir)
+            .map_err(|error| error.to_string())?;
+        if removed {
+            super::watch::emit_board_changed(&app, "extra_dirs");
+        }
+        Ok(removed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 对话页改选启动选项后的落库（合并单键写回）：模型/权限是**启动参数**，resume/接管
 /// 时回放（`terminal::splice_stored_launch_args`）——不落库的话每次重启都回默认档
 /// （用户实拍：会话里切到 1M 上下文档，重启后回落 200K）。

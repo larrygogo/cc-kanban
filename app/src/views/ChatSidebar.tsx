@@ -1,12 +1,13 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { confirmStopSession, getLiveSessionsPage, getSessionLineage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, searchChatTranscripts, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LineageEntry, type LiveSession, type SessionTone, type TranscriptSearchHit } from "../api";
+import { pickAndAddExtraDir, confirmStopSession, getLiveSessionsPage, getSessionLineage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, searchChatTranscripts, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LineageEntry, type LiveSession, type SessionTone, type TranscriptSearchHit } from "../api";
 import { remoteUi } from "../remoteMode";
 import { useBoardRefresh } from "../hooks/useBoardRefresh";
 import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
 import { folderName, parentSegment, pathKey } from "../paths";
 import { useMenuPopup } from "./menu";
+import { useAgents } from "../useAgents";
 import { CardContextMenu } from "./sticker/CardContextMenu";
 import { editorKeyDown, useStarred } from "./sticker/helpers";
 import { UNNAMED_SESSION_SENTINEL } from "./sticker/types";
@@ -770,6 +771,18 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
   };
   const openMenuAt = (item: LiveSession, x: number, y: number) => setCtxMenu({ sid: item.session.id, x, y });
 
+  // 中途附加目录(条目菜单):命令统一负责落库 + 即时生效(有托管 PTY 时后端直写
+  // /add-dir);断开会话只落库,下次恢复回放。入口按能力位显隐(与贴纸同口径)。
+  const { agents } = useAgents();
+  const supportsExtraDir = (p: string) => agents?.find((a) => a.id === p)?.supports_extra_dirs ?? false;
+  const addExtraDir = async (item: LiveSession) => {
+    try {
+      await pickAndAddExtraDir(item.session.id);
+    } catch (error) {
+      setActionError(formatBackendError(error, t.locale));
+    }
+  };
+
   const changeGroupMode = (mode: GroupMode) => {
     setGroupMode(mode);
     localStorage.setItem(GROUP_MODE_KEY, mode);
@@ -948,8 +961,23 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
               )}
             </span>
           )}
-          {/* 按目录分组时每条再重复一遍目录名是噪声——组头已经写着了（按日期/状态分组时目录仍有用）。 */}
-          {dir && groupMode !== "dir" && !noting && <span className="chat-sidebar-meta" data-tip={item.cwd ?? undefined}>{dir}</span>}
+          {/* 目录行 = 目录名 + 附加目录标(+N,与贴纸卡同款)同排——两者曾是纵排容器里
+              的块级兄弟,+N 会掉到下一行(用户实拍)。按目录分组时目录名让位组头,但
+              +N 照显(组头只写主仓,跨仓信息组头没有)。 */}
+          {!noting && ((dir && groupMode !== "dir") || (item.extra_dirs?.length ?? 0) > 0) && (
+            <span className="chat-sidebar-metaline">
+              {dir && groupMode !== "dir" && <span className="chat-sidebar-meta" data-tip={item.cwd ?? undefined}>{dir}</span>}
+              {(item.extra_dirs?.length ?? 0) > 0 && (
+                <span
+                  className="chat-sidebar-extradirs"
+                  data-testid="sidebar-extradirs"
+                  data-tip={[item.cwd, ...item.extra_dirs].filter(Boolean).join(" · ")}
+                >
+                  +{item.extra_dirs.length}
+                </span>
+              )}
+            </span>
+          )}
           {/* 便签写完要看得见，否则「添加便签」等于写进黑洞。编辑中的那条让位给输入框。 */}
           {!noting && item.note && (
             <span className="chat-sidebar-note" data-tip={item.note}><NoteIcon />{item.note}</span>
@@ -1213,6 +1241,8 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
           onArchive={() => toggleArchived(ctxItem)}
           onNewSession={() => void openNewSessionWindow({ cwd: ctxItem.cwd, provider: ctxItem.provider }).catch(() => {})}
           onOpenDir={!remoteUi() && ctxItem.cwd ? () => void openProjectDir(ctxItem.cwd!).catch(() => {}) : null}
+          // 远程(手机网页)没有系统目录选择器,附加目录入口一并收起。
+          onAddDir={!remoteUi() && supportsExtraDir(ctxItem.provider) ? () => void addExtraDir(ctxItem) : null}
           // 结束会话只对本 GUI 托管的 PTY 开放（与看板同一门控）：外部终端里跑的会话
           // 杀不了，后台会话杀了也会被 supervisor 拉回来。远程再叠一层门控:
           // stop_managed_terminal 是 /rpc 拒绝项,点了必 404。

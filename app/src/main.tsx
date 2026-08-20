@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { App } from "./App";
 import { TooltipLayer } from "./Tooltip";
-import { lockdownInProduction } from "./devtools-guard";
+import { lockdownInProduction, suppressNativeFind } from "./devtools-guard";
 import { installInputModality } from "./input-modality";
 import { bootAppearance } from "./appearance";
 import { detectHostOs } from "./platform";
@@ -39,6 +39,9 @@ if (import.meta.env.VITE_E2E === "1") {
 
 // 正式构建下封死右键菜单与 DevTools 快捷键（dev 放行）。
 lockdownInProduction();
+
+// 全部窗口按掉 WebView 原生页内查找条（Ctrl+F/F3），应用内搜索自行接管。
+suppressNativeFind();
 
 // 焦点框只在键盘导航时显示（避免打开面板时 WKWebView 自动聚焦首元素亮起 UA 焦点框）。
 installInputModality();

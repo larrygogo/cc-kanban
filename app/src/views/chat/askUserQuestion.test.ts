@@ -1,10 +1,54 @@
 import { describe, expect, it } from "vitest";
 import {
+  composeAnswerBody,
   matchOptionByLabel,
   observeTranscriptForDismiss,
   parseAskUserQuestions,
+  type QuestionAnswerDraft,
   type QuestionDismissTracker,
+  type StructuredQuestion,
 } from "./askUserQuestion";
+
+describe("composeAnswerBody", () => {
+  const question = (over: Partial<StructuredQuestion>): StructuredQuestion => ({
+    question: "问点什么？",
+    header: null,
+    multiSelect: false,
+    options: [],
+    ...over,
+  });
+  const draft = (selected: string[], custom = ""): QuestionAnswerDraft => ({ selected, custom });
+
+  it("逐题一行,多选顿号拼接,自定义追加在选项后", () => {
+    const questions = [
+      question({ header: "晚饭", question: "晚饭吃什么？" }),
+      question({ header: "配菜", question: "配菜选哪些？", multiSelect: true }),
+    ];
+    const answers = new Map([
+      [0, draft(["火锅"])],
+      [1, draft(["毛肚", "虾滑"], " 少放辣 ")],
+    ]);
+    expect(composeAnswerBody(questions, answers)).toBe(
+      "晚饭 · 晚饭吃什么？ → 火锅\n配菜 · 配菜选哪些？ → 毛肚、虾滑、少放辣",
+    );
+  });
+
+  it("任一题空着(含纯空白自定义)即不可提交", () => {
+    const questions = [question({}), question({ multiSelect: true })];
+    expect(composeAnswerBody(questions, new Map([[0, draft(["A"])]]))).toBeNull();
+    expect(
+      composeAnswerBody(questions, new Map([[0, draft(["A"])], [1, draft([], "   ")]])),
+    ).toBeNull();
+    expect(composeAnswerBody([], new Map())).toBeNull();
+  });
+
+  it("纯自定义文本可作答,无 header 的题面直接用问题原文", () => {
+    const questions = [question({ question: "还有什么要补充？" })];
+    expect(composeAnswerBody(questions, new Map([[0, draft([], "没有了")]]))).toBe(
+      "还有什么要补充？ → 没有了",
+    );
+  });
+});
 
 describe("observeTranscriptForDismiss", () => {
   const tracker = (armAt: number): QuestionDismissTracker => ({ armAt, count: null });

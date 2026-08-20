@@ -29,6 +29,9 @@ import {
   type SearchResultDto,
 } from "../../api";
 import { FileMarkdown } from "../ChatMarkdown";
+import { useMenuPopup } from "../menu";
+import { FolderPlusIcon } from "../sticker/icons";
+import { folderName } from "../../paths";
 import { pushEscLayer } from "../../escLayers";
 import { useT } from "../../i18n";
 import { formatBackendError } from "../../i18n/errors";
@@ -375,9 +378,84 @@ type FetchEntry<T> = { loading: boolean; error: string | null; data: T | null };
  * memo：折叠只是 display:none 不卸载，不隔断的话 ChatWindow 每次击键都要对面板里
  * 可能上千行的文件 DOM 做全量 reconcile；父层回调已换稳定引用配合生效。
  */
-export const GitDiffView = memo(GitDiffViewImpl);
-function GitDiffViewImpl({ cwd, summary, width, collapsed, maximized, onCollapse, onToggleMaximize }: {
+/** 面板头行的仓切换 + 附加目录管理菜单(用户指定收拢于此):行点选切换激活仓(当前
+ *  项打勾),附加目录行尾 ✕ 移除(落库侧,下次恢复不再带上),菜单尾「附加目录」添加。 */
+function DirSwitcher({ cwd, dirs, onDirChange, onAddDir, onRemoveDir }: {
   cwd: string;
+  dirs: string[];
+  onDirChange: (dir: string) => void;
+  onAddDir: (() => void) | null;
+  onRemoveDir: (dir: string) => void;
+}) {
+  const t = useT();
+  const { open, setOpen, pos, ref, btnRef, menuRef, toggle, onKeyDown } = useMenuPopup({ align: "left" });
+  const pick = (action: () => void) => { setOpen(false); btnRef.current?.focus(); action(); };
+  return (
+    <div className="dd chat-diff-dirs" ref={ref} onKeyDown={onKeyDown}>
+      <button ref={btnRef} type="button" className="chat-diff-dirs-btn" aria-haspopup="menu" aria-expanded={open} data-tip={t.chat.dirsSection} title={cwd} onClick={toggle}>
+        <FolderIcon />
+        <span className="chat-diff-dirs-name">{folderName(cwd)}</span>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
+      </button>
+      {open && (
+        <div className="dd-menu chat-dirs-menu" role="menu" ref={menuRef} style={{ position: "fixed", top: pos.top, bottom: pos.bottom, left: pos.left }}>
+          {dirs.map((dir, i) => {
+            // 首项是主仓(会话根,不可移除);其余为附加目录。
+            const isMain = i === 0;
+            const active = dir === cwd;
+            return (
+              // 行是 div 而非 button:× 要住在行**内部**(用户指定),button 套 button
+              // 非法。键盘可达靠 role+tabIndex,Enter/Space 由 useMenuPopup 显式 click。
+              // 选中态 = 整行 active 背景(is-active),不再用勾。
+              <div
+                key={dir}
+                role="menuitem"
+                tabIndex={-1}
+                className={"dd-item chat-dirs-item" + (active ? " is-active" : "")}
+                title={dir}
+                onClick={() => pick(() => onDirChange(dir))}
+              >
+                <span className="dd-label">{folderName(dir)}</span>
+                {!isMain && (
+                  <button
+                    type="button"
+                    className="chat-dirs-x"
+                    aria-label={t.newSession.extraDirRemove}
+                    title={t.newSession.extraDirRemove}
+                    onClick={(e) => { e.stopPropagation(); pick(() => onRemoveDir(dir)); }}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          {onAddDir && (
+            <>
+              <div className="sf-sep" role="separator" />
+              <button type="button" role="menuitem" className="dd-item" onClick={() => pick(onAddDir)}>
+                <span className="chat-title-action-ico"><FolderPlusIcon /></span>
+                <span className="dd-label">{t.chat.addExtraDir}</span>
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export const GitDiffView = memo(GitDiffViewImpl);
+function GitDiffViewImpl({ cwd, dirs, onDirChange, onAddDir, onRemoveDir, summary, width, collapsed, maximized, onCollapse, onToggleMaximize }: {
+  /** 面板的激活仓:主仓或某个附加目录(--add-dir)。文件树与更改都对着它。 */
+  cwd: string;
+  /** 会话的全部目录(主仓在首)。仓切换与附加目录管理都在头行的 DirSwitcher。 */
+  dirs: string[];
+  onDirChange: (dir: string) => void;
+  /** 中途附加目录;会话 provider 不支持时传 null 隐藏该动作。 */
+  onAddDir: (() => void) | null;
+  /** 移除附加目录(落库侧,下次恢复不再带上)。 */
+  onRemoveDir: (dir: string) => void;
   summary: GitDiffSummaryDto | null;
   /** 停靠宽度（px，ChatWindow 侧的分栏柄拖动改写）；最大化时忽略（面板占满整宽）。 */
   width: number;
@@ -420,8 +498,14 @@ function GitDiffViewImpl({ cwd, summary, width, collapsed, maximized, onCollapse
       {/* 最大化时对话卡（含承载窗口拖拽区的 .chat-bar）整体隐藏，
           面板头行因此也要是拖拽区；行内按钮不带该属性，点击不受影响（同 .chat-bar 约定）。 */}
       <header className="chat-diff-head" data-tauri-drag-region>
+        {/* 仓切换 + 附加目录管理(用户指定收拢于此):选中的仓即 cwd,文件树与更改整体
+            跟随;summary 由 ChatWindow 按激活仓重拉,非 git 仓自动只剩「文件」页签。
+            多仓或支持附加时才渲染——单仓且不支持附加的 agent 界面零变化。 */}
+        {(dirs.length > 1 || onAddDir) && (
+          <DirSwitcher cwd={cwd} dirs={dirs} onDirChange={onDirChange} onAddDir={onAddDir} onRemoveDir={onRemoveDir} />
+        )}
         <div className="chat-diff-tabs">
-          <button type="button" className={tab === "files" ? "is-active" : ""} onClick={() => setTab("files")}>
+          <button type="button" className={tab === "files" || !changesAvailable ? "is-active" : ""} onClick={() => setTab("files")}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
             </svg>
@@ -467,9 +551,10 @@ function GitDiffViewImpl({ cwd, summary, width, collapsed, maximized, onCollapse
           </svg>
         </button>
       </header>
+      {/* key=cwd:切仓即重挂,树展开态/选中文件不跨仓串场。 */}
       {tab === "changes" && changesAvailable && summary
-        ? <ChangesView cwd={cwd} summary={summary} />
-        : <FilesView cwd={cwd} />}
+        ? <ChangesView key={cwd} cwd={cwd} summary={summary} />
+        : <FilesView key={cwd} cwd={cwd} />}
     </aside>
   );
 }

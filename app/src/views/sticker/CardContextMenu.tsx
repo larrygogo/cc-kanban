@@ -2,7 +2,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { pushEscLayer } from "../../escLayers";
 import { useT } from "../../i18n";
-import { ArchiveIcon, FolderIcon, NoteIcon, PencilIcon, PlusIcon, StopIcon, TopIcon } from "./icons";
+import { ArchiveIcon, FolderIcon, FolderPlusIcon, NoteIcon, PencilIcon, PlusIcon, StopIcon, TopIcon } from "./icons";
 
 // 卡片右键菜单：置顶/便签/重命名/归档收拢于此（替代原 hover 图标行，卡片标题行更干净）。
 // fixed 定位 + useLayoutEffect 钳位：贴纸窗口小，菜单贴边时向内收、不被窗口边缘裁掉。
@@ -19,6 +19,7 @@ export function CardContextMenu({
   onArchive,
   onNewSession,
   onOpenDir,
+  onAddDir,
   onEndSession,
   onClose,
 }: {
@@ -35,6 +36,8 @@ export function CardContextMenu({
   onNewSession: () => void;
   /** 打开项目目录；会话无 cwd（旧数据）时传 null 隐藏该项。 */
   onOpenDir: (() => void) | null;
+  /** 附加目录(一个会话跨多仓,--add-dir):会话 provider 未声明该能力时传 null 隐藏。 */
+  onAddDir: (() => void) | null;
   /** 结束会话（杀托管 PTY）；仅本 GUI 托管的会话可结束，其余传 null 隐藏该项。 */
   onEndSession: (() => void) | null;
   onClose: () => void;
@@ -155,14 +158,18 @@ export function CardContextMenu({
         <PlusIcon />
         {t.sticker.newSession}
       </button>
+      {(onOpenDir || onAddDir) && <div className="ctx-sep" role="separator" />}
       {onOpenDir && (
-        <>
-          <div className="ctx-sep" role="separator" />
-          <button type="button" role="menuitem" className="ctx-item" onClick={act(onOpenDir)}>
-            <FolderIcon />
-            {t.sticker.openProjectDir}
-          </button>
-        </>
+        <button type="button" role="menuitem" className="ctx-item" onClick={act(onOpenDir)}>
+          <FolderIcon />
+          {t.sticker.openProjectDir}
+        </button>
+      )}
+      {onAddDir && (
+        <button type="button" role="menuitem" className="ctx-item" onClick={act(onAddDir)}>
+          <FolderPlusIcon />
+          {t.chat.addExtraDir}
+        </button>
       )}
       {onEndSession && (
         <>

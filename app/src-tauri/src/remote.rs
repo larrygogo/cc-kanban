@@ -1015,6 +1015,8 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
                     a.cwd,
                     a.provider,
                     a.options,
+                    // 手机端新建暂不带附加目录(移动页无该表单);None = 单目录会话。
+                    None,
                 )
                 .await
                 .map(|_temp_id| ()),

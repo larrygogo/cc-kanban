@@ -129,10 +129,14 @@ export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setVi
       if (cancelled) return;
       if (nextApproval) setBrokerOwnsReview(true);
       setApproval(nextApproval);
-      // 已有同一 requestId 的题面卡时不重复设置，避免打断点选状态。
+      // 已有同一 requestId 的题面卡时不重复设置，避免打断点选状态；answerable 翻转
+      // （挂起结算/超时 → 作答卡降级为展示卡）必须放行——它正是靠这条轮询传递的。
       if (question) {
         setStructuredQuestion((current) => {
-          if (current?.requestId === question.requestId) return current;
+          if (
+            current?.requestId === question.requestId
+            && current.answerable === question.answerable
+          ) return current;
           setBrokerOwnsReview(true);
           return question;
         });

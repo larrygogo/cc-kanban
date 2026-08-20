@@ -22,6 +22,9 @@ pub(crate) fn request_approval(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
     permission_suggestions: &[serde_json::Value],
+    // PreToolUse 阶段的 AskUserQuestion 代答桥置 true；broker 据此挂起等 GUI 作答，
+    // 而不是走 PermissionRequest 的自动放行。
+    pre_tool_use: bool,
 ) -> Option<ApprovalDecision> {
     let (endpoint, token, protocol) = approval_broker()?;
     let request_id = format!(
@@ -54,6 +57,7 @@ pub(crate) fn request_approval(
         description: description.map(str::to_string),
         input,
         permission_suggestions: permission_suggestions.to_vec(),
+        pre_tool_use,
     };
     // 305s 读超时是给**用户**决策留的时间，前提是对端确实是 Meowo。建连则必须有独立上限：
     // 裸 connect 在对端端口被无关进程回收时会一直挂着，把 PermissionRequest hook 拖满
@@ -137,7 +141,11 @@ fn pid_alive(pid: u32) -> bool {
 
 /// SessionStart 落库后，用继承自托管 PTY 的一次性环境变量把临时 PTY 绑定到真实数据库会话。
 /// 失败必须静默：reporter 的首要契约是永不阻塞 agent hook。
-pub(crate) fn notify_claim(session_id: i64) {
+///
+/// `agent_pid` = 本次 hook 的会话本体 pid（proc::owner_pid）。这些环境变量会被会话内 Bash
+/// 起的嵌套 agent（`claude -p` 探针等）原样继承——broker 端靠这个 pid 把嵌套 agent 的
+/// 误认领与真 /clear 换代区分开（见 app 侧 pty.rs 的换代守卫）。
+pub(crate) fn notify_claim(session_id: i64, agent_pid: Option<u32>) {
     let Ok(endpoint) = std::env::var("MEOWO_PTY_ENDPOINT") else {
         return;
     };
@@ -171,6 +179,7 @@ pub(crate) fn notify_claim(session_id: i64) {
                 token,
                 launch_token: launch,
                 session_id,
+                pid: agent_pid,
             },
         );
     } else {

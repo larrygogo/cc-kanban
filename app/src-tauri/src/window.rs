@@ -68,6 +68,43 @@ pub(crate) fn round_window_corners(window: &tauri::WebviewWindow) {
     let _ = window;
 }
 
+/// 生产构建整族关掉 WebView2 的「浏览器加速键」（Ctrl+P 打印 / Ctrl+R·F5 刷新 /
+/// Ctrl+S 另存 / Ctrl+O 打开文件 / F7 光标浏览 / Ctrl+F 原生查找条等）：这些默认行为
+/// 在桌面应用里全是缺陷,前端 devtools-guard 只能逐键追。编辑键（Ctrl+C/V/X/A/Z）
+/// 不属于此列,不受影响;按键事件照常到达页面,应用内的 Ctrl+F 搜索接管不变。
+/// tauri 2.11 没透传 wry 的 browser_accelerator_keys,故建成后经 with_webview 自己
+/// 调 WebView2 设置。dev 构建放行——F12/Ctrl+R 是日常调试路径,与 devtools-guard 同界。
+/// 每次页面加载都会被调一遍（on_page_load 挂载）,重复设置无害。
+/// cfg! 而非 #[cfg] 做 debug 判定:release 专属代码 dev 也要过编译(同 single-instance)。
+pub(crate) fn disable_browser_accelerators(webview: &tauri::Webview) {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = webview.with_webview(|platform| {
+            use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+            use windows::core::Interface;
+            let apply = || -> windows::core::Result<()> {
+                // SAFETY: with_webview 保证闭包在主线程执行,controller 是活的 COM 指针。
+                unsafe {
+                    platform
+                        .controller()
+                        .CoreWebView2()?
+                        .Settings()?
+                        .cast::<ICoreWebView2Settings3>()?
+                        .SetAreBrowserAcceleratorKeysEnabled(false)
+                }
+            };
+            if let Err(error) = apply() {
+                eprintln!("关闭 WebView2 浏览器加速键失败: {error}");
+            }
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = webview;
+}
+
 /// 独立窗口的**原生**底色，与 styles.css 的 --cc-window-bg 对齐（dark #1c1c1e / light #f6f6f7）。
 ///
 /// 隐藏创建 + 首帧后 show 只消除了「窗口先于首帧显示」的那类白框；show 的瞬间 WebView2
