@@ -519,16 +519,44 @@ struct Ctx {
 }
 
 fn build_router(app: tauri::AppHandle, token: String, file_token: String) -> Router {
-    Router::new()
+    let ctx = Ctx {
+        app,
+        token: token.into(),
+        file_token: file_token.into(),
+    };
+    // /rpc 的 token 门用 route_layer 前置到 body 提取之前:未鉴权请求在读 body 前就被
+    // 401 掐掉,堵住「48MB body 在鉴权前就 buffer 进内存」的预鉴权内存耗尽面(0.0.0.0
+    // 上任何同网设备可打)。route_layer 只作用于本 Router 的已定义路由,不波及 /file
+    // (query token)与静态资源。
+    let rpc = Router::new()
         .route("/rpc/{command}", post(rpc_handler))
+        .route_layer(axum::middleware::from_fn_with_state(
+            ctx.clone(),
+            require_token,
+        ));
+    Router::new()
+        .merge(rpc)
         .route("/file", get(file_handler))
         .fallback(get(static_handler))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .with_state(Ctx {
-            app,
-            token: token.into(),
-            file_token: file_token.into(),
-        })
+        .with_state(ctx)
+}
+
+/// /rpc 前置鉴权:只看 header,不碰 body。放行才让 handler 去提取 body。
+async fn require_token(
+    State(ctx): State<Ctx>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let provided = req
+        .headers()
+        .get("x-meowo-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !token_matches(&ctx.token, provided) {
+        return err_status(StatusCode::UNAUTHORIZED, "未授权");
+    }
+    next.run(req).await
 }
 
 /// invoke 语义对齐：Ok → 200 + JSON 值；Err(String) → 400 + JSON 字符串（前端
