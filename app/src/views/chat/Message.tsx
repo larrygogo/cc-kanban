@@ -44,12 +44,14 @@ function splitUserText(text: string): { body: string; images: { path: string; ke
   // 指令头连同其后紧跟的光杆「-」行（附件残行）一起处理：残行总是剥；仍有实质
   // 附件行（非图片路径「- xxx」）时保留头，否则头也剥。用户自己写的孤立「-」
   // 不紧跟在指令头后，不受影响。
-  // 消息里是否有附件指令头(剥掉光杆指代后比对):它是「这条消息经附件机制发出」的
-  // 上下文信号——只有此时,独行的光杆「[Image #N]」才按机器残留剥掉;普通消息里
-  // 用户手打的孤立指代照旧保留。
+  // 消息是否经附件机制发出(有指令头):独行光杆只在此前提下、且仅剥「文本最顶端那段
+  // 机器前缀」——CC 把光杆「[Image #N]」挪到提交文本最前,始终排在用户正文之前。一旦
+  // 遇到第一行真实内容就停止,用户正文里手打的孤立「[Image #N]」照旧保留(此前全消息
+  // 范围剥,把用户写的指代也吃了——desktop 回归)。
   const hasInstructionHeader = kept.some((line) =>
     ATTACHMENT_INSTRUCTION_HEADERS.has(line.replace(/\[Image #\d+\]\s*/g, "").trim()),
   );
+  let inLeadingRefs = hasInstructionHeader;
   const body: string[] = [];
   for (let i = 0; i < kept.length; i++) {
     const line = kept[i];
@@ -58,8 +60,10 @@ function splitUserText(text: string): { body: string; images: { path: string; ke
     // 比对失配,整段样板漏进气泡(远程发图实拍)。带 source 的完整引用行已在上一轮抽走。
     const bareStripped = line.replace(/\[Image #\d+\]\s*/g, "");
     if (!ATTACHMENT_INSTRUCTION_HEADERS.has(bareStripped.trim())) {
-      // 附件消息里的独行光杆指代 = 机器残留(图片已由 image 块渲染),剥;其余原样保留。
-      if (hasInstructionHeader && bareStripped.trim() === "" && line.trim() !== "") continue;
+      // 顶端机器前缀里的独行光杆指代(图片已由 image 块渲染),剥。
+      if (inLeadingRefs && bareStripped.trim() === "" && line.trim() !== "") continue;
+      // 第一行真实内容(空行不计):机器前缀结束,此后不再剥独行指代。
+      if (line.trim() !== "") inLeadingRefs = false;
       body.push(line);
       continue;
     }

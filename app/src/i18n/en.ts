@@ -110,6 +110,7 @@ export const en: Dict = {
     up: "Up",
     pickHere: "Use this folder",
     drives: "Pick a drive",
+    fixOnDesktop: "Resolve on the desktop before launching",
     noSubdirs: "No subfolders",
     recent: "Recent",
     agent: "Agent",

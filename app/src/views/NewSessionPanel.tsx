@@ -481,34 +481,44 @@ export function NewSessionPanel({ onClose, prefill }: {
               ))}
             </div>
           )}
-          {/* 修复 hook / 登录都要在桌面拉起终端进程,远程既不放行也无从操作——隐藏,不留死按钮。 */}
-          {!remoteUi() && avail && avail.length > 0 && warn && (
+          {/* 修复 hook / 登录的按钮都要在桌面拉起终端进程,远程无从操作——按钮隐藏。但警告
+              文字必须留:远程若整块藏掉,用户对着「启动」点下去会起一个 hook 没接、永远
+              不出现在看板的哑会话且毫无线索(审查 #10)。远程把动作换成「请在桌面端处理」。 */}
+          {avail && avail.length > 0 && warn && (
             <div className="ns-warn" data-testid="ns-hooks-warn">
               <span>{hooks[provider] === "unknown" ? t.newSession.hooksUnknown : t.newSession.hooksMissing}</span>
-              <button
-                type="button"
-                className="ns-repair"
-                data-testid="ns-repair-hooks"
-                onClick={repairHooks}
-                disabled={repairing}
-              >
-                {repairing ? t.newSession.repairingHooks : t.newSession.repairHooks}
-              </button>
+              {remoteUi() ? (
+                <span className="ns-warn-remote">{t.newSession.fixOnDesktop}</span>
+              ) : (
+                <button
+                  type="button"
+                  className="ns-repair"
+                  data-testid="ns-repair-hooks"
+                  onClick={repairHooks}
+                  disabled={repairing}
+                >
+                  {repairing ? t.newSession.repairingHooks : t.newSession.repairHooks}
+                </button>
+              )}
             </div>
           )}
-          {!remoteUi() && avail && avail.length > 0 && needLogin && (
+          {avail && avail.length > 0 && needLogin && (
             <div className="ns-warn" data-testid="ns-login-warn">
               {/* 等待中：这行承载「正在等」，按钮则变成「取消等待」。 */}
               <span>{loginOperations.isPending(provider) ? t.newSession.loggingIn : t.newSession.notLoggedIn}</span>
-              <button
-                type="button"
-                className="ns-repair"
-                data-testid="ns-login"
-                // 等待中不再是死按钮：终端可能已被关掉，而后端要 5 分钟才超时。点它即取消等待。
-                onClick={loginOperations.isPending(provider) ? cancelLoginWait : doLogin}
-              >
-                {loginOperations.isPending(provider) ? t.newSession.cancelLogin : t.newSession.login}
-              </button>
+              {remoteUi() ? (
+                <span className="ns-warn-remote">{t.newSession.fixOnDesktop}</span>
+              ) : (
+                <button
+                  type="button"
+                  className="ns-repair"
+                  data-testid="ns-login"
+                  // 等待中不再是死按钮：终端可能已被关掉，而后端要 5 分钟才超时。点它即取消等待。
+                  onClick={loginOperations.isPending(provider) ? cancelLoginWait : doLogin}
+                >
+                  {loginOperations.isPending(provider) ? t.newSession.cancelLogin : t.newSession.login}
+                </button>
+              )}
             </div>
           )}
         </div>

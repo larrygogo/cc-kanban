@@ -2666,6 +2666,8 @@ button.stab {
   color: var(--cc-text-faint);
 }
 .ns-dirbrowse-err { color: var(--cc-err); }
+/* 远程新建会话:hook/登录警告的动作位改成一句「去桌面处理」的次要说明。 */
+.ns-warn-remote { font-size: var(--fs-11); color: var(--cc-text-faint); flex: none; }
 
 /* 文本输入 / 下拉：统一的深色控件，focus 时翡翠绿描边。 */
 .ns-input {

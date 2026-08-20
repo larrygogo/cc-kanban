@@ -2180,15 +2180,18 @@ impl PtyBroker {
         })
     }
 
-    /// 有任何会话的消费者租约 = 对话窗的 WebView 活着且正显示着某条会话。
-    /// 与 [`crate::window::chat_window_in_view`] 合取才构成「用户正在看」：
+    /// 有任何**桌面**会话的消费者租约 = 对话窗的 WebView 活着且正显示着某条会话。
+    /// 与 [`crate::window::chat_window_in_view`] 合取才构成「桌面用户正在看」：
     /// 隐藏到托盘的窗口租约仍在（只有销毁才清），单凭租约不能断定有人注视。
+    /// **排除远端租约**：它表示「手机在看某会话」，与「桌面窗此刻是否被注视」无关。
+    /// 若把远端租约算进来，别的会话有手机在看时会把本会话的召唤从 Summon 误降为 Hold
+    /// （桌面用户其实没在看任何会话，却不切窗过去，审批空等 300s）。
     fn has_any_approval_consumer(&self) -> bool {
         let now = crate::now_ms();
         self.attach.approval_consumers.lock().is_ok_and(|consumers| {
-            consumers
-                .iter()
-                .any(|(id, lease)| consumer_lease_fresh(id, lease.seen_ms, now))
+            consumers.iter().any(|(id, lease)| {
+                !is_remote_consumer(id) && consumer_lease_fresh(id, lease.seen_ms, now)
+            })
         })
     }
 

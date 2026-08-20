@@ -60,12 +60,18 @@ export function RemoteAccessCard() {
   const enabled = settings?.remote_access_enabled ?? false;
   const port = settings?.remote_access_port ?? 18620;
 
-  // 开关/端口落盘后重取信息：token 首开时才生成，lastError 依端口占用而定，ips 随网卡变。
+  // 开关/端口落盘后重取信息：remote::apply 是 fire-and-forget,set_settings resolve 时
+  // server 往往还没 bind 完——立刻 refresh 会读到 apply 前的 last_error(端口被占也显
+  // 「一切正常」的假二维码)。再延迟补一拍,拿到 bind 结果后的真 last_error。
+  const refreshSettled = () => {
+    refresh();
+    window.setTimeout(refresh, 600);
+  };
   const toggle = () => {
-    void patch({ remote_access_enabled: !enabled }).then(() => refresh());
+    void patch({ remote_access_enabled: !enabled }).then(refreshSettled);
   };
   const changePort = (next: number) => {
-    void patch({ remote_access_port: next }).then(() => refresh());
+    void patch({ remote_access_port: next }).then(refreshSettled);
   };
 
   const url =
@@ -143,7 +149,7 @@ export function RemoteAccessCard() {
                   onClick={() => {
                     void appConfirm(t.remote.regenerateConfirm, { title: t.remote.regenerate, danger: true }).then((yes) => {
                       if (!yes) return;
-                      void regenerateRemoteToken().then(() => refresh()).catch(() => {});
+                      void regenerateRemoteToken().then(refreshSettled).catch(() => {});
                     });
                   }}
                 >

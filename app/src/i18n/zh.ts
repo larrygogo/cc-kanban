@@ -115,6 +115,7 @@ export const zh = {
     up: "上一级",
     pickHere: "用这个目录",
     drives: "选择磁盘",
+    fixOnDesktop: "请在桌面端处理后再启动",
     noSubdirs: "没有子目录",
     recent: "最近",
     agent: "Agent",

@@ -455,11 +455,24 @@ async fn apply_with(app: &tauri::AppHandle, enabled: bool, port: u32, token: Str
         }
     };
 
-    let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port16)).await {
-        Ok(l) => l,
-        Err(e) => {
-            set_error(Some(format!("绑定端口 {port16} 失败：{e}")));
-            return;
+    // 重启换发(改端口/token/重新生成令牌)时,旧 server 的 shutdown 已 notify,但它的
+    // listener 要等那个 detached 任务下一次 poll 才 drop——这中间同端口 bind 会
+    // WSAEADDRINUSE。短退避重试几次,躲开这段交接窗口;真被别的进程占着才如实报错。
+    let listener = {
+        let mut attempt = 0u32;
+        loop {
+            match tokio::net::TcpListener::bind(("0.0.0.0", port16)).await {
+                Ok(l) => break l,
+                Err(e) if attempt < 10 => {
+                    attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    let _ = e;
+                }
+                Err(e) => {
+                    set_error(Some(format!("绑定端口 {port16} 失败：{e}")));
+                    return;
+                }
+            }
         }
     };
     let shutdown = Arc::new(tokio::sync::Notify::new());
@@ -1051,9 +1064,20 @@ async fn file_handler(State(ctx): State<Ctx>, Query(q): Query<FileQuery>) -> Res
     match bytes {
         Ok(Ok(bytes)) => {
             let mime = mime_for(sniff_image_ext(&bytes));
-            // no-store:该 URL 的 query 里带 token,不许进浏览器磁盘缓存/中间缓存。
+            // 安全头(缺一不可):
+            // - no-store:URL query 带 token,不许进浏览器/中间缓存。
+            // - nosniff:附件内容用户可控,禁浏览器把 png 猜成 html 一类。
+            // - CSP default-src 'none' + sandbox:SVG 附件可含 <script>,经 <img> 加载
+            //   不执行,但用户长按「在新标签打开图片」会让它成为同源顶层文档、脚本运行、
+            //   读走 localStorage 里的主 token(=write_managed_terminal=宿主命令执行)。
+            //   sandbox(无 token)彻底关掉脚本与同源,file_token 分级才不被绕过。
             (
-                [("content-type", mime), ("cache-control", "no-store")],
+                [
+                    ("content-type", mime),
+                    ("cache-control", "no-store"),
+                    ("x-content-type-options", "nosniff"),
+                    ("content-security-policy", "default-src 'none'; sandbox"),
+                ],
                 bytes,
             )
                 .into_response()

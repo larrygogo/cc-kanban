@@ -26,6 +26,8 @@ bootAppearance({ scale: false });
 // settings-changed 的远程替身:12s 轮询 get_settings,内容变了就派发 REMOTE_SETTINGS_EVENT
 // (appearance/i18n 订阅它跟随主题/语言)。设置改动是低频事件,12s 时延可接受;
 // 未配对时不打(闸门页也用不上),失败静默等下一拍。
+// 首拍也广播:手动配对路径下,boot 期的 getSettings 在存 token 前就 401 了、主题/语言
+// 停在浏览器默认;apply 幂等,首拍重放正确值即修正,扫码路径下重放同值无副作用。
 let lastSettingsJson = "";
 window.setInterval(() => {
   if (!getToken()) return;
@@ -33,10 +35,8 @@ window.setInterval(() => {
     .then((s) => {
       const json = JSON.stringify(s);
       if (json === lastSettingsJson) return;
-      const first = lastSettingsJson === "";
       lastSettingsJson = json;
-      // 首拍只记基线不广播:bootAppearance 的初始 getSettings 已经把首值套上了。
-      if (!first) window.dispatchEvent(new CustomEvent(REMOTE_SETTINGS_EVENT, { detail: s }));
+      window.dispatchEvent(new CustomEvent(REMOTE_SETTINGS_EVENT, { detail: s }));
     })
     .catch(() => {});
 }, 12_000);
