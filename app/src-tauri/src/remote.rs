@@ -1262,6 +1262,23 @@ mod tests {
         assert!(a.len() >= MIN_TOKEN_LEN);
     }
 
+    /// 白名单与 dispatch 手工分列两处,易漂移:白名单有、match 漏写 arm 的命令会撞
+    /// `_ => 404` 静默变哑(看着已放行、实际永远「未知命令」)。逐条断言每个白名单命令
+    /// 在本文件源码里有 `"<cmd>" =>` 臂——dispatch 里没有组合臂(唯一的 `|` 在 mime_for),
+    /// substring 命中即等价「有独立臂」。反向(有臂无白名单)不查:那种命令 rpc_handler
+    /// 的白名单前置检查直接 404,不构成越权,只是死代码。
+    #[test]
+    fn every_bridged_command_has_a_dispatch_arm() {
+        let src = include_str!("remote.rs");
+        for cmd in BRIDGED_COMMANDS {
+            let needle = format!("\"{cmd}\" =>");
+            assert!(
+                src.contains(&needle),
+                "{cmd} 在白名单但 dispatch 无对应臂——会静默 404"
+            );
+        }
+    }
+
     /// 白名单是 default-deny 的唯一事实源：敏感命令绝不许出现。此测试是审计基线的
     /// 可执行形式——往名单里加这些项必须先过这里。
     #[test]
