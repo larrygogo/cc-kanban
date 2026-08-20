@@ -285,6 +285,8 @@ export function descriptors(installed: string[]): AgentDescriptor[] {
     supports_profiles: SUPPORTS_PROFILES.has(id),
     supports_context: SUPPORTS_CONTEXT.has(id),
     supports_chat_export: SUPPORTS_CHAT_EXPORT.has(id),
+    // 与后端事实对齐:目前只有 claude 声明了附加目录 flag(--add-dir)。
+    supports_extra_dirs: id === "claude",
     launch_options: LAUNCH_OPTIONS[id] ?? [],
     relay: RELAYS[id],
   }));

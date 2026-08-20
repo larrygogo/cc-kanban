@@ -269,6 +269,9 @@ struct AttachState {
     /// 不发生时这条暂存自然过期，旧会话**不会**被错误标记为已接替——这是切换失败的
     /// 关键防线（用户仍可 resume 回旧引擎）。
     pending_lineage: Mutex<HashMap<String, i64>>,
+    /// launch_token → 附加目录列表(--add-dir 已进 argv,这里是**落库**用的原件)。
+    /// claim 认领时序列化进 sessions.extra_dirs,resume/接管按它回放。
+    pending_extra_dirs: Mutex<HashMap<String, Vec<String>>>,
     bindings: Mutex<HashMap<i64, i64>>,
     approvals: Mutex<HashMap<String, PendingApproval>>,
     /// 显式注册的 GUI 审批消费者。窗口存在/可见不等于已经订阅了目标 session。
@@ -332,6 +335,7 @@ impl Default for PtyBroker {
                 pending: Mutex::new(HashMap::new()),
                 pending_launch_args: Mutex::new(HashMap::new()),
                 pending_lineage: Mutex::new(HashMap::new()),
+                pending_extra_dirs: Mutex::new(HashMap::new()),
                 bindings: Mutex::new(HashMap::new()),
                 approvals: Mutex::new(HashMap::new()),
                 approval_consumers: Mutex::new(HashMap::new()),
@@ -682,6 +686,21 @@ fn finalize_exit(broker: &PtyBroker, app: &tauri::AppHandle, managed: &Arc<Manag
     }
 }
 
+/// 换代认领是否为嵌套 agent 的误认领（真 → 拒绝换绑，见 [`PtyBroker::handle_reclaim`]）。
+/// 仅当「旧行记了 pid + 认领方是别的进程 + 旧进程还活着」三条同时成立才拦；旧行没记 pid
+/// 时无从比对，放行维持旧行为。`old_alive` 须同时校验进程名仍是 agent——Windows 会复用
+/// pid，无名校验会把「旧会话已死、pid 被无关进程接走」误判成活着而错杀真换代。
+fn nested_claim_hijacks_reclaim(
+    claim_pid: u32,
+    old_pid: Option<i64>,
+    old_alive: impl FnOnce(i64) -> bool,
+) -> bool {
+    match old_pid {
+        Some(old) => i64::from(claim_pid) != old && old_alive(old),
+        None => false,
+    }
+}
+
 fn random_token() -> String {
     let mut bytes = [0u8; 32];
     if getrandom::fill(&mut bytes).is_err() {
@@ -936,6 +955,16 @@ impl PtyBroker {
                 event,
                 meowo_protocol::ipc::PendingApprovalDto::from(request.clone()),
             );
+        }
+    }
+
+    /// interactive-question 的 emit：与 [`Self::emit_approval`] 同一 DTO 纪律，另带
+    /// answerable（PreToolUse 挂起代答=true；自动放行的展示题面=false）。
+    fn emit_question(&self, request: &ApprovalRequest, answerable: bool) {
+        if let Some(app) = self.attach.app.lock().ok().and_then(|app| app.clone()) {
+            let mut dto = meowo_protocol::ipc::PendingApprovalDto::from(request.clone());
+            dto.answerable = answerable;
+            let _ = app.emit("interactive-question", dto);
         }
     }
 
@@ -1426,6 +1455,8 @@ impl PtyBroker {
         launch_selections: &HashMap<String, String>,
         // 跨 provider 切换时 = 被接替的旧会话 id；普通新建传 None。claim 认领时落接续链。
         predecessor: Option<i64>,
+        // 附加目录(--add-dir 原件,argv 由调用方拼好):claim 时落库供 resume 回放。
+        extra_dirs: &[String],
     ) -> Result<i64, String> {
         let endpoint = self
             .attach
@@ -1449,6 +1480,11 @@ impl PtyBroker {
         if let Some(old_sid) = predecessor {
             if let Ok(mut map) = self.attach.pending_lineage.lock() {
                 map.insert(launch_token.clone(), old_sid);
+            }
+        }
+        if !extra_dirs.is_empty() {
+            if let Ok(mut map) = self.attach.pending_extra_dirs.lock() {
+                map.insert(launch_token.clone(), extra_dirs.to_vec());
             }
         }
         let mut launch_env = env.to_vec();
@@ -1477,6 +1513,9 @@ impl PtyBroker {
                 map.remove(&launch_token);
             }
             if let Ok(mut map) = self.attach.pending_lineage.lock() {
+                map.remove(&launch_token);
+            }
+            if let Ok(mut map) = self.attach.pending_extra_dirs.lock() {
                 map.remove(&launch_token);
             }
             return Err(error);
@@ -1995,7 +2034,12 @@ impl PtyBroker {
             .lock()
             .ok()?
             .values()
-            .find(|pending| pending.request.session_id == session_id)
+            // 挂起代答的提问也在 approvals 表里，但它属于题面卡（interactive_question
+            // 出口），不能被当成普通审批吐出去——否则前端同一次提问双卡（审批卡+题面卡）。
+            .find(|pending| {
+                pending.request.session_id == session_id
+                    && pending.request.tool_name != "AskUserQuestion"
+            })
             .map(|pending| pending.request.clone())
     }
 
@@ -2058,6 +2102,25 @@ impl PtyBroker {
                     .ok_or("审批选项已失效")?;
                 ApprovalDecision::AllowWithPermissions(vec![suggestion])
             }
+            // 「去终端作答」：把挂起的提问交还 TUI（reporter 零输出 → CC 继续 →
+            // PermissionRequest 自动放行 → 表单出现在终端）。仅提问可用，普通审批
+            // 不开这个口子——它的 pass 由消费者注销/窗口关闭等路径兜底。
+            "pass" if pending.request.tool_name == "AskUserQuestion" => ApprovalDecision::Pass,
+            // 卡内代答：正文由前端拼（「问题 → 答案」清单），引导语在这里统一包上——
+            // 措辞决定模型把 deny 当答复还是当拒绝，集中协议层一处便于热修。
+            value if value.starts_with("answer:") => {
+                if pending.request.tool_name != "AskUserQuestion" {
+                    return Err("无效的审批选项".into());
+                }
+                let body = value["answer:".len()..].trim();
+                if body.is_empty() {
+                    return Err("无效的审批选项".into());
+                }
+                ApprovalDecision::DenyWith(format!(
+                    "{}{body}",
+                    meowo_protocol::broker::QUESTION_ANSWER_PREAMBLE
+                ))
+            }
             _ => return Err("无效的审批选项".into()),
         };
         let pending = approvals.remove(request_id).expect("刚验证存在的审批请求");
@@ -2087,12 +2150,42 @@ impl PtyBroker {
     /// 前端的收卡信号决定（作答/取消后 transcript 增长或回合结束），后端无从得知用户
     /// 何时答完，只能靠 TTL 兜底——与前端的 180s 兜底同一量级，早于它过期即可。
     pub(crate) fn interactive_question(&self, session_id: i64) -> Option<ApprovalRequest> {
+        // 挂起代答中的题面（request_id 仍在 approvals 表）豁免 TTL：代答等待期 300s
+        // 比 TTL 长，不豁免的话挂起中途题面就被 retain 清掉、轮询丢卡。
+        // 先取 approvals 快照再锁 questions，两把锁不嵌套。
+        let held: HashSet<String> = self
+            .attach
+            .approvals
+            .lock()
+            .map(|approvals| approvals.keys().cloned().collect())
+            .unwrap_or_default();
         let mut questions = self.attach.interactive_questions.lock().ok()?;
         let now = crate::now_ms();
-        questions.retain(|_, (_, at)| now.saturating_sub(*at) < INTERACTIVE_QUESTION_TTL_MS);
+        questions.retain(|_, (request, at)| {
+            held.contains(&request.request_id)
+                || now.saturating_sub(*at) < INTERACTIVE_QUESTION_TTL_MS
+        });
         questions
             .get(&session_id)
             .map(|(request, _)| request.clone())
+    }
+
+    /// 题面的 GUI 出口：answerable = broker 此刻仍持有该请求（挂起中，可 resolve 代答）。
+    /// 挂起结算/超时后 approvals 出表，下一拍轮询这里自然翻 false，前端卡片随之降级为
+    /// 纯展示——不需要额外的 cleared 事件。
+    pub(crate) fn interactive_question_dto(
+        &self,
+        session_id: i64,
+    ) -> Option<meowo_protocol::ipc::PendingApprovalDto> {
+        let request = self.interactive_question(session_id)?;
+        let answerable = self
+            .attach
+            .approvals
+            .lock()
+            .is_ok_and(|approvals| approvals.contains_key(&request.request_id));
+        let mut dto = meowo_protocol::ipc::PendingApprovalDto::from(request);
+        dto.answerable = answerable;
+        Some(dto)
     }
 
     /// 用户已处理完该题面（前端收卡时调用）：撤下表，避免轮询把答过的题重新弹出来。
@@ -2217,7 +2310,8 @@ impl PtyBroker {
                     token,
                     launch_token,
                     session_id,
-                } => self.handle_claim(&token, &launch_token, session_id),
+                    pid,
+                } => self.handle_claim(&token, &launch_token, session_id, pid),
                 BrokerRequest::Approval { token, request } => {
                     self.handle_approval(&token, request, stream)
                 }
@@ -2375,7 +2469,13 @@ impl PtyBroker {
         Ok(Some(managed))
     }
 
-    fn handle_claim(&self, token: &str, launch_token: &str, real_id: i64) -> Result<(), String> {
+    fn handle_claim(
+        &self,
+        token: &str,
+        launch_token: &str,
+        real_id: i64,
+        claim_pid: Option<u32>,
+    ) -> Result<(), String> {
         if token != self.attach.token {
             return Err("PTY claim 认证失败".into());
         }
@@ -2404,7 +2504,7 @@ impl PtyBroker {
             if old_sid == real_id {
                 return Ok(());
             }
-            return self.handle_reclaim(temp_id, old_sid, real_id);
+            return self.handle_reclaim(temp_id, old_sid, real_id, claim_pid);
         }
         // start 的 openpty+spawn 在锁外进行（冷启动+杀软扫描可达数秒），claim 又是一次性的
         // （reporter 不重试）——子进程已起、登记未落的窗口里绝不能按「已结束」把这次绑定
@@ -2469,6 +2569,22 @@ impl PtyBroker {
                 }
             }
         }
+        // 附加目录落库(resume/接管重启的回放依据):best-effort 与 launch_args 同款,
+        // 失败只丢一次回放依据,不阻断认领。
+        let extra_dirs = self
+            .attach
+            .pending_extra_dirs
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(launch_token));
+        if let Some(dirs) = extra_dirs.filter(|d| !d.is_empty()) {
+            if let (Ok(store), Ok(json)) = (
+                crate::open_store(&crate::db_path()),
+                serde_json::to_string(&dirs),
+            ) {
+                let _ = store.set_session_extra_dirs(real_id, &json);
+            }
+        }
         // 保持 Arc 活到映射完成，避免极短命进程在重绑边界提前析构。
         drop(managed);
         Ok(())
@@ -2479,7 +2595,33 @@ impl PtyBroker {
     /// 外部起的、只给「在外部终端同步打开」（实拍反馈）。这里把 PTY 换绑到新行，旧行
     /// 标记结束并写接续链（superseded_by），看板折叠成同一张卡；开着旧段的对话窗靠
     /// 轮询 header 里的 supersededBy 自动跟随跳转。
-    fn handle_reclaim(&self, temp_id: i64, old_sid: i64, new_sid: i64) -> Result<(), String> {
+    fn handle_reclaim(
+        &self,
+        temp_id: i64,
+        old_sid: i64,
+        new_sid: i64,
+        claim_pid: Option<u32>,
+    ) -> Result<(), String> {
+        // 同 launch token 换了会话 id 不一定是 /clear：会话内 Bash 起的嵌套 agent
+        // （`claude -p` 探针等）继承 PTY 环境变量后，SessionStart 也会带着同一 token 来
+        // 认领——照单换绑会把真会话 supersede 到探针行（卡片顶着探针标题、对话窗跟着
+        // 接续链跳进已结束的探针段、子任务全失联，实拍）。按认领方 pid 裁决：同 pid =
+        // 原进程原地换代；异 pid 且旧会话进程还活着 = 嵌套误认领，拒绝（探针按普通外部
+        // 会话落库）；旧进程已死 = 同一终端手动重启 agent，PTY 真换主，放行。
+        // claim_pid 缺失（旧 reporter / owner_pid 上溯失败）时不开库、直接放行——守卫
+        // 只在证据齐全时收紧，宁可漏挡不可错杀真 /clear。
+        if let Some(claim) = claim_pid {
+            let old_pid = crate::open_store(&crate::db_path())
+                .ok()
+                .and_then(|store| store.session_pid(old_sid).ok().flatten());
+            if nested_claim_hijacks_reclaim(claim, old_pid, |pid| {
+                crate::proc::agent_pids_snapshot().contains(&pid)
+            }) {
+                return Err(format!(
+                    "拒绝换代：认领方 pid {claim} 不是旧会话 {old_sid} 的进程且后者仍存活（嵌套 agent 误认领）"
+                ));
+            }
+        }
         // 首次认领已完成（bindings 有值），不存在 starting 占位竞态，无需等待循环。
         let managed = self
             .try_claim_rebind(old_sid, new_sid)?
@@ -2539,6 +2681,74 @@ impl PtyBroker {
                 .write_all(format!("{}\n", decision.as_wire()).as_bytes())
                 .map_err(|e| e.to_string());
         }
+        // PreToolUse 代答桥：表单尚未渲染（PreToolUse 在权限流程之前拦住了工具），挂起
+        // 等 GUI 在题面卡上作答。答案以 DenyWith 回 hook——reason 直达模型，表单不再
+        // 出现；GUI 不可用/超时/「去终端作答」回 pass——reporter 零输出，CC 继续走权限
+        // 流程，PermissionRequest 会再来一遍并走下面的自动放行段，表单照常出现在终端。
+        // 旧 reporter 不带 pre_tool_use 标记，永远走不进这里。
+        if request.tool_name == "AskUserQuestion" && request.pre_tool_use {
+            // 先入题面表：窗口冷启动期间事件打进虚空，前端轮询靠这张表补卡（同下）。
+            if let Ok(mut questions) = self.attach.interactive_questions.lock() {
+                questions.insert(request.session_id, (request.clone(), crate::now_ms()));
+            }
+            // 与普通审批同款「先入表再等窗口」：晚注册的窗口靠轮询也能找回请求。
+            let (tx, rx) = mpsc::channel();
+            self.attach
+                .approvals
+                .lock()
+                .map_err(|_| LOCK_POISONED)?
+                .insert(
+                    request.request_id.clone(),
+                    PendingApproval {
+                        request: request.clone(),
+                        response: tx,
+                    },
+                );
+            if !self.ensure_approval_window(request.session_id) {
+                if let Ok(mut approvals) = self.attach.approvals.lock() {
+                    approvals.remove(&request.request_id);
+                }
+                // 题面条目刻意留下：它是降级展示卡的数据源（approvals 出表后 answerable
+                // 自动为 false），随后 PermissionRequest 的放行段会以同会话新题面覆盖。
+                return stream.write_all(b"pass\n").map_err(|e| e.to_string());
+            }
+            self.emit_question(&request, true);
+            // 探针与普通审批同理：挂起期间表单虽不在屏，并行工具的事件仍可能结算
+            // pending_review——Pass 交还终端是安全降级（失去代答，不丢作答机会）。
+            let store = crate::open_store(&crate::db_path()).ok();
+            let outcome = await_approval_outcome(
+                &rx,
+                &stream,
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+                std::time::Duration::from_millis(500),
+                || {
+                    store
+                        .as_ref()
+                        .and_then(|s| s.session_pending_review(request.session_id).ok())
+                        .map(|pending| pending.is_some())
+                },
+            );
+            if let Ok(mut approvals) = self.attach.approvals.lock() {
+                approvals.remove(&request.request_id);
+            }
+            let decision = match outcome {
+                ApprovalWait::PeerGone => {
+                    // CC 撤销了提问（Esc/回合终止）：题面已失效，收掉防轮询诈尸。
+                    self.clear_interactive_question(request.session_id);
+                    return Ok(());
+                }
+                ApprovalWait::Decision(decision) => decision,
+                ApprovalWait::TimedOut | ApprovalWait::ResolvedElsewhere => ApprovalDecision::Pass,
+            };
+            if matches!(decision, ApprovalDecision::DenyWith(_)) {
+                // 已代答：收题面，已答的卡不许靠轮询弹回来。
+                self.clear_interactive_question(request.session_id);
+            }
+            let _ = stream.set_nonblocking(false);
+            return stream
+                .write_all(format!("{}\n", decision.as_wire()).as_bytes())
+                .map_err(|e| e.to_string());
+        }
         // AskUserQuestion 不是权限请求而是提问：「允许提问」这个决定没有信息量（且它属于
         // 「需用户交互」的工具，连 bypassPermissions 都拦不住触发），弹一张 JSON 审批卡
         // 纯属摩擦。直接放行让 TUI 表单立即出现；结构化题面转发给对话窗，选择列表卡从
@@ -2547,6 +2757,7 @@ impl PtyBroker {
         // 刻意不走 ensure_approval_window 的消费者等待：放行不需要 GUI 表态，等满一个
         // 10s 窗口只会把终端表单的出现拖慢同样久。窗口没开/开晚了也无碍——表单在终端里
         // 本来就能答，事件错过时既有的屏幕识别路径仍会长出可作答的卡。
+        // （PermissionRequest 阶段与旧 reporter 的所有提问都走这里；代答桥在上面。）
         if request.tool_name == "AskUserQuestion" {
             // 先入表再切窗：窗口冷启动期间事件会打进虚空（见 interactive_questions 的
             // 文档），前端轮询靠这张表把错过的题面补回来。
@@ -2575,7 +2786,7 @@ impl PtyBroker {
                     }
                 }
             }
-            self.emit_approval("interactive-question", &request);
+            self.emit_question(&request, false);
             return stream
                 .write_all(format!("{}\n", ApprovalDecision::Allow.as_wire()).as_bytes())
                 .map_err(|e| e.to_string());
@@ -3211,6 +3422,7 @@ mod tests {
                 .into(),
             description: None,
             permission_suggestions: vec![],
+            pre_tool_use: false,
         };
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -3243,6 +3455,7 @@ mod tests {
             input: "{}".into(),
             description: None,
             permission_suggestions: vec![],
+            pre_tool_use: false,
         };
         // 直接以「刚好超过 TTL」的时刻入表，模拟一条没人处理的陈旧题面。
         broker.attach.interactive_questions.lock().unwrap().insert(
@@ -3259,6 +3472,126 @@ mod tests {
                 .is_empty(),
             "过期条目应被顺手清掉，不留堆积"
         );
+    }
+
+    /// PreToolUse 代答桥（带 pre_tool_use 标记）：GUI 不可用（测试环境无 app handle →
+    /// ensure_approval_window 必 false）→ 回 pass 交还权限流程，approvals 不滞留；
+    /// 题面条目留在表里作降级展示卡数据源，且 answerable=false（无 approvals 背书）。
+    #[test]
+    fn marked_question_without_gui_passes_and_keeps_a_display_only_entry() {
+        let broker = PtyBroker::default();
+        broker.sessions.lock().unwrap().insert(21, dummy_managed(21));
+        let mut request = approval_request(21, "AskUserQuestion");
+        request.pre_tool_use = true;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_side, _) = listener.accept().unwrap();
+        let token = broker.attach.token.clone();
+        broker.handle_approval(&token, request, server_side).unwrap();
+        let mut reply = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(client), &mut reply).unwrap();
+        assert_eq!(reply.trim(), "pass");
+        assert!(
+            broker.attach.approvals.lock().unwrap().is_empty(),
+            "降级后请求不得滞留在 approvals 表"
+        );
+        let dto = broker.interactive_question_dto(21).expect("题面应留作展示卡");
+        assert!(!dto.answerable, "无 approvals 背书的题面不可作答");
+    }
+
+    /// 挂起中的提问由 resolve 通道代答/交还：`answer:<正文>` → DenyWith(引导语+正文)；
+    /// `pass` → Pass（去终端作答）。answer 臂只对提问开放，普通审批条目拒收。
+    #[test]
+    fn resolve_channel_answers_or_passes_a_held_question() {
+        let broker = PtyBroker::default();
+        let (tx, rx) = mpsc::channel();
+        let mut request = approval_request(31, "AskUserQuestion");
+        request.pre_tool_use = true;
+        broker.attach.approvals.lock().unwrap().insert(
+            request.request_id.clone(),
+            PendingApproval {
+                request: request.clone(),
+                response: tx,
+            },
+        );
+        // 挂起的提问不得被当成普通审批吐给前端（否则同题双卡）。
+        assert!(broker.pending_approval(31).is_none());
+
+        broker
+            .resolve_approval_choice(31, &request.request_id, "answer:晚饭吃什么？ → 火锅")
+            .unwrap();
+        let decision = rx.recv().unwrap();
+        let ApprovalDecision::DenyWith(reason) = decision else {
+            panic!("代答应是 DenyWith，实际：{decision:?}");
+        };
+        assert!(reason.starts_with(meowo_protocol::broker::QUESTION_ANSWER_MARKER));
+        assert!(reason.ends_with("晚饭吃什么？ → 火锅"));
+
+        // 「去终端作答」：pass 让 reporter 零输出、表单回落终端。
+        let (tx, rx) = mpsc::channel();
+        broker.attach.approvals.lock().unwrap().insert(
+            request.request_id.clone(),
+            PendingApproval {
+                request: request.clone(),
+                response: tx,
+            },
+        );
+        broker
+            .resolve_approval_choice(31, &request.request_id, "pass")
+            .unwrap();
+        assert!(matches!(rx.recv().unwrap(), ApprovalDecision::Pass));
+
+        // 空正文与非提问条目一律拒收。
+        let (tx, _rx) = mpsc::channel();
+        broker.attach.approvals.lock().unwrap().insert(
+            "request-bash-31".into(),
+            PendingApproval {
+                request: {
+                    let mut bash = approval_request(31, "Bash");
+                    bash.request_id = "request-bash-31".into();
+                    bash
+                },
+                response: tx,
+            },
+        );
+        assert!(broker
+            .resolve_approval_choice(31, "request-bash-31", "answer:某答案")
+            .is_err());
+        assert!(broker
+            .resolve_approval_choice(31, "request-bash-31", "pass")
+            .is_err());
+        assert!(broker
+            .resolve_approval_choice(31, "request-bash-31", "answer:   ")
+            .is_err());
+    }
+
+    /// 挂起中的题面豁免 TTL：代答等待期 300s 长于 TTL 150s，不豁免的话挂起中途
+    /// 题面就被 retain 清掉、轮询丢卡；approvals 出表后恢复正常过期。
+    #[test]
+    fn held_questions_survive_the_ttl_until_settled() {
+        let broker = PtyBroker::default();
+        let mut request = approval_request(41, "AskUserQuestion");
+        request.pre_tool_use = true;
+        let stale_at = crate::now_ms() - INTERACTIVE_QUESTION_TTL_MS - 1;
+        broker
+            .attach
+            .interactive_questions
+            .lock()
+            .unwrap()
+            .insert(41, (request.clone(), stale_at));
+        let (tx, _rx) = mpsc::channel();
+        broker.attach.approvals.lock().unwrap().insert(
+            request.request_id.clone(),
+            PendingApproval {
+                request: request.clone(),
+                response: tx,
+            },
+        );
+        let dto = broker.interactive_question_dto(41).expect("挂起中的题面不得过期");
+        assert!(dto.answerable, "approvals 持有中应可作答");
+        // 结算（出表）后，同一条陈旧题面恢复 TTL 语义被清掉。
+        broker.attach.approvals.lock().unwrap().clear();
+        assert_eq!(broker.interactive_question(41), None, "结算后陈旧题面应过期");
     }
 
     /// 召唤策略:目标会话已有消费者→Ready;用户盯着别的会话(有租约+窗口在眼前)→Hold
@@ -3285,6 +3618,7 @@ mod tests {
             description: None,
             input: r#"{"questions":[]}"#.into(),
             permission_suggestions: vec![],
+            pre_tool_use: false,
         }
     }
 
@@ -3592,7 +3926,7 @@ mod tests {
         });
 
         // claim 不重试（reporter 一次性）：登记未落的窗口里必须等，不能按「已结束」错杀。
-        broker.handle_claim(&token, "launch", 9).unwrap();
+        broker.handle_claim(&token, "launch", 9, None).unwrap();
         handle.join().unwrap();
         let sessions = broker.sessions.lock().unwrap();
         assert!(sessions.contains_key(&9));
@@ -3618,7 +3952,7 @@ mod tests {
         broker.begin_start(-5).unwrap();
         broker.end_start(-5); // 启动失败：清占位、不入表
         let token = broker.attach.token.clone();
-        assert!(broker.handle_claim(&token, "launch", 9).is_err());
+        assert!(broker.handle_claim(&token, "launch", 9, None).is_err());
         // token 不消费：早到/迟到的 claim 都不得断送下一次认领（原有语义保持）。
         assert_eq!(
             broker.attach.pending.lock().unwrap().get("launch"),
@@ -3797,7 +4131,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert("launch-token".into(), -7);
-        assert!(first.handle_claim("wrong", "launch-token", 9).is_err());
+        assert!(first.handle_claim("wrong", "launch-token", 9, None).is_err());
         assert_eq!(
             first.attach.pending.lock().unwrap().get("launch-token"),
             Some(&-7)
@@ -3825,7 +4159,7 @@ mod tests {
         broker.attach.bindings.lock().unwrap().insert(-7, 9);
 
         // compact 等场景会对同一真实 id 重发 SessionStart：重放必须幂等成功。
-        broker.handle_claim(&token, "launch-token", 9).unwrap();
+        broker.handle_claim(&token, "launch-token", 9, None).unwrap();
         // token 存续（/clear 换代还要靠它重认领），不随认领消费。
         assert_eq!(
             broker.attach.pending.lock().unwrap().get("launch-token"),
@@ -3833,8 +4167,27 @@ mod tests {
         );
 
         // 换代到新 id，但旧会话已不在 sessions（PTY 已退出）：报错，且绑定保持原值。
-        assert!(broker.handle_claim(&token, "launch-token", 10).is_err());
+        assert!(broker.handle_claim(&token, "launch-token", 10, None).is_err());
         assert_eq!(broker.binding(-7), Some(9));
+    }
+
+    /// 换代守卫：会话内 Bash 起的嵌套 agent（`claude -p` 探针等）继承 PTY 环境变量后，
+    /// SessionStart 会带同一 launch token、不同 pid 来认领——旧会话进程还活着时必须拒绝，
+    /// 否则真会话被 supersede 到探针行（卡片顶探针标题、子任务全失联，2026-08-18 实拍）。
+    #[test]
+    fn nested_agent_claim_is_rejected_only_while_the_old_session_lives() {
+        // 同 pid = /clear 原地换代，放行（不该走到判活）。
+        assert!(!nested_claim_hijacks_reclaim(60072, Some(60072), |_| {
+            panic!("同 pid 不该判活")
+        }));
+        // 异 pid + 旧进程活着 = 嵌套误认领，拒绝。
+        assert!(nested_claim_hijacks_reclaim(62732, Some(60072), |_| true));
+        // 异 pid + 旧进程已死 = 同终端手动重启 agent，PTY 真换主，放行。
+        assert!(!nested_claim_hijacks_reclaim(62732, Some(60072), |_| false));
+        // 旧行没记 pid：无从比对，放行维持旧行为。
+        assert!(!nested_claim_hijacks_reclaim(62732, None, |_| {
+            panic!("没有旧 pid 不该判活")
+        }));
     }
 
     #[test]
@@ -3849,6 +4202,7 @@ mod tests {
             description: Some("run tests".into()),
             input: "{}".into(),
             permission_suggestions: vec![],
+            pre_tool_use: false,
         };
         broker.attach.approvals.lock().unwrap().insert(
             request.request_id.clone(),
@@ -3889,6 +4243,7 @@ mod tests {
                     description: None,
                     input: r#"{"command":"cargo test"}"#.into(),
                     permission_suggestions: vec![suggestion.clone()],
+                    pre_tool_use: false,
                 },
                 response: tx,
             },
@@ -3920,6 +4275,7 @@ mod tests {
                         description: None,
                         input: "{}".into(),
                         permission_suggestions: vec![],
+                        pre_tool_use: false,
                     },
                     response: tx,
                 },
@@ -3954,6 +4310,7 @@ mod tests {
                     description: None,
                     input: "{}".into(),
                     permission_suggestions: vec![],
+                    pre_tool_use: false,
                 },
                 response: tx,
             },
@@ -4002,6 +4359,7 @@ mod tests {
             description: Some("build release".into()),
             input: "{}".into(),
             permission_suggestions: vec![],
+            pre_tool_use: false,
         };
         let encoded =
             base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&request).unwrap());
@@ -4035,6 +4393,7 @@ mod tests {
             description: Some("build release".into()),
             input: "{}".into(),
             permission_suggestions: vec![],
+            pre_tool_use: false,
         };
         let mut stream = TcpStream::connect(endpoint).unwrap();
         stream

@@ -103,7 +103,8 @@ describe("ChatWindow", () => {
     });
     render(<ChatWindow />);
     await waitFor(() => expect(screen.getByText("实现同步对话")).toBeTruthy());
-    // 标题是动作菜单触发钮（Kimi 式）：路径入口收进菜单里的「打开项目目录」。
+    // 标题是动作菜单触发钮（Kimi 式）：主仓路径入口在菜单的「打开项目目录」;
+    // 多仓的目录清单与附加管理在 diff 面板头行的仓菜单(用户指定)。
     fireEvent.click(screen.getByRole("button", { name: /实现同步对话/ }));
     fireEvent.click(screen.getByRole("menuitem", { name: "打开项目目录" }));
     expect(invoke).toHaveBeenCalledWith("open_project_dir", { cwd: "C:/repo" });
@@ -2066,6 +2067,143 @@ describe("ChatWindow", () => {
     expect(writes()).toBe(before);
     fireEvent.click(screen.getByRole("button", { name: /autopilot-v2/ }));
     expect(screen.queryByText(/已选「/)).toBeNull();
+  });
+
+  /** broker 挂起代答（answerable）：卡片是真正的作答面——多问题跨 tab、多选勾选、
+   *  自定义输入，提交把 `answer:<正文>` 发给 resolve 通道，不写一个 PTY 字节。
+   *  出口只有提交与「去终端作答」，刻意没有「仅收起」（收起=让 hook 干等 300s）。 */
+  it("answerable 题面卡内作答:多问题多选提交 answer 正文", async () => {
+    window.history.replaceState({}, "", "/?sessionId=32");
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 32, title: "代答会话", status: "running", provider: "claude", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
+        ptyManaged: true,
+      });
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      if (command === "managed_terminal_binding") return Promise.resolve(null);
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 32, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("代答会话")).toBeTruthy());
+
+    const payload = {
+      sessionId: 32, requestId: "request-answerable", provider: "claude", toolName: "AskUserQuestion",
+      description: null, answerable: true,
+      input: JSON.stringify({
+        questions: [
+          { header: "晚饭", question: "晚饭吃什么？", multiSelect: false, options: [{ label: "火锅" }, { label: "烧烤" }] },
+          { header: "配菜", question: "配菜选哪些？", multiSelect: true, options: [{ label: "毛肚" }, { label: "虾滑" }, { label: "青菜" }] },
+        ],
+      }),
+      permissionSuggestions: [],
+    };
+    act(() => { eventListeners.get("interactive-question")?.({ payload }); });
+    expect(await screen.findByText(/晚饭吃什么/)).toBeTruthy();
+    // 作答卡没有「仅收起」，提交键在但没答完先禁用。
+    expect(screen.queryByRole("button", { name: "仅收起" })).toBeNull();
+    const submit = screen.getByRole("button", { name: "提交选择" });
+    expect((submit as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("还有 2 题未作答")).toBeTruthy();
+
+    // 第 1 题单选：点选后完成度推进；换选直接替换。
+    fireEvent.click(screen.getByRole("button", { name: /火锅/ }));
+    expect(screen.getByText("还有 1 题未作答")).toBeTruthy();
+    // 第 2 题多选：切 tab 勾两项，再补一句自定义。
+    fireEvent.click(screen.getByRole("tab", { name: /配菜/ }));
+    fireEvent.click(screen.getByRole("button", { name: /毛肚/ }));
+    fireEvent.click(screen.getByRole("button", { name: /虾滑/ }));
+    fireEvent.change(screen.getByPlaceholderText("输入其他回答"), { target: { value: "少放辣" } });
+    expect(screen.getByText("提交后 Agent 立即继续")).toBeTruthy();
+    // tab 上出现已答 ✓（两题都有内容）。
+    expect(screen.getAllByLabelText("已作答").length).toBe(2);
+
+    const writes = () =>
+      invoke.mock.calls.filter((call) => call[0] === "write_managed_terminal").length;
+    const before = writes();
+    fireEvent.click(screen.getByRole("button", { name: "提交选择" }));
+    await waitFor(() => {
+      const resolved = invoke.mock.calls.find((call) => call[0] === "resolve_pending_approval");
+      expect(resolved).toBeTruthy();
+      const args = resolved![1] as { sessionId: number; requestId: string; choice: string };
+      expect(args.sessionId).toBe(32);
+      expect(args.requestId).toBe("request-answerable");
+      expect(args.choice).toBe("answer:晚饭 · 晚饭吃什么？ → 火锅\n配菜 · 配菜选哪些？ → 毛肚、虾滑、少放辣");
+    });
+    // 提交即收卡，且全程不写 PTY（代答走 resolve 通道，不是按键回放）。
+    await waitFor(() => expect(screen.queryByText(/晚饭吃什么/)).toBeNull());
+    expect(writes()).toBe(before);
+  });
+
+  /** 作答卡的「去终端作答」不再只是切视图：先 resolve `pass` 把挂起交还终端
+   *  （表单随权限流程出现在那里），再切终端页。 */
+  it("answerable 题面卡去终端作答:先 resolve pass 再切终端", async () => {
+    window.history.replaceState({}, "", "/?sessionId=33");
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 33, title: "交还会话", status: "running", provider: "claude", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
+        ptyManaged: true,
+      });
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      if (command === "managed_terminal_binding") return Promise.resolve(null);
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 33, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("交还会话")).toBeTruthy());
+    act(() => {
+      eventListeners.get("interactive-question")?.({ payload: {
+        sessionId: 33, requestId: "request-to-terminal", provider: "claude", toolName: "AskUserQuestion",
+        description: null, answerable: true,
+        input: JSON.stringify({ questions: [{ question: "继续吗？", multiSelect: false, options: [{ label: "是" }] }] }),
+        permissionSuggestions: [],
+      } });
+    });
+    expect(await screen.findByText(/继续吗/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "去终端作答" }));
+    await waitFor(() => {
+      const resolved = invoke.mock.calls.find((call) => call[0] === "resolve_pending_approval");
+      expect(resolved).toBeTruthy();
+      expect((resolved![1] as { choice: string }).choice).toBe("pass");
+    });
+  });
+
+  /** 挂起结算/超时后轮询把 answerable 翻 false：作答卡当场降级为展示卡
+   *  （选项不可点、恢复「仅收起」），不需要任何 cleared 事件。 */
+  it("answerable 翻 false 时作答卡降级为展示卡", async () => {
+    window.history.replaceState({}, "", "/?sessionId=34");
+    const question = {
+      sessionId: 34, requestId: "request-degrade", provider: "claude", toolName: "AskUserQuestion",
+      description: null, answerable: true,
+      input: JSON.stringify({ questions: [
+        { header: "配菜", question: "配菜选哪些？", multiSelect: true, options: [{ label: "毛肚" }, { label: "青菜" }] },
+      ] }),
+      permissionSuggestions: [],
+    };
+    let polledQuestion: typeof question | null = null;
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 34, title: "降级会话", status: "running", provider: "claude", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
+        ptyManaged: true,
+      });
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: polledQuestion });
+      if (command === "managed_terminal_binding") return Promise.resolve(null);
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 34, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("降级会话")).toBeTruthy());
+    act(() => { eventListeners.get("interactive-question")?.({ payload: question }); });
+    expect(await screen.findByRole("button", { name: "提交选择" })).toBeTruthy();
+    // 挂起在后端结算：同 requestId 但 answerable=false 从轮询回来。
+    polledQuestion = { ...question, answerable: false };
+    await waitFor(() => expect(screen.queryByRole("button", { name: "提交选择" })).toBeNull());
+    // 降级为展示形态：多选提示回归，选项不再是按钮。
+    expect(screen.getByText("多选表单请到终端作答，完成后本卡自动关闭")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /毛肚/ })).toBeNull();
   });
 
   /**

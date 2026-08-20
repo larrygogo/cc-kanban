@@ -70,7 +70,10 @@ use managed_terminal::{
 };
 #[cfg(test)]
 use session_command::is_safe_id;
-use session_command::{rename_session, set_archived, set_session_note};
+use session_command::{
+    add_session_extra_dir, remove_session_extra_dir, rename_session, set_archived,
+    set_session_note,
+};
 use session_query::{
     get_live_sessions_counts, get_live_sessions_page, recent_cwds,
 };
@@ -988,6 +991,9 @@ pub fn run() {
         .plugin(tauri_plugin_wdio::init())
         .plugin(tauri_plugin_wdio_webdriver::init());
     builder
+        // 生产构建关掉 WebView2 浏览器加速键（打印/刷新/另存/原生查找等整族，详见函数注释）。
+        // on_page_load 是覆盖全部窗口（含后建的对话/确认窗）的唯一集中挂点。
+        .on_page_load(|webview, _payload| window::disable_browser_accelerators(webview))
         // window-state 只持久化/恢复「位置」等，不恢复「尺寸」：main 窗口尺寸改由前端 localStorage
         // (SIZE_KEY) 单独持有。否则吸附态退出会把「细条几何」存进 window-state，与 localStorage 的吸附态
         // (SNAP_KEY) 两套持久化不同步——重启读不到 SNAP_KEY 却被还原成细条尺寸，渲染完整贴纸而没真正吸附。
@@ -1081,6 +1087,8 @@ pub fn run() {
             rename_session,
             set_archived,
             set_session_note,
+            add_session_extra_dir,
+            remove_session_extra_dir,
             get_autostart,
             set_autostart,
             get_settings,

@@ -342,6 +342,8 @@ export function Sticker({
   const [ctxMenu, setCtxMenu] = useState<{ sid: number; x: number; y: number } | null>(null);
   const ctxItem = ctxMenu ? data.find((l) => l.session.id === ctxMenu.sid) ?? null : null;
 
+
+
   // 便签编辑：notingId 为正在编辑便签的会话 id。与重命名互斥（同卡只开一个）。
   const [notingId, setNotingId] = useState<number | null>(null);
   const [focusNotice, setFocusNotice] = useState<{
@@ -1022,6 +1024,17 @@ export function Sticker({
                               {l.cwd.split(/[\\/]/).filter(Boolean).pop() ?? l.cwd}
                             </span>
                           )}
+                          {/* 附加目录标:一个会话跨 N 仓(--add-dir),tip 列全部目录。
+                              可选链防御:旧后端/测试固件的行没有该字段。 */}
+                          {(l.extra_dirs?.length ?? 0) > 0 && (
+                            <span
+                              className="stk-extradirs"
+                              data-testid="stk-extradirs"
+                              data-tip={[l.cwd, ...l.extra_dirs].filter(Boolean).join(" · ")}
+                            >
+                              +{l.extra_dirs.length}
+                            </span>
+                          )}
                           {/* Agent 从这个会话派生出去的后台作业**不在卡片上留痕**：它们自己
                               不建卡（见后端 hidden_background），源会话卡上也不标数——用户既
                               管不了这些作业（终端按键无效、发消息在手动模式下不会被执行），
@@ -1156,6 +1169,8 @@ export function Sticker({
           onOpenDir={
             ctxItem.cwd ? () => openProjectDir(ctxItem.cwd!).catch(() => {}) : null
           }
+          // 附加目录入口不上贴纸(用户指定):贴纸是监控视野,操作入口在对话窗。
+          onAddDir={null}
           onEndSession={
             // 仅本 GUI 托管的 PTY 能结束（与对话窗标题栏入口同门控）；确认+停止走共用的
             // confirmStopSession。成功后不用做别的：轮询里 connected 翻 false、徽标自退。

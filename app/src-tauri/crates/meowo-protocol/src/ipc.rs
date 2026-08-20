@@ -191,6 +191,9 @@ pub struct ChatHistoryDto {
     pub status: String,
     pub provider: String,
     pub cwd: Option<String>,
+    /// 附加目录(--add-dir):会话除 cwd 外还能访问的仓。空 = 单目录会话。
+    /// 标题菜单按它列出完整目录清单——加了目录必须看得见。
+    pub extra_dirs: Vec<String>,
     pub supported: bool,
     pub items: Vec<ChatItem>,
     #[cfg_attr(test, ts(type = "number"))]
@@ -283,6 +286,11 @@ pub struct PendingApprovalDto {
     pub input: String,
     #[cfg_attr(test, ts(type = "unknown[]"))]
     pub permission_suggestions: Vec<serde_json::Value>,
+    /// 题面卡可否在对话窗内直接作答：broker 仍在 approvals 表里持有该 request_id
+    /// （PreToolUse 挂起中）时为 true。挂起结算/超时后轮询把它翻回 false，前端卡片
+    /// 随之降级为纯展示。审批卡不使用该字段（恒 false）。
+    #[serde(default)]
+    pub answerable: bool,
 }
 
 /// 一次轮询同时取回审批与 AskUserQuestion 题面。此前是两条独立的 400ms 轮询——
@@ -496,6 +504,9 @@ impl From<crate::broker::ApprovalRequest> for PendingApprovalDto {
             description: request.description,
             input: request.input,
             permission_suggestions: request.permission_suggestions,
+            // 可作答与否取决于 broker 是否还持有请求（approvals 表），不是请求本身的属性；
+            // 由 emit/轮询处按持有状态覆写。
+            answerable: false,
         }
     }
 }
@@ -539,6 +550,7 @@ mod tests {
             description: None,
             input: "{}".into(),
             permission_suggestions: vec![],
+            pre_tool_use: false,
         };
         // 原始线路结构：空列表 → 字段消失（这正是不能拿它喂前端的原因）。
         let raw = serde_json::to_value(&request).unwrap();

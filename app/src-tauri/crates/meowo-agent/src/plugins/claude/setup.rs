@@ -916,6 +916,16 @@ mod tests {
             from_rs, from_js,
             "plugins/claude.rs 的 EVENTS 与 install-hooks.mjs 的 SPECS 不一致"
         );
+
+        // timeout 的弱绊线：SPECS 行不带 timeout（脚本在循环里算），至少钉住「哪些事件
+        // 用长超时」的判定式与 Rust 侧 with_timeout(310) 同步——本次改动正是它守不住的
+        // 形态漂移（PreToolUse:AskUserQuestion 加入长超时家族）。
+        assert!(
+            src.contains(
+                r#"event === "PermissionRequest" || (event === "PreToolUse" && matcher === "AskUserQuestion")"#
+            ),
+            "install-hooks.mjs 的长超时判定与 EVENTS 的 with_timeout(310) 不同步"
+        );
     }
 
     /// dry-run：对 CLAUDE_CONFIG_DIR/settings.json（真实文件的副本）跑一次接线，核对产物。

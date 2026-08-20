@@ -94,6 +94,18 @@ export function FolderIcon() {
   );
 }
 
+export function FolderPlusIcon() {
+  // lucide folder-plus：右键菜单「附加目录」用（一个会话跨多仓,--add-dir）
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+      <path d="M12 10v6" />
+      <path d="M9 13h6" />
+    </svg>
+  );
+}
+
 export function StopIcon() {
   // lucide circle-stop：右键菜单「结束会话」用
   return (

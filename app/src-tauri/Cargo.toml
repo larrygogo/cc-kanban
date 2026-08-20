@@ -122,6 +122,9 @@ windows = { version = "0.61", features = [
 ] }
 # 修正 auto-launch 写 Run 项时路径不加引号的问题（含空格路径会失败）：enable 后重写为带引号路径。
 winreg = "0.55"
+# 生产构建关 WebView2 浏览器加速键（window.rs disable_browser_accelerators）。
+# tauri/wry 已传递依赖同版本（0.38.2，windows-core 0.61 系），提为直接依赖不引第二份副本。
+webview2-com = "0.38"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # 钉 rev 不跟踪分支：lock 重建 / cargo update 不会静默拉到上游新提交（与 Cargo.lock 锁定提交一致）。

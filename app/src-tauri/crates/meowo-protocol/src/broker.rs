@@ -12,6 +12,15 @@ pub const MAX_HANDSHAKE_BYTES: usize = 32 * 1024;
 pub const CURRENT_PROTOCOL_VERSION: u16 = 2;
 pub const V2_MAGIC: &[u8; 4] = b"MWO2";
 
+/// GUI 代答 AskUserQuestion 时 deny reason 的哨兵前缀。transcript 解析靠它把
+/// 「代答回执」从真实工具失败里区分出来(tool_result 只有 tool_use_id 没有工具名,
+/// 逐行无状态解析配不了对,文本哨兵是唯一稳定判据)。
+pub const QUESTION_ANSWER_MARKER: &str = "【Meowo 代答】";
+/// deny reason 的固定引导语。措辞直接影响模型是否把 deny 当作答复采纳(而不是当拒绝
+/// 重试提问),集中在这一个常量便于热修;不进 i18n——读者是模型,不是用户。
+pub const QUESTION_ANSWER_PREAMBLE: &str =
+    "【Meowo 代答】用户已在 Meowo 对话窗中直接回答了本次 AskUserQuestion。这不是拒绝:请勿重试提问,直接采用以下答案继续任务。\n\n";
+
 /// GUI broker 的发现文件。`pid` 用于拒绝崩溃后遗留的过期端点。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +46,11 @@ pub struct ApprovalRequest {
     /// Agent 提供的“记住此决定”等原生权限更新。旧 reporter 不发送该字段，按空列表处理。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permission_suggestions: Vec<serde_json::Value>,
+    /// 请求来自 PreToolUse 阶段（AskUserQuestion 代答桥专用）。PermissionRequest 与
+    /// PreToolUse 到 broker 是同构的 Approval 请求，broker 靠它区分「挂起等 GUI 代答」
+    /// 与「自动放行走 TUI 表单」。旧 reporter 不发送 → false，维持自动放行旧行为。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pre_tool_use: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +58,9 @@ pub enum ApprovalDecision {
     Allow,
     AllowWithPermissions(Vec<serde_json::Value>),
     Deny,
+    /// 拒绝并携带给模型看的说明文本。AskUserQuestion 代答用它把答案送回 hook；
+    /// 旧 reporter 的 from_wire 解不出 JSON deny → None → 不输出决策，安全回落 TUI。
+    DenyWith(String),
     Pass,
 }
 
@@ -57,6 +74,11 @@ impl ApprovalDecision {
             })
             .to_string(),
             Self::Deny => "deny".into(),
+            Self::DenyWith(message) => serde_json::json!({
+                "behavior": "deny",
+                "message": message,
+            })
+            .to_string(),
             Self::Pass => "pass".into(),
         }
     }
@@ -68,11 +90,17 @@ impl ApprovalDecision {
             "pass" => Some(Self::Pass),
             encoded => {
                 let value: serde_json::Value = serde_json::from_str(encoded).ok()?;
-                if value.get("behavior").and_then(|v| v.as_str()) != Some("allow") {
-                    return None;
+                match value.get("behavior").and_then(|v| v.as_str()) {
+                    Some("allow") => {
+                        let permissions = value.get("updatedPermissions")?.as_array()?.clone();
+                        Some(Self::AllowWithPermissions(permissions))
+                    }
+                    Some("deny") => {
+                        let message = value.get("message")?.as_str()?.to_string();
+                        Some(Self::DenyWith(message))
+                    }
+                    _ => None,
                 }
-                let permissions = value.get("updatedPermissions")?.as_array()?.clone();
-                Some(Self::AllowWithPermissions(permissions))
             }
         }
     }
@@ -118,6 +146,12 @@ pub enum BrokerRequest {
         token: String,
         launch_token: String,
         session_id: i64,
+        /// 认领方 agent 会话本体的 pid（reporter 沿进程树上溯的 owner_pid）。broker 据此把
+        /// 「/clear 原地换代（同进程）」与「会话内 Bash 起的嵌套 agent 继承 PTY 环境变量后
+        /// 误认领（异进程）」区分开。旧 reporter（v2 无此字段 / v1 四段行）不发送 → None，
+        /// 换代守卫放行，维持旧行为。
+        #[serde(default)]
+        pid: Option<u32>,
     },
     Approval {
         token: String,
@@ -150,6 +184,7 @@ impl From<LegacyHandshake> for BrokerRequest {
                 token,
                 launch_token,
                 session_id,
+                pid: None,
             },
             LegacyHandshake::Approval { token, request } => Self::Approval { token, request },
         }
@@ -332,11 +367,20 @@ mod tests {
             description: None,
             input: "{}".into(),
             permission_suggestions: vec![],
+            pre_tool_use: false,
         };
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(value["sessionId"], 9);
         assert_eq!(value["requestId"], "request-9");
         assert_eq!(value["toolName"], "Bash");
+        // false 不上线（旧 GUI 收到的字节与从前一致），旧 reporter 缺字段 → false。
+        assert!(value.get("preToolUse").is_none());
+        let legacy: ApprovalRequest = serde_json::from_value(serde_json::json!({
+            "sessionId": 9, "requestId": "request-9", "provider": "codex",
+            "toolName": "Bash", "description": null, "input": "{}"
+        }))
+        .unwrap();
+        assert!(!legacy.pre_tool_use);
     }
 
     #[test]
@@ -360,6 +404,19 @@ mod tests {
             ApprovalDecision::from_wire(&remembered.as_wire()),
             Some(remembered)
         );
+        let answered =
+            ApprovalDecision::DenyWith(format!("{QUESTION_ANSWER_PREAMBLE}晚饭 → 火锅"));
+        assert_eq!(
+            ApprovalDecision::from_wire(&answered.as_wire()),
+            Some(answered.clone())
+        );
+        // JSON deny 的 wire 形状是 reporter 侧 hook 输出的直接原料，锁死字段名。
+        let wire: serde_json::Value = serde_json::from_str(&answered.as_wire()).unwrap();
+        assert_eq!(wire["behavior"], "deny");
+        assert!(wire["message"]
+            .as_str()
+            .unwrap()
+            .starts_with(QUESTION_ANSWER_MARKER));
         assert_eq!(ApprovalDecision::from_wire("future-value"), None);
     }
 
@@ -393,6 +450,7 @@ mod tests {
             description: None,
             input: "{}".into(),
             permission_suggestions: vec![],
+            pre_tool_use: false,
         };
         let approval = encode_legacy_approval("token", &request).unwrap();
         assert!(matches!(
@@ -461,12 +519,37 @@ mod tests {
         ));
     }
 
+    /// 旧握手（v2 无 pid 字段 / v1 四段行）→ None，新字段 round-trip 保留。与 Attach.pid
+    /// 同款演进：serde default，不 bump 协议版本，两个跨版本方向都兼容。
+    #[test]
+    fn claim_pid_defaults_to_none_and_round_trips() {
+        let old: BrokerRequest = serde_json::from_value(serde_json::json!({
+            "kind": "claim",
+            "token": "t",
+            "launch_token": "l",
+            "session_id": 1
+        }))
+        .unwrap();
+        assert!(matches!(old, BrokerRequest::Claim { pid: None, .. }));
+
+        let request = BrokerRequest::Claim {
+            token: "t".into(),
+            launch_token: "l".into(),
+            session_id: 1,
+            pid: Some(4242),
+        };
+        let mut framed = Vec::new();
+        write_v2_handshake(&mut framed, &request).unwrap();
+        assert_eq!(read_handshake(&mut framed.as_slice()).unwrap(), request);
+    }
+
     #[test]
     fn stream_decoder_accepts_v1_and_v2_as_the_same_request() {
         let expected = BrokerRequest::Claim {
             token: "token".into(),
             launch_token: "launch".into(),
             session_id: 17,
+            pid: None,
         };
         let legacy = encode_legacy_claim("token", "launch", 17);
         assert_eq!(read_handshake(&mut legacy.as_bytes()).unwrap(), expected);

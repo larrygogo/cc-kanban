@@ -598,4 +598,5 @@ describe("ChatSidebar", () => {
     expect(onSelect).toHaveBeenCalledWith(20);
     expect(onSelect).not.toHaveBeenCalledWith(21);
   });
+
 });

@@ -1416,6 +1416,36 @@ fn resolve_resume_plan(
 /// 进程都会重置成 CLI 默认（实拍反馈「每次接管权限模式都会变」）。
 /// 插入点在 launch 前缀之后、resume 子命令之前，与首次启动的参数次序一致。
 /// 读库/解析失败一律静默跳过：回放是增强，不能因此拦掉恢复本身。
+/// 把会话的附加目录拼回恢复 argv（sessions.extra_dirs，claim 时落库）：每个目录一对
+/// `<flag> <dir>`，插入点与 [`splice_stored_launch_args`] 相同（launch 前缀之后、resume
+/// 子命令之前）。不回放的话恢复的进程就丢了那些仓的访问权——附加目录是**启动参数**。
+/// 已消失的目录跳过（agent 对不存在的目录报错会拦掉整次恢复）；读库失败静默跳过。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn splice_stored_extra_dirs(resume: &mut Vec<String>, provider: &str, sid: i64) {
+    let Some(agent) = meowo_agent::resolve(Some(provider)) else { return };
+    let Some(flag) = agent.extra_dir_flag() else { return };
+    let Ok(store) = open_store(&db_path()) else { return };
+    let dirs: Vec<String> = store
+        .session_extra_dirs(sid)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
+    let args: Vec<String> = dirs
+        .into_iter()
+        .filter(|d| std::path::Path::new(d).is_dir())
+        .flat_map(|d| [flag.to_string(), d])
+        .collect();
+    if args.is_empty() {
+        return;
+    }
+    let sub_len = agent.resume_args().len();
+    let insert_at = resume.len().saturating_sub(sub_len + 1);
+    for (offset, arg) in args.into_iter().enumerate() {
+        resume.insert(insert_at + offset, arg);
+    }
+}
+
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn splice_stored_launch_args(
     resume: &mut Vec<String>,
@@ -1695,6 +1725,9 @@ pub(crate) fn validate_new_session_cwd(cwd: &str) -> Result<String, String> {
 /// 会话入库仍靠 CLI hook；SessionStart 后 reporter 用一次性 token 将临时 PTY 绑定到真实 session id。
 /// `terminal` 仅为旧前端兼容参数：托管模式下用哪个外部终端由设置里的 `resume_terminal` 决定。
 #[tauri::command]
+// 参数形状即前端 invoke 的调用契约(与 get_live_sessions_page 同一豁免理由):
+// cwd/options/workGroup/extraDirs 都是正交的启动维度,合并成 struct 破坏旧前端兼容。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn new_session(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::AppState>,
@@ -1702,9 +1735,29 @@ pub(crate) async fn new_session(
     provider: String,
     terminal: Option<String>,
     options: Option<std::collections::HashMap<String, String>>,
+    // 附加目录(跨仓同一需求 = 一个会话):每个以 agent 声明的 flag(claude --add-dir)
+    // 进 argv;原件 claim 时落库,resume/接管重启回放。
+    extra_dirs: Option<Vec<String>>,
 ) -> Result<(), String> {
     let dir = validate_new_session_cwd(&cwd)?;
     let agent = meowo_agent::resolve(Some(&provider)).ok_or("未知 agent")?;
+    // 附加目录:逐个过与主目录同款的存在性校验(拼进 argv 的路径必须真实),并剔除
+    // 与主目录重复的。声明了才支持——没声明的 agent 收到附加目录要如实拒绝,
+    // 静默丢弃会让用户以为 agent 看得到那些仓。
+    let extras: Vec<String> = {
+        let mut out = Vec::new();
+        for d in extra_dirs.unwrap_or_default() {
+            let v = validate_new_session_cwd(&d)?;
+            if v != dir && !out.contains(&v) {
+                out.push(v);
+            }
+        }
+        out
+    };
+    let extra_flag = agent.extra_dir_flag();
+    if !extras.is_empty() && extra_flag.is_none() {
+        return Err(format!("{} 不支持附加目录", agent.display_name()));
+    }
     // 启动选项：前端只回传 choice id，此处按插件声明表翻译成 flag——未知 id 被忽略/落默认，
     // 用户输入永远进不了 argv。放在 relay 增补**之前**：中转声明的 `--model` 必须最后压轴
     // （中转端点只认它配置的那个模型，用户选的别名对它无意义，claude 以最后一个 --model 为准）。
@@ -1717,6 +1770,13 @@ pub(crate) async fn new_session(
         agent.launch_options(),
         &selections,
     ));
+    // 附加目录:每个一对 `<flag> <dir>`(路径已过存在性校验)。
+    if let Some(flag) = extra_flag {
+        for d in &extras {
+            argv.push(flag.to_string());
+            argv.push(d.clone());
+        }
+    }
     let argv = crate::relay::augment_argv(agent.id(), argv);
     // 代理 + 中转 **+ 当前活跃账号的隔离变量**（`CLAUDE_CONFIG_DIR` 等），三者都在
     // `launch_env_for_profile` 里。
@@ -1744,6 +1804,7 @@ pub(crate) async fn new_session(
             &provider,
             &selections,
             None,
+            &extras,
         )
     })
     .await
@@ -2042,6 +2103,8 @@ pub(crate) fn start_managed_resume_sized(
     }
     // 回放会话的启动选项（权限模式等；接管时的改选合并写回），恢复后的进程与选择同参。
     splice_stored_launch_args(&mut resume, &provider, sid, option_overrides.as_ref());
+    // 回放附加目录（--add-dir）：恢复的进程与首次启动同一份跨仓访问范围。
+    splice_stored_extra_dirs(&mut resume, &provider, sid);
     // takeover 调用本函数前已经结束旧进程；普通 resume 的旧进程本就不在。此刻复制能拿到
     // 完整的最后一帧 transcript，也不会与 Claude 正在追加同一个文件发生竞争。
     let target_profile = prepare_session_for_active_profile(&provider, &session_id)?;

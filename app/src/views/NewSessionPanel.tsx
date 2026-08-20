@@ -91,6 +91,9 @@ export function NewSessionPanel(): ReactElement {
   // 启动选项的选择（option id → choice id）。选项表由插件经 descriptor 声明；换 agent 清空
   // ——不同 agent 的选项 id 可能撞名（如都叫 approval）但语义不同，残留会串。
   const [opts, setOpts] = useState<Record<string, string>>({});
+  // 附加目录(一个需求跨 N 仓 = 一个会话 + --add-dir):agent 在同一上下文里看到
+  // 所有仓,跨仓改动自己协调——不必开 N 个会话再让用户当人肉消息总线。
+  const [extraDirs, setExtraDirs] = useState<string[]>([]);
   // null = 尚未拿到账号（或取不到）→ 不显示未登录提示，避免误闪/误报。
   const [loggedIn, setLoggedIn] = useState<Record<string, boolean> | null>(null);
   // 各 provider 当前活跃账号的展示名（null = 默认账号）。非默认账号活跃时在启动按钮旁提示，
@@ -188,6 +191,22 @@ export function NewSessionPanel(): ReactElement {
   useEffect(() => {
     if (avail && avail.length > 0 && !avail.includes(provider)) setProvider(avail[0]);
   }, [avail, provider]);
+  // 附加目录只对声明支持的 agent 开放(claude --add-dir);切到不支持的 agent 时清空,
+  // 静默带过去会让后端如实拒绝、启动直接报错。
+  const supportsExtraDirs = agents?.find((a) => a.id === provider)?.supports_extra_dirs ?? false;
+  useEffect(() => {
+    if (!supportsExtraDirs) setExtraDirs([]);
+  }, [supportsExtraDirs]);
+  const toggleExtraDir = (dir: string) => {
+    const key = pathKey(dir);
+    if (key === pathKey(normalizePath(cwd.trim()))) return; // 主目录不重复附加
+    setExtraDirs((prev) =>
+      prev.some((x) => pathKey(x) === key) ? prev.filter((x) => pathKey(x) !== key) : [...prev, dir]);
+  };
+  async function pickExtraDir() {
+    const picked = await open({ directory: true });
+    if (typeof picked === "string") toggleExtraDir(normalizePath(picked));
+  }
   // 换 agent 重置选择（不同 agent 的选项 id 可能撞名但语义不同，残留会串），
   // 但优先回填本 provider 上次的选择——见 LAUNCH_OPTS_KEY。
   useEffect(() => setOpts(loadStoredOpts()[provider] ?? {}), [provider]);
@@ -210,7 +229,9 @@ export function NewSessionPanel(): ReactElement {
     setBusy(true);
     setError(null);
     try {
-      await newSession(cwd.trim(), provider, opts);
+      // 附加目录剔除与主目录重复的(归一比较):agent 对同一目录拿两份授权无意义。
+      const extras = extraDirs.filter((d) => pathKey(d) !== pathKey(cwd.trim()));
+      await newSession(cwd.trim(), provider, opts, extras);
       saveStoredOpts(provider, opts); // 启动成功才记：失败的组合不该成为下次的默认
       closeWin();
     } catch (e) {
@@ -290,7 +311,22 @@ export function NewSessionPanel(): ReactElement {
 
       <div className="ns-body">
         <label className="ns-field">
-          <span className="ns-label">{t.newSession.dir}</span>
+          <span className="ns-label ns-label-row">
+            {t.newSession.dir}
+            {/* 附加目录:跨仓同一需求开**一个**会话(agent 在同一上下文里协调所有仓),
+                每个附加目录以 --add-dir 进 argv。最近列表 Ctrl+点击可快捷附加。 */}
+            {supportsExtraDirs && (
+              <button
+                type="button"
+                className="ns-extra-add"
+                data-testid="ns-extra-add"
+                data-tip={t.newSession.extraDirsTip}
+                onClick={(e) => { e.preventDefault(); void pickExtraDir(); }}
+              >
+                + {t.newSession.extraDirsAdd}
+              </button>
+            )}
+          </span>
           <div className="ns-picker">
             <div className="ns-dir-row">
               <input
@@ -306,15 +342,41 @@ export function NewSessionPanel(): ReactElement {
                 {t.newSession.browse}
               </button>
             </div>
+            {extraDirs.length > 0 && (
+              <div className="ns-extra-list" data-testid="ns-extra-list">
+                {extraDirs.map((d) => (
+                  <span key={d} className="ns-extra-chip" title={d}>
+                    {d.split(/[\\/]/).filter(Boolean).pop() ?? d}
+                    <button
+                      type="button"
+                      className="ns-extra-x"
+                      aria-label={t.newSession.extraDirRemove}
+                      onClick={(e) => { e.preventDefault(); setExtraDirs((prev) => prev.filter((x) => x !== d)); }}
+                    >×</button>
+                  </span>
+                ))}
+              </div>
+            )}
             {recent.length > 0 && shownRecent.length > 0 && (
               <div className="ns-recent-list">
                 {shownRecent.map((r) => (
                   <button
                     key={r}
                     type="button"
-                    className={"ns-recent-item" + (cwdNorm === r ? " is-on" : "")}
-                    title={r}
-                    onClick={() => setCwd(r)}
+                    className={
+                      "ns-recent-item"
+                      + (cwdNorm === r ? " is-on" : "")
+                      + (extraDirs.some((x) => pathKey(x) === pathKey(r)) ? " is-extra" : "")
+                    }
+                    title={supportsExtraDirs ? `${r}\n${t.newSession.extraDirsHint}` : r}
+                    onClick={(e) => {
+                      // Ctrl/Cmd+点击 = 加为/移出附加目录(与侧栏多选同一手势);普通点击 = 设主目录。
+                      if (supportsExtraDirs && (e.ctrlKey || e.metaKey)) {
+                        toggleExtraDir(r);
+                        return;
+                      }
+                      setCwd(r);
+                    }}
                   >
                     <FolderIcon />
                     <span className="ns-recent-name">{r.split(/[\\/]/).filter(Boolean).pop() ?? r}</span>

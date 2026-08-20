@@ -36,7 +36,7 @@ describe("new-session api", () => {
     // 不再传 terminal：托管模式下终端选择由后端设置决定（后端参数仅为旧前端兼容保留）。
     newSession("C:/p", "claude", { model: "opus" });
     expect(invokeMock).toHaveBeenCalledWith("new_session", {
-      cwd: "C:/p", provider: "claude", options: { model: "opus" },
+      cwd: "C:/p", provider: "claude", options: { model: "opus" }, extraDirs: [],
     });
   });
 

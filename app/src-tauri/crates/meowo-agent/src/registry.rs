@@ -51,6 +51,13 @@ pub trait AgentPlugin: Sync {
         &[]
     }
 
+    /// 「附加目录」flag：一个会话访问多个目录（跨仓同一需求 = 一个 agent 一个上下文，
+    /// 每个附加目录以 `<flag> <dir>` 一对追加进启动/恢复 argv，claude 为 `--add-dir`）。
+    /// None = 不支持，新建面板不给附加入口——给出走不通的入口比不给更糟。
+    fn extra_dir_flag(&self) -> Option<&'static str> {
+        None
+    }
+
     /// 官方安装引导脚本的地址（None = 无一键方案）。`windows` 决定取 `.ps1` 还是 `.sh`。
     ///
     /// 返回的是**地址**而非 `irm <url> | iex` 这类命令串：宿主取回内容、判定它确实是脚本

@@ -1,11 +1,12 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { confirmStopSession, getLiveSessionsPage, getSessionLineage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, searchChatTranscripts, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LineageEntry, type LiveSession, type SessionTone, type TranscriptSearchHit } from "../api";
+import { pickAndAddExtraDir, confirmStopSession, getLiveSessionsPage, getSessionLineage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, searchChatTranscripts, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LineageEntry, type LiveSession, type SessionTone, type TranscriptSearchHit } from "../api";
 import { useBoardRefresh } from "../hooks/useBoardRefresh";
 import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
 import { folderName, parentSegment, pathKey } from "../paths";
 import { useMenuPopup } from "./menu";
+import { useAgents } from "../useAgents";
 import { CardContextMenu } from "./sticker/CardContextMenu";
 import { editorKeyDown, useStarred } from "./sticker/helpers";
 import { UNNAMED_SESSION_SENTINEL } from "./sticker/types";
@@ -768,6 +769,18 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
   };
   const openMenuAt = (item: LiveSession, x: number, y: number) => setCtxMenu({ sid: item.session.id, x, y });
 
+  // 中途附加目录(条目菜单):命令统一负责落库 + 即时生效(有托管 PTY 时后端直写
+  // /add-dir);断开会话只落库,下次恢复回放。入口按能力位显隐(与贴纸同口径)。
+  const { agents } = useAgents();
+  const supportsExtraDir = (p: string) => agents?.find((a) => a.id === p)?.supports_extra_dirs ?? false;
+  const addExtraDir = async (item: LiveSession) => {
+    try {
+      await pickAndAddExtraDir(item.session.id);
+    } catch (error) {
+      setActionError(formatBackendError(error, t.locale));
+    }
+  };
+
   const changeGroupMode = (mode: GroupMode) => {
     setGroupMode(mode);
     localStorage.setItem(GROUP_MODE_KEY, mode);
@@ -1211,6 +1224,7 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
           onArchive={() => toggleArchived(ctxItem)}
           onNewSession={() => void openNewSessionWindow({ cwd: ctxItem.cwd, provider: ctxItem.provider }).catch(() => {})}
           onOpenDir={ctxItem.cwd ? () => void openProjectDir(ctxItem.cwd!).catch(() => {}) : null}
+          onAddDir={supportsExtraDir(ctxItem.provider) ? () => void addExtraDir(ctxItem) : null}
           // 结束会话只对本 GUI 托管的 PTY 开放（与看板同一门控）：外部终端里跑的会话
           // 杀不了，后台会话杀了也会被 supervisor 拉回来。
           onEndSession={ctxItem.pty_managed && !ctxItem.background ? () => endSession(ctxItem) : null}

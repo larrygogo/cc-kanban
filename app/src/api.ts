@@ -135,6 +135,26 @@ export type LiveSession = Omit<LiveSessionDto, "session" | "todos" | "column" | 
 
 export type { LiveSessionCounts };
 
+/** 已有会话中途附加目录的落库半边（resume 回放依据）。运行中进程的即时生效由调用方
+ *  另经发送通道发 `/add-dir <dir>`。返回是否真的新增（重复目录 no-op）。 */
+export function addSessionExtraDir(sessionId: number, dir: string): Promise<boolean> {
+  return invoke("add_session_extra_dir", { sessionId, dir });
+}
+
+/** 移除一个附加目录(落库侧,下次恢复不再带上;运行中进程已持有的权限收不回)。 */
+export function removeSessionExtraDir(sessionId: number, dir: string): Promise<boolean> {
+  return invoke("remove_session_extra_dir", { sessionId, dir });
+}
+
+/** 选目录并附加到会话(对话窗 diff 面板 / 侧栏条目菜单共用,免得两处各自漂移):
+ *  用户取消返回 null;失败抛原始错误,由调用方走各自的提示通道。 */
+export async function pickAndAddExtraDir(sessionId: number): Promise<boolean | null> {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const picked = await open({ directory: true });
+  if (typeof picked !== "string") return null;
+  return addSessionExtraDir(sessionId, picked);
+}
+
 export type ChatItem = GeneratedChatItem;
 export type ChatHistory = ChatHistoryDto;
 /** 一次委派可能派出多个子任务（kimi 的 AgentSwarm），故按分支返回。 */
@@ -763,9 +783,10 @@ export function refreshUsage(provider: string): Promise<ProviderUsage> {
 export type HooksStatus = "installed" | "missing" | "unknown";
 
 /** 新建一个全新会话：起托管 PTY，视图与终端类型由设置的 session_open_in / resume_terminal 决定。 */
-/** `options`：启动选项的选择（option id → choice id），映射成 flag 由后端按插件声明表完成。 */
-export function newSession(cwd: string, provider: AgentId, options?: Record<string, string>): Promise<void> {
-  return invoke("new_session", { cwd, provider, options });
+/** `options`：启动选项的选择（option id → choice id），映射成 flag 由后端按插件声明表完成。
+ *  `extraDirs`：附加目录（跨仓同一需求 = 一个会话 + --add-dir）;仅声明支持的 agent 接受。 */
+export function newSession(cwd: string, provider: AgentId, options?: Record<string, string>, extraDirs: string[] = []): Promise<void> {
+  return invoke("new_session", { cwd, provider, options, extraDirs });
 }
 
 /** 最近使用过的工作目录（新建面板快捷选择）。 */

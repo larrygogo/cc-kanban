@@ -69,7 +69,10 @@ function isOurs(cmd) {
 }
 
 for (const [event, matcher] of SPECS) {
-  const timeout = event === "PermissionRequest" ? 310 : 5;
+  // 等人的 hook（审批、AskUserQuestion 代答）用长超时，与 Rust 侧 EVENTS 的 with_timeout 同步。
+  const waitsOnUser =
+    event === "PermissionRequest" || (event === "PreToolUse" && matcher === "AskUserQuestion");
+  const timeout = waitsOnUser ? 310 : 5;
   settings.hooks[event] ??= [];
   // hooks[event] 非数组（如被手改成对象）时下面的 .map 会抛裸 TypeError，先校验再合并。
   if (!Array.isArray(settings.hooks[event])) {
@@ -87,8 +90,9 @@ for (const [event, matcher] of SPECS) {
         if (kept) return false; // 我方第 2+ 条 → 重复注册，删
         kept = true;
         h.command = command;
-        // 审批 hook 要等待 GUI 用户决定；普通 hook 仍限制 5 秒，且保留用户已有的自定义值。
-        if (event === "PermissionRequest") h.timeout = timeout;
+        // 等人的 hook 必须强制迁移到长超时（旧装机残留 5 会掐断代答等待）；
+        // 普通 hook 仍限制 5 秒，且保留用户已有的自定义值。
+        if (waitsOnUser) h.timeout = timeout;
         else h.timeout ??= timeout;
         return true;
       });

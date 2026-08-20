@@ -155,6 +155,7 @@ fn load_chat_history(
         status: header.status.clone(),
         provider: header.provider.clone(),
         cwd: header.cwd.clone(),
+        extra_dirs: header.extra_dirs.clone(),
         supported: false,
         items: Vec::new(),
         offset,

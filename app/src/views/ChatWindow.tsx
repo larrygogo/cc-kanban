@@ -6,8 +6,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { pathKey } from "../paths";
 import { appConfirm } from "../confirm";
-import { agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardRestore, clipboardSetImage, confirmStopSession, dismissInteractiveQuestion, getChatHistory, getGitDiffSummary, getLiveSessionsPage, getSessionLineage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, refreshSessionModel, refreshSessionTodos, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, switchSessionProvider, takeoverManagedTerminal, writeManagedTerminal, type AgentId, type ChatHistory, type ChatItem, type ChatUi, type GitDiffSummaryDto, type LiveSession, type ModelPreset, type ModeScreenMarker } from "../api";
+import { pickAndAddExtraDir, removeSessionExtraDir, agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardRestore, clipboardSetImage, confirmStopSession, dismissInteractiveQuestion, getChatHistory, getGitDiffSummary, getLiveSessionsPage, getSessionLineage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, refreshSessionModel, refreshSessionTodos, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, switchSessionProvider, takeoverManagedTerminal, writeManagedTerminal, type AgentId, type ChatHistory, type ChatItem, type ChatUi, type GitDiffSummaryDto, type LiveSession, type ModelPreset, type ModeScreenMarker } from "../api";
 import { hasEscLayers, pushEscLayer } from "../escLayers";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useT } from "../i18n";
@@ -15,7 +16,7 @@ import { formatBackendError } from "../i18n/errors";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { collectSubagentReceipts, reduceChatEvents } from "../chat/reducer";
 import { ApprovalCard } from "./chat/ApprovalCard";
-import { matchOptionByLabel, observeTranscriptForDismiss, parseAskUserQuestions, type QuestionDismissTracker, type StructuredQuestion } from "./chat/askUserQuestion";
+import { composeAnswerBody, matchOptionByLabel, observeTranscriptForDismiss, parseAskUserQuestions, type QuestionAnswerDraft, type QuestionDismissTracker, type StructuredQuestion } from "./chat/askUserQuestion";
 import { detectAtToken, useAtFileCompletion, useSlashCompletion } from "./chat/composerCompletion";
 import { useApprovalChannel } from "./chat/useApprovalChannel";
 import { useModelPresets } from "./chat/useModelPresets";
@@ -565,6 +566,12 @@ export function ChatWindow() {
     lastInteractiveQuestionRef,
   } = useApprovalChannel({ sessionId, activeSessionRef, viewRef, setView, setSendError });
   const [queuedAnswer, setQueuedAnswer] = useState<string | null>(null);
+  // 作答卡（broker 挂起代答）上的逐题草稿。按 requestId 整体重置：新一轮提问不继承
+  // 上一轮的选择。
+  const [questionAnswers, setQuestionAnswers] = useState<ReadonlyMap<number, QuestionAnswerDraft>>(new Map());
+  useEffect(() => {
+    setQuestionAnswers(new Map());
+  }, [structuredQuestion?.requestId]);
   // t 的实时镜像:mount-once 监听(拖放附件上限提示)里的闭包 state 是过期值。
   const tRef = useRef(t);
   tRef.current = t;
@@ -944,27 +951,40 @@ export function ChatWindow() {
     setDiffMaximized((max) => !max);
     setDiffCollapsed(false);
   }, []);
+  // 面板的激活仓(多仓会话:主仓 + 各附加目录之一)。null = 主仓;换会话重置。
+  const [diffDir, setDiffDir] = useState<string | null>(null);
+  const diffCwd = diffDir ?? cwd;
+  // 会话的全部目录。extraDirs 数组每次 650ms 轮询都是新引用,用 join 键稳住
+  // useMemo——否则 dirs 每帧换新引用,memo 的 GitDiffView 白 memo。
+  const extraDirsKey = (history?.extraDirs ?? []).join("\0");
+  const diffDirs = useMemo(
+    () => (cwd ? [cwd, ...extraDirsKey.split("\0").filter(Boolean)] : []),
+    [cwd, extraDirsKey]
+  );
   useEffect(() => {
     setDiffOpen(false);
     setDiffCollapsed(false);
     setDiffMaximized(false);
-    if (!cwd) { setGitSummary(null); return; }
+    setDiffDir(null);
+  }, [cwd]);
+  useEffect(() => {
+    if (!diffCwd) { setGitSummary(null); return; }
     let cancelled = false;
-    getGitDiffSummary(cwd)
+    getGitDiffSummary(diffCwd)
       .then((result) => { if (!cancelled) setGitSummary(result); })
       .catch(() => { if (!cancelled) setGitSummary(null); });
     return () => { cancelled = true; };
-  }, [cwd]);
+  }, [diffCwd]);
   // 面板每次转为可见都重拉摘要:agent 随时在提交/改文件,进窗时拉的那份清单会过期
   // ——点开「更改」看到的是已提交文件的空 diff(实拍反馈)。git status 毫秒级,不设节流。
   useEffect(() => {
-    if (!cwd || !diffOpen || diffCollapsed) return;
+    if (!diffCwd || !diffOpen || diffCollapsed) return;
     let cancelled = false;
-    getGitDiffSummary(cwd)
+    getGitDiffSummary(diffCwd)
       .then((result) => { if (!cancelled) setGitSummary(result); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [cwd, diffOpen, diffCollapsed]);
+  }, [diffCwd, diffOpen, diffCollapsed]);
   // 恢复/接管时的权限改选："" = 沿用会话存的选择；选了具体档就随本次恢复下发，
   // 后端按选项维度合并写回，成为会话新的持久形态——覆盖「当年不是以跳过权限新建、
   // 恢复时想切过去」的场景（存量会话同样适用）。没声明权限类选项的 agent 不显示。
@@ -1449,6 +1469,9 @@ export function ChatWindow() {
       return;
     }
     shownQuestionSessionRef.current = structuredQuestion.sessionId;
+    // 作答卡不吃 180s 过期：broker 挂着 300s，到点它自己降级（answerable 随轮询翻
+    // false，本 effect 因对象更换重跑，展示卡的 180s 从那一刻起算）。
+    if (structuredQuestion.answerable) return;
     const timer = window.setTimeout(() => {
       setStructuredQuestion(null);
       // 过期不能只是凭空消失（用户离开一会儿回来，分不清是自己漏点还是超时）——
@@ -1457,6 +1480,29 @@ export function ChatWindow() {
     }, 180_000);
     return () => window.clearTimeout(timer);
   }, [structuredQuestion, sessionId, t]);
+  // 作答卡的剩余时间徽章：broker 侧挂起 300s，与审批倒计时同一课——到点降级不能像
+  // bug 一样凭空发生。从本窗口首见该 requestId 起本地计时（晚开窗只会显得更宽裕）。
+  const QUESTION_TIMEOUT_MS = 300_000;
+  const questionSeenRef = useRef<{ id: string; at: number } | null>(null);
+  const [questionNow, setQuestionNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!structuredQuestion?.answerable) {
+      questionSeenRef.current = null;
+      return;
+    }
+    if (questionSeenRef.current?.id !== structuredQuestion.requestId) {
+      questionSeenRef.current = { id: structuredQuestion.requestId, at: Date.now() };
+      setQuestionNow(Date.now());
+    }
+    const timer = window.setInterval(() => setQuestionNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [structuredQuestion]);
+  const questionCountdown = (() => {
+    if (!structuredQuestion?.answerable || !questionSeenRef.current) return null;
+    const left = Math.max(0, QUESTION_TIMEOUT_MS - (questionNow - questionSeenRef.current.at));
+    const totalSeconds = Math.floor(left / 1000);
+    return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, "0")}`;
+  })();
   // 「问题已了结」的收卡信号：判定逻辑见 observeTranscriptForDismiss。
   //
   // 计数**必须**读独立累积的 items state，不能读 history.offset/history.items——那两个
@@ -2317,6 +2363,7 @@ export function ChatWindow() {
     }
   };
 
+
   // 输入框有没有东西,决定了 composer 右下角那颗圆钮的身份:空 + 回合运行中 = 停止键,
   // 否则 = 发送键。两个判定要用同一份口径,别在 JSX 里各算各的。
   const hasDraft = prompt.trim().length > 0 || attachments.length > 0;
@@ -2379,6 +2426,65 @@ export function ChatWindow() {
   // 装不下多选，且跨问题的同名选项会把答案落到错的题上）。
   const answerableInCard =
     structuredQuestions.length === 1 && !structuredQuestions[0].multiSelect;
+  // 作答卡（broker 挂起代答）：题面来自挂起路径且会话托管时，卡片就是作答面——
+  // 多选/多问题/自定义输入全部可答，不再依赖屏幕识别与排队落键。
+  const questionAnswerable = !!structuredQuestion?.answerable && history?.ptyManaged !== false;
+  // 作答卡的逐题草稿操作：单选点即换（再点取消），多选勾选切换。
+  const selectQuestionOption = (questionIndex: number, label: string) => {
+    const multi = structuredQuestions[questionIndex]?.multiSelect === true;
+    setQuestionAnswers((current) => {
+      const next = new Map(current);
+      const draft = next.get(questionIndex) ?? { selected: [], custom: "" };
+      const selected = draft.selected.includes(label)
+        ? draft.selected.filter((entry) => entry !== label)
+        : multi ? [...draft.selected, label] : [label];
+      next.set(questionIndex, { ...draft, selected });
+      return next;
+    });
+  };
+  const setQuestionCustom = (questionIndex: number, text: string) => {
+    setQuestionAnswers((current) => {
+      const next = new Map(current);
+      const draft = next.get(questionIndex) ?? { selected: [], custom: "" };
+      next.set(questionIndex, { ...draft, custom: text });
+      return next;
+    });
+  };
+  // 每题都有内容（点选或自定义）才可提交；正文即 answer: 的 payload。
+  const answerBody = composeAnswerBody(structuredQuestions, questionAnswers);
+  const unansweredCount = structuredQuestions.filter((_, index) => {
+    const draft = questionAnswers.get(index);
+    return !(draft && (draft.selected.length > 0 || draft.custom.trim()));
+  }).length;
+  // 提交：正文由这里拼，引导语由 broker 统一包上 → DenyWith 回 hook，agent 直接继续。
+  // 复用 resolvingApproval 在途锁（与审批同类的终止动作）。
+  const submitQuestionAnswers = async () => {
+    if (!questionAnswerable || !structuredQuestion || resolvingApproval || !answerBody) return;
+    setResolvingApproval(true);
+    try {
+      await resolvePendingApproval(sessionId, structuredQuestion.requestId, `answer:${answerBody}`);
+      setStructuredQuestion(null);
+    } catch (error) {
+      // 挂起可能已在别处结算（超时/回合终止）：说明原因，卡随下一拍轮询降级或消失。
+      setSendError(formatBackendError(error, t.locale));
+    } finally {
+      setResolvingApproval(false);
+    }
+  };
+  // 作答卡的「去终端作答」：把挂起交还终端（broker 回 Pass → 表单随权限流程出现在
+  // 终端），切到终端页等它。
+  const sendQuestionToTerminal = async () => {
+    if (!questionAnswerable || !structuredQuestion || resolvingApproval) return;
+    setResolvingApproval(true);
+    try {
+      await resolvePendingApproval(sessionId, structuredQuestion.requestId, "pass");
+    } catch {
+      // 已在别处结算：表单要么已在终端，要么请求已了结，切过去看即可。
+    } finally {
+      setResolvingApproval(false);
+    }
+    setView("terminal");
+  };
   const commandApproval = commandAttention
     ? commandAttention.details === "arrow_panel"
       ? arrowPanelApprovalDetails(commandAttention.text)
@@ -2497,6 +2603,30 @@ export function ChatWindow() {
       .then(() => setQuestionCustomText(""))
       .catch((error) => setSendError(formatBackendError(error, t.locale)));
   };
+
+  // 中途附加目录(diff 面板的仓菜单):命令统一负责落库(sessions.extra_dirs,resume
+  // 回放依据)与即时生效(有托管 PTY 时后端直写 /add-dir)。断开会话只落库,恢复回放
+  // 兜底。useCallback:props 进 memo 的 GitDiffView,引用不稳会让 memo 白 memo。
+  const addExtraDir = useCallback(async () => {
+    try {
+      await pickAndAddExtraDir(sessionId);
+    } catch (error) {
+      setSendError(formatBackendError(error, t.locale));
+    }
+  }, [sessionId, t.locale]);
+  // 移除附加目录(落库侧,下次恢复不再带上;运行中进程已持有的权限收不回)。
+  const removeExtraDir = useCallback((dir: string) => {
+    removeSessionExtraDir(sessionId, dir).catch((error) => setSendError(formatBackendError(error, t.locale)));
+  }, [sessionId, t.locale]);
+  // 附加动作的能力位包装:memo 稳定引用(内联三元每渲染换新)。
+  const onDiffAddDir = useMemo(
+    () => (currentAgentDescriptor?.supports_extra_dirs ? () => void addExtraDir() : null),
+    [currentAgentDescriptor?.supports_extra_dirs, addExtraDir]
+  );
+  // 激活仓被移除后 diffDir 悬空(指着已不在清单里的目录):回落主仓。
+  useEffect(() => {
+    if (diffDir !== null && !diffDirs.includes(diffDir)) setDiffDir(null);
+  }, [diffDir, diffDirs]);
 
   // 侧栏折叠/展开的统一开关（Kimi 式面板图标，两态共用一个钮）。Windows/Linux 常驻
   // 顶栏左上角；macOS 没有独立顶栏，折叠钮在侧栏头部（ChatSidebar 内，仅 mac 渲染）、
@@ -2880,10 +3010,33 @@ export function ChatWindow() {
           />
         </div>
       )}
-      {/* AskUserQuestion 的同步题面卡：broker 自动放行后从结构化参数渲染，与终端表单同步
-          出现（先于屏幕识别）。仅展示——作答按键要等识别确认表单在屏（interactiveAttention
-          接管后此卡退场）；识别不认的形态（多问题 tab 表单）走「去终端作答」。 */}
-      {view === "chat" && structuredQuestions.length > 0 && !terminalAttention && !approval && <ApprovalCard
+      {/* AskUserQuestion 的作答卡（broker 挂起代答）：表单尚未渲染，卡片就是作答面——
+          多选/多问题/自定义输入全部可答，提交后答案经 hook 直达模型。刻意没有「仅收起」：
+          收起等于让 hook 干等到 300s 超时（与 broker 审批卡同理），出口只有提交与
+          「去终端作答」（交还终端表单）。 */}
+      {view === "chat" && structuredQuestions.length > 0 && !terminalAttention && !approval && questionAnswerable && <ApprovalCard
+        className="chat-screen-approval"
+        title={t.chat.questionTitle}
+        badge={questionCountdown ? `${t.chat.questionPending} · ${questionCountdown}` : t.chat.questionPending}
+        actions={<>
+          <button type="button" disabled={resolvingApproval} onClick={() => void sendQuestionToTerminal()}>{t.chat.answerInTerminal}</button>
+          <button type="button" className="is-allow" disabled={resolvingApproval || !answerBody} onClick={() => void submitQuestionAnswers()}>{t.chat.submitAnswer}</button>
+        </>}
+      >
+        <QuestionPanels
+          mode="answer"
+          items={structuredQuestions}
+          answers={questionAnswers}
+          onSelect={selectQuestionOption}
+          onCustom={setQuestionCustom}
+        />
+        <span>{answerBody ? t.chat.questionAnswerReady : t.chat.questionAnswerIncomplete(unansweredCount)}</span>
+      </ApprovalCard>}
+      {/* AskUserQuestion 的同步题面卡（展示形态）：broker 自动放行后从结构化参数渲染，与
+          终端表单同步出现（先于屏幕识别）。仅展示——作答按键要等识别确认表单在屏
+          （interactiveAttention 接管后此卡退场）；识别不认的形态（多问题 tab 表单）走
+          「去终端作答」。旧 reporter/降级（挂起超时）场景都落在这里。 */}
+      {view === "chat" && structuredQuestions.length > 0 && !terminalAttention && !approval && !questionAnswerable && <ApprovalCard
         className="chat-screen-approval"
         title={t.chat.questionTitle}
         badge={t.chat.questionPending}
@@ -3524,7 +3677,11 @@ export function ChatWindow() {
             onPointerDown={startDiffResize}
           />
           <GitDiffView
-            cwd={cwd}
+            cwd={diffDir ?? cwd}
+            dirs={diffDirs}
+            onDirChange={setDiffDir}
+            onAddDir={onDiffAddDir}
+            onRemoveDir={removeExtraDir}
             summary={gitSummary}
             width={diffWidth}
             collapsed={diffCollapsed}

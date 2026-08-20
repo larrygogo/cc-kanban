@@ -791,6 +791,8 @@ button.stab {
 .stk-profile { flex: none; max-width: calc(96px * var(--cc-ui)); overflow: hidden; text-overflow: ellipsis; font-size: calc(10px * var(--cc-ui)); line-height: 1.5; padding: 0 var(--sp-6); border-radius: var(--r-sm); background: var(--cc-surface-hover); color: var(--cc-text-dim); white-space: nowrap; }
 /* 外库(安装版)来源徽章:与 profile 徽章同形,虚线边框示意「非本实例、只读观察」 */
 .stk-foreign { flex: none; font-size: calc(10px * var(--cc-ui)); line-height: 1.5; padding: 0 var(--sp-6); border-radius: var(--r-sm); border: 1px dashed var(--cc-border); color: var(--cc-text-dim); white-space: nowrap; }
+/* 附加目录标:一个会话跨 N 仓(--add-dir),紧贴 repo 名,tip 列全部目录。 */
+.stk-extradirs { flex: none; font-size: calc(10px * var(--cc-ui)); line-height: 1.5; padding: 0 var(--sp-4); border-radius: var(--r-sm); background: var(--cc-surface-hover); color: var(--cc-text-dim); white-space: nowrap; }
 /* sub 行：活动/错误文案 + （按钮模式）末尾的打开按钮 */
 .stk-subrow { display: flex; align-items: center; gap: var(--sp-6); margin-top: var(--sp-7); }
 .stk-sub { flex: 1; min-width: 0; font-size: calc(10.5px * var(--cc-ui)); color: var(--cc-text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2551,6 +2553,17 @@ button.stab {
   color: var(--cc-text-dim);
   letter-spacing: 0.02em;
 }
+/* 目录 label 行:右侧放「+ 附加目录」入口(仅支持 --add-dir 的 agent 显示)。 */
+.ns-label-row { display: flex; align-items: center; justify-content: space-between; }
+.ns-extra-add { border: none; background: transparent; padding: 0 var(--sp-4); font-size: var(--fs-11); font-family: inherit; color: var(--cc-text-faint); cursor: pointer; border-radius: var(--r-sm); }
+.ns-extra-add:hover { color: var(--cc-text); background: var(--cc-surface-hover); }
+/* 已附加目录 chips:输入行下一排,✕ 移除;主目录仍由输入框承载。 */
+.ns-extra-list { display: flex; flex-wrap: wrap; gap: var(--sp-4); padding: var(--sp-4) var(--sp-8) 0; }
+.ns-extra-chip { display: inline-flex; align-items: center; gap: var(--sp-3); padding: 0 var(--sp-4) 0 var(--sp-6); font-size: var(--fs-11); border-radius: var(--r-sm); background: var(--cc-surface-hover); color: var(--cc-text-dim); }
+.ns-extra-x { border: none; background: transparent; padding: 0 var(--sp-2); font-size: var(--fs-12); color: var(--cc-text-faint); cursor: pointer; }
+.ns-extra-x:hover { color: var(--cc-text); }
+/* 最近项的附加态:与主选中(is-on)区分的浅框,Ctrl+点击切换。 */
+.ns-recent-item.is-extra { outline: 1px dashed var(--cc-border); outline-offset: -1px; }
 
 /* 目录选择器：combobox 一体式——输入框 + 浏览按钮 + 最近项目列表包进一个面板，
    整体 focus 时翡翠绿描边；输入实时过滤下方最近项。 */
@@ -3056,6 +3069,21 @@ select.ns-input {
 .chat-title-btn:hover { background: var(--cc-surface-hover); }
 .chat-title-btn .chat-title { cursor: pointer; }
 .chat-title-chev { flex: 0 0 auto; opacity: .55; }
+/* diff 面板头行的仓切换 + 附加目录管理(用户指定收拢于此)。 */
+.chat-diff-dirs { flex: 0 0 auto; min-width: 0; }
+.chat-diff-dirs-btn { display: inline-flex; align-items: center; gap: var(--sp-4); max-width: 160px; padding: var(--sp-4) var(--sp-6); border: 0; border-radius: var(--r-sm); background: transparent; color: var(--cc-text-dim); font-size: var(--fs-11); font-family: inherit; cursor: pointer; }
+.chat-diff-dirs-btn:hover { background: var(--cc-surface-hover); color: var(--cc-text); }
+.chat-diff-dirs-btn > svg { flex: 0 0 auto; }
+.chat-diff-dirs-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 目录行:切换钮(menuitem)与行尾槽并排,不嵌套(button 套 button 非法)。
+   行尾槽固定 20px:✓(激活)与 ×(可移除)同槽对齐,两行行尾不再错位。 */
+.chat-dirs-row { display: flex; align-items: center; }
+.chat-dirs-row .dd-item { flex: 1; min-width: 0; }
+.chat-dirs-tail { flex: 0 0 auto; width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; margin-right: var(--sp-6); }
+.chat-dirs-x { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--cc-text-faint); cursor: pointer; opacity: 0; }
+/* 行悬停/键盘聚焦才浮现:常显一排 × 视觉太吵;透明时仍占位可点(触屏兜底)。 */
+.chat-dirs-row:hover .chat-dirs-x, .chat-dirs-x:focus-visible { opacity: 1; }
+.chat-dirs-x:hover { color: var(--cc-err-vivid); background: color-mix(in srgb, var(--cc-err-vivid) 12%, transparent); }
 .chat-title-btn:hover .chat-title-chev { opacity: .9; }
 .chat-title-actions { min-width: 200px; }
 .chat-title-actions .dd-item { justify-content: flex-start; gap: var(--sp-8); padding: var(--sp-7) var(--sp-10); }
