@@ -44,16 +44,33 @@ function splitUserText(text: string): { body: string; images: { path: string; ke
   // 指令头连同其后紧跟的光杆「-」行（附件残行）一起处理：残行总是剥；仍有实质
   // 附件行（非图片路径「- xxx」）时保留头，否则头也剥。用户自己写的孤立「-」
   // 不紧跟在指令头后，不受影响。
+  // 消息是否经附件机制发出(有指令头):独行光杆只在此前提下、且仅剥「文本最顶端那段
+  // 机器前缀」——CC 把光杆「[Image #N]」挪到提交文本最前,始终排在用户正文之前。一旦
+  // 遇到第一行真实内容就停止,用户正文里手打的孤立「[Image #N]」照旧保留(此前全消息
+  // 范围剥,把用户写的指代也吃了——desktop 回归)。
+  const hasInstructionHeader = kept.some((line) =>
+    ATTACHMENT_INSTRUCTION_HEADERS.has(line.replace(/\[Image #\d+\]\s*/g, "").trim()),
+  );
+  let inLeadingRefs = hasInstructionHeader;
   const body: string[] = [];
   for (let i = 0; i < kept.length; i++) {
     const line = kept[i];
-    if (!ATTACHMENT_INSTRUCTION_HEADERS.has(line.trim())) {
+    // CC 把粘贴图片的光杆指代「[Image #N]」挪到提交文本最前:可能与指令头粘成一行
+    // (「[Image #1]请读取并结合…」),也可能独占一行——判头前先剥掉它,否则精确
+    // 比对失配,整段样板漏进气泡(远程发图实拍)。带 source 的完整引用行已在上一轮抽走。
+    const bareStripped = line.replace(/\[Image #\d+\]\s*/g, "");
+    if (!ATTACHMENT_INSTRUCTION_HEADERS.has(bareStripped.trim())) {
+      // 顶端机器前缀里的独行光杆指代(图片已由 image 块渲染),剥。
+      if (inLeadingRefs && bareStripped.trim() === "" && line.trim() !== "") continue;
+      // 第一行真实内容(空行不计):机器前缀结束,此后不再剥独行指代。
+      if (line.trim() !== "") inLeadingRefs = false;
       body.push(line);
       continue;
     }
     let j = i + 1;
     while (j < kept.length && kept[j].trim() === "-") j++;
-    if (kept[j]?.trim().startsWith("- ")) body.push(line);
+    // 头要保留(还有非图片附件行)时也用剥过指代的版本:图片已是缩略图,光杆指代无信息。
+    if (kept[j]?.trim().startsWith("- ")) body.push(bareStripped);
     i = j - 1;
   }
   return { body: body.join("\n").trim(), images };
@@ -136,10 +153,12 @@ function Lightbox({ src, name, onClose }: { src: string; name: string; onClose: 
         onMouseLeave={onMouseUp}
         onDoubleClick={reset}
       >
+        {/* no-referrer:远程模式下 src 是带 token 的 /file URL,不许经 Referer 外泄。 */}
         <img
           src={src}
           alt={name}
           draggable={false}
+          referrerPolicy="no-referrer"
           style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }}
         />
       </div>
@@ -174,7 +193,7 @@ export function ImageRef({ path }: { path: string }) {
   return (
     <>
       <button type="button" className="chat-image-thumb-btn" title={name} onClick={() => setExpanded(true)}>
-        <img className="chat-image-thumb" src={src} alt={name} loading="lazy" onError={() => setFailed(true)} />
+        <img className="chat-image-thumb" src={src} alt={name} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} />
       </button>
       {/* 灯箱走 portal（在 Lightbox 内）：消息块开着 content-visibility（paint 包含），
           fixed 覆盖层留在消息里会被裁剪在消息框内。 */}

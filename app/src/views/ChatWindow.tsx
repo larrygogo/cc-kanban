@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 // 文件拖入走 Tauri 的 drag-drop 事件(webview 原生 drop 被拦截,DOM 拿不到 File;
@@ -35,6 +35,7 @@ import { ManagedTerminal } from "./ManagedTerminal";
 import { WindowControls } from "./WindowControls";
 import { DevBadge } from "./DevBadge";
 import { isMac } from "../platform";
+import { remoteUi, NEW_SESSION_EVENT } from "../remoteMode";
 import { appendTerminalText, modeFromScreen, terminalAttention as detectTerminalAttention, visibleTerminalText, type AttentionGrammar, type TerminalAttention, type TerminalAttentionOption } from "../terminalAttention";
 import { Dropdown, useMenuPopup } from "./menu";
 // 恢复时的权限改选需要 agent 的启动选项声明表（与新建会话面板同源）。
@@ -42,10 +43,25 @@ import { listAgents, type AgentDescriptor } from "../api";
 // 「切换引擎」分组的目标 agent 图标（前端资产表，未知 id 走中性兜底）。
 import { agentAssets, tintStyle } from "../providers";
 
+/** 远程刷新后回到上次看的会话(桌面开窗恒带 ?sessionId,不落到这条)。 */
+const REMOTE_LAST_SESSION_KEY = "meowo-remote-last-session";
+/** initialSessionId 若用了存储恢复,记下该 id:恢复目标可能已被删/归档,首次加载
+ *  失败要放弃恢复回空态,而不是卡在「读取失败」(自审 M4)。 */
+let restoredSessionId = 0;
+
 function initialSessionId(): number {
   const value = new URLSearchParams(window.location.search).get("sessionId");
   const id = Number(value);
-  return Number.isSafeInteger(id) && id !== 0 ? id : 0;
+  if (Number.isSafeInteger(id) && id !== 0) return id;
+  if (remoteUi()) {
+    const stored = Number(localStorage.getItem(REMOTE_LAST_SESSION_KEY));
+    if (Number.isSafeInteger(stored) && stored > 0) {
+      restoredSessionId = stored;
+      return stored;
+    }
+  }
+  // 0 = 尚未选中任何会话(仅远程首开会出现):渲染「去侧栏选会话」空态,不是加载态。
+  return 0;
 }
 
 const SIDEBAR_COLLAPSED_KEY = "meowo-chat-sidebar-collapsed";
@@ -58,6 +74,31 @@ function storedViewPref(): "chat" | "terminal" {
 }
 function rememberViewPref(view: "chat" | "terminal") {
   localStorage.setItem(VIEW_PREF_KEY, view);
+}
+/** 远程模式选文件:临时挂一个隐藏 <input type=file multiple>,点开系统选择器,resolve 选中的 File。
+ *  取消(未选)时 change 不触发,靠 window focus 兜底 resolve 空数组,避免 Promise 永挂。 */
+function pickFilesViaInput(): Promise<File[]> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    input.style.display = "none";
+    let settled = false;
+    const done = (files: File[]) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("focus", onFocus);
+      input.remove();
+      resolve(files);
+    };
+    input.addEventListener("change", () => done(input.files ? Array.from(input.files) : []));
+    // 用户点「取消」:多数浏览器不发 change,只在窗口重新获焦后能判定放弃。延迟要给足:
+    // iOS/低端安卓的 change 可比 refocus 晚数百毫秒,300ms 会把真选中的照片静默吞掉。
+    const onFocus = () => setTimeout(() => done([]), 1000);
+    window.addEventListener("focus", onFocus, { once: true });
+    document.body.appendChild(input);
+    input.click();
+  });
 }
 /** 改动/文件停靠面板的宽度持久化键（localStorage 既有 meowo-* 命名惯例）。 */
 const DIFF_WIDTH_KEY = "meowo-diff-panel-width";
@@ -411,7 +452,19 @@ export function ChatWindow() {
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   // 新建会话（负数临时 id）落在用户偏好的视图上：对话页此时渲染「启动中」占位，
   // 发送链路（writeManagedTerminal）对临时 id 本就可用。已有会话恒从对话页进。
-  const [view, setView] = useState<"chat" | "terminal">(sessionId < 0 ? storedViewPref() : "chat");
+  const [view, setViewState] = useState<"chat" | "terminal">(
+    remoteUi() ? "chat" : sessionId < 0 ? storedViewPref() : "chat",
+  );
+  // 远程 UI 没有可用的 xterm 终端视图(手机上不渲染 250KB 终端,也没有 pty-output 实时流)。
+  // setView 在此收口:远程一律钉在对话页,散落各处的 setView("terminal")(后台自动切、
+  // 空态出口、去终端作答兜底)统统无害化——隐藏的 ManagedTerminal 仍按需挂载做屏幕识别,
+  // 但 visible 恒 false。桌面无此改写,行为逐字不变。
+  const setView = useCallback<Dispatch<SetStateAction<"chat" | "terminal">>>((next) => {
+    setViewState((prev) => {
+      const resolved = typeof next === "function" ? next(prev) : next;
+      return remoteUi() && resolved === "terminal" ? "chat" : resolved;
+    });
+  }, []);
   // 认领迟迟不来（信任目录询问/登录把 CLI 启动卡住，SessionStart hook 不触发）时，
   // 启动占位下亮「打开终端」出口——那些询问只在终端画面上，对话页看不见。
   // 计时器而非屏幕识别：认领前 provider 未知（history 还是 null），拿不到识别标记，
@@ -824,6 +877,34 @@ export function ChatWindow() {
   // 失效——composer 每个字符都重建整张会话列表(上百条 item)就是这么来的。
   const collapseSidebar = useCallback(() => toggleSidebarRef.current(), []);
   const closeOverlaySidebar = useCallback(() => setOverlaySidebar(false), []);
+  // 远程:侧栏点「新建会话」派发页内导航事件(RemoteApp 据此叠加渲染 sheet)。窄屏抽屉
+  // 层级(z 61)在 sheet 之上,不收就盖住 sheet——收到事件即收抽屉。桌面此事件永不派发。
+  useEffect(() => {
+    const close = () => setOverlaySidebar(false);
+    window.addEventListener(NEW_SESSION_EVENT, close);
+    return () => window.removeEventListener(NEW_SESSION_EVENT, close);
+  }, []);
+  // 远程首开没有会话上下文:窄屏自动拉开抽屉让用户先选,别对着「去侧栏选会话」空态干瞪眼。
+  // 一次性:横竖屏切换会翻转 narrow 重跑 effect,不加闩的话手动收起的抽屉会被强行
+  // 重开(自审 L13)。
+  const autoDrawerDoneRef = useRef(false);
+  useEffect(() => {
+    if (autoDrawerDoneRef.current) return;
+    if (remoteUi() && sessionId === 0 && narrow) {
+      autoDrawerDoneRef.current = true;
+      setOverlaySidebar(true);
+    }
+  }, [sessionId, narrow]);
+  // 远程记住最后看的会话:刷新/重开页面直接回到它(桌面开窗恒带 query,不用这条)。
+  useEffect(() => {
+    if (remoteUi() && sessionId > 0) {
+      try {
+        localStorage.setItem(REMOTE_LAST_SESSION_KEY, String(sessionId));
+      } catch {
+        /* 隐私模式禁写:退化为每次都要手选 */
+      }
+    }
+  }, [sessionId]);
   // Ctrl/Cmd+K 快速切换器（QuickSwitcher）。
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // ? 打开快捷键速查表（输入框内的 ? 是正文，不拦）。
@@ -968,7 +1049,8 @@ export function ChatWindow() {
     setDiffDir(null);
   }, [cwd]);
   useEffect(() => {
-    if (!diffCwd) { setGitSummary(null); return; }
+    // 远程无 GitDiff 入口且命令不在 /rpc 白名单:短路,别每次换会话白打一发 404。
+    if (!diffCwd || remoteUi()) { setGitSummary(null); return; }
     let cancelled = false;
     getGitDiffSummary(diffCwd)
       .then((result) => { if (!cancelled) setGitSummary(result); })
@@ -1183,7 +1265,9 @@ export function ChatWindow() {
   const currentAgentDescriptor = provider
     ? agentsForOptions?.find((agent) => agent.id === provider) ?? null
     : null;
-  const switchTargets = currentAgentDescriptor?.supports_chat_export
+  // switch_session_provider 会 spawn 宿主进程,是 /rpc 拒绝项——远程直接不给切换引擎分组,
+  // 免得用户走完不可逆确认后收一句 404。
+  const switchTargets = !remoteUi() && currentAgentDescriptor?.supports_chat_export
     ? (agentsForOptions ?? []).filter((agent) => agent.installed && agent.id !== provider)
     : [];
   // ── 接续会话的前序段历史（跨 provider 切换的连续性）──
@@ -1345,7 +1429,9 @@ export function ChatWindow() {
 
   const refresh = useCallback(async () => {
     if (sessionId <= 0 || busyRef.current) {
-      if (sessionId < 0) setLoading(false);
+      // 0(远程未选会话)与负数(冷启动临时 id)都不该停留在加载态——0 漏掉的话
+      // 「正在读取对话…」会永远挂着。
+      if (sessionId <= 0) setLoading(false);
       return;
     }
     busyRef.current = true;
@@ -1387,7 +1473,23 @@ export function ChatWindow() {
       setItems((prev) => next.items.length || reset ? reduceChatEvents(prev, next.items, reset) : prev);
       setLoading(false);
       setFailed(false);
+      // 存储恢复的会话加载成功:解除恢复标记,此后的瞬时失败按普通失败处理。
+      if (restoredSessionId === sessionId) restoredSessionId = 0;
     } catch {
+      // 远程从 localStorage 恢复的会话可能已被删/归档:恒失败会卡在「读取失败」,
+      // 空态与自动拉抽屉都进不去。首败即放弃恢复回「选会话」空态(误伤瞬时网络
+      // 抖动可接受——抽屉在场,点回去即可);用户手选的会话不受此影响。
+      if (restoredSessionId === sessionId) {
+        restoredSessionId = 0;
+        try {
+          localStorage.removeItem(REMOTE_LAST_SESSION_KEY);
+        } catch {
+          /* ignore */
+        }
+        setSessionId(0);
+        setLoading(false);
+        return;
+      }
       setLoading(false);
       setFailed(true);
     } finally {
@@ -1969,7 +2071,8 @@ export function ChatWindow() {
     // 剪贴板让 TUI 自己读(kimi/claude 的 composer 都支持多张图连续粘贴)。含非图片附件、
     // 或任一张落地失败(剪贴板写不进、占位符超时)都静默退回指令文本——那条路径对所有
     // agent 恒可用。
-    const clipMarker = chatUi?.clipboard_image_paste;
+    // 远程跳过:clipboard_set_image 是 /rpc 拒绝项,必 404 再回退——省掉每张图两发白请求。
+    const clipMarker = !remoteUi() && chatUi?.clipboard_image_paste;
     if (clipMarker && attachments.length > 0 && attachments.every((file) => file.image)) {
       if (await sendWithClipboardImages(prompt.trim(), clipMarker, attachments)) {
         setPrompt("");
@@ -2126,7 +2229,7 @@ export function ChatWindow() {
     modelProbeTimerRef.current = window.setTimeout(() => {
       endSilentProbe();
       setModelProbeFailed(true);
-      setSendError(t.chat.modelListUnavailable(modelMenuCommand));
+      setSendError(remoteUi() ? t.chat.modelListUnavailableRemote(modelMenuCommand) : t.chat.modelListUnavailable(modelMenuCommand));
     }, 12_000);
   };
   /// 结束静默探测：收掉 CLI 菜单、关识别窗口、清忙态。
@@ -2267,6 +2370,13 @@ export function ChatWindow() {
     });
   };
   const chooseAttachments = async () => {
+    if (remoteUi()) {
+      // 手机没有系统文件对话框(plugin-dialog 也拿不到源路径):用原生 <input type=file> 取 File,
+      // 再走与粘贴完全相同的 base64→savePastedAttachment 落盘通道(该 command 已在远程白名单)。
+      const files = await pickFilesViaInput();
+      if (files.length) await pasteAttachments(files);
+      return;
+    }
     const selected = await open({ multiple: true, directory: false, title: t.chat.chooseAttachments });
     const paths = selected == null ? [] : Array.isArray(selected) ? selected : [selected];
     const fresh = (current: Attachment[]) => {
@@ -2662,7 +2772,8 @@ export function ChatWindow() {
       {!isMac() && (
         <header className="chat-topbar" data-tauri-drag-region>
           {sidebarToggleButton}
-          <WindowControls onClose={close} />
+          {/* 最小化/最大化/关闭是桌面窗口能力,手机浏览器没有可控窗口——远程隐藏。 */}
+          {!remoteUi() && <WindowControls onClose={close} />}
         </header>
       )}
       {/* 窄窗浮窗形态（Kimi 式全高抽屉）：挂在窗口层级、从最顶盖到最底——锚在 chat-body
@@ -2716,8 +2827,9 @@ export function ChatWindow() {
             窗口标题的 ▶ 标记、对话区底部的脉冲指示条、侧栏状态点。 */}
         {/* 任务进度入口:常驻图标,点开浮出「进度」面板(无任务时是骨架占位空态)。 */}
         <ChatTodoMenu todos={todos} subagents={panelSubagents} t={t} />
-        {/* 文件/改动面板入口:有 cwd 即显示(非仓库会话只有「文件」页签),徽标数 = 变更文件数。 */}
-        {cwd && (
+        {/* 文件/改动面板入口:有 cwd 即显示(非仓库会话只有「文件」页签),徽标数 = 变更文件数。
+            远程 v1 砍掉改动面板(GitDiffView),入口一并隐藏。 */}
+        {!remoteUi() && cwd && (
           <button
             type="button"
             // 面板可见时亮 is-active:点击语义是「首开/折叠↔展开」,没有状态指示的话
@@ -2740,15 +2852,19 @@ export function ChatWindow() {
             {gitSummary && gitSummary.isRepo && gitSummary.files.length > 0 && <span className="chat-diff-btn-count">{gitSummary.files.length}</span>}
           </button>
         )}
-        {history?.ptyManaged && (
+        {/* stop_managed_terminal 是 /rpc 明确拒绝项(宿主进程生杀),远程按钮点了必 404——隐藏。 */}
+        {!remoteUi() && history?.ptyManaged && (
           <button type="button" className="chat-end" disabled={endingSession} onClick={() => void endSession()}>
             {endingSession ? t.chat.terminalStopping : t.chat.endSession}
           </button>
         )}
-        <div className="chat-view-tabs">
-          <button type="button" className={view === "chat" ? "is-active" : ""} aria-pressed={view === "chat"} onClick={() => { rememberViewPref("chat"); setView("chat"); }}>{t.chat.conversation}</button>
-          <button type="button" className={view === "terminal" ? "is-active" : ""} aria-pressed={view === "terminal"} onClick={() => { rememberViewPref("terminal"); setView("terminal"); }}>{t.chat.terminal}</button>
-        </div>
+        {/* 终端页签在远程无意义(见 setView 说明):只留对话页,不给死按钮。 */}
+        {!remoteUi() && (
+          <div className="chat-view-tabs">
+            <button type="button" className={view === "chat" ? "is-active" : ""} aria-pressed={view === "chat"} onClick={() => { rememberViewPref("chat"); setView("chat"); }}>{t.chat.conversation}</button>
+            <button type="button" className={view === "terminal" ? "is-active" : ""} aria-pressed={view === "terminal"} onClick={() => { rememberViewPref("terminal"); setView("terminal"); }}>{t.chat.terminal}</button>
+          </div>
+        )}
       </header>
       {/* 两个视图都留在树上、用 CSS 切换可见性：此前三元表达式会在每次切 tab 时
           dispose + new Terminal()，还要把整个 backlog 重传并让 xterm 重放一遍 ANSI。
@@ -2759,7 +2875,8 @@ export function ChatWindow() {
         {failed && items.length > 0 && (
           <div className="chat-sync-warn" role="status">{t.chat.loadError}</div>
         )}
-        {loading ? <div className="chat-empty">{t.chat.loading}</div>
+        {sessionId === 0 ? <div className="chat-empty">{t.chat.pickSession}</div>
+          : loading ? <div className="chat-empty">{t.chat.loading}</div>
           : failed && items.length === 0 ? <div className="chat-empty is-error">{t.chat.loadError}</div>
           : history && !history.supported ? (
             /* 不提供结构化 transcript 的 agent：hook 落库的最近往来仍然是真实数据，先渲染它，
@@ -2779,7 +2896,8 @@ export function ChatWindow() {
               : <div className="chat-empty">{sessionId < 0
                   ? <div>
                       <div>{t.chat.emptyStarting}</div>
-                      {startingSlow && (
+                      {/* 远程没有终端视图(setView 被无害化),不给死按钮。 */}
+                      {startingSlow && !remoteUi() && (
                         /* 目的性跳转，不写视图偏好。 */
                         <button type="button" className="chat-empty-cta" onClick={() => setView("terminal")}>{t.chat.openTerminal}</button>
                       )}
@@ -3041,7 +3159,7 @@ export function ChatWindow() {
         title={t.chat.questionTitle}
         badge={t.chat.questionPending}
         sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setStructuredQuestion(null)}>{t.chat.attentionDismiss}</button>}
-        actions={history?.ptyManaged && <button type="button" className="is-allow" onClick={() => setView("terminal")}>{t.chat.answerInTerminal}</button>}
+        actions={!remoteUi() && history?.ptyManaged && <button type="button" className="is-allow" onClick={() => setView("terminal")}>{t.chat.answerInTerminal}</button>}
       >
         {/* 可点选排队的条件很严：托管会话（GUI 持有 PTY 才写得进按键）+ 单问题
             + 单选。多问题表单绝不可点——queuedAnswer 是单值、且匹配只按 label 不带
@@ -3055,9 +3173,10 @@ export function ChatWindow() {
           onToggle={(label) => setQueuedAnswer((current) => current === label ? null : label)}
         />
         <span>{!history?.ptyManaged
-          ? t.chat.questionExternalHint
+          ? (remoteUi() ? t.chat.answerOnDesktop : t.chat.questionExternalHint)
           : !answerableInCard
-          ? t.chat.questionMultiHint
+          // 远程没有终端视图,「去终端作答」的指路改成「回桌面端」。
+          ? (remoteUi() ? t.chat.answerOnDesktop : t.chat.questionMultiHint)
           : queuedAnswer
           ? t.chat.queuedAnswerHint(queuedAnswer)
           : t.chat.questionFormLoading}</span>
@@ -3093,7 +3212,9 @@ export function ChatWindow() {
             {escArmed ? t.chat.denyConfirmEsc : t.chat.deny}<kbd aria-hidden="true">Esc</kbd>
           </button>
           <button type="button" className="is-allow" disabled={resolvingApproval} onClick={() => void decideApproval("allow_once")}>{t.chat.allowOnce}</button>
-        </> : <button type="button" onClick={() => setView("terminal")}>{t.chat.openTerminal}</button>}
+        </> : remoteUi()
+          ? <span className="chat-remote-hint">{t.chat.answerOnDesktop}</span>
+          : <button type="button" onClick={() => setView("terminal")}>{t.chat.openTerminal}</button>}
       >
         {approval ? <>
           <div className="chat-approval-tool"><span>{t.chat.approvalTool}</span><code>{approval.toolName}</code></div>
@@ -3105,7 +3226,8 @@ export function ChatWindow() {
         {/* 降级分支仅托管会话可达(渲染条件已含 ptyManaged),文案恒为「正在读取终端」。 */}
         </> : <span>{t.chat.approvalReadingTerminal}</span>}
       </ApprovalCard>}
-      {view === "chat" && <footer ref={composeRef} className={"chat-compose" + (composerLocked ? " is-locked" : "") + (composerGated || supersededTo != null ? " is-gated" : "")}>
+      {/* sessionId=0(远程未选会话)没有可发送的对象,composer 整体不渲染。 */}
+      {view === "chat" && sessionId !== 0 && <footer ref={composeRef} className={"chat-compose" + (composerLocked ? " is-locked" : "") + (composerGated || supersededTo != null ? " is-gated" : "")}>
         {supersededTo != null ? <div className="chat-compose-gate">
           <span>{t.chat.supersededBanner}</span>
           <div className="chat-compose-gate-actions">
@@ -3199,7 +3321,8 @@ export function ChatWindow() {
               ? t.chat.inputLocked
               : sendError && !history?.background
                 ? t.chat.inputUnavailable
-                : t.chat.inputPlaceholder
+                // 手机上 Enter/Shift+Enter 是不存在的键盘语义,占位只留一句短的。
+                : remoteUi() ? t.chat.inputPlaceholderRemote : t.chat.inputPlaceholder
           }
           onChange={(event) => {
             setPrompt(event.target.value);
@@ -3383,12 +3506,13 @@ export function ChatWindow() {
                   role="menuitem"
                   className="chat-model-item"
                   onClick={() => {
-                    if (modelProbeFailed) { setModelMenu(false); setView("terminal"); }
+                    // 远程没有终端页可去,探测失败也只给「重试探测」(探测走 PTY,远程可用)。
+                    if (modelProbeFailed && !remoteUi()) { setModelMenu(false); setView("terminal"); }
                     else void probeModelMenu();
                   }}
                 >
                   <span className="chat-model-item-text">
-                    <span className="chat-model-item-name">{modelProbeFailed ? t.chat.modelGoTerminal : t.chat.switchModel}</span>
+                    <span className="chat-model-item-name">{modelProbeFailed && !remoteUi() ? t.chat.modelGoTerminal : t.chat.switchModel}</span>
                   </span>
                 </button>
               )}
@@ -3608,6 +3732,21 @@ export function ChatWindow() {
               Ctrl+Enter=打断并发送的说明只剩 textarea 的 onKeyDown 行为本身,不再有
               可见挂点(此前挂这里的 tooltip 随文字一起去掉:零宽元素 hover 不到)。 */}
           <span className="chat-compose-hint" />
+          {/* 触屏没有 Ctrl+Enter:有草稿时主圆钮已是发送,回合还在跑的话停止另给一颗——
+              否则手机上必须先清空输入框才能叫停。桌面有快捷键与空框停止,不渲染。 */}
+          {remoteUi() && canInterrupt && hasDraft && (
+            <button
+              type="button"
+              className="chat-send-button is-stop chat-stop-secondary"
+              aria-label={interrupting ? t.chat.interrupting : t.chat.interruptNow}
+              onClick={() => sendInterrupt()}
+              disabled={interrupting}
+            >
+              {interrupting
+                ? <span className="chat-model-spinner" aria-hidden="true" />
+                : <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="4.5" /></svg>}
+            </button>
+          )}
           {/* 主圆钮双身份:回合运行中且输入框是空的 → 它就是停止键(黑圆方块,一按停当前
               回合)。发出去的消息撤不回,能叫停的只有这个键,它不该藏在草稿或次级按钮后面。
               一旦开始打字,身份让回「发送」——那时用户要的是把话递进去,停回合走左边的
@@ -3651,14 +3790,14 @@ export function ChatWindow() {
             忙态只体现在模型按钮上。用户主动发的斜杠菜单命令照旧显示。 */}
         {menuWatching && !modelProbing && !terminalAttention && <div className="chat-send-error" role="status">
           <span>{t.chat.slashMenuOpened}</span>
-          <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>
+          {!remoteUi() && <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>}
           <button type="button" className="chat-send-takeover" onClick={cancelTerminalMenu}>{t.chat.slashMenuDismiss}</button>
         </div>}
         {/* 软拦非阻断横幅:消息已发出,提示终端可能有未识别的交互等待,给跳终端/收起两个出口。
             terminalAttention 出现说明识别成功变成了卡片,此横幅即让位。 */}
         {softPromptNotice && !terminalAttention && <div className="chat-send-error" role="status">
-          <span>{t.chat.unrecognizedPromptNotice}</span>
-          <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>
+          <span>{remoteUi() ? t.chat.unrecognizedPromptNoticeRemote : t.chat.unrecognizedPromptNotice}</span>
+          {!remoteUi() && <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>}
           <button type="button" className="chat-send-takeover" onClick={() => setSoftPromptNotice(false)}>{t.chat.slashMenuDismiss}</button>
         </div>}
         </>}
@@ -3667,7 +3806,7 @@ export function ChatWindow() {
       {/* 「查看改动」停靠面板：与 .chat-main 并列的右列，对话区收缩让位（非覆盖层）。
           折叠只加 is-collapsed（display:none）不卸载，面板状态原样保留。
           分栏柄落在两张卡之间的缝隙里，拖拽调宽（折叠/最大化时隐藏）。 */}
-      {diffOpen && cwd && (
+      {!remoteUi() && diffOpen && cwd && (
         <>
           <div
             className={"chat-diff-resizer" + (diffCollapsed ? " is-hidden" : "")}

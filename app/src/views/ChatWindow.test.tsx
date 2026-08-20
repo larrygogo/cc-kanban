@@ -2301,6 +2301,43 @@ describe("ChatWindow", () => {
     expect(screen.queryByText(/^-$/)).toBeNull();
   });
 
+  /** CC 还会把光杆指代「[Image #N]」挪到提交文本最前,与指令头粘成一行
+   *  (「[Image #1]请读取并结合…」)——精确比对指令头会失配,整段样板漏进气泡
+   *  (远程发图实拍)。判头前须先剥光杆指代。 */
+  it("光杆 [Image #N] 粘在指令头行首时,样板照样剥净", async () => {
+    window.history.replaceState({}, "", "/?sessionId=45");
+    respondWithHistory({
+      sessionId: 45, title: "贴图粘头", status: "running", provider: "claude", cwd: "C:/repo",
+      supported: true, offset: 1, reset: false, pendingReview: null,
+      items: [
+        { type: "user_text", id: "u1", timestamp: null, text: "[Image #1]请读取并结合以下本地附件完成任务（图片请使用图像读取能力）：\n-" },
+      ],
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("贴图粘头")).toBeTruthy());
+    expect(screen.queryByText(/本地附件/)).toBeNull();
+    expect(screen.queryByText(/\[Image #1\]/)).toBeNull();
+  });
+
+  /** 只剥「文本顶端机器前缀」里的独行光杆:用户在正文中手打的 [Image #N] 是内容,
+   *  不能一起吃掉——否则气泡与真正发出的 prompt 不一致(审查回归,非远程限定)。 */
+  it("用户正文里手打的独行 [Image #N] 不被附件剥离误删", async () => {
+    window.history.replaceState({}, "", "/?sessionId=46");
+    respondWithHistory({
+      sessionId: 46, title: "用户指代", status: "running", provider: "claude", cwd: "C:/repo",
+      supported: true, offset: 1, reset: false, pendingReview: null,
+      items: [
+        { type: "user_text", id: "u1", timestamp: null, text: "[Image #1]重点看这张\n[Image #2]\n其余忽略\n\n请读取并结合以下本地附件完成任务（图片请使用图像读取能力）：\n-" },
+      ],
+    });
+    render(<ChatWindow />);
+    await screen.findByText(/其余忽略/);
+    // 顶端机器前缀被剥,样板不上屏。
+    expect(screen.queryByText(/本地附件/)).toBeNull();
+    // 用户在正文里手打的 [Image #2] 保留(它是内容,不是机器残留)。
+    expect(screen.getByText(/\[Image #2\]/)).toBeTruthy();
+  });
+
   /** 多问题题面用 tab 切换：全部竖排会把卡片堆得比对话区还高、把输入框挤出可视区。 */
   it("多问题题面渲染成 tab,一次只显示一题", async () => {
     window.history.replaceState({}, "", "/?sessionId=43");

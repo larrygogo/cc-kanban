@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { pickAndAddExtraDir, confirmStopSession, getLiveSessionsPage, getSessionLineage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, searchChatTranscripts, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LineageEntry, type LiveSession, type SessionTone, type TranscriptSearchHit } from "../api";
+import { remoteUi } from "../remoteMode";
 import { useBoardRefresh } from "../hooks/useBoardRefresh";
 import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
@@ -647,7 +648,8 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
   // 时,改设置的人会以为没生效(另一个还在),不改的人则平白多一个不知从哪来的按钮。
   // 首帧占位与后端真实默认(button)一致,与看板同步改过——占位 context 会让 ⋯ 按钮延迟弹入。
   const [menuMode, setMenuMode] = useState<CardMenuMode>("button");
-  useSettingsEffect((s) => setMenuMode(s.card_menu_mode ?? "button"));
+  // 远程钉死 button 档:桌面设置若是 context(仅右键),触屏根本够不着菜单。
+  useSettingsEffect((s) => setMenuMode(remoteUi() ? "button" : (s.card_menu_mode ?? "button")));
   // 菜单内容按 id 现查:刷新后置顶/便签/归档态自动跟上,会话消失则菜单自然收起。
   const ctxItem = ctxMenu ? (sessions ?? []).find((s) => s.session.id === ctxMenu.sid) ?? null : null;
   // 置顶与看板共用同一份 localStorage(键沿用 meowo-starred,改键会丢用户已有数据),
@@ -1238,15 +1240,19 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
           onRename={() => startRename(ctxItem)}
           onArchive={() => toggleArchived(ctxItem)}
           onNewSession={() => void openNewSessionWindow({ cwd: ctxItem.cwd, provider: ctxItem.provider }).catch(() => {})}
-          onOpenDir={ctxItem.cwd ? () => void openProjectDir(ctxItem.cwd!).catch(() => {}) : null}
-          onAddDir={supportsExtraDir(ctxItem.provider) ? () => void addExtraDir(ctxItem) : null}
+          onOpenDir={!remoteUi() && ctxItem.cwd ? () => void openProjectDir(ctxItem.cwd!).catch(() => {}) : null}
+          // 远程(手机网页)没有系统目录选择器,附加目录入口一并收起。
+          onAddDir={!remoteUi() && supportsExtraDir(ctxItem.provider) ? () => void addExtraDir(ctxItem) : null}
           // 结束会话只对本 GUI 托管的 PTY 开放（与看板同一门控）：外部终端里跑的会话
-          // 杀不了，后台会话杀了也会被 supervisor 拉回来。
-          onEndSession={ctxItem.pty_managed && !ctxItem.background ? () => endSession(ctxItem) : null}
+          // 杀不了，后台会话杀了也会被 supervisor 拉回来。远程再叠一层门控:
+          // stop_managed_terminal 是 /rpc 拒绝项,点了必 404。
+          onEndSession={!remoteUi() && ctxItem.pty_managed && !ctxItem.background ? () => endSession(ctxItem) : null}
           onClose={() => setCtxMenu(null)}
         />
       )}
-      {/* 常驻底部：会话列表可能很长并滚动，设置入口不能跟着滚走。 */}
+      {/* 常驻底部：会话列表可能很长并滚动，设置入口不能跟着滚走。
+          远程 v1 不含设置页(宿主执行类,default-deny)——整条底栏隐藏。 */}
+      {!remoteUi() && (
       <div className="chat-sidebar-footer">
         <button
           type="button"
@@ -1260,6 +1266,7 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
           <span>{t.sticker.openSettings}</span>
         </button>
       </div>
+      )}
     </aside>
   );
 }

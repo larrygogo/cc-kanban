@@ -595,6 +595,12 @@ export type Settings = {
   proxy: ProxySettings;
   /** API 中转元数据；密钥由独立命令保存，不在此对象中。 */
   relay?: RelaySettings;
+  /** 手机远程访问总开关（局域网/Tailscale + token）。默认关闭。 */
+  remote_access_enabled: boolean;
+  /** 远程 HTTP 服务端口。默认 18620。 */
+  remote_access_port: number;
+  /** 远程访问 token。由 remote_access_info 惰性生成落盘；set_settings 忽略回传值(后端以磁盘值为准)。 */
+  remote_access_token: string;
 };
 
 export type RelayAuth = string;
@@ -735,6 +741,53 @@ export function getSettings(): Promise<Settings> {
 
 export function setSettings(settings: Settings): Promise<void> {
   return invoke("set_settings", { settings });
+}
+
+/** 归类后的可达地址候选：kind 决定 UI 怎么标注「手机什么情况下连得上」。 */
+export type RemoteIpCandidate = {
+  ip: string;
+  kind: "tailscale" | "lan";
+};
+
+/** 设置页远程访问配对信息（桌面专用命令，不经 /rpc）。 */
+export type RemoteAccessInfo = {
+  enabled: boolean;
+  port: number;
+  /** 惰性生成的 token；二维码 URL = http://<ip>:<port>/#token=<token>。 */
+  token: string;
+  /** 可达地址候选，Tailscale 优先（可能为空,回退手输）。 */
+  ips: RemoteIpCandidate[];
+  /** 最近一次启动失败原因（端口被占等），无错为 null。 */
+  lastError: string | null;
+};
+
+export function remoteAccessInfo(): Promise<RemoteAccessInfo> {
+  return invoke("remote_access_info");
+}
+
+/** 重新生成远程访问令牌（桌面专用）。换发即吊销:server 重启,已配对手机全部回配对页。 */
+export function regenerateRemoteToken(): Promise<void> {
+  return invoke("regenerate_remote_token");
+}
+
+/** 全部会话里正在等用户的清单(审批+同步题面)。远程徽标 3s 扫描用——push 事件到不了
+ *  浏览器,非当前会话的审批只能靠它点亮侧栏徽标;桌面走事件,不调这条。 */
+export function awaitingInteractionSessions(): Promise<number[]> {
+  return invoke("awaiting_interaction_sessions");
+}
+
+/** 远程新建会话的页内目录浏览（只列目录名）。path 为空 = 磁盘/根列表。 */
+export type DirListing = {
+  /** 当前目录规范化绝对路径；根列表时为空串。 */
+  path: string;
+  /** 上一级；空串 = 回磁盘列表；null = 已在顶层。 */
+  parent: string | null;
+  dirs: { name: string; path: string }[];
+};
+
+/** 仅远程模式可用：命令只在 /rpc 白名单登记，桌面 invoke 会被拒（桌面有系统对话框）。 */
+export function listSubdirectories(path?: string): Promise<DirListing> {
+  return invoke("list_subdirectories", { path: path ?? null });
 }
 
 // 纯函数：根据 todo 列表算完成度。

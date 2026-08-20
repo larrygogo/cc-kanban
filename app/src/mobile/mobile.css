@@ -1,0 +1,290 @@
+/* 手机远程 UI 的样式补丁。全部圈在 body.remote-ui 下,桌面各窗永不套用(远程门控标志同源,
+   见 remoteMode.ts)。只做三件事:适配移动视口高度与安全区、放大触控热区与字号、把桌面窗口
+   语义的浮层(新建会话)改成全屏 sheet。ChatWindow/ChatSidebar 的既有布局尽量原样复用。 */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overscroll-behavior: none;
+  /* 页面画布与应用同底色:viewport-fit=cover 下状态栏/浏览器工具栏后面的区域由
+     html 背景填充,不设的话 dark 配色默认纯黑,和 --cc-window-bg 的深灰撞出上下黑边。 */
+  background: var(--cc-window-bg, #16171b);
+}
+
+body.remote-ui {
+  /* 移动端浏览器地址栏收放会改 vh;用 dvh 让根容器贴合实际可视高度,避免底部输入框被顶栏截。 */
+  height: 100dvh;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body.remote-ui .chat-window {
+  height: 100dvh;
+}
+
+/* 顶栏拖拽区在真浏览器里无意义(没有可拖的窗口),但仍占 data-tauri-drag-region 的高度做安全区留白。 */
+body.remote-ui .chat-topbar {
+  padding-top: env(safe-area-inset-top, 0);
+}
+
+/* 触屏专属调优。远程页也会被桌面浏览器打开(同一局域网的另一台电脑),鼠标环境必须
+   按 1:1 桌面密度渲染——这些规则无条件套用时,16px 输入框会撑肥侧栏搜索框、禁选中
+   会让鼠标无法复制聊天文本。刻意不做钝器式 button min-height:紧凑图标按钮(筛选、
+   行内小钮)会被它拉变形,触控热区靠整体 zoom 放大来保。 */
+@media (pointer: coarse) {
+  body.remote-ui {
+    /* 刻意不做整体放大。试过两条路都不行:--cc-ui 是贴纸窗专用阶梯,只缩放走 token
+       的半边字号(硬编码 px 原样),放出错乱的大小;zoom 对 100dvh 的语义各引擎实现
+       不一,移动端实测内容整体超高 15%,底部输入框被裁出屏。1:1 密度下字号协调,
+       手机上略紧凑但可用;要放大交给系统级缩放,不在这层赌浏览器行为。 */
+    /* 长按选中/系统放大镜在聊天操作里多是误触,输入框单独放开。 */
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* 输入框/文本域放开选择与缩放,否则手机上无法选中已输入文本、粘贴不便。 */
+  body.remote-ui input,
+  body.remote-ui textarea {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* 输入框跟随移动字号标尺(此前恒 16px,搜索框比它筛出的列表标题还大 4px)。
+     iOS 的「聚焦 <16px 输入框自动放大整页」由 viewport meta 的 maximum-scale=1
+     压制(mobile.html),不需要字号侧再防——曾试过 :focus 抬 16px 的方案,但 WebKit
+     的判定时机存疑且聚焦跳字号是确定代价,撤销(自审 M8)。 */
+  body.remote-ui .chat-compose textarea { font-size: 14px; }
+  body.remote-ui .chat-sidebar-search input { font-size: 13px; }
+  body.remote-ui .chat-sidebar-edit { font-size: 13px; }
+  body.remote-ui .ns-input { font-size: 14px; }
+  body.remote-ui .chat-approval-custom input { font-size: 13px; }
+
+  /* 消息正文/代码块同样放开:HTTP 非 secure context 下 navigator.clipboard 不存在,
+     复制按钮走 execCommand 回退,手动框选是最后一条兜底——全禁了内容一个字拿不走。 */
+  body.remote-ui .chat-message,
+  body.remote-ui .chat-md-pre {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* 全面屏 home 横条(~34px)会压住 composer 底边,补 safe-area 留白。 */
+  body.remote-ui .chat-compose {
+    margin-bottom: calc(var(--sp-18, 18px) + env(safe-area-inset-bottom, 0));
+  }
+
+  /* 双击缩放在聊天操作里全是误触。触控热区用 ::after 外扩 6px 而非 min-height:
+     后者会把紧凑图标钮拉变形(实拍),外扩只加命中面不动视觉(全仓无 button::after
+     既有用法,不冲突)。曾随 zoom 方案一起误删过 min-height 版本(自审 H1),此为回补。
+     position 用 :where() 归零特异性:绝对定位的小钮(如审批卡右上的收起 ✕)自带
+     position,不能被这里的 relative 反超打回文档流。 */
+  body.remote-ui button {
+    touch-action: manipulation;
+  }
+  :where(body.remote-ui button) {
+    position: relative;
+  }
+  :where(body.remote-ui button)::after {
+    content: "";
+    position: absolute;
+    inset: -6px;
+  }
+
+  /* ── 移动端字号标尺(按 2026-08 全量清单逐类抬升) ──
+     桌面密度下 9–11.5px 的小字在手机上过小,而 16px 输入框(iOS 防缩放地板,降不得)
+     又把周边文字压得更显迷你。整体缩放两条路已证伪(--cc-ui 只动 token 半边、zoom 破
+     dvh),这里按层级重排:正文 14 / 标题与主控件 13–15 / 次要 12 / 地板 11。
+     只在触屏生效,桌面与桌面浏览器一像素不动。 */
+
+  /* 消息区:一问一答同号(用户气泡原 13 vs AI 正文 14);分隔线/辅助行抬到地板。 */
+  body.remote-ui .chat-message.is-user .chat-text { font-size: 14px; }
+  body.remote-ui .chat-day-sep,
+  body.remote-ui .chat-meta { font-size: 11px; }
+  body.remote-ui .chat-empty { font-size: 13px; }
+  body.remote-ui .chat-sync-warn,
+  body.remote-ui .chat-load-earlier button,
+  body.remote-ui .chat-jump-latest { font-size: 12px; }
+  body.remote-ui .chat-md pre code { font-size: 12.5px; }
+  body.remote-ui .chat-md-lang,
+  body.remote-ui .chat-md-pre-tools button { font-size: 11px; }
+  body.remote-ui .chat-tool summary,
+  body.remote-ui .chat-tool-name,
+  body.remote-ui .chat-tool-summary,
+  body.remote-ui .chat-activity-summary,
+  body.remote-ui .chat-todos > summary,
+  body.remote-ui .chat-subagent > summary,
+  body.remote-ui .chat-reasoning { font-size: 12px; }
+  body.remote-ui .chat-tool pre { font-size: 12px; }
+  body.remote-ui .chat-reasoning summary { font-size: 11px; }
+  body.remote-ui .chat-todos-list li,
+  body.remote-ui .chat-running { font-size: 13px; }
+  body.remote-ui .chat-command,
+  body.remote-ui .chat-image-chip { font-size: 12px; }
+
+  /* composer 工具行:16px 输入框旁 11.5px 的模型/权限/用量显得迷你;
+     触发钮抬到 13 后顺带修掉「钮 11.5 < 自己菜单项 12.5」的倒挂。 */
+  body.remote-ui .chat-model-button,
+  body.remote-ui .chat-context,
+  body.remote-ui .chat-model-item-name { font-size: 13px; }
+  body.remote-ui .chat-model-item-desc,
+  body.remote-ui .chat-model-group { font-size: 11.5px; }
+  body.remote-ui .chat-send-error,
+  body.remote-ui .chat-send-takeover { font-size: 12px; }
+  body.remote-ui .chat-queued,
+  body.remote-ui .chat-queued-head > button,
+  body.remote-ui .chat-queued-list li,
+  body.remote-ui .chat-queued-dismiss { font-size: 11.5px; }
+  body.remote-ui .chat-compose-gate { font-size: 12px; }
+
+  /* 审批/题面卡:按钮同时是触控目标,统一 13;标题 14 > 正文 13 > 注 11.5 的层级重排。 */
+  body.remote-ui .chat-approval { font-size: 13px; }
+  body.remote-ui .chat-approval-copy strong { font-size: 14px; }
+  body.remote-ui .chat-approval button,
+  body.remote-ui .chat-approval-options b { font-size: 13px; }
+  body.remote-ui .chat-approval-options small { font-size: 11.5px; }
+  body.remote-ui .chat-question-tabs button { font-size: 12px; }
+  body.remote-ui .chat-approval-copy pre { font-size: 11.5px; }
+  body.remote-ui .chat-approval-tool { font-size: 11px; }
+  body.remote-ui .chat-approval-tool code { font-size: 12px; }
+  body.remote-ui .chat-remote-hint { font-size: 12px; }
+
+  /* 侧栏抽屉:手机的主导航面。列表标题 13.5/副行 11,头部按钮与 16px 搜索框看齐。 */
+  body.remote-ui .chat-sidebar-new { font-size: 13px; }
+  body.remote-ui .chat-sidebar-name { font-size: 13.5px; }
+  body.remote-ui .chat-sidebar-meta,
+  body.remote-ui .chat-sidebar-note,
+  body.remote-ui .chat-sidebar-group-head,
+  body.remote-ui .chat-sidebar-error,
+  body.remote-ui .chat-sidebar-deep-head,
+  body.remote-ui .chat-sidebar-deep-excerpt { font-size: 11px; }
+  body.remote-ui .chat-sidebar-more,
+  body.remote-ui .chat-sidebar-empty,
+  body.remote-ui .chat-sidebar-deep-title { font-size: 12px; }
+  body.remote-ui .sf-menu .dd-item { font-size: 13px; }
+
+  /* 待办面板与顶栏弹层。 */
+  body.remote-ui .chat-todo-panel-title,
+  body.remote-ui .chat-todo-panel li { font-size: 13px; }
+  body.remote-ui .chat-todos-count,
+  body.remote-ui .chat-todo-panel-time { font-size: 11px; }
+  body.remote-ui .chat-todo-panel-collapse,
+  body.remote-ui .chat-todo-panel-hint { font-size: 12px; }
+  body.remote-ui .chat-modal-title { font-size: 14px; }
+  body.remote-ui .chat-modal-error { font-size: 12px; }
+
+  /* 通用下拉与新建会话 sheet:基准 14,主动作/浏览钮与 16px 输入框协调,标题对齐会话标题 15。 */
+  body.remote-ui .dd-btn,
+  body.remote-ui .dd-item { font-size: 13px; }
+  body.remote-ui .ns-window { font-size: 14px; }
+  body.remote-ui .ns-title { font-size: 15px; }
+  body.remote-ui .ns-label,
+  body.remote-ui .ns-option-label { font-size: 12px; }
+  body.remote-ui .ns-browse,
+  body.remote-ui .ns-btn { font-size: 14px; }
+  body.remote-ui .ns-agent { font-size: 13px; }
+  body.remote-ui .ns-recent-name,
+  body.remote-ui .ns-dirbrowse-path { font-size: 13px; }
+  body.remote-ui .ns-recent-path,
+  body.remote-ui .ns-dirbrowse-empty,
+  body.remote-ui .ns-profile-hint { font-size: 12px; }
+}
+
+/* 配对闸门(TokenGate)。首屏唯一界面,居中一张卡。 */
+.remote-gate {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg, #16171b);
+  color: var(--fg, #e7e7ea);
+}
+
+.remote-gate-card {
+  width: min(360px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.remote-gate-card h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.remote-gate-card p {
+  margin: 0;
+  opacity: 0.75;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.remote-gate-card .remote-gate-err {
+  opacity: 1;
+  color: #e5484d;
+  font-size: 13px;
+}
+
+.remote-gate-card input {
+  height: 44px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #33343a);
+  background: var(--panel, #1e1f24);
+  color: inherit;
+  font-size: 16px;
+}
+
+.remote-gate-card button {
+  height: 44px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent, #6b8afd);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.remote-gate-card button:disabled {
+  opacity: 0.5;
+}
+
+/* 新建会话浮层:桌面是独立窗口,远程改全屏 sheet 盖在会话列表上。
+   注意 .ns-window 桌面态是 100vw/100vh 填满自己的 OS 窗,在这里必须双双改掉——
+   之前只覆宽不覆高,sheet 恒撑 100vh(比手机可视区还高),底部按钮直接出屏。 */
+.remote-new-session-overlay {
+  position: fixed;
+  inset: 0;
+  /* 压过窄屏侧栏抽屉(scrim 60 / 抽屉 61):抽屉未收或再拉开时,sheet 仍在最上层。 */
+  z-index: 70;
+  background: var(--cc-window-bg);
+}
+
+.remote-new-session-overlay .ns-window {
+  width: 100%;
+  height: 100%;
+  padding-top: env(safe-area-inset-top, 0);
+  padding-bottom: env(safe-area-inset-bottom, 0);
+  box-sizing: border-box;
+}
+
+/* 宽屏(桌面浏览器开远程页、平板/手机横屏):全屏 sheet 会大得离谱,还原桌面独立窗
+   的观感——460x520 固定居中卡(window.rs open_new_session_window 的原生尺寸)+ 压暗
+   背景。窄竖屏保持全屏 sheet。 */
+@media (min-width: 700px) {
+  .remote-new-session-overlay {
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: rgba(0, 0, 0, 0.55);
+  }
+
+  .remote-new-session-overlay .ns-window {
+    width: 460px;
+    height: min(520px, 100%);
+    padding-top: 0;
+    padding-bottom: 0;
+    border-radius: 12px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+  }
+}

@@ -13,6 +13,7 @@ const api = vi.hoisted(() => ({
   getAccounts: vi.fn(),
   loginAgent: vi.fn(),
   cancelLogin: vi.fn(),
+  listSubdirectories: vi.fn(),
 }));
 vi.mock("../api", async (orig) => ({ ...(await orig<typeof import("../api")>()), ...api }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -410,5 +411,32 @@ describe("NewSessionPanel 登录", () => {
     fireLogin("claude", "success"); // 登录成功是客观事实，与当前选中谁无关
     fireEvent.click(screen.getByTestId("ns-agent-claude")); // 切回来
     await waitFor(() => expect(screen.queryByTestId("ns-login-warn")).toBeNull());
+  });
+});
+
+/// 远程模式的页内目录浏览:系统目录对话框在浏览器里弹不起来,「浏览…」改为就地
+/// 列目录逐级下钻,选定后回填输入框。
+describe("远程目录浏览", () => {
+  afterEach(() => {
+    (globalThis as Record<string, unknown>).__MEOWO_REMOTE__ = undefined;
+  });
+
+  it("点「浏览…」出磁盘列表,下钻两级后选定,路径回填输入框", async () => {
+    (globalThis as Record<string, unknown>).__MEOWO_REMOTE__ = true;
+    api.listSubdirectories
+      .mockResolvedValueOnce({ path: "", parent: null, dirs: [{ name: "C:\\", path: "C:\\" }] })
+      .mockResolvedValueOnce({ path: "C:\\", parent: "", dirs: [{ name: "repo", path: "C:\\repo" }] })
+      .mockResolvedValueOnce({ path: "C:\\repo", parent: "C:\\", dirs: [] });
+    render(<NewSessionPanel />);
+
+    fireEvent.click(await screen.findByText(zh.newSession.browse));
+    const browser = await screen.findByTestId("ns-dirbrowse");
+    fireEvent.click(within(browser).getByText("C:\\"));
+    fireEvent.click(await within(browser).findByText("repo"));
+    await within(browser).findByText(zh.newSession.noSubdirs);
+
+    fireEvent.click(within(browser).getByText(zh.newSession.pickHere));
+    expect(screen.queryByTestId("ns-dirbrowse")).toBeNull();
+    expect((screen.getByTestId("ns-dir") as HTMLInputElement).value).toBe("C:\\repo");
   });
 });

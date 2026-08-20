@@ -15,12 +15,17 @@ import {
 } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
+  awaitingInteractionSessions,
   pendingInteraction,
   registerApprovalConsumer,
   unregisterApprovalConsumer,
   type PendingApproval,
 } from "../../api";
 import { useT } from "../../i18n";
+import { remoteUi } from "../../remoteMode";
+
+/** 远程审批租约续约周期（ms）。须显著小于后端 REMOTE_CONSUMER_TTL_MS(60s),留足网络抖动余量。 */
+export const REMOTE_CONSUMER_HEARTBEAT_MS = 20_000;
 
 export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setView, setSendError }: {
   sessionId: number;
@@ -92,9 +97,18 @@ export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setVi
       });
     };
     register(0);
+    // 远程租约带 60s TTL(防手机锁屏/被杀留幽灵租约)。前端每 20s 重注册续约——
+    // registerApprovalConsumer 幂等,重注册即刷新 seen_ms。桌面租约无 TTL,不进此分支。
+    let heartbeat = 0;
+    if (remoteUi()) {
+      heartbeat = window.setInterval(() => {
+        void registerApprovalConsumer(sessionId, consumerId).catch(() => {});
+      }, REMOTE_CONSUMER_HEARTBEAT_MS);
+    }
     return () => {
       disposed = true;
       window.clearTimeout(retryTimer);
+      window.clearInterval(heartbeat);
       void unregisterApprovalConsumer(consumerId).catch(() => {});
     };
   }, [sessionId]);
@@ -137,6 +151,29 @@ export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setVi
     tick();
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [sessionId]);
+
+  // 远程徽标扫描:pending-approval 系 push 事件到不了浏览器,非当前会话的审批/题面
+  // 若不扫,侧栏永不亮徽标——远程挂多会话盯批正是主场景。3s 与看板刷新同量级。
+  // 与桌面「进过会话即撤徽标」的礼貌不同,扫描以 broker 实时压着的请求为准:请求
+  // 未决就一直亮(正在看的会话卡片本身已在场,徽标略冗余但如实)。
+  useEffect(() => {
+    if (!remoteUi()) return;
+    let cancelled = false;
+    const sweep = () => {
+      void awaitingInteractionSessions().then((raw) => {
+        if (cancelled) return;
+        // 防非数组:旧后端没有此命令时桥可能回 null/undefined,不能炸掉整个组件树。
+        const ids = Array.isArray(raw) ? raw : [];
+        setApprovalAwaitingIds((prev) => {
+          if (prev.size === ids.length && ids.every((id) => prev.has(id))) return prev;
+          return new Set(ids);
+        });
+      }).catch(() => {});
+    };
+    sweep();
+    const timer = window.setInterval(sweep, 3_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
 
   useEffect(() => {
     let unApproval: (() => void) | undefined;

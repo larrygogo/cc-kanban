@@ -275,7 +275,12 @@ struct AttachState {
     bindings: Mutex<HashMap<i64, i64>>,
     approvals: Mutex<HashMap<String, PendingApproval>>,
     /// 显式注册的 GUI 审批消费者。窗口存在/可见不等于已经订阅了目标 session。
-    approval_consumers: Mutex<HashMap<String, i64>>,
+    /// 键分两族：桌面对话窗的租约（前端自取 id）与远程桥的 `remote:` 前缀租约
+    /// （remote.rs 在服务端强制加前缀，两族互不可冒充）。远端租约带 TTL
+    /// （[`REMOTE_CONSUMER_TTL_MS`]）：手机切后台/被杀不会走 unregister，残留
+    /// 租约会压制桌面召唤并让审批静默空等 300s；桌面租约不设 TTL——窗口销毁
+    /// 兜底（release_desktop_consumers）已覆盖它的残留形态，语义不动。
+    approval_consumers: Mutex<HashMap<String, ConsumerLease>>,
     /// 已自动放行、等用户处理的 AskUserQuestion 题面（session_id → (题面, 入表时刻)）。
     ///
     /// `interactive-question` 事件是 fire-and-forget：对话窗冷启动要 1~2s，而 emit
@@ -290,6 +295,40 @@ struct AttachState {
 struct PendingApproval {
     request: ApprovalRequest,
     response: mpsc::Sender<ApprovalDecision>,
+}
+
+/// 远端审批消费者租约的保鲜期。手机端（useApprovalChannel 远程模式）每 20s 重注册
+/// 续约，60s = 三个续约周期都缺席才判死——网络抖动不误杀，锁屏/关页 1 分钟内桌面
+/// 召唤恢复。
+const REMOTE_CONSUMER_TTL_MS: i64 = 60_000;
+
+/// 远端消费者的 id 前缀。由 remote.rs 的桥接臂在**服务端**强制添加：桌面端无法
+/// 伪造远端身份，远端也无法冒充桌面租约。
+pub(crate) const REMOTE_CONSUMER_PREFIX: &str = "remote:";
+
+/// 审批消费者租约：哪条会话 + 最近一次注册/续约时刻。
+struct ConsumerLease {
+    session_id: i64,
+    seen_ms: i64,
+}
+
+fn is_remote_consumer(consumer_id: &str) -> bool {
+    consumer_id.starts_with(REMOTE_CONSUMER_PREFIX)
+}
+
+/// 租约是否仍然有效：桌面租约恒新鲜（无 TTL），远端租约按 TTL 判定。纯函数供单测。
+fn consumer_lease_fresh(consumer_id: &str, seen_ms: i64, now_ms: i64) -> bool {
+    !is_remote_consumer(consumer_id) || now_ms.saturating_sub(seen_ms) <= REMOTE_CONSUMER_TTL_MS
+}
+
+/// 「此刻正被注视」比「租约还有效」严格得多。远端心跳 20s 一发,租约 60s 才过期——
+/// 这段差是**给审批领卡留的宽限**(手机锁屏 60s 内切回仍能批),但拿去抑制桌面 toast
+/// 就错了:手机装兜里 20-60s,人根本没在看,桌面却被压着不弹「等你回复」。故 viewed
+/// 信号用 1.5×心跳(30s)判活:漏一次心跳就不再算「在看」,jitter 不误伤活跃手机。
+const REMOTE_CONSUMER_VIEWING_MS: i64 = 30_000;
+
+fn consumer_lease_viewing(consumer_id: &str, seen_ms: i64, now_ms: i64) -> bool {
+    !is_remote_consumer(consumer_id) || now_ms.saturating_sub(seen_ms) <= REMOTE_CONSUMER_VIEWING_MS
 }
 
 #[derive(Clone)]
@@ -985,29 +1024,38 @@ impl PtyBroker {
     /// 切会话召唤的分支只做**有界**等待，等不到就返回 false 让调用方撤回请求并答
     /// `pass`，提示回落到 agent 自己的审批界面——窗口起不来时 hook 不该压着 TUI
     /// 盲等满 300s。
-    fn ensure_approval_window(&self, session_id: i64) -> bool {
-        // 对话功能关闭（轻量模式）：GUI 不是合法消费者，立即返回 false 让调用方答 pass
-        // 回落 TUI——不能走下面的 10s 消费者等待，那只会把终端审批面板的出现拖慢同样久。
-        // 放在租约检查之前：关闭后即便残留已开的对话窗，审批也统一走 TUI，语义不摇摆。
-        if !crate::settings::load_settings().chat_enabled {
-            return false;
+    fn ensure_approval_window(&self, session_id: i64) -> ApprovalHold {
+        match approval_gate(
+            self.has_fresh_remote_consumer(session_id),
+            crate::settings::load_settings().chat_enabled,
+        ) {
+            // 手机端正看着这条会话：请求直接可领取（手机 400ms 轮询取卡），桌面窗
+            // 一概不动——人在手机上，切窗/闪烁都是对空椅子表演。
+            ApprovalGate::Claimable => return ApprovalHold::RemoteClaimable,
+            // 对话功能关闭（轻量模式）且手机端不在场：GUI 不是合法消费者，立即返回
+            // false 让调用方答 pass 回落 TUI——不能走下面的 10s 消费者等待，那只会把
+            // 终端审批面板的出现拖慢同样久。桌面租约检查也被跳过：关闭后即便残留已开
+            // 的对话窗，审批也统一走 TUI，语义不摇摆（chat_enabled 关的是桌面对话窗，
+            // 远程通道由 remote_access_enabled 自己管）。
+            ApprovalGate::FallbackTui => return ApprovalHold::Reject,
+            ApprovalGate::Desktop => {}
         }
         let Some(app) = self.attach.app.lock().ok().and_then(|app| app.clone()) else {
-            return false;
+            return ApprovalHold::Reject;
         };
         match approval_summon_action(
             self.has_approval_consumer(session_id),
             self.has_any_approval_consumer(),
             crate::window::chat_window_in_view(&app),
         ) {
-            SummonAction::Ready => return true,
+            SummonAction::Ready => return ApprovalHold::Desktop,
             SummonAction::Hold => {
                 // 不切窗只召唤：请求已由调用方先入表，pending-approval 事件让前端
                 // 点亮侧栏徽标（approvalAwaitingIds），闪烁提醒有事发生。
                 if let Some(window) = app.get_webview_window("chat") {
                     let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
                 }
-                return true;
+                return ApprovalHold::Desktop;
             }
             SummonAction::Summon => {}
         }
@@ -1026,11 +1074,11 @@ impl PtyBroker {
         // 不会出现「窗口弹出却空无一物」。占的是本连接自己的 handler 线程，不挤别人。
         for _ in 0..400 {
             if self.has_approval_consumer(session_id) {
-                return true;
+                return ApprovalHold::Desktop;
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        false
+        ApprovalHold::Reject
     }
 
     /// `provider` 是 agent id（"claude"/"codex"/"kimi"），决定屏幕检测用哪套规则。
@@ -2043,6 +2091,17 @@ impl PtyBroker {
             .map(|pending| pending.request.clone())
     }
 
+    /// 此刻挂着同步题面(AskUserQuestion)的会话(批量版,供远程徽标扫描)。
+    /// 与 [`Self::interactive_question`] 同一 TTL 口径:过期条目就地清掉,不点亮徽标。
+    pub(crate) fn interactive_question_session_ids(&self) -> HashSet<i64> {
+        let Ok(mut questions) = self.attach.interactive_questions.lock() else {
+            return HashSet::new();
+        };
+        let now = crate::now_ms();
+        questions.retain(|_, (_, at)| now.saturating_sub(*at) < INTERACTIVE_QUESTION_TTL_MS);
+        questions.keys().copied().collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn resolve_approval(
         &self,
@@ -2131,19 +2190,6 @@ impl PtyBroker {
             .map_err(|_| "Agent 已不再等待审批".into())
     }
 
-    /// 对话窗关闭后 GUI 已不再能消费审批；立即把所有挂起请求交还各自 Agent 的 TUI。
-    pub(crate) fn pass_pending_approvals(&self) {
-        let pending = self
-            .attach
-            .approvals
-            .lock()
-            .map(|mut approvals| approvals.drain().map(|(_, item)| item).collect::<Vec<_>>())
-            .unwrap_or_default();
-        for item in pending {
-            let _ = item.response.send(ApprovalDecision::Pass);
-        }
-    }
-
     /// 该会话待处理的 AskUserQuestion 题面（前端轮询用，补 emit 丢失的事件）。
     ///
     /// 超过 [`INTERACTIVE_QUESTION_TTL_MS`] 的条目视为过期并顺手清掉：题面卡的去留最终由
@@ -2195,34 +2241,65 @@ impl PtyBroker {
         }
     }
 
-    /// 对话窗此刻停在哪些会话上。审批消费者租约由对话页的 useEffect 在切到某会话后
-    /// 注册、切走时注销，语义正是「这个窗口正显示这条会话」——通知抑制复用它当
-    /// 「用户正在看」的信号，不必再造一套上报。
+    /// 对话窗/手机端此刻停在哪些会话上。审批消费者租约由对话页的 useEffect 在切到某
+    /// 会话后注册、切走时注销，语义正是「有个视图正显示这条会话」——通知抑制复用它当
+    /// 「用户正在看」的信号，不必再造一套上报。手机端新鲜租约同样算「在看」（人在
+    /// 手机上看着，桌面 toast 不必弹）；过期远端租约不算。
     pub(crate) fn viewed_session_ids(&self) -> HashSet<i64> {
+        let now = crate::now_ms();
         self.attach
             .approval_consumers
             .lock()
-            .map(|consumers| consumers.values().copied().collect())
+            .map(|consumers| {
+                consumers
+                    .iter()
+                    // 用更严的 viewing 判活(非 60s 租约):兜里的手机不该压住桌面 toast。
+                    .filter(|(id, lease)| consumer_lease_viewing(id, lease.seen_ms, now))
+                    .map(|(_, lease)| lease.session_id)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     fn has_approval_consumer(&self, session_id: i64) -> bool {
-        self.attach
-            .approval_consumers
-            .lock()
-            .is_ok_and(|consumers| consumers.values().any(|session| *session == session_id))
+        let now = crate::now_ms();
+        self.attach.approval_consumers.lock().is_ok_and(|consumers| {
+            consumers.iter().any(|(id, lease)| {
+                lease.session_id == session_id && consumer_lease_fresh(id, lease.seen_ms, now)
+            })
+        })
     }
 
-    /// 有任何会话的消费者租约 = 对话窗的 WebView 活着且正显示着某条会话。
-    /// 与 [`crate::window::chat_window_in_view`] 合取才构成「用户正在看」：
+    /// 手机端是否正看着这条会话（新鲜的 `remote:` 租约）。审批/提问闸门据此
+    /// 短路：远端就位时请求直接可领取，且**不召唤桌面窗**——人在手机上，弹桌面窗
+    /// 是夺屏（与「用户正盯着别的会话不切窗」同一条产品判断）。
+    fn has_fresh_remote_consumer(&self, session_id: i64) -> bool {
+        let now = crate::now_ms();
+        self.attach.approval_consumers.lock().is_ok_and(|consumers| {
+            consumers.iter().any(|(id, lease)| {
+                lease.session_id == session_id
+                    && is_remote_consumer(id)
+                    && consumer_lease_fresh(id, lease.seen_ms, now)
+            })
+        })
+    }
+
+    /// 有任何**桌面**会话的消费者租约 = 对话窗的 WebView 活着且正显示着某条会话。
+    /// 与 [`crate::window::chat_window_in_view`] 合取才构成「桌面用户正在看」：
     /// 隐藏到托盘的窗口租约仍在（只有销毁才清），单凭租约不能断定有人注视。
+    /// **排除远端租约**：它表示「手机在看某会话」，与「桌面窗此刻是否被注视」无关。
+    /// 若把远端租约算进来，别的会话有手机在看时会把本会话的召唤从 Summon 误降为 Hold
+    /// （桌面用户其实没在看任何会话，却不切窗过去，审批空等 300s）。
     fn has_any_approval_consumer(&self) -> bool {
-        self.attach
-            .approval_consumers
-            .lock()
-            .is_ok_and(|consumers| !consumers.is_empty())
+        let now = crate::now_ms();
+        self.attach.approval_consumers.lock().is_ok_and(|consumers| {
+            consumers.iter().any(|(id, lease)| {
+                !is_remote_consumer(id) && consumer_lease_fresh(id, lease.seen_ms, now)
+            })
+        })
     }
 
+    /// 注册即续约：同 id 重复注册刷新 seen_ms（远端 20s 心跳走的就是这条）。
     pub(crate) fn register_approval_consumer(
         &self,
         session_id: i64,
@@ -2235,29 +2312,72 @@ impl PtyBroker {
             .approval_consumers
             .lock()
             .map_err(|_| LOCK_POISONED.to_string())?
-            .insert(consumer_id, session_id);
+            .insert(
+                consumer_id,
+                ConsumerLease {
+                    session_id,
+                    seen_ms: crate::now_ms(),
+                },
+            );
         Ok(())
     }
 
     /// 对话窗被销毁时的租约兜底。租约平时靠前端卸载时 unregister，但窗口销毁瞬间
     /// 那次 IPC 未必执行得到；残留租约会让 `ensure_approval_window` 误判「有 GUI
-    /// 消费者」而把审批入队空等 300s，而不是立即交还 TUI。chat 窗是单例，
-    /// 所有 consumer 都属于它，直接清空即可。
-    pub(crate) fn clear_approval_consumers(&self) {
+    /// 消费者」而把审批入队空等 300s，而不是立即交还 TUI。
+    ///
+    /// 只清**桌面**租约：chat 窗是单例，非 `remote:` 的 consumer 都属于它；手机端
+    /// 新鲜租约与桌面窗生命周期无关，不许被关窗连坐（过期远端租约顺手清掉）。
+    /// 随后仅把「无任何新鲜消费者」会话的挂起审批交还 TUI——手机端正看着的会话
+    /// 继续可领取。
+    pub(crate) fn release_desktop_consumers(&self) {
+        let now = crate::now_ms();
         if let Ok(mut consumers) = self.attach.approval_consumers.lock() {
-            consumers.clear();
+            consumers.retain(|id, lease| {
+                is_remote_consumer(id) && consumer_lease_fresh(id, lease.seen_ms, now)
+            });
+        }
+        self.pass_approvals_without_consumer();
+    }
+
+    /// 把没有任何新鲜消费者的会话的挂起审批交还各自 TUI。
+    fn pass_approvals_without_consumer(&self) {
+        let watched = self.viewed_session_ids();
+        let pending = self
+            .attach
+            .approvals
+            .lock()
+            .map(|mut approvals| {
+                let ids = approvals
+                    .iter()
+                    .filter(|(_, item)| !watched.contains(&item.request.session_id))
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                ids.into_iter()
+                    .filter_map(|id| approvals.remove(&id))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for item in pending {
+            let _ = item.response.send(ApprovalDecision::Pass);
         }
     }
 
     pub(crate) fn unregister_approval_consumer(&self, consumer_id: &str) {
+        let now = crate::now_ms();
         let session_id = self
             .attach
             .approval_consumers
             .lock()
             .ok()
             .and_then(|mut consumers| {
-                let session_id = consumers.remove(consumer_id)?;
-                (!consumers.values().any(|session| *session == session_id)).then_some(session_id)
+                let lease = consumers.remove(consumer_id)?;
+                // 只剩过期远端租约也算「没人看了」：它们不会来领卡，压着不放只会空等 300s。
+                let still_watched = consumers.iter().any(|(id, other)| {
+                    other.session_id == lease.session_id
+                        && consumer_lease_fresh(id, other.seen_ms, now)
+                });
+                (!still_watched).then_some(lease.session_id)
             });
         let Some(session_id) = session_id else { return };
         let pending = self
@@ -2704,7 +2824,8 @@ impl PtyBroker {
                         response: tx,
                     },
                 );
-            if !self.ensure_approval_window(request.session_id) {
+            let hold = self.ensure_approval_window(request.session_id);
+            if matches!(hold, ApprovalHold::Reject) {
                 if let Ok(mut approvals) = self.attach.approvals.lock() {
                     approvals.remove(&request.request_id);
                 }
@@ -2716,6 +2837,9 @@ impl PtyBroker {
             // 探针与普通审批同理：挂起期间表单虽不在屏，并行工具的事件仍可能结算
             // pending_review——Pass 交还终端是安全降级（失去代答，不丢作答机会）。
             let store = crate::open_store(&crate::db_path()).ok();
+            // 放弃探针语义与普通审批段同款:仅远端 Claimable 时「手机租约过期且再无
+            // 消费者即回落 TUI」,桌面路径整个等待期保持可领取。
+            let remote_only = matches!(hold, ApprovalHold::RemoteClaimable);
             let outcome = await_approval_outcome(
                 &rx,
                 &stream,
@@ -2727,6 +2851,7 @@ impl PtyBroker {
                         .and_then(|s| s.session_pending_review(request.session_id).ok())
                         .map(|pending| pending.is_some())
                 },
+                || remote_only && !self.has_approval_consumer(request.session_id),
             );
             if let Ok(mut approvals) = self.attach.approvals.lock() {
                 approvals.remove(&request.request_id);
@@ -2738,7 +2863,11 @@ impl PtyBroker {
                     return Ok(());
                 }
                 ApprovalWait::Decision(decision) => decision,
-                ApprovalWait::TimedOut | ApprovalWait::ResolvedElsewhere => ApprovalDecision::Pass,
+                // Abandoned = 远端领卡方消失(手机租约过期):与超时/别处结算同语义,
+                // Pass 交还终端表单作答。
+                ApprovalWait::TimedOut | ApprovalWait::ResolvedElsewhere | ApprovalWait::Abandoned => {
+                    ApprovalDecision::Pass
+                }
             };
             if matches!(decision, ApprovalDecision::DenyWith(_)) {
                 // 已代答：收题面，已答的卡不许靠轮询弹回来。
@@ -2769,7 +2898,11 @@ impl PtyBroker {
                 // 不切窗只闪烁 + 亮徽标，题面已入表，用户过去时轮询可取；窗口不在眼前
                 // 才切会话安静唤醒。quiet 同理不抢焦点。
                 // 对话功能关闭时整段跳过：提问已放行、表单在终端里作答，弹窗与闪烁都是噪音。
-                if crate::settings::load_settings().chat_enabled {
+                // 手机端正看着这条会话时同样整段跳过：题面已入表（上面），手机轮询可取，
+                // 桌面既不切窗也不闪烁——与审批闸门的 Claimable 分支同一条判断。
+                if !self.has_fresh_remote_consumer(request.session_id)
+                    && crate::settings::load_settings().chat_enabled
+                {
                     match approval_summon_action(
                         self.has_approval_consumer(request.session_id),
                         self.has_any_approval_consumer(),
@@ -2806,7 +2939,8 @@ impl PtyBroker {
                     response: tx,
                 },
             );
-        if !self.ensure_approval_window(request.session_id) {
+        let hold = self.ensure_approval_window(request.session_id);
+        if matches!(hold, ApprovalHold::Reject) {
             // 窗口没起来：撤回请求，把决定权交还 agent 自己的审批界面。
             if let Ok(mut approvals) = self.attach.approvals.lock() {
                 approvals.remove(&request.request_id);
@@ -2820,6 +2954,10 @@ impl PtyBroker {
         // 作答。此前这里盲等满 300s,对话页的审批卡片残留成幽灵卡(实拍:终端已批准,切回
         // 对话页倒计时还在走)。store 打不开时探针恒 None,退化为断连+超时两路,不会更坏。
         let store = crate::open_store(&crate::db_path()).ok();
+        // 仅远端 Claimable 时启用「消费者消失即放弃」:手机租约过期且本会话再无任何新鲜
+        // 消费者 = 无人会来领卡,回落 TUI 好过盲等 300s。桌面路径(含召唤后 300s 保持
+        // 可领取)不启用——那是刻意等用户切过来的设计。
+        let remote_only = matches!(hold, ApprovalHold::RemoteClaimable);
         let outcome = await_approval_outcome(
             &rx,
             &stream,
@@ -2831,6 +2969,7 @@ impl PtyBroker {
                     .and_then(|s| s.session_pending_review(request.session_id).ok())
                     .map(|pending| pending.is_some())
             },
+            || remote_only && !self.has_approval_consumer(request.session_id),
         );
         if let Ok(mut approvals) = self.attach.approvals.lock() {
             approvals.remove(&request.request_id);
@@ -2841,14 +2980,52 @@ impl PtyBroker {
             ApprovalWait::PeerGone => return Ok(()),
             ApprovalWait::Decision(decision) => decision,
             // 别处结算时 hook 若还活着,pass 让它零决策退出——CLI 反正会丢弃迟到的 hook
-            // 结果;超时沿用既有语义交还终端。
-            ApprovalWait::TimedOut | ApprovalWait::ResolvedElsewhere => ApprovalDecision::Pass,
+            // 结果;超时/领卡方消失沿用既有语义交还终端。
+            ApprovalWait::TimedOut | ApprovalWait::ResolvedElsewhere | ApprovalWait::Abandoned => {
+                ApprovalDecision::Pass
+            }
         };
         let _ = stream.set_nonblocking(false);
         stream
             .write_all(format!("{}\n", decision.as_wire()).as_bytes())
             .map_err(|e| e.to_string())
     }
+}
+
+/// 审批入 GUI 通道的第一道闸门（在召唤策略之前）。
+#[derive(Debug, PartialEq, Eq)]
+enum ApprovalGate {
+    /// 手机端正看着目标会话：请求直接可领取，桌面窗一概不动。
+    Claimable,
+    /// 轻量模式（chat_enabled=false）且手机端不在场：回落 TUI。
+    FallbackTui,
+    /// 走桌面的既有召唤逻辑（approval_summon_action）。
+    Desktop,
+}
+
+/// 闸门纯决策（供单测矩阵）。远端优先于 chat_enabled：chat_enabled 关的是桌面
+/// 对话窗，不该一并关掉远程通道——远程有自己的开关（没开就注册不了 `remote:` 租约，
+/// 第一参恒 false，行为与改动前逐字一致）。
+fn approval_gate(remote_watching_target: bool, chat_enabled: bool) -> ApprovalGate {
+    if remote_watching_target {
+        ApprovalGate::Claimable
+    } else if !chat_enabled {
+        ApprovalGate::FallbackTui
+    } else {
+        ApprovalGate::Desktop
+    }
+}
+
+/// `ensure_approval_window` 的结果:决定 await 循环用哪种耐心等待。
+#[derive(Debug, PartialEq, Eq)]
+enum ApprovalHold {
+    /// 远端手机在看这条会话:靠它轮询来领卡。手机若消失(60s 租约过期且本会话再无任何
+    /// 新鲜消费者)即放弃等待、回落 TUI——不空等满 300s(手机锁屏/被杀后审批会盲等)。
+    RemoteClaimable,
+    /// 桌面消费者已就位或已召唤:整个等待期(300s)保持可领取,用户可能随时切过来。
+    Desktop,
+    /// 没有合法消费者(轻量模式且手机不在场 / 召唤窗起不来):立即交还 TUI。
+    Reject,
 }
 
 /// 审批/提问到达时对对话窗的召唤动作。
@@ -2888,6 +3065,8 @@ enum ApprovalWait {
     TimedOut,
     PeerGone,
     ResolvedElsewhere,
+    /// 唯一的领卡方(远端手机)消失了:放弃等待,回落 TUI(同 pass 语义)。
+    Abandoned,
 }
 
 /// 审批等待循环(纯逻辑,供单测)。除 GUI 决策与超时外,还监视两路「已在终端结算」的信号:
@@ -2909,6 +3088,9 @@ fn await_approval_outcome(
     deadline: std::time::Instant,
     tick: std::time::Duration,
     mut pending_review_probe: impl FnMut() -> Option<bool>,
+    // 每拍探一次「该放弃了吗」:远端 Claimable 下,手机租约过期且本会话再无消费者即 true。
+    // 桌面路径恒 false(整个 300s 保持可领取)。
+    mut abandon_probe: impl FnMut() -> bool,
 ) -> ApprovalWait {
     let peer_watch = stream.set_nonblocking(true).is_ok();
     let mut seen_pending = false;
@@ -2922,6 +3104,9 @@ fn await_approval_outcome(
         }
         if std::time::Instant::now() >= deadline {
             return ApprovalWait::TimedOut;
+        }
+        if abandon_probe() {
+            return ApprovalWait::Abandoned;
         }
         if peer_watch {
             let mut probe = [0u8; 1];
@@ -3692,7 +3877,7 @@ mod tests {
         let (_tx, rx) = mpsc::channel::<ApprovalDecision>();
         drop(client);
         assert_eq!(
-            await_approval_outcome(&rx, &server, far(), tick, || Some(true)),
+            await_approval_outcome(&rx, &server, far(), tick, || Some(true), || false),
             ApprovalWait::PeerGone
         );
 
@@ -3703,7 +3888,7 @@ mod tests {
         let outcome = await_approval_outcome(&rx2, &server2, far(), tick, move || {
             ticks += 1;
             Some(ticks <= 2) // 两拍置位，此后清除
-        });
+        }, || false);
         assert_eq!(outcome, ApprovalWait::ResolvedElsewhere);
 
         // 从未观察到置位的「清除」不是本请求的结算（写库失败 / 迟到的上一工具事件）：
@@ -3716,9 +3901,22 @@ mod tests {
                 &server3,
                 Instant::now() + Duration::from_millis(40),
                 tick,
-                || Some(false)
+                || Some(false),
+                || false
             ),
             ApprovalWait::TimedOut
+        );
+
+        // 领卡方(远端手机)中途消失 → Abandoned(回落 TUI,不空等满超时)。
+        let (_client5, server5) = pair();
+        let (_tx5, rx5) = mpsc::channel::<ApprovalDecision>();
+        let mut probes = 0;
+        assert_eq!(
+            await_approval_outcome(&rx5, &server5, far(), tick, || Some(false), move || {
+                probes += 1;
+                probes > 2 // 前两拍还在,之后手机租约过期
+            }),
+            ApprovalWait::Abandoned
         );
 
         // GUI 决策最高优先：先于任何监视信号被消费。
@@ -3726,7 +3924,7 @@ mod tests {
         let (tx4, rx4) = mpsc::channel::<ApprovalDecision>();
         tx4.send(ApprovalDecision::Allow).unwrap();
         assert_eq!(
-            await_approval_outcome(&rx4, &server4, far(), tick, || Some(true)),
+            await_approval_outcome(&rx4, &server4, far(), tick, || Some(true), || false),
             ApprovalWait::Decision(ApprovalDecision::Allow)
         );
     }
@@ -4258,31 +4456,53 @@ mod tests {
         );
     }
 
+    /// 测试固件：向审批表塞一条挂起请求，返回决策接收端。
+    fn seed_pending_approval(
+        broker: &PtyBroker,
+        session_id: i64,
+        request_id: &str,
+    ) -> mpsc::Receiver<ApprovalDecision> {
+        let (tx, rx) = mpsc::channel();
+        broker.attach.approvals.lock().unwrap().insert(
+            request_id.into(),
+            PendingApproval {
+                request: ApprovalRequest {
+                    session_id,
+                    request_id: request_id.into(),
+                    provider: "codex".into(),
+                    tool_name: "Bash".into(),
+                    description: None,
+                    input: "{}".into(),
+                    permission_suggestions: vec![],
+                    pre_tool_use: false,
+                },
+                response: tx,
+            },
+        );
+        rx
+    }
+
+    /// 测试固件：把远端租约人为推回过去，模拟 TTL 过期/临期。
+    fn age_consumer_lease(broker: &PtyBroker, consumer_id: &str, by_ms: i64) {
+        broker
+            .attach
+            .approval_consumers
+            .lock()
+            .unwrap()
+            .get_mut(consumer_id)
+            .unwrap()
+            .seen_ms -= by_ms;
+    }
+
     #[test]
     fn closing_approval_consumer_passes_every_pending_request() {
+        // 没有任何消费者时关窗：全部挂起审批交还 TUI（release 的退化形态 = 旧全清语义）。
         let broker = PtyBroker::default();
-        let mut receivers = Vec::new();
-        for id in ["request-1", "request-2"] {
-            let (tx, rx) = mpsc::channel();
-            broker.attach.approvals.lock().unwrap().insert(
-                id.into(),
-                PendingApproval {
-                    request: ApprovalRequest {
-                        session_id: 7,
-                        request_id: id.into(),
-                        provider: "codex".into(),
-                        tool_name: "Bash".into(),
-                        description: None,
-                        input: "{}".into(),
-                        permission_suggestions: vec![],
-                        pre_tool_use: false,
-                    },
-                    response: tx,
-                },
-            );
-            receivers.push(rx);
-        }
-        broker.pass_pending_approvals();
+        let receivers = vec![
+            seed_pending_approval(&broker, 7, "request-1"),
+            seed_pending_approval(&broker, 7, "request-2"),
+        ];
+        broker.release_desktop_consumers();
         assert!(broker.attach.approvals.lock().unwrap().is_empty());
         assert!(receivers
             .into_iter()
@@ -4326,8 +4546,8 @@ mod tests {
     }
 
     #[test]
-    fn destroying_chat_window_clears_every_consumer_lease() {
-        // 窗口销毁时前端的 unregister 未必执行得到；关窗兜底必须把租约清干净，
+    fn destroying_chat_window_clears_every_desktop_lease() {
+        // 窗口销毁时前端的 unregister 未必执行得到；关窗兜底必须把桌面租约清干净，
         // 否则残留租约会让下一个审批入队空等 300s 而不是立即交还 TUI。
         let broker = PtyBroker::default();
         broker
@@ -4336,9 +4556,106 @@ mod tests {
         broker
             .register_approval_consumer(8, "consumer-b".into())
             .unwrap();
-        broker.clear_approval_consumers();
+        broker.release_desktop_consumers();
         assert!(!broker.has_approval_consumer(7));
         assert!(!broker.has_approval_consumer(8));
+    }
+
+    #[test]
+    fn closing_chat_window_spares_fresh_remote_leases_and_their_approvals() {
+        // 关桌面对话窗不许连坐手机端：远端新鲜租约保留，其会话的挂起审批继续可领取；
+        // 只有无人看的会话的审批被交还 TUI。
+        let broker = PtyBroker::default();
+        broker
+            .register_approval_consumer(7, "chat-a".into())
+            .unwrap();
+        broker
+            .register_approval_consumer(8, "remote:phone".into())
+            .unwrap();
+        let desktop_rx = seed_pending_approval(&broker, 7, "request-7");
+        let remote_rx = seed_pending_approval(&broker, 8, "request-8");
+
+        broker.release_desktop_consumers();
+
+        assert!(!broker.has_approval_consumer(7), "桌面租约应被清掉");
+        assert!(broker.has_approval_consumer(8), "远端新鲜租约应保留");
+        assert!(
+            matches!(desktop_rx.recv().unwrap(), ApprovalDecision::Pass),
+            "无人看的会话的审批交还 TUI"
+        );
+        assert!(
+            matches!(remote_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "手机端正等着批的卡不得被 pass"
+        );
+        assert!(broker.pending_approval(8).is_some());
+    }
+
+    #[test]
+    fn stale_remote_lease_counts_as_absent_everywhere() {
+        // 过期远端租约（手机锁屏/被杀，没走 unregister）不得压制任何判定：
+        // 目标会话判「无消费者」、关窗时其审批照常交还、顺手从表里清掉。
+        let broker = PtyBroker::default();
+        broker
+            .register_approval_consumer(7, "remote:phone".into())
+            .unwrap();
+        age_consumer_lease(&broker, "remote:phone", REMOTE_CONSUMER_TTL_MS + 1);
+
+        assert!(!broker.has_approval_consumer(7));
+        assert!(!broker.has_fresh_remote_consumer(7));
+        assert!(!broker.viewed_session_ids().contains(&7));
+
+        let rx = seed_pending_approval(&broker, 7, "request-7");
+        broker.release_desktop_consumers();
+        assert!(matches!(rx.recv().unwrap(), ApprovalDecision::Pass));
+        assert!(
+            broker.attach.approval_consumers.lock().unwrap().is_empty(),
+            "过期远端租约应随关窗清理"
+        );
+    }
+
+    #[test]
+    fn unregister_ignores_stale_remote_lease_when_deciding_last_watcher() {
+        // 桌面租约注销时若同会话只剩过期远端租约，等同没人看：审批立即交还 TUI，
+        // 不许被一个不会来领卡的幽灵租约压着空等 300s。
+        let broker = PtyBroker::default();
+        broker
+            .register_approval_consumer(7, "chat-a".into())
+            .unwrap();
+        broker
+            .register_approval_consumer(7, "remote:phone".into())
+            .unwrap();
+        age_consumer_lease(&broker, "remote:phone", REMOTE_CONSUMER_TTL_MS + 1);
+        let rx = seed_pending_approval(&broker, 7, "request-7");
+
+        broker.unregister_approval_consumer("chat-a");
+        assert!(matches!(rx.recv().unwrap(), ApprovalDecision::Pass));
+    }
+
+    #[test]
+    fn remote_lease_reregistration_refreshes_ttl() {
+        // 手机端 20s 心跳 = 同 id 重注册；临期租约续约后必须重新算新鲜。
+        let broker = PtyBroker::default();
+        broker
+            .register_approval_consumer(7, "remote:phone".into())
+            .unwrap();
+        age_consumer_lease(&broker, "remote:phone", REMOTE_CONSUMER_TTL_MS - 1_000);
+        assert!(broker.has_fresh_remote_consumer(7), "临期未过期仍新鲜");
+        broker
+            .register_approval_consumer(7, "remote:phone".into())
+            .unwrap();
+        age_consumer_lease(&broker, "remote:phone", 1_000);
+        assert!(broker.has_fresh_remote_consumer(7), "续约后重新起算");
+    }
+
+    /// 闸门矩阵：远端在场恒可领取（含轻量模式——chat_enabled 关的是桌面窗，不关远程
+    /// 通道）；远端缺席时轻量模式回落 TUI、常规模式走桌面召唤。远程未开时注册不出
+    /// remote: 租约，第一参恒 false，桌面语义与改动前逐字一致。
+    #[test]
+    fn approval_gate_matrix() {
+        assert_eq!(approval_gate(true, true), ApprovalGate::Claimable);
+        assert_eq!(approval_gate(true, false), ApprovalGate::Claimable);
+        assert_eq!(approval_gate(false, false), ApprovalGate::FallbackTui);
+        assert_eq!(approval_gate(false, true), ApprovalGate::Desktop);
     }
 
     #[test]

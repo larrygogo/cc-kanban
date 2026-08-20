@@ -21,6 +21,7 @@ mod seed;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod proxy;
+mod remote;
 mod settings;
 pub mod snap;
 mod term_script;
@@ -60,7 +61,7 @@ use install::{
     install_agent, login_agent, logout_agent, repair_provider_hooks,
 };
 use managed_terminal::{
-    dismiss_interactive_question, managed_terminal_binding,
+    awaiting_interaction_sessions, dismiss_interactive_question, managed_terminal_binding,
     managed_terminal_snapshot, attach_background_session, open_attached_terminal,
     pending_interaction, register_approval_consumer, register_terminal_viewer,
     resize_managed_terminal, screen_detect_explain, screen_detect_explain_text,
@@ -936,6 +937,14 @@ pub fn run() {
         return;
     }
     harden_dll_search_path();
+    // 关掉系统级「严重错误」模态:空光驱/断链网络盘在被探测(如远程目录浏览的盘符
+    // 枚举 is_dir)时,默认会在宿主机弹「请将磁盘插入驱动器」硬模态并卡住调用线程。
+    // 进程级一次设定,让这类探测安静地返回错误。
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows_sys::Win32::System::Diagnostics::Debug::{GetErrorMode, SetErrorMode, SEM_FAILCRITICALERRORS};
+        SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS);
+    }
     // ConPTY 来源诊断:应用目录里有打包的 conpty.dll(随安装分发 + OpenConsole.exe 宿主,
     // 见 scripts/fetch-conpty.mjs)时 portable-pty 会优先加载它——新版实现修掉了系统
     // conhost 的一批僵死死锁(输出停滞/Resize/Close 挂起),是管道卡死的治本项。缺失则
@@ -1063,6 +1072,7 @@ pub fn run() {
             screen_detect_explain_text,
             pending_interaction,
             dismiss_interactive_question,
+            awaiting_interaction_sessions,
             stop_managed_terminal,
             register_terminal_viewer,
             unregister_terminal_viewer,
@@ -1093,6 +1103,8 @@ pub fn run() {
             set_autostart,
             get_settings,
             set_settings,
+            remote::remote_access_info,
+            remote::regenerate_remote_token,
             mark_onboarding_seen,
             get_effective_proxy,
             get_relay_secret_status,
@@ -1295,6 +1307,10 @@ pub fn run() {
             } else {
                 eprintln!("Meowo dev: 跳过启动自动接线(hooks/statusline)；需要时用设置页「修复连接」或设 MEOWO_DEV_WIRE=1");
             }
+            // 远程访问桥（手机浏览器）：manage 生命周期状态后按 settings 决定是否启动。
+            // 默认关闭时 apply 是 no-op，不监听任何端口。
+            app.manage(remote::RemoteRuntime::default());
+            remote::apply(app.handle());
             // 先起合流线程：其余几个 spawn_* 都经 emit_board_changed 发事件，晚起会让它们的
             // 首批事件退化成直接 emit。
             spawn_board_notifier(app.handle().clone());
@@ -1432,6 +1448,7 @@ mod tests {
             ("proxy.rs", include_str!("proxy.rs")),
             ("pty.rs", include_str!("pty.rs")),
             ("relay.rs", include_str!("relay.rs")),
+            ("remote.rs", include_str!("remote.rs")),
             ("session_command.rs", include_str!("session_command.rs")),
             ("session_query.rs", include_str!("session_query.rs")),
             ("settings.rs", include_str!("settings.rs")),

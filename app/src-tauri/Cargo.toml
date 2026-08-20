@@ -101,11 +101,21 @@ vt100 = "0.16.2"
 # regex 本就在依赖树里（ureq/notify 等的传递依赖），提为直接依赖不增加编译体积。
 regex = "1"
 tauri-plugin-single-instance = "2.4.3"
+# 远程访问桥（remote.rs）：局域网/Tailscale 内手机浏览器经 HTTP 使用对话页。
+# axum 本就在依赖树（e2e 插件的传递依赖，lock 已锁 0.8.9），提为常驻不引新版本；
+# 关默认特性只留用到的四项，控制 release（opt-level="s"）的体积增量。
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+# tokio 经 tauri 传递引入，但 tauri 默认不开 net（现由 updater→reqwest 链传递打开）——
+# 远程桥的 TcpListener 依赖它，显式声明不把编译成败押在别人的依赖树上。
+tokio = { version = "1", features = ["net", "sync"] }
+# 远程目录浏览（remote.rs list_subdirectories）：std canonicalize 在 Windows 回 \\?\
+# 前缀路径，展示难看且回填 cwd 后部分 agent 不认。已在依赖树（tauri 传递），零新增。
+dunce = "1"
 # codex config.toml 的结构保持编辑（保注释与键序）。kimi 的已迁入 meowo-agent::config。
 # codex hook 预信任的 trusted_hash 计算（SHA-256）。
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader"] }
 uiautomation = "0.25"
 tauri-winrt-notification = "0.7"
 # 点击 toast 后从"通知中心"移除本应用的已投递通知（tauri-winrt-notification 本身不暴露历史清除）。

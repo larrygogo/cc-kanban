@@ -15,6 +15,8 @@ import {
   agentName,
   getAccounts,
   isLoggedIn,
+  listSubdirectories,
+  type DirListing,
 } from "../api";
 import { agentAssets, tintStyle } from "../providers";
 import { normalizePath, pathKey } from "../paths";
@@ -25,6 +27,7 @@ import { useLoginOperations } from "../hooks/useLoginOperations";
 import { useT, repairFailMessage } from "../i18n";
 import { formatBackendError } from "../i18n/errors";
 import { useEscClose } from "../hooks/useEscClose";
+import { remoteUi } from "../remoteMode";
 
 function FolderIcon() {
   return (
@@ -71,13 +74,19 @@ function saveStoredOpts(provider: string, opts: Record<string, string>) {
   }
 }
 
-export function NewSessionPanel(): ReactElement {
+export function NewSessionPanel({ onClose, prefill }: {
+  onClose?: () => void;
+  /** 远程页内打开时的预填(桌面走 URL query / ns-prefill 事件,远程两条都不通,改走 props)。 */
+  prefill?: { cwd?: string | null; provider?: string | null };
+} = {}): ReactElement {
+  const startCwd = prefill?.cwd != null ? normalizePath(prefill.cwd) : initialCwd;
+  const startProvider = (prefill?.provider ?? initialProvider) as AgentId | null;
   const t = useT();
   // 窗口以 visible:false 创建（window.rs），首帧渲染后再显示，消除打开瞬间的白框闪烁。
   useShowWhenReady();
-  const [cwd, setCwd] = useState(initialCwd);
+  const [cwd, setCwd] = useState(startCwd);
   // 首帧种子（settings.default_agent resolve 前）。真实默认值由后端给。
-  const [provider, setProvider] = useState<AgentId>(initialProvider ?? "claude");
+  const [provider, setProvider] = useState<AgentId>(startProvider ?? "claude");
   const [recent, setRecent] = useState<string[]>([]);
   const [hooks, setHooks] = useState<Record<string, HooksStatus>>({});
   const [busy, setBusy] = useState(false);
@@ -155,7 +164,7 @@ export function NewSessionPanel(): ReactElement {
 
   useEffect(() => {
     // 若从会话卡片菜单带 provider 参数打开，保留该参数；否则回退到设置里的默认 agent。
-    if (!initialProvider) {
+    if (!startProvider) {
       getSettings()
         .then((s) => setProvider(s.default_agent))
         .catch(() => {});
@@ -213,6 +222,11 @@ export function NewSessionPanel(): ReactElement {
   const launchOptions = agents?.find((a) => a.id === provider)?.launch_options ?? [];
 
   function closeWin() {
+    // 桌面是独立窗口,关窗即销毁;远程是页内浮层,由 onClose 回列表(无 onClose 才退回关窗)。
+    if (onClose) {
+      onClose();
+      return;
+    }
     getCurrentWindow().close();
   }
   // Esc 关窗（输入框内让位）：填错想放弃时不必去点右上角 ✕。
@@ -221,6 +235,31 @@ export function NewSessionPanel(): ReactElement {
   async function pickDir() {
     const picked = await open({ directory: true });
     if (typeof picked === "string") setCwd(normalizePath(picked));
+  }
+
+  // 远程端页内目录浏览:系统目录对话框在浏览器里弹不起来,改为逐级下钻的就地列表。
+  const [browse, setBrowse] = useState<DirListing | null>(null);
+  // 下钻失败(权限拒绝/断链网络盘)要说出来:静默吞掉的话,点了没反应像卡死(自审 L12)。
+  const [browseError, setBrowseError] = useState<string | null>(null);
+  function browseTo(path?: string) {
+    listSubdirectories(path)
+      .then((listing) => {
+        setBrowse(listing);
+        setBrowseError(null);
+      })
+      .catch((error) => setBrowseError(formatBackendError(error, t.locale)));
+  }
+  async function openRemoteBrowser() {
+    // 起点取当前输入的目录;不存在/为空则回退磁盘列表,列不了就保持手输。
+    try {
+      setBrowse(await listSubdirectories(cwd.trim() || undefined));
+    } catch {
+      try {
+        setBrowse(await listSubdirectories());
+      } catch {
+        /* 保持手输 */
+      }
+    }
   }
 
   async function launch() {
@@ -338,9 +377,20 @@ export function NewSessionPanel(): ReactElement {
                 // Enter 直接启动（launch 内部对空目录/busy 有守卫），与账号页 API Key 输入框同规。
                 onKeyDown={(e) => { if (e.key === "Enter") void launch(); }}
               />
-              <button type="button" className="ns-browse" onClick={pickDir}>
-                {t.newSession.browse}
-              </button>
+              {/* 桌面走系统目录对话框(plugin-dialog);远程在浏览器里弹不起来,换页内浏览器。 */}
+              {!remoteUi() ? (
+                <button type="button" className="ns-browse" onClick={pickDir}>
+                  {t.newSession.browse}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="ns-browse"
+                  onClick={() => (browse ? setBrowse(null) : void openRemoteBrowser())}
+                >
+                  {t.newSession.browse}
+                </button>
+              )}
             </div>
             {extraDirs.length > 0 && (
               <div className="ns-extra-list" data-testid="ns-extra-list">
@@ -357,8 +407,57 @@ export function NewSessionPanel(): ReactElement {
                 ))}
               </div>
             )}
-            {recent.length > 0 && shownRecent.length > 0 && (
-              <div className="ns-recent-list">
+            {browse && (
+              <div className="ns-dirbrowse" data-testid="ns-dirbrowse">
+                <div className="ns-dirbrowse-head">
+                  <button
+                    type="button"
+                    className="ns-browse"
+                    disabled={browse.parent === null}
+                    onClick={() => browseTo(browse.parent || undefined)}
+                  >
+                    {t.newSession.up}
+                  </button>
+                  {/* 只显当前目录名:整条路径在窄屏必被截断,反而遮住最有信息量的末段。 */}
+                  <span className="ns-dirbrowse-path" title={browse.path}>
+                    {browse.path
+                      ? (browse.path.split(/[\\/]/).filter(Boolean).pop() ?? browse.path)
+                      : t.newSession.drives}
+                  </span>
+                  {browse.path && (
+                    <button
+                      type="button"
+                      className="ns-browse ns-dirbrowse-pick"
+                      onClick={() => {
+                        setCwd(normalizePath(browse.path));
+                        setBrowse(null);
+                      }}
+                    >
+                      {t.newSession.pickHere}
+                    </button>
+                  )}
+                </div>
+                {browseError && <div className="ns-dirbrowse-empty ns-dirbrowse-err">{browseError}</div>}
+                <div className="ns-dirbrowse-list">
+                  {browse.dirs.map((d) => (
+                    <button
+                      key={d.path}
+                      type="button"
+                      className="ns-recent-item"
+                      onClick={() => browseTo(d.path)}
+                    >
+                      <FolderIcon />
+                      <span className="ns-recent-name">{d.name}</span>
+                    </button>
+                  ))}
+                  {browse.dirs.length === 0 && (
+                    <div className="ns-dirbrowse-empty">{t.newSession.noSubdirs}</div>
+                  )}
+                </div>
+              </div>
+            )}
+            {/* 浏览器展开时顶掉「最近」列表:两块可滚列表叠放又挤又乱。 */}
+            {!browse && recent.length > 0 && shownRecent.length > 0 && (              <div className="ns-recent-list">
                 {shownRecent.map((r) => (
                   <button
                     key={r}
@@ -443,33 +542,44 @@ export function NewSessionPanel(): ReactElement {
               ))}
             </div>
           )}
+          {/* 修复 hook / 登录的按钮都要在桌面拉起终端进程,远程无从操作——按钮隐藏。但警告
+              文字必须留:远程若整块藏掉,用户对着「启动」点下去会起一个 hook 没接、永远
+              不出现在看板的哑会话且毫无线索(审查 #10)。远程把动作换成「请在桌面端处理」。 */}
           {avail && avail.length > 0 && warn && (
             <div className="ns-warn" data-testid="ns-hooks-warn">
               <span>{hooks[provider] === "unknown" ? t.newSession.hooksUnknown : t.newSession.hooksMissing}</span>
-              <button
-                type="button"
-                className="ns-repair"
-                data-testid="ns-repair-hooks"
-                onClick={repairHooks}
-                disabled={repairing}
-              >
-                {repairing ? t.newSession.repairingHooks : t.newSession.repairHooks}
-              </button>
+              {remoteUi() ? (
+                <span className="ns-warn-remote">{t.newSession.fixOnDesktop}</span>
+              ) : (
+                <button
+                  type="button"
+                  className="ns-repair"
+                  data-testid="ns-repair-hooks"
+                  onClick={repairHooks}
+                  disabled={repairing}
+                >
+                  {repairing ? t.newSession.repairingHooks : t.newSession.repairHooks}
+                </button>
+              )}
             </div>
           )}
           {avail && avail.length > 0 && needLogin && (
             <div className="ns-warn" data-testid="ns-login-warn">
               {/* 等待中：这行承载「正在等」，按钮则变成「取消等待」。 */}
               <span>{loginOperations.isPending(provider) ? t.newSession.loggingIn : t.newSession.notLoggedIn}</span>
-              <button
-                type="button"
-                className="ns-repair"
-                data-testid="ns-login"
-                // 等待中不再是死按钮：终端可能已被关掉，而后端要 5 分钟才超时。点它即取消等待。
-                onClick={loginOperations.isPending(provider) ? cancelLoginWait : doLogin}
-              >
-                {loginOperations.isPending(provider) ? t.newSession.cancelLogin : t.newSession.login}
-              </button>
+              {remoteUi() ? (
+                <span className="ns-warn-remote">{t.newSession.fixOnDesktop}</span>
+              ) : (
+                <button
+                  type="button"
+                  className="ns-repair"
+                  data-testid="ns-login"
+                  // 等待中不再是死按钮：终端可能已被关掉，而后端要 5 分钟才超时。点它即取消等待。
+                  onClick={loginOperations.isPending(provider) ? cancelLoginWait : doLogin}
+                >
+                  {loginOperations.isPending(provider) ? t.newSession.cancelLogin : t.newSession.login}
+                </button>
+              )}
             </div>
           )}
         </div>

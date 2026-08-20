@@ -36,6 +36,9 @@ export const store: Store = {
     sticker_quota_providers: ["claude", "codex"],
     default_agent: "claude",
     proxy: { mode: "system", url: "", per_agent: {} },
+    remote_access_enabled: false,
+    remote_access_port: 18620,
+    remote_access_token: "",
   },
 };
 

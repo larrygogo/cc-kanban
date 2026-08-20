@@ -6,6 +6,7 @@
 // settings-changed，这里实时重套用（顺带做了设置窗口里的明暗即时预览）。
 import { listen } from "@tauri-apps/api/event";
 import { getSettings, type Settings, type StickerStyle, type ThemeMode } from "./api";
+import { remoteUi, REMOTE_SETTINGS_EVENT } from "./remoteMode";
 
 /** 贴纸底色预设：swatch = 设置页色板里显示的鲜亮代表色（小圆点便于区分）；
  *  dark/light = 该色在深/浅主题下实际套用的贴纸底色 RGB（低饱和微染，配合不透明+毛玻璃才不刺眼）。 */
@@ -125,6 +126,16 @@ export function bootAppearance(opts: { scale: boolean }): void {
     apply(a);
     writeCache(a);
   }).catch(() => {});
+  // 远程收不到 Tauri 事件:mobile 入口轮询发现设置变化后派发 DOM 事件,这里同源套用
+  // ——桌面改主题/贴纸色,手机不再要刷新才跟上。桌面窗永不派发此事件,零影响。
+  if (remoteUi()) {
+    window.addEventListener(REMOTE_SETTINGS_EVENT, (e) => {
+      eventApplied = true;
+      const a = pick((e as CustomEvent).detail as Partial<Settings>);
+      apply(a);
+      writeCache(a);
+    });
+  }
   getSettings()
     .then((s) => {
       if (eventApplied) return;

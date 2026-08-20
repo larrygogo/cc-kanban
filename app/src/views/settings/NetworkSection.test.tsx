@@ -17,6 +17,8 @@ const api = vi.hoisted(() => ({
   setSettings: vi.fn(),
   listAgents: vi.fn(),
   getEffectiveProxy: vi.fn(),
+  // 网络分区顶部现内嵌 RemoteAccessCard,它挂载即拉 remoteAccessInfo——桩掉,别让真 invoke 打进来。
+  remoteAccessInfo: vi.fn(),
 }));
 vi.mock("../../api", async (o) => ({ ...(await o<typeof import("../../api")>()), ...api }));
 // 收集 install-done 监听者，测试里手动广播（模拟后端 emit）。
@@ -53,6 +55,7 @@ beforeEach(() => {
   Object.values(api).forEach((m) => m.mockReset());
   api.setSettings.mockResolvedValue(undefined);
   api.listAgents.mockResolvedValue(descriptors(["claude", "codex", "kimi"]));
+  api.remoteAccessInfo.mockResolvedValue({ enabled: false, port: 18620, token: "", ips: [], lastError: null });
 });
 afterEach(() => cleanup());
 

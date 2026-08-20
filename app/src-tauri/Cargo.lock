@@ -2699,7 +2699,9 @@ name = "meowo-app"
 version = "0.6.1"
 dependencies = [
  "arboard",
+ "axum",
  "base64 0.22.1",
+ "dunce",
  "encoding_rs",
  "getrandom 0.3.4",
  "image",
@@ -2730,6 +2732,7 @@ dependencies = [
  "tauri-plugin-wdio-webdriver",
  "tauri-plugin-window-state",
  "tauri-winrt-notification",
+ "tokio",
  "uiautomation",
  "ureq",
  "url",

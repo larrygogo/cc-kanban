@@ -611,9 +611,10 @@ pub(crate) fn open_chat_window_impl(
             tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
         ) {
             let ptys = &app_handle.state::<crate::AppState>().ptys;
-            // 先清租约再放行挂起审批：窗口没了，租约留着只会让后续审批空等 300s。
-            ptys.clear_approval_consumers();
-            ptys.pass_pending_approvals();
+            // 关窗兜底：清桌面租约，再把无人看的挂起审批交还 TUI。手机端（remote:）
+            // 的新鲜租约与桌面窗生命周期无关，不被连坐——手机上正等着批的卡不能
+            // 因为桌面关了个窗就被悄悄 pass 掉。
+            ptys.release_desktop_consumers();
             #[cfg(target_os = "macos")]
             crate::macos::menubar::settings_window_did_close(&app_handle, "chat");
         }

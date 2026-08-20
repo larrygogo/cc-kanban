@@ -1739,6 +1739,34 @@ pub(crate) async fn new_session(
     // 进 argv;原件 claim 时落库,resume/接管重启回放。
     extra_dirs: Option<Vec<String>>,
 ) -> Result<(), String> {
+    // 参数为兼容旧前端保留；托管模式不再由这里预选外部终端，视图与终端类型分别由
+    // session_open_in / resume_terminal 决定。
+    let _ = terminal;
+    let reveal_broker = state.ptys.clone();
+    let window_app = app.clone();
+    let temp_id = new_session_inner(app, state.ptys.clone(), cwd, provider, options, extra_dirs).await?;
+    // 用临时负 id 就能 attach：claim 只改注册表的键，subscriber 挂在 ManagedPty 上，
+    // 认领前后都指着同一个 PTY，不会断流。
+    tauri::async_runtime::spawn_blocking(move || {
+        reveal_session(&window_app, &reveal_broker, temp_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// `new_session` 的启动段：校验 cwd、翻译启动选项、由托管 PTY 裸启动 CLI，返回临时
+/// 负 id。**不 reveal**——远程桥（remote.rs）也走这里：手机新建会话时不许在宿主机
+/// 弹对话窗/开外部终端，桌面命令在外层自行补 reveal_session。
+pub(crate) async fn new_session_inner(
+    app: tauri::AppHandle,
+    broker: crate::pty::PtyBroker,
+    cwd: String,
+    provider: String,
+    options: Option<std::collections::HashMap<String, String>>,
+    // 附加目录(跨仓同一需求 = 一个会话):每个以 agent 声明的 flag(claude --add-dir)
+    // 进 argv;原件 claim 时落库,resume/接管重启回放。
+    extra_dirs: Option<Vec<String>>,
+) -> Result<i64, String> {
     let dir = validate_new_session_cwd(&cwd)?;
     let agent = meowo_agent::resolve(Some(&provider)).ok_or("未知 agent")?;
     // 附加目录:逐个过与主目录同款的存在性校验(拼进 argv 的路径必须真实),并剔除
@@ -1764,7 +1792,7 @@ pub(crate) async fn new_session(
     // 选择 map 单独留一份：随临时 PTY 暂存、claim 认领时写进 sessions.launch_args，
     // resume/接管重启进程时经声明表翻译回放（权限模式等是启动参数，不回放每次重启都
     // 重置成 CLI 默认）。存选择而非 flag：接管时改权限只需按选项维度合并。
-    let selections = options.clone().unwrap_or_default();
+    let selections = options.unwrap_or_default();
     let mut argv = agent.launch_argv();
     argv.extend(meowo_agent::resolve_launch_args(
         agent.launch_options(),
@@ -1785,15 +1813,9 @@ pub(crate) async fn new_session(
     // 账号，新开的会话却仍跑在默认账号上——而且毫无迹象，用户只能靠 `/status` 里的邮箱才发现。
     // 新建会话是**用户切换账号后最先走的一条路**，漏了它等于整个功能没做。
     let env = launch_env_for_profile(Some(&provider), None);
-    // 参数为兼容旧前端保留；托管模式不再由这里预选外部终端，视图与终端类型分别由
-    // session_open_in / resume_terminal 决定。
-    let _ = terminal;
-    let broker = state.ptys.clone();
-    let reveal_broker = state.ptys.clone();
-    let window_app = app.clone();
     // PTY 冷启动与杀软扫描可能阻塞数秒，放 blocking 池；首次 SessionStart hook 会把临时 PTY
     // 认领为真实数据库 session。
-    let temp_id = tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         broker.start_pending(
             app,
             &argv,
@@ -1806,13 +1828,6 @@ pub(crate) async fn new_session(
             None,
             &extras,
         )
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    // 用临时负 id 就能 attach：claim 只改注册表的键，subscriber 挂在 ManagedPty 上，
-    // 认领前后都指着同一个 PTY，不会断流。
-    tauri::async_runtime::spawn_blocking(move || {
-        reveal_session(&window_app, &reveal_broker, temp_id)
     })
     .await
     .map_err(|e| e.to_string())?

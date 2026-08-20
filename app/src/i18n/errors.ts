@@ -23,6 +23,10 @@ export const ENTRIES: ErrorEntry[] = [
   { m: "无效 session_id", exact: true, zh: "会话已失效，请重新打开", en: "Session is no longer valid; reopen it" },
   { m: "会话不存在", exact: true, zh: "会话不存在", en: "Session not found" },
   { m: "目录不存在", exact: true, zh: "项目目录不存在", en: "Project directory not found" },
+  // 远程新建会话的页内目录浏览(list_subdirectories):手机端可见,英文界面下需双语。
+  { m: "目录不存在或不可读", exact: true, zh: "目录不存在或不可读", en: "Folder doesn't exist or isn't readable" },
+  { m: "不是目录", exact: true, zh: "这不是一个目录", en: "Not a folder" },
+  { m: "目录不可读", exact: true, zh: "目录不可读", en: "Folder isn't readable" },
   { m: "未知 agent", exact: true, zh: "未知的 Agent", en: "Unknown agent" },
   { m: "当前平台不支持", exact: true, zh: "当前平台不支持此操作", en: "Not supported on this platform" },
   { m: "当前平台暂不支持托管终端", exact: true, zh: "当前平台暂不支持托管终端", en: "Managed terminals aren't supported on this platform" },

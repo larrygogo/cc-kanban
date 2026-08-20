@@ -4,6 +4,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getSettings, type Settings, type RepairReason } from "../api";
+import { remoteUi, REMOTE_SETTINGS_EVENT } from "../remoteMode";
 import { zh, type Dict } from "./zh";
 import { en } from "./en";
 
@@ -77,10 +78,17 @@ export function I18nProvider({ children, initial }: { children: ReactNode; initi
         })
         .catch(() => {});
     } catch { /* 非 Tauri 环境 */ }
+    // 远程收不到 Tauri 事件:mobile 入口轮询派发的 DOM 事件同源切语言(桌面永不派发)。
+    const onRemote = (e: Event) => {
+      eventApplied = true;
+      apply((e as CustomEvent).detail as Settings);
+    };
+    if (remoteUi()) window.addEventListener(REMOTE_SETTINGS_EVENT, onRemote);
     getSettings().then((s) => { if (!eventApplied) apply(s); }).catch(() => {});
     return () => {
       cancelled = true;
       un?.();
+      if (remoteUi()) window.removeEventListener(REMOTE_SETTINGS_EVENT, onRemote);
     };
   }, [initial]);
   return <I18nCtx.Provider value={DICTS[lang]}>{children}</I18nCtx.Provider>;
