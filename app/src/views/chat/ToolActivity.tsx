@@ -4,7 +4,7 @@ import { type ToolResultItem, type ToolUseItem } from "./shared";
 
 export function friendlyToolName(name: string, t: ReturnType<typeof useT>): string {
   const normalized = name.toLowerCase();
-  if (normalized === "bash" || normalized.includes("shell") || normalized.includes("terminal")) return t.chat.runTerminal;
+  if (normalized === "bash" || normalized === "exec" || normalized.includes("shell") || normalized.includes("terminal")) return t.chat.runTerminal;
   if (normalized === "read" || normalized.includes("view_image")) return t.chat.readFile;
   if (normalized === "write" || normalized === "edit" || normalized.includes("patch")) return t.chat.editFile;
   return name;
