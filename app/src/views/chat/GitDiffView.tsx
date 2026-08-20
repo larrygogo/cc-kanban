@@ -30,7 +30,7 @@ import {
 } from "../../api";
 import { FileMarkdown } from "../ChatMarkdown";
 import { useMenuPopup } from "../menu";
-import { CheckIcon, FolderPlusIcon } from "../sticker/icons";
+import { FolderPlusIcon } from "../sticker/icons";
 import { folderName } from "../../paths";
 import { pushEscLayer } from "../../escLayers";
 import { useT } from "../../i18n";
@@ -398,28 +398,35 @@ function DirSwitcher({ cwd, dirs, onDirChange, onAddDir, onRemoveDir }: {
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
       </button>
       {open && (
-        <div className="dd-menu chat-title-actions" role="menu" ref={menuRef} style={{ position: "fixed", top: pos.top, bottom: pos.bottom, left: pos.left }}>
+        <div className="dd-menu chat-dirs-menu" role="menu" ref={menuRef} style={{ position: "fixed", top: pos.top, bottom: pos.bottom, left: pos.left }}>
           {dirs.map((dir, i) => {
             // 首项是主仓(会话根,不可移除);其余为附加目录。
             const isMain = i === 0;
             const active = dir === cwd;
             return (
-              <div key={dir} className="chat-dirs-row">
-                <button type="button" role="menuitem" className="dd-item" title={dir} onClick={() => pick(() => onDirChange(dir))}>
-                  <span className="dd-label">{folderName(dir)}</span>
-                </button>
-                {/* 行尾统一槽位:激活行放 ✓,非激活的附加行放 ×(悬停浮现),主仓
-                    非激活时留空——勾与叉各挂各的位置会让两行行尾错位(用户实拍)。
-                    激活的附加行只显示 ✓:要删先切走,免得一键同时表达两种语义。 */}
-                <span className="chat-dirs-tail">
-                  {active ? (
-                    <CheckIcon className="dd-check" />
-                  ) : !isMain ? (
-                    <button type="button" className="chat-dirs-x" aria-label={t.newSession.extraDirRemove} title={t.newSession.extraDirRemove} onClick={() => pick(() => onRemoveDir(dir))}>
-                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
-                    </button>
-                  ) : null}
-                </span>
+              // 行是 div 而非 button:× 要住在行**内部**(用户指定),button 套 button
+              // 非法。键盘可达靠 role+tabIndex,Enter/Space 由 useMenuPopup 显式 click。
+              // 选中态 = 整行 active 背景(is-active),不再用勾。
+              <div
+                key={dir}
+                role="menuitem"
+                tabIndex={-1}
+                className={"dd-item chat-dirs-item" + (active ? " is-active" : "")}
+                title={dir}
+                onClick={() => pick(() => onDirChange(dir))}
+              >
+                <span className="dd-label">{folderName(dir)}</span>
+                {!isMain && (
+                  <button
+                    type="button"
+                    className="chat-dirs-x"
+                    aria-label={t.newSession.extraDirRemove}
+                    title={t.newSession.extraDirRemove}
+                    onClick={(e) => { e.stopPropagation(); pick(() => onRemoveDir(dir)); }}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+                  </button>
+                )}
               </div>
             );
           })}

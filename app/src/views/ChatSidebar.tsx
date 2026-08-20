@@ -959,8 +959,23 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
               )}
             </span>
           )}
-          {/* 按目录分组时每条再重复一遍目录名是噪声——组头已经写着了（按日期/状态分组时目录仍有用）。 */}
-          {dir && groupMode !== "dir" && !noting && <span className="chat-sidebar-meta" data-tip={item.cwd ?? undefined}>{dir}</span>}
+          {/* 目录行 = 目录名 + 附加目录标(+N,与贴纸卡同款)同排——两者曾是纵排容器里
+              的块级兄弟,+N 会掉到下一行(用户实拍)。按目录分组时目录名让位组头,但
+              +N 照显(组头只写主仓,跨仓信息组头没有)。 */}
+          {!noting && ((dir && groupMode !== "dir") || (item.extra_dirs?.length ?? 0) > 0) && (
+            <span className="chat-sidebar-metaline">
+              {dir && groupMode !== "dir" && <span className="chat-sidebar-meta" data-tip={item.cwd ?? undefined}>{dir}</span>}
+              {(item.extra_dirs?.length ?? 0) > 0 && (
+                <span
+                  className="chat-sidebar-extradirs"
+                  data-testid="sidebar-extradirs"
+                  data-tip={[item.cwd, ...item.extra_dirs].filter(Boolean).join(" · ")}
+                >
+                  +{item.extra_dirs.length}
+                </span>
+              )}
+            </span>
+          )}
           {/* 便签写完要看得见，否则「添加便签」等于写进黑洞。编辑中的那条让位给输入框。 */}
           {!noting && item.note && (
             <span className="chat-sidebar-note" data-tip={item.note}><NoteIcon />{item.note}</span>
