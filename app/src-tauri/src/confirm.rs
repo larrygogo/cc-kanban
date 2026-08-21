@@ -29,6 +29,9 @@ pub(crate) struct Confirms {
     /// 挂多个确认框(用户点不了被禁用的父窗,但 JS 侧事件/定时器仍能再拉起一个),首个
     /// resolve 就恢复父窗会让其余「模态」形同虚设——父窗可点,关掉它还会连带销毁剩下
     /// 的确认框、静默按取消收场。进场 +1、离场 -1,归零才恢复。
+    /// 仅非 macOS 使用:mac 不禁用父窗(set_enabled 的 sheet 实现见 confirm_dialog 内注释),
+    /// 字段与方法保留全平台编译,引用计数单测不分平台。
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     disabled_parents: Mutex<HashMap<String, usize>>,
 }
 
@@ -49,6 +52,7 @@ impl Confirms {
     }
 
     /// 计数 +1;返回是否由本次从 0 变 1(该真正执行禁用)。
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn parent_disabled(&self, label: &str) -> bool {
         let mut parents = self
             .disabled_parents
@@ -61,6 +65,7 @@ impl Confirms {
 
     /// 计数 -1;返回是否归零(该真正恢复启用)。计数缺失按归零处理——宁可多恢复一次,
     /// 也不能让父窗停留在禁用态。
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn parent_released(&self, label: &str) -> bool {
         let mut parents = self
             .disabled_parents
@@ -179,6 +184,12 @@ pub(crate) async fn confirm_dialog(
     // 一边还能继续操作。禁用失败(窗口已关/平台不支持)静默退化为非模态,不拦确认本身。
     // 从这里到恢复之间不得有 `?` 提前返回,否则父窗被永久禁用。
     // 经引用计数(见 disabled_parents):并发确认框首个 resolve 不得提前恢复父窗。
+    //
+    // macOS 除外:runtime 的 set_enabled(false) 实现是往父窗 beginSheet 一张与父窗
+    // 同 frame 的半透明灰窗(electron 同款)——sheet 从标题栏下方挂出、底部溢出父窗
+    // 一大截,视觉上凭空多出一块巨大灰板(实拍反馈)。mac 退化为置顶非模态,
+    // 与 parent() 的子窗关系配合已足够把确认框钉在父窗前。
+    #[cfg(not(target_os = "macos"))]
     if confirms.parent_disabled(window.label()) {
         let _ = window.set_enabled(false);
     }
@@ -186,6 +197,7 @@ pub(crate) async fn confirm_dialog(
     confirms.remove(id);
     // 先恢复父窗、再关模态窗(Win32 模态收尾定式):顺序反了的话,销毁瞬间系统找不到
     // 可激活的所属窗口,焦点会飞到别的应用。收尾后把焦点交还父窗。
+    #[cfg(not(target_os = "macos"))]
     if confirms.parent_released(window.label()) {
         let _ = window.set_enabled(true);
     }

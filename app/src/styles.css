@@ -1599,7 +1599,9 @@ button.stab {
 :root.platform-macos .ns-titlebar { padding-left: 76px; }
 /* macOS：红绿灯占据侧栏头部左侧，「会话」标题不再展示（挤在红绿灯后面反而突兀），
    头部只剩右侧动作按钮；84px 左留白保住拖拽区不与红绿灯重叠的视觉平衡。 */
-:root.platform-macos .chat-sidebar-head { padding-left: 84px; }
+/* macOS：红绿灯行（.chat-sidebar-mac-strip）独立于按钮行，头部不再左缩进让位。
+   84px 左 padding 给红绿灯让位，折叠钮紧随其后（Finder 式侧栏开关位）。 */
+.chat-sidebar-mac-strip { height: 52px; flex: 0 0 auto; display: flex; align-items: center; padding-left: 84px; }
 /* 侧栏折叠时 .chat-main 是 .chat-window 的第一个孩子，标题栏顶到窗口左缘才需要让位。 */
 :root.platform-macos .chat-main:first-child .chat-bar { padding-left: 84px; }
 
@@ -3391,8 +3393,6 @@ select.ns-input {
 .chat-sidebar-search input:focus { border-color: var(--cc-border); background: var(--cc-surface); }
 .chat-sidebar-search-x { position: absolute; top: 50%; right: calc(var(--sp-8) + 4px); transform: translateY(calc(-50% - 3px)); border: 0; background: none; color: var(--cc-text-faint); font-size: var(--fs-13); line-height: 1; cursor: pointer; padding: var(--sp-2); }
 .chat-sidebar-search-x:hover { color: var(--cc-text); }
-/* macOS：维持 52px 行高与右列标题栏对齐（红绿灯垂直居中在这条带里）。 */
-:root.platform-macos .chat-sidebar-head { height: 52px; padding-bottom: 0; }
 /* 整宽「新建会话」：与底部「打开设置」同款幽灵按钮（无描边、左对齐、hover 亮底），
    首尾两行视觉成对。 */
 .chat-sidebar-new {

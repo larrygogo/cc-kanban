@@ -1029,6 +1029,26 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
 
   return (
     <aside className="chat-sidebar">
+      {/* macOS：红绿灯独占一行（52px 带内垂直居中），按钮行整行下移——挤在红绿灯
+          右侧时「新建会话」CTA 会被压得只剩图标（实拍反馈）。条带本身也是拖拽区。
+          折叠钮留在这一行（红绿灯右侧，Finder/Safari 的侧栏开关惯例位），图标与
+          折叠后标题栏的展开钮同款（panel-left），一开一收视觉上是同一个钮。 */}
+      {isMac() && (
+        <div className="chat-sidebar-mac-strip" data-tauri-drag-region>
+          <button
+            type="button"
+            className="chat-sidebar-toggle"
+            aria-label={t.chat.sidebarCollapse}
+            data-tip={t.chat.sidebarCollapse}
+            onClick={onCollapse}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
+              <rect x="3.5" y="4.5" width="17" height="15" rx="3" />
+              <path d="M9.5 4.5v15" />
+            </svg>
+          </button>
+        </div>
+      )}
       {/* 窗口无系统装饰，侧栏顶部也要能拖动窗口——与右列标题栏同为 drag region。
           头部即「新建会话」按钮（Kimi 式整宽 CTA），不再放「会话」标题 + 迷你加号。 */}
       <div className="chat-sidebar-head" data-tauri-drag-region>
@@ -1056,21 +1076,6 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
           onArchived={setArchivedView}
           t={t}
         />
-        {/* macOS 专用：折叠钮留在侧栏头部（无独立顶栏）。Windows/Linux 的折叠/展开
-            统一在顶栏左上角（ChatWindow 的 sidebarToggleButton），这里不再重复出口。 */}
-        {isMac() && (
-          <button
-            type="button"
-            className="chat-sidebar-toggle"
-            aria-label={t.chat.sidebarCollapse}
-            data-tip={t.chat.sidebarCollapse}
-            onClick={onCollapse}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M15 6l-6 6 6 6" />
-            </svg>
-          </button>
-        )}
       </div>
       {/* 会话搜索（Ctrl/Cmd+F 聚焦）：标题/仓库名下沉后端 LIKE，与看板同一条通道。 */}
       <div className="chat-sidebar-search">
