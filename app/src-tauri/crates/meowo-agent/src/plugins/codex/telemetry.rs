@@ -724,7 +724,9 @@ mod tests {
 
     #[test]
     fn file_change_item_becomes_patch_call_with_result() {
-        let line = r##"{"timestamp":"t3","type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","id":"fc1","changes":{"C:\\p\\README.md":{"type":"add","content":"# 标题\n正文"}}}}}"##;
+        // 路径用正斜杠：Unix 的 Path::file_name 不认反斜杠分隔符，Windows 路径样本会让
+        // 此测试仅在 Windows 通过（rollout 由产生它的机器解析，生产中路径总是本平台形态）。
+        let line = r##"{"timestamp":"t3","type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","id":"fc1","changes":{"/p/README.md":{"type":"add","content":"# 标题\n正文"}}}}}"##;
         let items = parse_chat_items(line);
         assert_eq!(items.len(), 2);
         assert!(matches!(
