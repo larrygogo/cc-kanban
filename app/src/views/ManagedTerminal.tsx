@@ -783,6 +783,15 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       // 写完滚底：视口若停在上翻位置，退出提示行（和叠在其上的接管卡片语境）都在屏外。
       terminal.write(`\r\n\x1b[90m[Meowo: process exited${payload.code == null ? "" : ` (${payload.code})`}]\x1b[0m\r\n`, () => terminal.scrollToBottom());
     };
+    // 回放基线:回放起点之前的内容已随 backlog 淘汰丢失,其中最要命的是 TUI 启动时
+    // 只发一次的模式开关——硬件光标 `?25l`(claude/kimi 启动即发、此后自绘光标,不藏会
+    // 「输入框两个光标」),以及后端 ModeTracker 跟踪到的、此刻仍开着的私有模式(备用屏
+    // 1049 / 鼠标上报 1000-1006 / 括号粘贴 2004):不补的话 xterm 退回主屏、关掉鼠标
+    // 上报,而 TUI 仍按全屏 + 鼠标模式画,实拍两条滚动条、滚轮滚的不是 TUI 的内容。
+    // 顺序按后端给的(1049 在前:它清屏切缓冲,其余模式之后再开)。历史里若真有对应的
+    // `?25h`/`?1049l`,回放会照常盖回来,不误伤。
+    const replayBaseline = (modes: number[] | undefined) =>
+      "\x1b[?25l" + (modes ?? []).map((mode) => `\x1b[?${mode}h`).join("");
     // 首帧传 0 拿全量（要完整回放历史），补查轮询带 nextOffset 只取增量。
     // writeOutput 本来就按 startOffset 做区间裁剪，增量返回天然兼容。
     const inspectSnapshot = () => managedTerminalSnapshot(sessionId, hasWrittenOutput ? nextOffset : 0).then((snapshot) => {
@@ -805,11 +814,9 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
         terminal.reset();
         nextOffset = snapshot.startOffset;
         replayingHistory = true;
-        // 回放基线:先藏硬件光标。裁剪起点之前的 `?25l`(claude/kimi 启动即发、此后
-        // 自绘光标)已随淘汰丢失,reset 又把可见性归位成「显示」——TUI 的自绘反显块
-        // 旁边于是多出一个 xterm 硬件光标(实拍「输入框两个光标」)。历史里若真有
-        // `?25h`,回放会照常把它盖回来,不误伤想显示光标的 TUI。
-        terminal.write("\x1b[?25l");
+        // 裁剪起点之前的模式开关已随淘汰丢失,reset 又把一切归位——先落基线(见
+        // replayBaseline)。
+        terminal.write(replayBaseline(snapshot.modes));
       }
       if (snapshot.data) {
         // 首次全量回放(重连/重开窗口)才拦应答:里面全是答过的旧查询。增量补查是准实时
@@ -819,11 +826,11 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
         // (pty.rs StartupProbeScanner),回放路径只负责「不放行 xterm 的重复应答」。
         if (!hasWrittenOutput) {
           replayingHistory = true;
-          // 首挂载的回放起点若已被 1MiB backlog 裁剪(start > 0),截断点之前的 ?25l
-          // 同样丢了——与重对齐 reset 同款基线,防双光标。完整历史(start=0)自带
-          // TUI 的光标指令,写不写都会被覆盖,不多此一举。
+          // 首挂载的回放起点若已被 1MiB backlog 裁剪(start > 0),截断点之前的模式
+          // 开关同样丢了——与重对齐 reset 同款基线。完整历史(start=0)自带 TUI 的
+          // 开关指令,写不写都会被覆盖,不多此一举。
           if (Number.isFinite(snapshot.startOffset) && snapshot.startOffset > 0) {
-            terminal.write("\x1b[?25l");
+            terminal.write(replayBaseline(snapshot.modes));
           }
         }
         if (hasWrittenOutput && snapshot.data.length > JUMP_TAIL_B64_CHARS && Number.isFinite(snapshot.endOffset)) {
@@ -837,8 +844,8 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
           terminal.reset();
           replayingHistory = true;
           nextOffset = snapshot.endOffset;
-          // 回放基线同上(截断点之前的 ?25l 已丢):先藏硬件光标,防双光标。
-          terminal.write("\x1b[?25l");
+          // 回放基线同上(截断点之前的模式开关已丢)。
+          terminal.write(replayBaseline(snapshot.modes));
           lastByteAtRef.current = Date.now();
           setStalled(false);
           inspectAttention(tail);

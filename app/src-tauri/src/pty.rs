@@ -215,6 +215,9 @@ struct ManagedPty {
     /// 前端切换视图/多视图并存时会重复下发同一尺寸，不短路的话每次都是一发 SIGWINCH、
     /// TUI 整屏重排 + 屏幕状态机扫描位点清零。
     last_size: AtomicU32,
+    /// 输出流里此刻开着的 DEC 私有模式位图（位序 = [`ModeTracker::TRACKED`] 下标），
+    /// 由 reader 线程单趟维护，snapshot 无锁读取。用途见 DTO `modes` 字段注释。
+    modes: AtomicU32,
 }
 
 /// 一个在线的外部同步终端（attach 客户端）。pid 是客户端上报的自身进程号，供查重
@@ -771,6 +774,172 @@ fn random_token() -> String {
 /// 摘除之前,同一条首帧前探测会被订阅在先的 attach 客户端(DsrFilter 对实时查询全数
 /// 代答)或与首个可见字节挤进同一事件帧的 GUI xterm 再答一遍——多出的应答落进 agent
 /// 输入框。摘除之后 DsrFilter/xterm 只会遇到首帧后的实时查询,那正是它们该答的。
+/// 跟踪输出流里 DEC 私有模式（`CSI ? Pm h/l`）的开关态，供快照回放基线用。
+///
+/// 只认 [`Self::TRACKED`] 里的几个「TUI 启动时设一次、影响 xterm 输入/视口行为」的模式。
+/// 其它模式（光标可见 25、自动换行 7、同步输出 2026 …）要么回放里自带、要么 TUI 每帧
+/// 都重发，不需要基线。`ESC c`（RIS）视为全部复位。
+///
+/// 序列可能跨 chunk 断开：尾部若是一段未闭合的疑似前缀（`ESC` / `ESC [` / `ESC [ ?` +
+/// 参数），暂存到下一次 feed 前面拼接再扫。前缀超过 [`Self::CARRY_MAX`] 就不是模式序列，丢弃。
+struct ModeTracker {
+    bits: u32,
+    carry: Vec<u8>,
+}
+
+impl ModeTracker {
+    /// 位序即下标。1049 排第一不是巧合：前端按此序补写，`?1049h` 会清屏并切缓冲，
+    /// 必须先于鼠标/粘贴模式生效（后者与缓冲无关，但顺序稳定便于测试与阅读）。
+    const TRACKED: [u16; 10] = [1049, 47, 1047, 1000, 1002, 1003, 1005, 1006, 1015, 2004];
+    const CARRY_MAX: usize = 24;
+
+    fn new() -> Self {
+        Self {
+            bits: 0,
+            carry: Vec::new(),
+        }
+    }
+
+    fn bits(&self) -> u32 {
+        self.bits
+    }
+
+    /// 位图 → 开着的模式号列表（按 TRACKED 顺序）。
+    fn modes_of(bits: u32) -> Vec<u16> {
+        Self::TRACKED
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| bits & (1 << i) != 0)
+            .map(|(_, m)| *m)
+            .collect()
+    }
+
+    fn apply(&mut self, params: &[u8], on: bool) {
+        for param in params.split(|b| *b == b';') {
+            let Ok(mode) = std::str::from_utf8(param).unwrap_or("").parse::<u16>() else {
+                continue;
+            };
+            if let Some(idx) = Self::TRACKED.iter().position(|m| *m == mode) {
+                if on {
+                    self.bits |= 1 << idx;
+                } else {
+                    self.bits &= !(1 << idx);
+                }
+            }
+        }
+    }
+
+    fn feed(&mut self, chunk: &[u8]) {
+        let data: std::borrow::Cow<'_, [u8]> = if self.carry.is_empty() {
+            std::borrow::Cow::Borrowed(chunk)
+        } else {
+            let mut joined = std::mem::take(&mut self.carry);
+            joined.extend_from_slice(chunk);
+            std::borrow::Cow::Owned(joined)
+        };
+        let data = &*data;
+        let mut i = 0;
+        while i < data.len() {
+            if data[i] != 0x1b {
+                i += 1;
+                continue;
+            }
+            // ESC 之后的字节不足以判定:暂存尾巴(最多 "ESC [ ?" 三字节)等下一块。
+            let Some(&b1) = data.get(i + 1) else {
+                self.carry.extend_from_slice(&data[i..]);
+                return;
+            };
+            if b1 == b'c' {
+                // ESC c = RIS:全部复位。
+                self.bits = 0;
+                i += 2;
+                continue;
+            }
+            if b1 != b'[' {
+                i += 1;
+                continue;
+            }
+            let Some(&b2) = data.get(i + 2) else {
+                self.carry.extend_from_slice(&data[i..]);
+                return;
+            };
+            if b2 != b'?' {
+                // 普通 CSI:不解析,跳过前导继续。
+                i += 2;
+                continue;
+            }
+            // ESC [ ? <params> <final>
+            let mut j = i + 3;
+            while j < data.len() && (data[j].is_ascii_digit() || data[j] == b';') {
+                j += 1;
+            }
+            let Some(&final_byte) = data.get(j) else {
+                // 未闭合:尾部暂存(过长则不是模式序列,丢弃)。
+                if data.len() - i <= Self::CARRY_MAX {
+                    self.carry.extend_from_slice(&data[i..]);
+                }
+                return;
+            };
+            if final_byte == b'h' || final_byte == b'l' {
+                self.apply(&data[i + 3..j], final_byte == b'h');
+            }
+            i = j + 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod mode_tracker_tests {
+    use super::ModeTracker;
+
+    #[test]
+    fn tracks_set_and_reset_in_tracked_order() {
+        let mut t = ModeTracker::new();
+        t.feed(b"\x1b[?1004h\x1b[?1049h\x1b[2J\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h");
+        assert_eq!(
+            ModeTracker::modes_of(t.bits()),
+            vec![1049, 1000, 1002, 1006, 2004]
+        );
+        t.feed(b"\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?1049l");
+        assert_eq!(ModeTracker::modes_of(t.bits()), vec![2004]);
+    }
+
+    /// 跨 chunk 断在任意位置都不能漏:ConPTY 的 16KB 读块与 TUI 的写边界无关。
+    #[test]
+    fn survives_sequences_split_across_chunks() {
+        let full = b"ab\x1b[?1049h\x1b[?1000;1006hxy";
+        for cut in 0..=full.len() {
+            let mut t = ModeTracker::new();
+            t.feed(&full[..cut]);
+            t.feed(&full[cut..]);
+            assert_eq!(
+                ModeTracker::modes_of(t.bits()),
+                vec![1049, 1000, 1006],
+                "cut at {cut}"
+            );
+        }
+    }
+
+    #[test]
+    fn ris_clears_everything_and_untracked_modes_are_ignored() {
+        let mut t = ModeTracker::new();
+        t.feed(b"\x1b[?25l\x1b[?7h\x1b[?1049h\x1b[?2026h");
+        assert_eq!(ModeTracker::modes_of(t.bits()), vec![1049]);
+        t.feed(b"\x1bc");
+        assert!(ModeTracker::modes_of(t.bits()).is_empty());
+    }
+
+    /// 非模式的长 `CSI ?` 序列(或垃圾)不能把 carry 撑成无限缓冲。
+    #[test]
+    fn oversized_prefix_is_dropped_not_carried() {
+        let mut t = ModeTracker::new();
+        t.feed(b"\x1b[?11111111111111111111111111111111");
+        assert!(t.carry.is_empty());
+        t.feed(b"h");
+        assert!(ModeTracker::modes_of(t.bits()).is_empty());
+    }
+}
+
 struct StartupProbeScanner {
     /// 已见到可见字节:探测期结束,feed 恒原样透传。
     painted: bool,
@@ -1237,6 +1406,7 @@ impl PtyBroker {
             finalized: AtomicBool::new(false),
             probe: ScreenProbe::new(pty_size.rows, pty_size.cols, provider.to_string()),
             last_size: AtomicU32::new(pack_size(pty_size.cols, pty_size.rows)),
+            modes: AtomicU32::new(0),
         });
         // writer 线程：唯一直接触碰 ConPTY 输入管道的地方。写失败（管道断）即退出；
         // ManagedPty 被收尾丢弃后 tx 断开，recv 出错线程随之结束。它若卡死在一次
@@ -1399,10 +1569,15 @@ impl PtyBroker {
             // 启动探测代答必须在 reader 单趟流上做(见 StartupProbeScanner):任何基于
             // 快照/回放的重扫都可能把同一个查询答第二遍,多出的应答会落进 agent 输入框。
             let mut probe_scanner = StartupProbeScanner::new();
+            let mut mode_tracker = ModeTracker::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        // 私有模式开关同样必须在 reader 单趟流上跟踪:它们只在 TUI 启动时
+                        // 发一次,淘汰出 backlog 后任何基于快照的重扫都看不到。
+                        mode_tracker.feed(&buf[..n]);
+                        managed.modes.store(mode_tracker.bits(), Ordering::Release);
                         // 首帧前:扫描并把已代答的探测从流中摘除(理由见 StartupProbeScanner:
                         // 下游 DsrFilter/xterm 看不到已答的查询就不可能再答第二遍),疑似探测
                         // 前缀暂存到下一读。首帧后:零拷贝直通,不再产生任何暂存。
@@ -1711,6 +1886,12 @@ impl PtyBroker {
             exit_code: completed.and_then(|item| item.code),
             cols,
             rows,
+            // 已退出的定格快照不补基线:进程退出时 TUI 自己已经 ?1049l/?1000l 收尾,
+            // 定格画面就该停在主屏。
+            modes: session
+                .as_ref()
+                .map(|s| ModeTracker::modes_of(s.modes.load(Ordering::Acquire)))
+                .unwrap_or_default(),
         }
     }
 
@@ -3466,6 +3647,7 @@ mod tests {
             subscribers: Mutex::new(Vec::new()),
             probe: ScreenProbe::new(24, 80, "claude".into()),
             last_size: AtomicU32::new(0),
+            modes: AtomicU32::new(0),
         })
     }
 

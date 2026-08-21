@@ -352,6 +352,14 @@ pub struct ManagedTerminalSnapshotDto {
     /// fit 出来的网格与 PTY 脱节，隐藏期到达的帧会按错误宽度换行/错行叠画（实拍花屏）。
     pub cols: u16,
     pub rows: u16,
+    /// PTY 输出流里**此刻处于开启态**的 DEC 私有模式（备用屏 1049、鼠标上报 1000-1006、
+    /// 括号粘贴 2004 等，见 pty.rs `ModeTracker::TRACKED`）。前端 reset 后回放时先按它
+    /// 补写 `CSI ? n h` 作为基线：这些开关只在 TUI 启动时发一次，1MiB backlog 很快把
+    /// 它们淘汰，重开窗口/重对齐的回放起点在其后——不补的话 xterm 退回主屏、关掉鼠标
+    /// 上报，而 TUI 仍按全屏 + 鼠标模式画（实拍：两条滚动条、滚轮滚的不是 TUI 的内容）。
+    /// 空 = 无活跃 PTY / 旁路快照 / 已退出定格。
+    #[serde(default)]
+    pub modes: Vec<u16>,
 }
 
 /// 工作区里有改动的一个文件（git status --porcelain 的一行归一化结果）。
@@ -528,6 +536,7 @@ mod tests {
             exit_code: None,
             cols: 120,
             rows: 40,
+            modes: vec![1049, 1006],
         })
         .unwrap();
         assert_eq!(value["sessionId"], 7);

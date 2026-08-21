@@ -86,7 +86,7 @@ const confirmAnswer = vi.hoisted(() => ({ ok: true }));
 
 import { findFakeCaret, ManagedTerminal, STREAM_STALL_MS, stripTerminalReplies, terminalStreamStalled } from "./ManagedTerminal";
 
-const noPty = { sessionId: 163, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null };
+const noPty = { sessionId: 163, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null, cols: 0, rows: 0, modes: [] as number[] };
 
 describe("ManagedTerminal", () => {
   afterEach(cleanup);
@@ -716,6 +716,52 @@ describe("ManagedTerminal", () => {
     // 不再有第三次快照:淘汰是终局,不能拿重试打转。
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(snapshots).toBe(2);
+  });
+
+  /**
+   * claude 2.1.238 的全屏渲染器启动即 `?1049h` + `?1000-1006h`,这些开关只发一次,1MiB
+   * backlog 很快把它们淘汰;重对齐 reset 后若只补 `?25l`,xterm 退回主屏、关掉鼠标上报,
+   * 而 TUI 仍按全屏 + 鼠标模式画(实拍:两条滚动条、滚轮滚的不是 TUI 的内容)。后端
+   * ModeTracker 把此刻开着的模式随快照带来,基线按序补写(1049 在前:清屏切缓冲)。
+   */
+  it("reset 回放基线按快照 modes 补写备用屏/鼠标模式,1049 在前", async () => {
+    let snapshots = 0;
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        snapshots += 1;
+        if (snapshots === 1) {
+          return Promise.resolve({ ...noPty, active: true, data: btoa("ABC"), endOffset: 3 });
+        }
+        return Promise.resolve({ ...noPty, active: true, data: btoa("YZ"), startOffset: 1000, endOffset: 1002, modes: [1049, 1000, 1006] });
+      }
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    eventHandlers.get("pty-output")!({ payload: { sessionId: 163, offset: 1002, data: btoa("!") } });
+    await waitFor(() => expect(resetSpy).toHaveBeenCalled());
+    const paintedAfterReset = () =>
+      write.mock.calls
+        .slice(1)
+        .map((call) => (typeof call[0] === "string" ? call[0] : new TextDecoder().decode(call[0])))
+        .join("");
+    await waitFor(() => expect(paintedAfterReset()).toBe("\x1b[?25l\x1b[?1049h\x1b[?1000h\x1b[?1006hYZ!"));
+  });
+
+  it("首挂载回放起点已被裁剪时同样补写 modes 基线", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve({ ...noPty, active: true, data: btoa("tail"), startOffset: 5000, endOffset: 5004, modes: [1049, 2004] });
+      }
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    const painted = () =>
+      write.mock.calls
+        .map((call) => (typeof call[0] === "string" ? call[0] : new TextDecoder().decode(call[0])))
+        .join("");
+    await waitFor(() => expect(painted()).toBe("\x1b[?25l\x1b[?1049h\x1b[?2004htail"));
   });
 
   /**

@@ -422,6 +422,8 @@ impl BgPtyRegistry {
             // 旁路不追踪对面 PTY 的尺寸,0 = 未知:前端不做隐藏态网格对齐。
             cols: 0,
             rows: 0,
+            // 旁路不解析流,模式未知:前端不补基线。
+            modes: Vec::new(),
         })
     }
 
