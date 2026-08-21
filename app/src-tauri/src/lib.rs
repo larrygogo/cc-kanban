@@ -1229,6 +1229,9 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            // 【临时测试后门，验证外部终端恢复链路，测完删除】
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            terminal::spawn_test_external_resume(app.handle());
             // 安装器的「对话窗口功能」勾选种子必须最先合并：下面的托盘构建、onboarding
             // 判断等都消费 load_settings()，晚了就会拿开关生效前的旧值建 UI。
             // （同步执行的线程纪律豁免理由见 seed.rs 文件头。）

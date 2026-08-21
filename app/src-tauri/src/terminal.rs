@@ -1864,6 +1864,12 @@ pub(crate) async fn resume_session(
             if session_agent_alive(&store, sid)? {
                 return Err("会话仍在外部终端运行，请先在终端页选择接管".into());
             }
+            // 外部终端偏好（含轻量模式）：进程直接落在用户的终端里，Meowo 不建 PTY、
+            // 不接镜像管道——否则 Meowo 一退出 PTY 随之消失，agent 连带被杀，外部窗口
+            // 只剩断流残帧。跟踪照旧走 hook，想回托管随时可从终端页接管。
+            if prefers_external_terminal(&load_settings()) {
+                return start_external_resume(&app, sid, cwd, session_id, provider);
+            }
             start_managed_resume(app, broker, sid, cwd, session_id, provider)
         })
         .await
@@ -2030,6 +2036,31 @@ fn activate_resume_terminal_app(terminal: &str) {
     let _ = std::process::Command::new("open").args(["-a", app]).spawn();
 }
 
+/// 外部终端是不是用户的首选视图：显式选择 `session_open_in=terminal`，或对话功能整体
+/// 关闭（轻量模式）——后者 chat 不是合法落点，外部终端是唯一去处。
+/// reveal（已托管会话拿什么看）与 resume（恢复时进程落在谁手里）共用同一判定。
+pub(crate) fn prefers_external_terminal(settings: &crate::settings::Settings) -> bool {
+    settings.session_open_in == "terminal" || !settings.chat_enabled
+}
+
+#[cfg(test)]
+mod external_preference_tests {
+    use super::prefers_external_terminal;
+
+    #[test]
+    fn follows_setting_and_light_mode() {
+        let make = |open_in: &str, chat_enabled: bool| crate::settings::Settings {
+            session_open_in: open_in.into(),
+            chat_enabled,
+            ..Default::default()
+        };
+        assert!(!prefers_external_terminal(&make("chat", true)));
+        assert!(prefers_external_terminal(&make("terminal", true)));
+        // 轻量模式（对话关闭）下 chat 不是合法落点，无视 session_open_in。
+        assert!(prefers_external_terminal(&make("chat", false)));
+    }
+}
+
 /// 把用户带到会话所在的视图，按 `session_open_in` 分发。
 ///
 /// 两种取值下 agent 都由 Meowo 的 PTY 持有——差的只是拿什么界面看它：`chat` 用对话窗口，
@@ -2042,15 +2073,73 @@ pub(crate) fn reveal_session(
     broker: &crate::pty::PtyBroker,
     sid: i64,
 ) -> Result<(), String> {
-    // 对话功能关闭（轻量模式）时无视 session_open_in 强制走外部终端——此时 chat 不是
-    // 合法落点，静默改道比开一个「不该存在」的窗口诚实。
     let settings = load_settings();
-    if settings.session_open_in == "terminal" || !settings.chat_enabled {
+    if prefers_external_terminal(&settings) {
         return attach_in_external_terminal(broker, sid);
     }
     // 同步等窗口创建结果：PTY 已经拉起、窗口却没开时，把错误交还调用方，
     // 而不是让前端误报成功（用户「点了没反应」会再点一次，重复起会话）。
     crate::window::open_chat_window_impl(app, sid, true)
+}
+
+/// 外部终端偏好下的恢复：直接在用户选定的外部终端里裸起 resume 命令，进程归外部终端
+/// 持有，Meowo 不参与它的生命周期。前置准备与托管恢复同一份（prepare_resume_launch），
+/// 差别只在最后一步 spawn_in_terminal 而非 broker.start。
+///
+/// 秒退探测（托管路径的 exit_info 轮询）在这里没有对应物：CLI 拒绝启动时错误就打印在
+/// 用户眼前的终端窗口里，无需代为截获。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn start_external_resume(
+    app: &tauri::AppHandle,
+    sid: i64,
+    cwd: Option<String>,
+    session_id: String,
+    provider: String,
+) -> Result<(), String> {
+    let plan = prepare_resume_launch(app, sid, cwd.as_deref(), &session_id, &provider, None)?;
+    if !spawn_in_terminal(
+        &plan.argv,
+        plan.cwd.as_deref(),
+        &load_settings().resume_terminal,
+        &plan.env,
+    ) {
+        if let Some(id) = plan.revived {
+            rollback_failed_resume(id);
+        }
+        emit_board_changed(app, "resume-failed");
+        return Err("打开外部终端失败".into());
+    }
+    if supports_cross_account_resume(Some(&provider)) {
+        record_resumed_profile(&session_id, plan.target_profile.as_deref());
+    }
+    Ok(())
+}
+
+/// 【临时测试后门，测完删除】`MEOWO_TEST_EXTERNAL_RESUME=<cc_session_id>:<provider>` 时
+/// 启动即直调 start_external_resume，免 UI 驱动整条外部恢复链路。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(crate) fn spawn_test_external_resume(app: &tauri::AppHandle) {
+    let Ok(spec) = std::env::var("MEOWO_TEST_EXTERNAL_RESUME") else {
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let Some((id, provider)) = spec.split_once(':') else {
+            eprintln!("[TEST] bad spec: {spec}");
+            return;
+        };
+        let result = (|| -> Result<(), String> {
+            let store = open_store(&db_path())?;
+            let sid = store
+                .find_session_id_pub(id)
+                .map_err(|e| e.to_string())?
+                .ok_or("会话不存在")?;
+            let cwd = store.session_cwd(sid).map_err(|e| e.to_string())?;
+            start_external_resume(&app, sid, cwd, id.to_string(), provider.to_string())
+        })();
+        eprintln!("[TEST] start_external_resume => {result:?}");
+    });
 }
 
 /// 从看板卡片恢复：会话此刻还没有任何视图，故成功后按设置把用户带过去。
@@ -2077,23 +2166,36 @@ fn start_managed_resume(
     reveal_session(&app, &broker, sid)
 }
 
-/// 恢复会话到托管 PTY 的**唯一**实现。刻意不开窗：从对话窗口内发起的恢复
-/// （start_managed_terminal / takeover）窗口已经在了，再调 open_chat_window 会触发
-/// chat-session-changed，把用户正在编辑的输入连同 history 一起重置。
+/// 一次恢复启动的全部前置产物：托管（broker.start）与外部终端（spawn_in_terminal）两条
+/// 路径共用同一份事实，只在「进程落在谁手里」上分道。
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn start_managed_resume_sized(
-    app: tauri::AppHandle,
-    broker: crate::pty::PtyBroker,
-    sid: i64,
+struct ResumeLaunch {
+    /// 完整恢复 argv（已回放启动选项与附加目录）。
+    argv: Vec<String>,
+    /// 解析后的工作目录（已过存在性校验）。
     cwd: Option<String>,
-    session_id: String,
-    provider: String,
-    terminal_size: crate::pty::TerminalSize,
-    option_overrides: Option<std::collections::HashMap<String, String>>,
-) -> Result<(), String> {
-    ensure_session_profile_available(&provider, &session_id)?;
-    let (resolved, mut resume) = resolve_resume_plan(&session_id, cwd.as_deref(), &provider);
+    /// 代理/中转/账号隔离环境变量（按实际恢复账号取）。
+    env: Vec<(String, String)>,
+    /// 乐观复活生效的会话 id；spawn 失败时凭它回滚（未复活的真连接会话不得误收尾）。
+    revived: Option<i64>,
+    /// 实际恢复账号（跨账号迁移后可能与原账号不同），成功后写回 DB 用。
+    target_profile: Option<String>,
+}
+
+/// 恢复启动的共用前置：可判定失败的守卫 → 恢复计划 → 启动选项/附加目录回放 →
+/// 跨账号资料迁移 → 乐观复活 → env。从 start_managed_resume_sized 抽出，供外部终端
+/// 恢复路径复用同一份纪律（此前 restart_session_supported 各写一遍且漏了选项回放）。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn prepare_resume_launch(
+    app: &tauri::AppHandle,
+    sid: i64,
+    cwd: Option<&str>,
+    session_id: &str,
+    provider: &str,
+    option_overrides: Option<&std::collections::HashMap<String, String>>,
+) -> Result<ResumeLaunch, String> {
+    ensure_session_profile_available(provider, session_id)?;
+    let (resolved, mut resume) = resolve_resume_plan(session_id, cwd, provider);
     if resume.is_empty() {
         return Err("该 Agent 不支持恢复会话".into());
     }
@@ -2101,7 +2203,7 @@ pub(crate) fn start_managed_resume_sized(
     // （`os error 2` 之类），用户拿不到任何可执行的下一步。这两种失败都有明确修复动作，
     // 在做乐观复活/账号迁移等副作用之前就拦下（新建路径的 validate_new_session_cwd 同理，
     // 恢复路径此前漏了）。
-    if let Some(plugin) = meowo_agent::resolve(Some(&provider)) {
+    if let Some(plugin) = meowo_agent::resolve(Some(provider)) {
         if !plugin.is_installed() {
             return Err(format!(
                 "{} 未安装或已被卸载，无法恢复会话。请到 设置 → Agent 重新安装",
@@ -2117,18 +2219,56 @@ pub(crate) fn start_managed_resume_sized(
         }
     }
     // 回放会话的启动选项（权限模式等；接管时的改选合并写回），恢复后的进程与选择同参。
-    splice_stored_launch_args(&mut resume, &provider, sid, option_overrides.as_ref());
+    splice_stored_launch_args(&mut resume, provider, sid, option_overrides);
     // 回放附加目录（--add-dir）：恢复的进程与首次启动同一份跨仓访问范围。
-    splice_stored_extra_dirs(&mut resume, &provider, sid);
-    // takeover 调用本函数前已经结束旧进程；普通 resume 的旧进程本就不在。此刻复制能拿到
+    splice_stored_extra_dirs(&mut resume, provider, sid);
+    // takeover 在调用前已经结束旧进程；普通 resume 的旧进程本就不在。此刻复制能拿到
     // 完整的最后一帧 transcript，也不会与 Claude 正在追加同一个文件发生竞争。
-    let target_profile = prepare_session_for_active_profile(&provider, &session_id)?;
-    let revived = prepare_resume(&app, &session_id);
+    let target_profile = prepare_session_for_active_profile(provider, session_id)?;
+    let revived = prepare_resume(app, session_id);
     // 一律按 prepare 算出的**实际**账号取 env，不再按 agent 身份分支重新推导。
     // target_profile 已经涵盖三种情形：跨账号迁移成功 → 活跃账号；声明了迁移但找不到
     // transcript（用户自设 config-home / 被清理策略删掉）→ 回退该会话原账号；未声明
     // 迁移 → 原账号。重新推导反而会丢掉中间那种回退，给出一个会话资料并不在那儿的账号。
-    let env = launch_env_for_resume_target(&provider, target_profile.as_deref());
+    let env = launch_env_for_resume_target(provider, target_profile.as_deref());
+    Ok(ResumeLaunch {
+        argv: resume,
+        cwd: resolved,
+        env,
+        revived,
+        target_profile,
+    })
+}
+
+/// 恢复会话到托管 PTY 的**唯一**实现。刻意不开窗：从对话窗口内发起的恢复
+/// （start_managed_terminal / takeover）窗口已经在了，再调 open_chat_window 会触发
+/// chat-session-changed，把用户正在编辑的输入连同 history 一起重置。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_managed_resume_sized(
+    app: tauri::AppHandle,
+    broker: crate::pty::PtyBroker,
+    sid: i64,
+    cwd: Option<String>,
+    session_id: String,
+    provider: String,
+    terminal_size: crate::pty::TerminalSize,
+    option_overrides: Option<std::collections::HashMap<String, String>>,
+) -> Result<(), String> {
+    let ResumeLaunch {
+        argv: resume,
+        cwd: resolved,
+        env,
+        revived,
+        target_profile,
+    } = prepare_resume_launch(
+        &app,
+        sid,
+        cwd.as_deref(),
+        &session_id,
+        &provider,
+        option_overrides.as_ref(),
+    )?;
     if let Err(error) = broker.start(
         app.clone(),
         sid,
@@ -2384,7 +2524,7 @@ pub(crate) async fn restart_session_supported(
         }
 
         // 先验证完整恢复计划，再动原进程；未知 provider/无恢复能力时必须保持原会话原样。
-        let (resolved, resume) = resolve_resume_plan(&session_id, cwd.as_deref(), &provider);
+        let (_, resume) = resolve_resume_plan(&session_id, cwd.as_deref(), &provider);
         if resume.is_empty() {
             return Err("该 Agent 不支持恢复会话".into());
         }
@@ -2394,29 +2534,10 @@ pub(crate) async fn restart_session_supported(
         ensure_session_profile_available(&provider, &session_id)?;
         terminate_agent_for_restart(pid)?;
 
-        // 原进程确认结束后才复活 DB 状态；恢复计划沿用终止前已验证的结果。
-        let target_profile = prepare_session_for_active_profile(&provider, &session_id)?;
-        let revived = prepare_resume(&app, &session_id);
-        // 与托管恢复同一口径：按 prepare 算出的实际账号取 env（理由见 start_managed_resume_sized）。
-        let env = launch_env_for_resume_target(&provider, target_profile.as_deref());
-        let ok = spawn_in_terminal(
-            &resume,
-            resolved.as_deref(),
-            &load_settings().resume_terminal,
-            &env,
-        );
-        if ok {
-            if supports_cross_account_resume(Some(&provider)) {
-                record_resumed_profile(&session_id, target_profile.as_deref());
-            }
-            Ok(())
-        } else {
-            if let Some(id) = revived {
-                rollback_failed_resume(id);
-            }
-            emit_board_changed(&app, "restart-failed");
-            Err("启动受支持的终端失败".into())
-        }
+        // 原进程确认结束后由共用前置复活 DB 状态并直接在外部终端拉起。收编进
+        // start_external_resume 顺带修掉此前的缺口：这条路径不回放启动选项/附加目录，
+        // 重启后权限模式等会静默重置成 CLI 默认。
+        start_external_resume(&app, sid, cwd, session_id, provider)
     })
     .await
     .map_err(|e| e.to_string())?
