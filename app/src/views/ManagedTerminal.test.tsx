@@ -87,7 +87,7 @@ vi.mock("@xterm/addon-unicode-graphemes", () => ({ UnicodeGraphemesAddon: class 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ confirm: vi.fn(), open: vi.fn() }));
 const confirmAnswer = vi.hoisted(() => ({ ok: true }));
 
-import { findFakeCaret, ManagedTerminal, STREAM_STALL_MS, stripTerminalReplies, terminalStreamStalled } from "./ManagedTerminal";
+import { findFakeCaret, isMouseMotionReport, ManagedTerminal, STREAM_STALL_MS, stripTerminalReplies, terminalStreamStalled } from "./ManagedTerminal";
 
 const noPty = { sessionId: 163, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null, cols: 0, rows: 0, modes: [] as number[] };
 
@@ -626,6 +626,44 @@ describe("ManagedTerminal", () => {
     } finally {
       terminalModes.mouseTrackingMode = "none";
     }
+  });
+
+  it("isMouseMotionReport 只认无按键的 SGR 移动事件", () => {
+    expect(isMouseMotionReport("\x1b[<35;10;20M")).toBe(true);
+    expect(isMouseMotionReport("\x1b[<39;10;20M")).toBe(true); // shift+移动
+    expect(isMouseMotionReport("\x1b[<0;10;20M")).toBe(false); // 左键按下
+    expect(isMouseMotionReport("\x1b[<32;10;20M")).toBe(false); // 左键拖动
+    expect(isMouseMotionReport("\x1b[<64;10;20M")).toBe(false); // 滚轮
+    expect(isMouseMotionReport("\x1b[<35;10;20m")).toBe(false); // 抬起
+    expect(isMouseMotionReport("\x1b[<35;10;20Ma")).toBe(false); // 混着按键
+    expect(isMouseMotionReport("a")).toBe(false);
+  });
+
+  /**
+   * `?1003h` 下 xterm 每跨一格发一次移动上报,快速划过每秒上百次,每次一趟 IPC——
+   * debug 构建下按键排在后面(实拍「终端变得很卡」)。移动是位置采样,只留最新一条;
+   * 按键不等:先冲积压的移动(顺序),再即时下发。
+   */
+  it("鼠标移动上报按帧合并只发最新一条,按键即时下发且排在其后", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2 });
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(dataHandler.current).toBeTruthy());
+    invoke.mockClear();
+    const writes = () => invoke.mock.calls.filter(([command]) => command === "write_managed_terminal").map(([, args]) => (args as { data: string }).data);
+    // 一帧内 50 条移动:IPC 只有一趟,且是最后的坐标。
+    for (let i = 1; i <= 50; i += 1) dataHandler.current!(`\x1b[<35;${i};7M`);
+    expect(writes()).toEqual([]);
+    await waitFor(() => expect(writes()).toEqual(["\x1b[<35;50;7M"]));
+    // 积压着移动时来了按键:移动先冲出去、按键紧随,都不等定时器。
+    dataHandler.current!("\x1b[<35;51;7M");
+    dataHandler.current!("a");
+    expect(writes()).toEqual(["\x1b[<35;50;7M", "\x1b[<35;51;7M", "a"]);
+    // 后续无移动积压:定时器到点不再多发。
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(writes()).toEqual(["\x1b[<35;50;7M", "\x1b[<35;51;7M", "a"]);
   });
 
   it("Ctrl+Enter / Shift+Enter 按插件声明的换行序列注入,不落成提交", async () => {

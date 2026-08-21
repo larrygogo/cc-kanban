@@ -120,6 +120,18 @@ const LINE_HEIGHTS: Record<string, number> = { compact: 1.1, normal: 1.22, relax
 /// 在几毫秒的回放窗口里按到它的代价可以忽略。
 /// 首帧前的启动探测不需要前端拦截:后端代答后已把查询从流中摘除（pty.rs 的
 /// StartupProbeScanner），xterm 根本看不到,不存在要拦的自动应答。
+/// 一段 onData 是否**只是**无按键的鼠标移动上报(SGR `CSI < Cb ; Cx ; Cy M`,Cb = 32+3
+/// 即 35,修饰键再加 4/8/16)。TUI 开了 `?1003h`(任意移动上报,claude 全屏渲染器即如此)
+/// 后 xterm 每跨一个单元格就发一次,快速划过终端每秒上百次;每次一趟 IPC + 后端
+/// spawn_blocking,debug 构建下足以把按键排在后面(实拍「终端变得很卡」)。移动事件是
+/// 位置采样,只有最新一条有意义——可以合并,不像按键一个都不能丢。
+/// 移动上报的合并窗口:一帧。再长鼠标悬停反馈会明显拖尾,再短合并不到几条。
+const MOTION_FLUSH_MS = 16;
+
+export function isMouseMotionReport(data: string): boolean {
+  return /^\x1b\[<(?:35|39|43|47|51|55|59|63);\d+;\d+M$/.test(data);
+}
+
 export function stripTerminalReplies(data: string): string {
   // DECRPM($y)的 '?' 必须可选:xterm 对 ANSI 模式查询(CSI Ps $ p)的应答不带 '?'
   // (如 \x1b[4;2$y),只匹配 DEC 私有形态会漏放。CSI-t 是窗口尺寸报告(CSI 18 t 等,
@@ -549,6 +561,23 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // 隐藏态的网格对齐交给快照的 cols/rows（见 inspectSnapshot）。
     requestAnimationFrame(() => { if (visibleRef.current) fit.fit(); });
 
+    // 写失败必须可见：典型场景是整段粘贴超过后端单次输入上限被拒——
+    // 静默吞掉的话，粘贴无声消失，终端画面纹丝不动。
+    const sendInput = (data: string) => {
+      void writeManagedTerminal(sessionId, data).catch((e) => setError(formatBackendError(e, t.locale)));
+    };
+    let pendingMotion: string | null = null;
+    let motionTimer: number | null = null;
+    const flushMotion = () => {
+      if (motionTimer !== null) {
+        window.clearTimeout(motionTimer);
+        motionTimer = null;
+      }
+      if (pendingMotion === null) return;
+      const data = pendingMotion;
+      pendingMotion = null;
+      sendInput(data);
+    };
     const input = terminal.onData((data) => {
       // 历史回放窗口内，xterm 对回放查询的自动应答不得下发 PTY（见 stripTerminalReplies）。
       // 预绘期不需要额外拦 CPR：启动探测由后端代答并**从流中摘除**（pty.rs 的
@@ -569,9 +598,16 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       if (payload.includes("\r")) {
         onUserSubmitRef.current?.();
       }
-      // 写失败必须可见：典型场景是整段粘贴超过后端单次输入上限被拒——
-      // 静默吞掉的话，粘贴无声消失，终端画面纹丝不动。
-      void writeManagedTerminal(sessionId, payload).catch((e) => setError(formatBackendError(e, t.locale)));
+      // 鼠标移动上报节流(见 isMouseMotionReport):积压里只留最新一条,每 16ms 至多
+      // 一趟 IPC。其余输入(按键/粘贴/应答)不等——先把积压的移动冲出去保证顺序,再
+      // 即时下发,按键延迟为零。
+      if (isMouseMotionReport(payload)) {
+        pendingMotion = payload;
+        if (motionTimer === null) motionTimer = window.setTimeout(flushMotion, MOTION_FLUSH_MS);
+        return;
+      }
+      flushMotion();
+      sendInput(payload);
     });
     // 声明「正在看」:后端 emitter 只对已注册的会话推 pty-output 实时帧,其余托管会话
     // 不再白付 base64 与 IPC(N 会话齐跑时那正是压垮前端的部分)。失败静默——快照轮询
@@ -1066,6 +1102,9 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       helperTextarea?.removeEventListener("compositionstart", startComposition);
       helperTextarea?.removeEventListener("compositionend", endComposition);
       input.dispose();
+      // 卸载时丢弃积压的移动采样:会话都换了,旧位置没有接收方。
+      if (motionTimer !== null) window.clearTimeout(motionTimer);
+      pendingMotion = null;
       unOutput?.();
       unExit?.();
       unSettings?.();
