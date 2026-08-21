@@ -25,14 +25,157 @@ fn content_text(value: &serde_json::Value) -> String {
         serde_json::Value::Array(parts) => parts
             .iter()
             .filter_map(|part| {
-                part.get("text")
-                    .or_else(|| part.get("input_text"))
-                    .or_else(|| part.get("output_text"))
-                    .and_then(|text| text.as_str())
+                // 0.148 的 Reasoning.summary_text 是裸字符串数组，消息 content 是对象数组。
+                part.as_str().map(str::to_string).or_else(|| {
+                    part.get("text")
+                        .or_else(|| part.get("input_text"))
+                        .or_else(|| part.get("output_text"))
+                        .and_then(|text| text.as_str())
+                        .map(str::to_string)
+                })
             })
             .collect::<Vec<_>>()
             .join(""),
         other => other.to_string(),
+    }
+}
+
+/// codex 0.148+ 的统一逐项完成事件 `event_msg/item_completed`：老版本的
+/// `event_msg/user_message`、`agent_message`、`agent_reasoning` 不再写入 rollout，
+/// 用户与 AI 正文只剩这里（`response_item/message` 虽也存一份 assistant 正文，但
+/// 与本事件同 id 重复，且其 user 形态裹着 environment_context，维持整体跳过）。
+///
+/// CommandExecution 刻意不产出：它是某次 `custom_tool_call`（exec）的子事件，命令
+/// 与输出已由 `custom_tool_call` / `custom_tool_call_output` 主链承载，再发一遍
+/// 就是同一条命令上屏两次。FileChange 没有主链对应物，是文件改动唯一的结构化记录。
+fn completed_item_events(
+    payload: &serde_json::Value,
+    timestamp: Option<String>,
+    line: &str,
+) -> Vec<TranscriptEvent> {
+    let Some(item) = payload.get("item") else {
+        return Vec::new();
+    };
+    let kind = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    // rollout 的 item.id 全局唯一；缺失时退回整行哈希。
+    let id = |prefix: &str| {
+        item.get("id")
+            .and_then(|v| v.as_str())
+            .map(|i| format!("codex-{prefix}-{i}"))
+            .unwrap_or_else(|| chat_id(prefix, line))
+    };
+    match kind {
+        "UserMessage" => {
+            let text = item.get("content").map(content_text).unwrap_or_default();
+            (!text.trim().is_empty())
+                .then(|| TranscriptEvent::UserMessage {
+                    id: id("user"),
+                    timestamp,
+                    text,
+                })
+                .into_iter()
+                .collect()
+        }
+        "AgentMessage" => {
+            let text = item.get("content").map(content_text).unwrap_or_default();
+            (!text.trim().is_empty())
+                .then(|| TranscriptEvent::AssistantMessage {
+                    id: id("assistant"),
+                    timestamp,
+                    text,
+                })
+                .into_iter()
+                .collect()
+        }
+        "Reasoning" => {
+            // 0.148 的思考多为 encrypted_content（summary_text/raw_content 皆空），
+            // 只在真有可读摘要时上屏。
+            let text = item
+                .get("summary_text")
+                .map(content_text)
+                .filter(|t| !t.trim().is_empty())
+                .or_else(|| item.get("raw_content").map(content_text))
+                .unwrap_or_default();
+            (!text.trim().is_empty())
+                .then(|| TranscriptEvent::Reasoning {
+                    id: id("reasoning"),
+                    timestamp,
+                    text,
+                })
+                .into_iter()
+                .collect()
+        }
+        "FileChange" => {
+            let Some(changes) = item.get("changes").and_then(|c| c.as_object()) else {
+                return Vec::new();
+            };
+            // 摘要列文件名（带操作），展开给每个文件的正文/补丁；正文可能是整个文件。
+            // 两处上限都按**字符**计——与 claude 的 compact_json 同单位（800/4000 同量级）。
+            const DETAIL_LIMIT: usize = 4000;
+            const SUMMARY_LIMIT: usize = 800;
+            let mut names = Vec::new();
+            let mut detail = String::new();
+            let mut detail_chars = 0usize;
+            for (path, change) in changes {
+                let op = change
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("update");
+                let name = Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path);
+                names.push(name.to_string());
+                if detail_chars >= DETAIL_LIMIT {
+                    continue;
+                }
+                let body = change
+                    .get("content")
+                    .or_else(|| change.get("unified_diff"))
+                    .or_else(|| change.get("diff"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let header = format!("[{op}] {path}\n");
+                detail_chars += header.chars().count();
+                detail.push_str(&header);
+                let room = DETAIL_LIMIT.saturating_sub(detail_chars);
+                if room > 0 && !body.is_empty() {
+                    let mut rest = body.chars();
+                    let clipped: String = rest.by_ref().take(room).collect();
+                    detail_chars += clipped.chars().count();
+                    detail.push_str(&clipped);
+                    // 迭代器还有剩 = 被截断；避免对整个 body 再做一次 O(n) 计数。
+                    if rest.next().is_some() {
+                        detail.push_str("\n…");
+                    }
+                    detail.push('\n');
+                }
+            }
+            let mut summary = names.join(", ");
+            if summary.chars().count() > SUMMARY_LIMIT {
+                summary = summary.chars().take(SUMMARY_LIMIT).collect();
+                summary.push('…');
+            }
+            let call_id = id("patch");
+            vec![
+                TranscriptEvent::ToolCall {
+                    id: call_id.clone(),
+                    timestamp: timestamp.clone(),
+                    name: "patch".into(),
+                    summary,
+                    subagent: None,
+                },
+                TranscriptEvent::ToolResult {
+                    id: format!("{call_id}-out"),
+                    timestamp,
+                    tool_call_id: Some(call_id),
+                    text: detail,
+                    is_error: item.get("status").and_then(|v| v.as_str()) == Some("failed"),
+                    subagent: None,
+                },
+            ]
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -142,6 +285,37 @@ fn parse_transcript_events(line: &str) -> Vec<TranscriptEvent> {
                     .get("is_error")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
+            }]
+        }
+        ("event_msg", "item_completed") => completed_item_events(payload, timestamp, line),
+        // 回合收尾带错误（如 unauthorized：refresh token 被吊销）：终端里满屏红字，
+        // 对话窗此前却一片空白——这是 rollout 里唯一的回合级错误信号。
+        ("event_msg", "task_complete") => {
+            let Some(error) = payload.get("error").filter(|e| !e.is_null()) else {
+                return Vec::new();
+            };
+            let info = error
+                .get("codex_error_info")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let text = error
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(info)
+                .to_string();
+            if text.trim().is_empty() {
+                return Vec::new();
+            }
+            let label = if info == "unauthorized" {
+                "需要重新登录"
+            } else {
+                "回合出错"
+            };
+            vec![TranscriptEvent::TurnError {
+                id: chat_id("error", line),
+                timestamp,
+                label: label.into(),
+                text,
             }]
         }
         ("event_msg", "context_compacted") => vec![TranscriptEvent::Metadata {
@@ -512,6 +686,100 @@ mod tests {
         // 原始 response_item user message 常含指令包，与 event_msg.user_message 重复，必须跳过。
         assert!(parse_chat_items(
             r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[]}}"#
+        )
+        .is_empty());
+    }
+
+    /// codex 0.148 换了 rollout 形态：user/agent 正文只在 `event_msg/item_completed` 里
+    ///（老的 `event_msg/user_message` 等不再写入），漏解析的直接后果是对话窗只剩 exec 组。
+    /// 样本取自真机 rollout（0.148.0）。
+    #[test]
+    fn parses_codex_0148_item_completed_events() {
+        let user = r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"我想做一个功能","text_elements":[]}]}}}"#;
+        assert!(matches!(
+            &parse_chat_items(user)[0],
+            ChatItem::UserText { id, text, .. } if text == "我想做一个功能" && id == "codex-user-u1"
+        ));
+
+        let agent = r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"我先检查项目结构"}],"phase":"commentary"}}}"#;
+        assert!(matches!(
+            &parse_chat_items(agent)[0],
+            ChatItem::AssistantText { text, .. } if text == "我先检查项目结构"
+        ));
+
+        // 0.148 的思考通常整段加密（summary_text/raw_content 皆空）→ 不产出。
+        let encrypted = r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","id":"r1","summary_text":[],"raw_content":[]}}}"#;
+        assert!(parse_chat_items(encrypted).is_empty());
+        // 真有可读摘要（裸字符串数组）时上屏。
+        let readable = r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","id":"r2","summary_text":["先运行测试"]}}}"#;
+        assert!(matches!(
+            &parse_chat_items(readable)[0],
+            ChatItem::Reasoning { text, .. } if text == "先运行测试"
+        ));
+
+        // CommandExecution 是 exec custom_tool_call 的子事件，产出即同一命令上屏两次。
+        let exec = r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"e1","command":["pwsh","-Command","ls"],"exit_code":0}}}"#;
+        assert!(parse_chat_items(exec).is_empty());
+    }
+
+    #[test]
+    fn file_change_item_becomes_patch_call_with_result() {
+        // 路径用正斜杠：Unix 的 Path::file_name 不认反斜杠分隔符，Windows 路径样本会让
+        // 此测试仅在 Windows 通过（rollout 由产生它的机器解析，生产中路径总是本平台形态）。
+        let line = r##"{"timestamp":"t3","type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","id":"fc1","changes":{"/p/README.md":{"type":"add","content":"# 标题\n正文"}}}}}"##;
+        let items = parse_chat_items(line);
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            &items[0],
+            ChatItem::ToolUse { id, name, summary, .. }
+                if name == "patch" && summary == "README.md" && id == "codex-patch-fc1"
+        ));
+        assert!(matches!(
+            &items[1],
+            ChatItem::ToolResult { tool_use_id: Some(call), text, is_error: false, .. }
+                if call == "codex-patch-fc1" && text.contains("[add]") && text.contains("# 标题")
+        ));
+    }
+
+    /// 上限一律按字符计：中文正文（每字符 3 字节）不得把详情撑到字节口径的数倍，
+    /// 超限文件仍要进摘要（只省正文），摘要本身也有封顶。
+    #[test]
+    fn file_change_caps_detail_and_summary_by_chars() {
+        let body: String = "中".repeat(5000);
+        let files: Vec<String> = (0..300)
+            .map(|i| format!(r#""/p/文件{i:03}.rs":{{"type":"update","content":"{body}"}}"#))
+            .collect();
+        let line = format!(
+            r#"{{"type":"event_msg","payload":{{"type":"item_completed","item":{{"type":"FileChange","id":"fc2","changes":{{{}}}}}}}}}"#,
+            files.join(",")
+        );
+        let items = parse_chat_items(&line);
+        assert_eq!(items.len(), 2);
+        let (summary, text) = match (&items[0], &items[1]) {
+            (ChatItem::ToolUse { summary, .. }, ChatItem::ToolResult { text, .. }) => {
+                (summary, text)
+            }
+            other => panic!("形状不对: {other:?}"),
+        };
+        // 详情：字符封顶（截断记号与文件头允许少量溢出），且带截断记号。
+        assert!(text.chars().count() < 4100, "实际 {}", text.chars().count());
+        assert!(text.contains('…'));
+        // 摘要：300 个文件名全进 names 但被封顶在 800 字符 + 记号。
+        assert_eq!(summary.chars().count(), 801);
+        assert!(summary.ends_with('…'));
+    }
+
+    #[test]
+    fn task_complete_error_becomes_turn_error() {
+        let unauthorized = r#"{"timestamp":"t4","type":"event_msg","payload":{"type":"task_complete","last_agent_message":null,"error":{"message":"Your access token could not be refreshed.","codex_error_info":"unauthorized"}}}"#;
+        assert!(matches!(
+            &parse_chat_items(unauthorized)[0],
+            ChatItem::TurnError { label, text, .. }
+                if label == "需要重新登录" && text.contains("could not be refreshed")
+        ));
+        // 正常收尾（error=null）不产出。
+        assert!(parse_chat_items(
+            r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"done","error":null}}"#
         )
         .is_empty());
     }
