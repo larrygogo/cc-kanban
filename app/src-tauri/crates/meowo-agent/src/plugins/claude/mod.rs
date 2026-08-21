@@ -625,16 +625,6 @@ impl AgentPlugin for Claude {
     fn writes_tab_token(&self) -> bool {
         true
     }
-    /// claude 2.1.238 起灰度「全屏渲染器」：进主界面即 `?1049h`（备用屏）+ `?1000-1006h`
-    /// （全量鼠标上报）。嵌在 xterm.js 里有两层冲突：备用屏没有 scrollback、鼠标上报开着时
-    /// xterm 把滚轮原样转发给 claude 自己处理（实测卡顿/不响应，表现为「滚轮失灵」）；
-    /// meowo 的 backlog 只留 1MiB，全屏整屏重绘很快把启动时的模式切换序列挤出去，之后
-    /// 重开窗口/重对齐的回放让 xterm 退回主屏、claude 却仍按全屏画，于是出现两条滚动条。
-    /// claude 自己的提示原话：该变量 "forces [the classic renderer] any time"。经典渲染器
-    /// 下主屏 + 无鼠标模式，滚动完全归 xterm，与此前版本体验一致。
-    fn managed_pty_env(&self) -> &'static [(&'static str, &'static str)] {
-        &[("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1")]
-    }
     fn telemetry(&self) -> Option<&'static dyn TelemetryCap> {
         Some(&telemetry::TELEMETRY)
     }
@@ -662,14 +652,6 @@ mod tests {
     fn terminal_title_capabilities_cover_slash_command_sessions() {
         assert!(Claude.sets_terminal_tab_title());
         assert!(Claude.writes_tab_token());
-    }
-
-    /// 托管 PTY 必须关掉 claude 的备用屏渲染器（滚轮归 xterm、单滚动条），见方法注释。
-    #[test]
-    fn managed_pty_disables_alternate_screen() {
-        assert!(Claude
-            .managed_pty_env()
-            .contains(&("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1")));
     }
 
     fn probe_in(home: &std::path::Path) -> Option<crate::Installation> {

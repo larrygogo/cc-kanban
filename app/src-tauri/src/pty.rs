@@ -1212,13 +1212,6 @@ impl PtyBroker {
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         command.env("FORCE_COLOR", "1");
-        // agent 声明的「嵌入 xterm.js 时才需要」的变量（如关掉 claude 的备用屏渲染器）。
-        // 放在 env 参数之后：这是托管面的事实，不由调用方的 env 覆盖。
-        if let Some(agent) = meowo_agent::resolve(Some(provider)) {
-            for (key, value) in agent.managed_pty_env() {
-                command.env(key, value);
-            }
-        }
 
         let child = pair
             .slave

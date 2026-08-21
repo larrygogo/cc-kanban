@@ -88,14 +88,6 @@ pub trait AgentPlugin: Sync {
         false
     }
 
-    /// 只在 **meowo 托管 PTY**（对话窗口里的 xterm.js）拉起该 agent 时额外注入的环境变量。
-    /// 外部终端（用户自己的 wt/iTerm）不注入——那里的渲染由用户的终端负责，agent 怎么画
-    /// 都行。用途是关掉与 xterm.js 嵌入面冲突的 TUI 行为：例如 agent 切备用屏 + 开鼠标
-    /// 上报后，滚轮不再归 xterm 管，而 meowo 的快照回放又可能把这些模式丢掉，两边脱节。
-    fn managed_pty_env(&self) -> &'static [(&'static str, &'static str)] {
-        &[]
-    }
-
     /// 对话页输入框 `/` 前缀的补全候选。这些命令由该 agent 的 TUI 自己执行，meowo 只把文本
     /// 原样送进 PTY——所以**宁缺毋滥**：只列常用且跨版本稳定的。空 = 前端不提供补全。
     ///
