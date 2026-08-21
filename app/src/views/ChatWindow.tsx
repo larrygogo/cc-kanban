@@ -2439,6 +2439,9 @@ export function ChatWindow() {
     try { webview = getCurrentWebview(); } catch { return; }
     webview.onDragDropEvent((event) => {
       if (event.payload.type === "over") return;
+      // 终端页没有附件概念:既不亮「松开以添加附件」遮罩,也不把文件暗挂到对话页的
+      // composer 上(用户看不见,下次切回对话才发现多了附件)。经 viewRef 取新鲜值。
+      if (viewRef.current === "terminal") { setDragHover(false); return; }
       if (event.payload.type === "drop") {
         setDragHover(false);
         const paths = event.payload.paths ?? [];
