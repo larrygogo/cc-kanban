@@ -2431,6 +2431,8 @@ export function ChatWindow() {
   // webview 的原生 drop(DOM 拿不到 File),它的 drag-drop 事件反而直接带**源路径**,
   // 无需像粘贴那样先落临时文件。订阅一次(文案经 tRef 取新鲜值)。
   const [dragHover, setDragHover] = useState(false);
+  // 终端页的落点动作经 ref 取新鲜闭包(订阅只挂一次);赋值在 composerGated 等门卡算出之后。
+  const dropPathsToTerminalRef = useRef<(paths: string[]) => void>(() => {});
   useEffect(() => {
     let un: (() => void) | undefined;
     let cancelled = false;
@@ -2439,9 +2441,18 @@ export function ChatWindow() {
     try { webview = getCurrentWebview(); } catch { return; }
     webview.onDragDropEvent((event) => {
       if (event.payload.type === "over") return;
-      // 终端页没有附件概念:既不亮「松开以添加附件」遮罩,也不把文件暗挂到对话页的
-      // composer 上(用户看不见,下次切回对话才发现多了附件)。经 viewRef 取新鲜值。
-      if (viewRef.current === "terminal") { setDragHover(false); return; }
+      // 终端页没有附件概念:拖入文件按终端惯例把**路径**打进输入行(含空白的加引号、
+      // 多个以空格分隔),不把文件暗挂到对话页的 composer 上。遮罩文案随页面切换。
+      if (viewRef.current === "terminal") {
+        if (event.payload.type === "drop") {
+          setDragHover(false);
+          const paths = event.payload.paths ?? [];
+          if (paths.length > 0) dropPathsToTerminalRef.current(paths);
+          return;
+        }
+        setDragHover(event.payload.type === "enter");
+        return;
+      }
       if (event.payload.type === "drop") {
         setDragHover(false);
         const paths = event.payload.paths ?? [];
@@ -2498,6 +2509,14 @@ export function ChatWindow() {
   // 已被跨 provider 切换接替的会话：只读回看。禁发优先于其它门卡——「恢复会话」对它
   // 是错误动作（会让接续链分叉，store 层也会拒绝再次接替），唯一正确的出口是去链尾。
   const supersededTo = history?.supersededBy ?? null;
+  // 终端页拖入文件 → 路径写进托管 PTY。后台/外部占用/已结束/已被接替的会话没有可写的
+  // 终端,静默忽略(composer 同样被门卡锁着,此处不另起提示)。写失败走发送错误条,
+  // 不许「拖了没反应」。
+  dropPathsToTerminalRef.current = (paths) => {
+    if (!history || history.background || composerGated || supersededTo) return;
+    const text = paths.map((path) => (/\s/.test(path) ? `"${path}"` : path)).join(" ");
+    writeManagedTerminal(sessionId, text).catch((e) => setSendError(formatBackendError(e, t.locale)));
+  };
   // /clear 换代自动跟随：正开着的会话在眼前被同一 PTY 的新段接替（supersededBy 由空变有）
   // 时直接跳到新段——终端进程还是同一个，留在旧段只剩定格画面。冷打开旧段回看时首帧就带
   // supersededBy，不构成「由空变有」，不跳；门卡的「去链尾」仍是回看的出口。
@@ -2766,7 +2785,7 @@ export function ChatWindow() {
       {/* 拖拽落点遮罩:文件悬在窗口上时给「松开以添加附件」的明确反馈。 */}
       {dragHover && (
         <div className="chat-drop-overlay" aria-hidden="true">
-          <span>{t.chat.dropToAttach}</span>
+          <span>{view === "terminal" ? t.chat.dropToTerminal : t.chat.dropToAttach}</span>
         </div>
       )}
       {/* Windows/Linux：独立顶栏（拖拽区 + 标准 − □ × 控制组），会话标题分离到下方

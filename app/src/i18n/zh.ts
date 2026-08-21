@@ -445,6 +445,7 @@ export const zh = {
     cancelSelect: "取消多选",
     // 拖拽文件到对话窗的落点遮罩。
     dropToAttach: "松开以添加附件",
+    dropToTerminal: "松开以插入路径",
     sidebarLoading: "正在加载会话…",
     sidebarDirAll: "全部目录",
     sidebarShowIdle: (n: number) => `显示 ${n} 个未运行会话`,

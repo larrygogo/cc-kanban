@@ -23,6 +23,7 @@ const dataHandler = vi.hoisted(() => ({ current: null as ((data: string) => void
 const writeCallbacks = vi.hoisted(() => ({ manual: false, queue: [] as (() => void)[] }));
 // 终端选区：复制快捷键测试用（有选区的 Ctrl+C=复制不发 ^C，无选区照旧发）。
 const selection = vi.hoisted(() => ({ text: "" }));
+const terminalModes = vi.hoisted(() => ({ mouseTrackingMode: "none" as "none" | "x10" | "vt200" | "drag" | "any" }));
 // terminal.paste 的间谍（右键粘贴测试断言剪贴板文本进了 xterm 粘贴通路）。
 const pasteSpy = vi.hoisted(() => vi.fn());
 // terminal.scrollToBottom 的间谍（退出提示写入后必须滚底，否则上翻视口里提示在屏外）。
@@ -53,6 +54,8 @@ vi.mock("@xterm/xterm", () => ({
     onData = (handler: (data: string) => void) => { dataHandler.current = handler; return { dispose: vi.fn() }; };
     attachCustomKeyEventHandler = (handler: (event: KeyboardEvent) => boolean) => { keyHandler.current = handler; };
     hasSelection = () => selection.text.length > 0;
+    // TUI 的鼠标上报模式(?1000-1006h 经 xterm 解析后暴露);测试按需改成 "any"。
+    modes = terminalModes;
     getSelection = () => selection.text;
     clearSelection = () => { selection.text = ""; };
     // UnicodeGraphemesAddon 激活时会读写 unicode.activeVersion;哑实现只要可赋值。
@@ -571,6 +574,58 @@ describe("ManagedTerminal", () => {
     // 无选区:读后端剪贴板,文本进 xterm 的 paste 通路(bracketed paste + onData 下发)。
     fireEvent.contextMenu(host);
     await waitFor(() => expect(pasteSpy).toHaveBeenCalledWith("from-clipboard"));
+  });
+
+  /**
+   * claude 全屏渲染器开鼠标上报后,xterm 把右键转发给它、它自己粘贴剪贴板(实测)。
+   * Meowo 的右键惯例必须让位:无选区不再叠加粘贴;有选区仍复制,但 mousedown 在
+   * 捕获段拦在 xterm 之外——TUI 不知道有过右键就不会顺手粘贴(实拍「右键复制,同时
+   * 就粘贴进输入框」)。
+   */
+  it("TUI 开鼠标上报时:无选区右键不粘贴,有选区右键复制且按键不进 xterm", async () => {
+    Object.defineProperty(navigator, "platform", { value: "Win32", configurable: true });
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2 });
+      if (command === "clipboard_text") return Promise.resolve("from-clipboard");
+      return Promise.resolve();
+    });
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.assign(navigator, { clipboard: { writeText } });
+    pasteSpy.mockClear();
+    terminalModes.mouseTrackingMode = "any";
+    try {
+      render(<ManagedTerminal sessionId={163} status="running" />);
+      const host = document.querySelector(".managed-terminal-host")!;
+      // xterm 自己的监听挂在 host 的子元素上;用一个子元素代替,验证捕获段拦截。
+      const xtermEl = document.createElement("div");
+      host.appendChild(xtermEl);
+      const reachedXterm = vi.fn();
+      xtermEl.addEventListener("mousedown", reachedXterm);
+      xtermEl.addEventListener("mouseup", reachedXterm);
+      // 无选区:右键归 TUI,Meowo 不读剪贴板、不 paste。
+      selection.text = "";
+      fireEvent.mouseDown(xtermEl, { button: 2 });
+      fireEvent.mouseUp(xtermEl, { button: 2 });
+      fireEvent.contextMenu(host);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(pasteSpy).not.toHaveBeenCalled();
+      expect(invoke).not.toHaveBeenCalledWith("clipboard_text");
+      expect(reachedXterm).toHaveBeenCalledTimes(2);
+      reachedXterm.mockClear();
+      // 有选区:复制,且这次按下/抬起都不到 xterm(TUI 看不见右键,不会粘贴)。
+      selection.text = "picked";
+      fireEvent.mouseDown(xtermEl, { button: 2 });
+      fireEvent.mouseUp(xtermEl, { button: 2 });
+      fireEvent.contextMenu(host);
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith("picked"));
+      expect(reachedXterm).not.toHaveBeenCalled();
+      expect(selection.text).toBe("");
+      // 左键照常放行。
+      fireEvent.mouseDown(xtermEl, { button: 0 });
+      expect(reachedXterm).toHaveBeenCalledTimes(1);
+    } finally {
+      terminalModes.mouseTrackingMode = "none";
+    }
   });
 
   it("Ctrl+Enter / Shift+Enter 按插件声明的换行序列注入,不落成提交", async () => {

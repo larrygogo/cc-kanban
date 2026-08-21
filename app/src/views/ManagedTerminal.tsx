@@ -463,6 +463,28 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // **没有任何替代行为**——「右键复制没生效」的实拍反馈即源于此。guard 只拦默认菜单
     // 不拦传播,这里照常收到事件。粘贴读后端剪贴板(readText 在 WebView2 要权限弹窗,
     // arboard 零打扰),经 terminal.paste 走 bracketed paste 与 onData 既有下发通路。
+    // TUI 开了鼠标上报(claude 2.1.238 全屏渲染器:?1000-1006h)时,xterm 把每次按键原样
+    // 转发给它、自己不再处理——右键也在其中,而 claude 收到右键就**自己粘贴剪贴板**
+    // (pywinpty 实测:发一个 SGR 右键事件,剪贴板内容直接进输入框)。此时 Meowo 再按
+    // Windows 惯例粘贴一次就是双份;更糟的是「有选区右键=复制」的路径:Meowo 复制的同时
+    // claude 已经把(旧)剪贴板粘进去了——实拍「右键复制,同时就粘贴到输入框」。
+    // 约定:鼠标归 TUI 时,无选区的右键完全让给它(它有自己的右键语义);有选区的右键
+    // 仍是复制,但要在 mousedown 捕获段把这次按键拦在 xterm 之外,TUI 不知道有过右键,
+    // 就不会顺手粘贴。对应的 mouseup 一并拦掉,否则 xterm 会发一个没有按下的抬起事件。
+    const mouseOwnedByApp = () => (terminal.modes?.mouseTrackingMode ?? "none") !== "none";
+    let swallowRightUp = false;
+    const onMouseDown = (event: MouseEvent) => {
+      if (event.button !== 2 || !mouseOwnedByApp() || !terminal.hasSelection()) return;
+      event.stopPropagation();
+      swallowRightUp = true;
+    };
+    const onMouseUp = (event: MouseEvent) => {
+      if (event.button !== 2 || !swallowRightUp) return;
+      event.stopPropagation();
+      swallowRightUp = false;
+    };
+    host.addEventListener("mousedown", onMouseDown, { capture: true });
+    host.addEventListener("mouseup", onMouseUp, { capture: true });
     const onContextMenu = () => {
       // 右键=复制/粘贴,全平台生效。macOS 终端右键本是菜单语义,但生产构建的默认菜单
       // 已被 devtools-guard 整个封死——「有行为」好过「右键点下去毫无反应的黑洞」。
@@ -472,6 +494,8 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
         terminal.clearSelection();
         return;
       }
+      // 鼠标归 TUI:右键已由 xterm 转发给它,粘不粘由它决定(claude 会粘),Meowo 不叠加。
+      if (mouseOwnedByApp()) return;
       // 后台会话只读:粘贴无接收方,交给宿主把用户领到对话页(与打字同一动线)。
       if (backgroundRef.current) {
         onBackgroundInputRef.current?.();
@@ -1037,6 +1061,8 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       imeObserver.disconnect();
       host.removeEventListener("paste", pasteImageFallback);
       host.removeEventListener("contextmenu", onContextMenu);
+      host.removeEventListener("mousedown", onMouseDown, { capture: true });
+      host.removeEventListener("mouseup", onMouseUp, { capture: true });
       helperTextarea?.removeEventListener("compositionstart", startComposition);
       helperTextarea?.removeEventListener("compositionend", endComposition);
       input.dispose();

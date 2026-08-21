@@ -418,6 +418,7 @@ export const en: Dict = {
     archiveSelected: "Archive selected",
     cancelSelect: "Exit selection",
     dropToAttach: "Drop to attach",
+    dropToTerminal: "Drop to insert path",
     sidebarEmptySearch: "No matching sessions",
     sidebarLoading: "Loading sessions…",
     sidebarDirAll: "All folders",
