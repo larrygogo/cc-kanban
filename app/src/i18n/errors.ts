@@ -42,7 +42,7 @@ export const ENTRIES: ErrorEntry[] = [
   { m: "会话仍在外部终端运行", zh: "会话仍在外部终端运行", en: "The session is still running in an external terminal" },
   { m: "外部终端已在线，但没能带到前台，请手动切换", exact: true, zh: "外部终端已在线，但没能带到前台，请手动切换", en: "External terminal is online but couldn't be focused; switch manually" },
   { m: "打开外部同步终端失败", zh: "打开外部终端失败", en: "Couldn't open the external terminal" },
-  { m: "启动受支持的终端失败", zh: "无法启动受支持的终端", en: "Couldn't launch a supported terminal" },
+  { m: "打开外部终端失败", zh: "无法打开外部终端", en: "Couldn't open the external terminal" },
   { m: "同步会话失败", tail: true, zh: "同步会话失败", en: "Couldn't sync the session" },
   // tail 透传:前端 i18n 也会生成同前缀消息(t.chat.terminalStartExited,含退出码),
   // zh 必须原样保留尾部信息;英文界面下该消息本就是英文,不会命中此中文前缀。
