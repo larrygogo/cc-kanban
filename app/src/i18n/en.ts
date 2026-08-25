@@ -773,6 +773,7 @@ export const en: Dict = {
     laneSevenDay: "7-day quota",
     laneOpus: "Opus · 7 days",
     laneWeekly: "Weekly quota",
+    laneModelWeekly: (model) => `${model} · weekly`,
     laneBalance: "Balance",
   },
   updater: {

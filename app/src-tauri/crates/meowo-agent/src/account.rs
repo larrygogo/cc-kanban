@@ -19,6 +19,9 @@ pub enum UsageKind {
     SevenDay,
     Opus,
     Weekly,
+    /// 按模型限定的每周配额(claude usage API 的 `limits[]` 里 `weekly_scoped` 条目,
+    /// 如 Fable/Opus 专属周限)。模型名在 [`UsageLane::label`],不再为每个模型加枚举。
+    ModelWeekly,
     Balance,
     Other,
 }
@@ -30,6 +33,7 @@ impl UsageKind {
             Self::SevenDay => "seven_day",
             Self::Opus => "opus",
             Self::Weekly => "weekly",
+            Self::ModelWeekly => "model_weekly",
             Self::Balance => "balance",
             Self::Other => "other",
         }
@@ -43,6 +47,7 @@ impl UsageKind {
             "seven_day" => Self::SevenDay,
             "opus" => Self::Opus,
             "weekly" => Self::Weekly,
+            "model_weekly" => Self::ModelWeekly,
             "balance" => Self::Balance,
             _ => Self::Other,
         }
@@ -53,6 +58,7 @@ impl UsageKind {
         Self::SevenDay,
         Self::Opus,
         Self::Weekly,
+        Self::ModelWeekly,
         Self::Balance,
         Self::Other,
     ];
@@ -70,6 +76,10 @@ pub struct UsageLane {
     pub unit: Option<String>,
     /// 重置时间（ISO 8601）。
     pub resets_at: Option<String>,
+    /// 泳道的附加名字。目前只有 [`UsageKind::ModelWeekly`] 用:被限定的模型名
+    /// (API 的 `scope.model.display_name`,如 "Fable")。`default` 兼容旧缓存/旧 DTO。
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// 某 agent 的全部用量泳道。note 携带补充文字（如 extra_usage_enabled / 余额）。

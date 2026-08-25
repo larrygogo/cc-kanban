@@ -394,6 +394,7 @@ fn parse_usage_object(usage: &Value) -> Option<UsageLane> {
         limit: Some(limit),
         unit: Some("tokens".to_string()),
         resets_at,
+        label: None,
     })
 }
 
@@ -432,6 +433,7 @@ fn parse_limit_item(item: &Value) -> Option<UsageLane> {
         limit: Some(limit),
         unit: Some("tokens".to_string()),
         resets_at,
+        label: None,
     })
 }
 

@@ -63,6 +63,12 @@ export function UsageScreen({
   const usage = usageMap[selected];
   const fiveHourLane = usage?.lanes.find((l) => l.kind === "five_hour") ?? null;
   const sevenDayLane = usage?.lanes.find((l) => l.kind === "seven_day" || l.kind === "weekly") ?? null;
+  // 模型专属周限(claude 的 Fable/Opus 周配额)。它常比总量先见顶(实测 Fable 83% vs
+  // 总量 44%),是真正的约束项,不显示会误判还有余量。旧后端的 opus 泳道同槽展示。
+  const modelLane = usage?.lanes.find((l) => l.kind === "model_weekly") ?? usage?.lanes.find((l) => l.kind === "opus") ?? null;
+  const modelLabel = modelLane?.kind === "opus"
+    ? t.account.laneOpus
+    : modelLane?.label ? t.account.laneModelWeekly(modelLane.label) : t.account.laneWeekly;
 
   return (
     <div className="stk-uscreen" role="group" aria-label={t.account.quota}>
@@ -84,9 +90,10 @@ export function UsageScreen({
           );
         })}
       </div>
-      {/* 选中 provider 的 5h 和 7d/weekly 用量条 */}
+      {/* 选中 provider 的 5h、7d/weekly 与模型专属周限用量条 */}
       {fiveHourLane && <LaneRow lane={fiveHourLane} label={t.account.laneFiveHour} />}
       {sevenDayLane && <LaneRow lane={sevenDayLane} label={sevenDayLane.kind === "weekly" ? t.account.laneWeekly : t.account.laneSevenDay} />}
+      {modelLane && <LaneRow lane={modelLane} label={modelLabel} />}
     </div>
   );
 }

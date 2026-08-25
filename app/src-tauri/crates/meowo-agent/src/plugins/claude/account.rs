@@ -29,7 +29,21 @@ pub struct Usage {
     pub seven_day: Option<UsageWindow>,
     pub seven_day_opus: Option<UsageWindow>,
     pub seven_day_sonnet: Option<UsageWindow>,
+    /// 按模型限定的每周配额,来自新版 `limits[]` 数组的 `weekly_scoped` 条目(实测
+    /// 2026-08:顶层 `seven_day_opus` 等旧字段已为 null,Fable 专属周限只出现在这里)。
+    /// `default` 兼容旧缓存反序列化。
+    #[serde(default)]
+    pub model_weekly: Vec<ScopedWindow>,
     pub extra_usage_enabled: bool,
+}
+
+/// 带名字的用量窗口(`limits[]` 里 scope.model 限定的条目)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScopedWindow {
+    /// 被限定的模型名(`scope.model.display_name`,如 "Fable")。
+    pub label: String,
+    pub utilization: f64,
+    pub resets_at: String,
 }
 
 /// 套餐徽章的候选字段，按「针对本人」到「针对组织」排列，取首个有语义的。
@@ -135,11 +149,50 @@ pub fn parse_usage(v: &serde_json::Value) -> Usage {
         .and_then(|e| e.get("is_enabled"))
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
+    // 新版响应的 `limits[]`:模型专属周限(kind=weekly_scoped)只出现在这里。实测样本
+    // (2026-08,Fable 专属周限):{"kind":"weekly_scoped","group":"weekly","percent":83,
+    // "resets_at":"…","scope":{"model":{"id":null,"display_name":"Fable"}}}。
+    // 只收 scope.model 限定的条目;surface 限定或无 scope 的(session/weekly_all 已由
+    // 顶层 five_hour/seven_day 覆盖)不重复收。名字缺失(display_name 与 id 都空)的
+    // 条目丢弃——没有名字的模型配额没法展示。
+    let model_weekly = v
+        .get("limits")
+        .and_then(|l| l.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|e| e.get("kind").and_then(|k| k.as_str()) == Some("weekly_scoped"))
+                .filter_map(|e| {
+                    let model = e.get("scope")?.get("model")?;
+                    let label = model
+                        .get("display_name")
+                        .and_then(|x| x.as_str())
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            model.get("id").and_then(|x| x.as_str()).filter(|s| !s.is_empty())
+                        })?
+                        .to_string();
+                    let utilization = e.get("percent").and_then(|x| x.as_f64())?;
+                    let resets_at = e
+                        .get("resets_at")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some(ScopedWindow {
+                        label,
+                        utilization,
+                        resets_at,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Usage {
         five_hour: win(v, "five_hour"),
         seven_day: win(v, "seven_day"),
         seven_day_opus: win(v, "seven_day_opus"),
         seven_day_sonnet: win(v, "seven_day_sonnet"),
+        model_weekly,
         extra_usage_enabled,
     }
 }
@@ -379,8 +432,10 @@ fn fetch_usage_live(inst: &Installation, ports: &Ports) -> Result<Usage, String>
 }
 
 /// 将旧 Usage 映射为通用 ProviderUsage 泳道格式。
-/// five_hour→FiveHour, seven_day→SevenDay, seven_day_opus→Opus（utilization→used_pct,
-/// unit "percent", resets_at 原样），extra_usage_enabled→note。seven_day_sonnet 忽略（保持现视觉）。
+/// five_hour→FiveHour, seven_day→SevenDay, model_weekly→ModelWeekly(带模型名 label),
+/// seven_day_opus→Opus 仅在没有 model_weekly 时兜底(旧响应;两边同现会重复表意),
+/// (utilization→used_pct, unit "percent", resets_at 原样),extra_usage_enabled→note。
+/// seven_day_sonnet 忽略（保持现视觉）。
 pub fn map_to_provider_usage(u: &Usage) -> ProviderUsage {
     let mut lanes: Vec<UsageLane> = Vec::new();
 
@@ -392,6 +447,7 @@ pub fn map_to_provider_usage(u: &Usage) -> ProviderUsage {
             limit: None,
             unit: Some("percent".to_string()),
             resets_at: non_empty_str(&w.resets_at),
+            label: None,
         });
     }
     if let Some(w) = &u.seven_day {
@@ -402,17 +458,32 @@ pub fn map_to_provider_usage(u: &Usage) -> ProviderUsage {
             limit: None,
             unit: Some("percent".to_string()),
             resets_at: non_empty_str(&w.resets_at),
+            label: None,
         });
     }
-    if let Some(w) = &u.seven_day_opus {
+    for w in &u.model_weekly {
         lanes.push(UsageLane {
-            kind: UsageKind::Opus,
+            kind: UsageKind::ModelWeekly,
             used_pct: Some(w.utilization),
             used: None,
             limit: None,
             unit: Some("percent".to_string()),
             resets_at: non_empty_str(&w.resets_at),
+            label: Some(w.label.clone()),
         });
+    }
+    if u.model_weekly.is_empty() {
+        if let Some(w) = &u.seven_day_opus {
+            lanes.push(UsageLane {
+                kind: UsageKind::Opus,
+                used_pct: Some(w.utilization),
+                used: None,
+                limit: None,
+                unit: Some("percent".to_string()),
+                resets_at: non_empty_str(&w.resets_at),
+                label: None,
+            });
+        }
     }
     // seven_day_sonnet 忽略（保持现视觉）
 
@@ -702,10 +773,11 @@ mod tests {
                 utilization: 2.0,
                 resets_at: "x".into(),
             }),
+            model_weekly: Vec::new(),
             extra_usage_enabled: true,
         };
         let pu = map_to_provider_usage(&u);
-        // 应有 3 条泳道（sonnet 忽略）。
+        // 应有 3 条泳道（sonnet 忽略；无 model_weekly 时 seven_day_opus 兜底成 Opus 泳道）。
         assert_eq!(pu.lanes.len(), 3);
         assert_eq!(pu.lanes[0].kind, UsageKind::FiveHour);
         assert_eq!(pu.lanes[0].used_pct, Some(13.0));
@@ -718,6 +790,61 @@ mod tests {
         assert_eq!(pu.lanes[2].kind, UsageKind::Opus);
         // extra_usage_enabled → note。
         assert_eq!(pu.note.as_deref(), Some("extra_usage_enabled"));
+    }
+
+    #[test]
+    fn parse_usage_reads_weekly_scoped_limits() {
+        // 真机响应样本(2026-08):Fable 专属周限只在 limits[],顶层 seven_day_* 全 null。
+        let v = json!({
+            "five_hour": {"utilization": 35.0, "resets_at": "2026-08-25T19:09:59+08:00"},
+            "seven_day": {"utilization": 44.0, "resets_at": "2026-08-27T02:59:59+08:00"},
+            "seven_day_opus": null,
+            "limits": [
+                {"kind": "session", "group": "session", "percent": 35, "resets_at": "2026-08-25T19:09:59+08:00", "scope": null},
+                {"kind": "weekly_all", "group": "weekly", "percent": 44, "resets_at": "2026-08-27T02:59:59+08:00", "scope": null},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 83, "severity": "warning",
+                 "resets_at": "2026-08-27T02:59:59+08:00",
+                 "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null}}
+            ]
+        });
+        let u = parse_usage(&v);
+        assert_eq!(u.model_weekly.len(), 1);
+        assert_eq!(u.model_weekly[0].label, "Fable");
+        assert_eq!(u.model_weekly[0].utilization, 83.0);
+        assert_eq!(u.model_weekly[0].resets_at, "2026-08-27T02:59:59+08:00");
+        // 无 scope.model 的条目(session/weekly_all)不收;limits 缺失整体退化为空。
+        assert!(parse_usage(&json!({})).model_weekly.is_empty());
+        // display_name 缺失回退 id;两者皆空则丢弃。
+        let v2 = json!({"limits": [
+            {"kind": "weekly_scoped", "percent": 10.0, "scope": {"model": {"id": "claude-opus-5", "display_name": null}}},
+            {"kind": "weekly_scoped", "percent": 20.0, "scope": {"model": {"id": null, "display_name": null}}}
+        ]});
+        let u2 = parse_usage(&v2);
+        assert_eq!(u2.model_weekly.len(), 1);
+        assert_eq!(u2.model_weekly[0].label, "claude-opus-5");
+        assert_eq!(u2.model_weekly[0].resets_at, "");
+    }
+
+    #[test]
+    fn map_to_provider_usage_prefers_model_weekly_over_legacy_opus() {
+        let u = Usage {
+            seven_day_opus: Some(UsageWindow {
+                utilization: 30.0,
+                resets_at: "2026-06-11T12:00:00Z".into(),
+            }),
+            model_weekly: vec![ScopedWindow {
+                label: "Fable".into(),
+                utilization: 83.0,
+                resets_at: "2026-08-27T02:59:59+08:00".into(),
+            }],
+            ..Default::default()
+        };
+        let pu = map_to_provider_usage(&u);
+        // 同现时只出 model_weekly(旧 Opus 泳道与之重复表意)。
+        assert_eq!(pu.lanes.len(), 1);
+        assert_eq!(pu.lanes[0].kind, UsageKind::ModelWeekly);
+        assert_eq!(pu.lanes[0].label.as_deref(), Some("Fable"));
+        assert_eq!(pu.lanes[0].used_pct, Some(83.0));
     }
 
     #[test]

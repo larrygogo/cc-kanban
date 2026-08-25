@@ -135,6 +135,7 @@ pub fn parse_codex_usage(payload: &Value) -> ProviderUsage {
             limit: None,
             unit: Some("percent".to_string()),
             resets_at,
+            label: None,
         })
     };
 

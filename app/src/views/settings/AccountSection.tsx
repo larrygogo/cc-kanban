@@ -92,14 +92,16 @@ function fmtResetIn(iso: string, t: Dict): string {
   return t.account.resetOnDate(date, clock);
 }
 
-function laneLabel(kind: string, t: Dict): string {
-  switch (kind) {
+function laneLabel(lane: UsageLane, t: Dict): string {
+  switch (lane.kind) {
     case "five_hour": return t.account.laneFiveHour;
     case "seven_day": return t.account.laneSevenDay;
     case "opus": return t.account.laneOpus;
     case "weekly": return t.account.laneWeekly;
+    // 模型专属周限(claude 的 Fable/Opus 周配额):模型名由 API 下发,缺失时退回通用周配额文案。
+    case "model_weekly": return lane.label ? t.account.laneModelWeekly(lane.label) : t.account.laneWeekly;
     case "balance": return t.account.laneBalance;
-    default: return kind;
+    default: return lane.kind;
   }
 }
 
@@ -646,7 +648,7 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
           {usage ? (
             <>
               {usage.lanes.map((lane, i) => (
-                <UsageBar key={`${lane.kind}-${i}`} lane={lane} label={laneLabel(lane.kind, t)} />
+                <UsageBar key={`${lane.kind}-${i}`} lane={lane} label={laneLabel(lane, t)} />
               ))}
               {usage.note && <div className="usage-extra">{renderNote(usage.note, t)}</div>}
               {err === "error" && <div className="usage-stale">{t.account.refreshFailed}</div>}

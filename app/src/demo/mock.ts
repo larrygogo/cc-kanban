@@ -51,11 +51,12 @@ export function notify(): void {
   subs.forEach((f) => f());
 }
 
-function mkUsage(fiveH: number, sevenD: number): ProviderUsage {
+function mkUsage(fiveH: number, sevenD: number, model?: { label: string; pct: number }): ProviderUsage {
   return {
     lanes: [
       { kind: "five_hour", used_pct: fiveH, used: null, limit: null, unit: null, resets_at: "2026-06-18T20:00:00Z" },
       { kind: "seven_day", used_pct: sevenD, used: null, limit: null, unit: null, resets_at: "2026-06-24T08:00:00Z" },
+      ...(model ? [{ kind: "model_weekly" as const, used_pct: model.pct, used: null, limit: null, unit: null, resets_at: "2026-06-24T08:00:00Z", label: model.label }] : []),
     ],
     note: null,
   };
@@ -121,7 +122,7 @@ export function installMocks(): void {
       }
       case "refresh_usage": {
         const a = args as { provider: string };
-        if (a.provider === "claude") return mkUsage(62, 38);
+        if (a.provider === "claude") return mkUsage(62, 38, { label: "Fable", pct: 71 });
         if (a.provider === "codex") return mkUsage(45, 22);
         return { lanes: [], note: null };
       }

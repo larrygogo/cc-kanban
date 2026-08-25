@@ -798,7 +798,7 @@ export function todoProgress(todos: Todo[]): { done: number; total: number; perc
   return { done, total, percent };
 }
 
-export type UsageKind = "five_hour" | "seven_day" | "opus" | "weekly" | "balance" | "other";
+export type UsageKind = "five_hour" | "seven_day" | "opus" | "weekly" | "model_weekly" | "balance" | "other";
 export type UsageLane = {
   kind: UsageKind;
   used_pct: number | null;
@@ -806,6 +806,8 @@ export type UsageLane = {
   limit: number | null;
   unit: string | null;
   resets_at: string | null;
+  /** 泳道附加名。目前只有 model_weekly 用:被限定的模型名(如 "Fable")。可选兼容旧后端。 */
+  label?: string | null;
 };
 export type ProviderUsage = { lanes: UsageLane[]; note: string | null };
 export type Account = {

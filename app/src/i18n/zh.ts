@@ -819,6 +819,8 @@ export const zh = {
     laneSevenDay: "7 天配额",
     laneOpus: "Opus · 7 天",
     laneWeekly: "每周配额",
+    // 模型专属周限(Fable/Opus 等),模型名由 API 下发。
+    laneModelWeekly: (model: string) => `${model} · 每周`,
     laneBalance: "余额",
   },
   updater: {
