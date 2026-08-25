@@ -132,6 +132,16 @@ export function isMouseMotionReport(data: string): boolean {
   return /^\x1b\[<(?:35|39|43|47|51|55|59|63);\d+;\d+M$/.test(data);
 }
 
+/// 一段 onData 是否是 Ctrl+左键的点击上报(SGR 按下 `CSI < 16 ; x ; y M` / 抬起 `…m`,
+/// Cb = 左键 0 + CTRL 修饰 16)。宿主把 Ctrl+点击定义为「打开链接」(openTerminalLink),
+/// 但鼠标归 TUI 时 xterm 仍照常上报这次按击——claude 全屏渲染器识别到点击落在链接上
+/// 会**自己再开一次**,一次 Ctrl+点击弹出两个浏览器窗口(实拍)。宿主语义优先:这对
+/// 按下/抬起上报一律不下发,TUI 视角里这次点击从未发生。macOS 的 Cmd+点击 xterm 根本
+/// 不编码 meta 位(上报形同普通点击),无从区分,不在此列。
+export function isCtrlLeftClickReport(data: string): boolean {
+  return /^\x1b\[<16;\d+;\d+[Mm]$/.test(data);
+}
+
 export function stripTerminalReplies(data: string): string {
   // DECRPM($y)的 '?' 必须可选:xterm 对 ANSI 模式查询(CSI Ps $ p)的应答不带 '?'
   // (如 \x1b[4;2$y),只匹配 DEC 私有形态会漏放。CSI-t 是窗口尺寸报告(CSI 18 t 等,
@@ -454,6 +464,18 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       }
       return true;
     });
+    // Shift+滚轮 = 本地滚动旁路(xterm(1) 惯例:Shift 越过鼠标上报)。TUI 持有鼠标时普通
+    // 滚轮整个交给它(既定方向:尊重 claude 配置),但 TUI 不理滚轮/正忙/假死时用户就
+    // 彻底翻不了本地 scrollback。xterm 对 shift+wheel 本来就是 no-op(consumeWheelEvent
+    // 见 shift 直接返回 0,事件被吞但什么都不做),征用零损失。deltaY 常见像素制
+    // (Chromium 一格约 100),按 ~40px 折一行;行制(deltaMode=1)数值小,靠下限保底。
+    terminal.attachCustomWheelEventHandler((event) => {
+      if (!event.shiftKey || event.deltaY === 0) return true;
+      event.preventDefault();
+      const lines = Math.max(1, Math.round(Math.abs(event.deltaY) / 40));
+      terminal.scrollLines(event.deltaY > 0 ? lines : -lines);
+      return false;
+    });
     // 上面的放行有个盲区：剪贴板是**图片**时 paste 事件没有文本数据，xterm 的 paste 监听
     // 不产生任何输入，^V 也早被拦下——claude 的原生贴图（^V 让 TUI 自己读系统剪贴板出
     // [Image #N]）在终端页整条断掉。兜底：无文本而有文件（位图）的 paste，补发 ^V 给 CLI。
@@ -598,6 +620,9 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       if (payload.includes("\r")) {
         onUserSubmitRef.current?.();
       }
+      // Ctrl+点击已由宿主消费(打开链接),上报不下发,否则 TUI 对同一链接再开一次
+      // (见 isCtrlLeftClickReport)。
+      if (isCtrlLeftClickReport(payload)) return;
       // 鼠标移动上报节流(见 isMouseMotionReport):积压里只留最新一条,每 16ms 至多
       // 一趟 IPC。其余输入(按键/粘贴/应答)不等——先把积压的移动冲出去保证顺序,再
       // 即时下发,按键延迟为零。
@@ -840,6 +865,11 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       // 进程没了就没有下一帧可等：必须离开初始化态，把退出结果交给遮罩。
       setInitialized(true);
       setExitCode(payload.code);
+      // 退出画面保留可翻看,但鼠标上报模式若还开着(全屏 TUI 崩溃/被终止时来不及收),
+      // xterm 会继续把滚轮/点击转发给早已不存在的进程——滚轮被吞、选区被禁,画面像
+      // 「卡死」一样完全不可滚动(实拍「偶尔无法滚动」的主案)。本地收回全部鼠标模式
+      // (只写进 xterm,不涉 PTY);备用屏 1049 不动——最后一帧正是用户要看的内容。
+      terminal.write(MOUSE_MODES_OFF);
       // 写完滚底：视口若停在上翻位置，退出提示行（和叠在其上的接管卡片语境）都在屏外。
       terminal.write(`\r\n\x1b[90m[Meowo: process exited${payload.code == null ? "" : ` (${payload.code})`}]\x1b[0m\r\n`, () => terminal.scrollToBottom());
     };
@@ -852,6 +882,9 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // `?25h`/`?1049l`,回放会照常盖回来,不误伤。
     const replayBaseline = (modes: number[] | undefined) =>
       "\x1b[?25l" + (modes ?? []).map((mode) => `\x1b[?${mode}h`).join("");
+    // 鼠标上报全家(1000-1015)的关闭序列,退出态收回滚轮/选区用(见 applyExit 与
+    // inspectSnapshot 的 exited 分支)。幂等,重复写无副作用。
+    const MOUSE_MODES_OFF = "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1005l\x1b[?1015l";
     // 首帧传 0 拿全量（要完整回放历史），补查轮询带 nextOffset 只取增量。
     // writeOutput 本来就按 startOffset 做区间裁剪，增量返回天然兼容。
     const inspectSnapshot = () => managedTerminalSnapshot(sessionId, hasWrittenOutput ? nextOffset : 0).then((snapshot) => {
@@ -925,6 +958,10 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
           replayingHistory = replayingHistory && hasWrittenOutput;
         }
       }
+      // 重开窗口看已退出的会话:回放基线把死进程遗留的鼠标模式原样补写回来(bitmap 记
+      // 的是死亡瞬间的真实状态,崩溃/被终止时模式来不及收),不收回的话滚轮/选区在这具
+      // 尸体上永远失灵。write 按入队顺序执行,排在回放数据之后即可盖过基线。
+      if (snapshot.exited) terminal.write(MOUSE_MODES_OFF);
       // data 是从 startOffset 起的增量，兜底算末尾要从 startOffset 加起，
       // 直接拿长度当绝对末尾会把偏移算小，之后的事件会被重复写一遍。
       const start = Number.isFinite(snapshot.startOffset) ? snapshot.startOffset : 0;

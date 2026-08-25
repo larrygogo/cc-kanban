@@ -28,6 +28,9 @@ const terminalModes = vi.hoisted(() => ({ mouseTrackingMode: "none" as "none" | 
 const pasteSpy = vi.hoisted(() => vi.fn());
 // terminal.scrollToBottom 的间谍（退出提示写入后必须滚底，否则上翻视口里提示在屏外）。
 const scrollToBottomSpy = vi.hoisted(() => vi.fn());
+// Shift+滚轮旁路：自定义 wheel 处理器与 scrollLines 的间谍。
+const wheelHandler = vi.hoisted(() => ({ current: null as ((event: WheelEvent) => boolean) | null }));
+const scrollLinesSpy = vi.hoisted(() => vi.fn());
 // terminal.resize 的间谍（隐藏态网格对齐：快照带的 PTY 尺寸要直接钉到网格上）。
 const resizeGridSpy = vi.hoisted(() => vi.fn());
 vi.mock("@xterm/addon-web-links", () => ({
@@ -53,6 +56,8 @@ vi.mock("@xterm/xterm", () => ({
     loadAddon = vi.fn();
     onData = (handler: (data: string) => void) => { dataHandler.current = handler; return { dispose: vi.fn() }; };
     attachCustomKeyEventHandler = (handler: (event: KeyboardEvent) => boolean) => { keyHandler.current = handler; };
+    attachCustomWheelEventHandler = (handler: (event: WheelEvent) => boolean) => { wheelHandler.current = handler; };
+    scrollLines = (amount: number) => scrollLinesSpy(amount);
     hasSelection = () => selection.text.length > 0;
     // TUI 的鼠标上报模式(?1000-1006h 经 xterm 解析后暴露);测试按需改成 "any"。
     modes = terminalModes;
@@ -87,7 +92,7 @@ vi.mock("@xterm/addon-unicode-graphemes", () => ({ UnicodeGraphemesAddon: class 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ confirm: vi.fn(), open: vi.fn() }));
 const confirmAnswer = vi.hoisted(() => ({ ok: true }));
 
-import { findFakeCaret, isMouseMotionReport, ManagedTerminal, STREAM_STALL_MS, stripTerminalReplies, terminalStreamStalled } from "./ManagedTerminal";
+import { findFakeCaret, isCtrlLeftClickReport, isMouseMotionReport, ManagedTerminal, STREAM_STALL_MS, stripTerminalReplies, terminalStreamStalled } from "./ManagedTerminal";
 
 const noPty = { sessionId: 163, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null, cols: 0, rows: 0, modes: [] as number[] };
 
@@ -105,6 +110,8 @@ describe("ManagedTerminal", () => {
     selection.text = "";
     scrollToBottomSpy.mockReset();
     resizeGridSpy.mockReset();
+    wheelHandler.current = null;
+    scrollLinesSpy.mockReset();
     searchFindNext.mockReset().mockReturnValue(true);
     searchFindPrevious.mockReset().mockReturnValue(true);
     global.ResizeObserver = class {
@@ -213,6 +220,77 @@ describe("ManagedTerminal", () => {
     expect(handler).toBeTruthy();
     handler.activate(click({ metaKey: true }), "https://example.com/b");
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_link", { url: "https://example.com/b" }));
+  });
+
+  it("Ctrl+左键的鼠标上报不下发 PTY：宿主已开链接，TUI 再收到点击会对同一链接开第二次", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(noPty);
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(dataHandler.current).toBeTruthy());
+    // Ctrl+左键按下/抬起(Cb=16)整对吞掉。
+    dataHandler.current!("\x1b[<16;5;6M");
+    dataHandler.current!("\x1b[<16;5;6m");
+    expect(invoke.mock.calls.some(([command]) => command === "write_managed_terminal")).toBe(false);
+    // 普通左键(Cb=0)照常转发——TUI 自己的点击语义不受牵连。
+    dataHandler.current!("\x1b[<0;5;6M");
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 163, data: "\x1b[<0;5;6M" }));
+    // 判别式本体:滚轮(64+16=80)与右键(2+16=18)带 Ctrl 都不在此列。
+    expect(isCtrlLeftClickReport("\x1b[<16;1;1M")).toBe(true);
+    expect(isCtrlLeftClickReport("\x1b[<16;1;1m")).toBe(true);
+    expect(isCtrlLeftClickReport("\x1b[<80;1;1M")).toBe(false);
+    expect(isCtrlLeftClickReport("\x1b[<18;1;1M")).toBe(false);
+    expect(isCtrlLeftClickReport("\x1b[<0;1;1M")).toBe(false);
+  });
+
+  it("Shift+滚轮走本地滚动旁路，普通滚轮交还 xterm", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(noPty);
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(wheelHandler.current).toBeTruthy());
+    const wheel = (init: Partial<WheelEvent>) => ({ preventDefault: vi.fn(), ...init }) as unknown as WheelEvent;
+    // 普通滚轮:返回 true 交还 xterm 默认路径(视口滚动或鼠标上报,按模式定)。
+    expect(wheelHandler.current!(wheel({ deltaY: 100 }))).toBe(true);
+    expect(scrollLinesSpy).not.toHaveBeenCalled();
+    // Shift+滚轮:本地滚动,返回 false 让 xterm 完全不处理(不上报 TUI)。
+    expect(wheelHandler.current!(wheel({ shiftKey: true, deltaY: 100 }))).toBe(false);
+    expect(scrollLinesSpy).toHaveBeenCalledWith(3);
+    expect(wheelHandler.current!(wheel({ shiftKey: true, deltaY: -100 }))).toBe(false);
+    expect(scrollLinesSpy).toHaveBeenCalledWith(-3);
+    // 行制 deltaMode 的小数值靠下限保底,至少滚一行。
+    expect(wheelHandler.current!(wheel({ shiftKey: true, deltaY: 3 }))).toBe(false);
+    expect(scrollLinesSpy).toHaveBeenCalledWith(1);
+  });
+
+  it("退出即收回鼠标上报模式：崩溃时模式来不及关，滚轮/选区在尸体上永远失灵", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2 });
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(eventHandlers.get("pty-exit")).toBeTruthy());
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    eventHandlers.get("pty-exit")!({ payload: { sessionId: 163, code: 1 } });
+    await waitFor(() => expect(write.mock.calls.some(([data]) => typeof data === "string" && data.includes("\x1b[?1003l"))).toBe(true));
+    // 重开窗口回放已退出会话:基线补写的鼠标模式同样要被收回(写序在回放数据之后)。
+    cleanup();
+    write.mockReset();
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve({ ...noPty, exited: true, exitCode: 1, data: btoa("tail"), startOffset: 5000, endOffset: 5004, modes: [1049, 1003, 1006] });
+      }
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(write.mock.calls.some(([data]) => typeof data === "string" && data.includes("\x1b[?1003l"))).toBe(true));
+    const calls = write.mock.calls.map(([data]) => data).filter((data): data is string => typeof data === "string");
+    const baselineAt = calls.findIndex((data) => data.includes("\x1b[?1003h"));
+    const offAt = calls.findIndex((data) => data.includes("\x1b[?1003l"));
+    expect(baselineAt).toBeGreaterThanOrEqual(0);
+    expect(offAt).toBeGreaterThan(baselineAt);
   });
 
   it("findFakeCaret：孤立单格反显是假光标，连排反显与多义画面不误认", () => {
