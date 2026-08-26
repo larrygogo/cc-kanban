@@ -109,6 +109,15 @@ fn tool_summary(name: &str, input: Option<&serde_json::Value>) -> String {
             return compact_json(Some(&slim), 800);
         }
     }
+    // Skill 调用摘要 = 用户敲的那行命令(`/code-review 1692 高强度`)。整包 JSON 兜底
+    // (`{"skill":"code-review","args":"…"}`)对用户没有意义;而 forked skill 的委派本体
+    // **没有** subagent 信息(见 [`forked_skill_outcome`]),前端的子任务行就靠这个摘要
+    // 当标题。刻意与侧车 meta 的 `description` 同形——[`locate_forked`] 拿它做外键。
+    if name == "Skill" {
+        if let Some(skill) = input.and_then(|v| v.get("skill")).and_then(|v| v.as_str()) {
+            return skill_invocation_desc(skill, input.and_then(|v| v.get("args")));
+        }
+    }
     let key = match name {
         "Bash" => "command",
         "WebSearch" => "query",
@@ -126,6 +135,18 @@ fn tool_summary(name: &str, input: Option<&serde_json::Value>) -> String {
         }
     }
     compact_json(input, 800)
+}
+
+/// Skill 调用的展示形态:`/<skill> <args>`(args 为空则只有 `/<skill>`)。
+///
+/// 这个串同时是 forked skill 的**外键**:侧车 meta 的 `description` 恰好是同一形态
+/// (实测 `{"description":"/code-review 1692 高强度","name":"code-review","spawnDepth":1}`),
+/// fork 出的顶层 agent 又偏偏不带 `toolUseId`——没有别的东西能把它连回主链那条 Skill 调用。
+fn skill_invocation_desc(skill: &str, args: Option<&serde_json::Value>) -> String {
+    match args.and_then(|v| v.as_str()).map(str::trim) {
+        Some(args) if !args.is_empty() => format!("/{skill} {args}"),
+        _ => format!("/{skill}"),
+    }
 }
 
 // 排队插话里内嵌图片的落盘上限与粘贴附件共用同一份（fsutil 单点定义）——
@@ -1164,7 +1185,10 @@ impl SubagentSpec for ClaudeSubagents {
     }
 
     fn locate_streams(&self, main_transcript: &Path, tool_use_id: &str) -> Vec<SubagentStream> {
+        // 常规委派靠 meta 的 toolUseId 直连;连不上再试 forked skill(那条路没有外键,
+        // 得回主链捞出 `/<skill> <args>` 去对 meta 的 description,见 locate_forked)。
         Self::locate_one(main_transcript, tool_use_id)
+            .or_else(|| Self::locate_forked(main_transcript, tool_use_id))
             .map(|path| {
                 vec![SubagentStream {
                     label: None,
@@ -1190,6 +1214,11 @@ impl SubagentSpec for ClaudeSubagents {
     ///    7 次委派 4 次只有启动回执),只认通知会让这些子任务永远显示「运行中」。TaskOutput
     ///    的回执挂在它自己的调用上,靠 `task_id`(= 启动回执里的 `agentId`)归回原委派。
     fn detect_result(&self, output: &str) -> Option<SubagentOutcome> {
+        // forked skill(`/code-review` 等):委派本体是条 Skill 调用,fork 与否在调用参数里
+        // 完全看不出来,只有回执写着 `(forked execution)`——它是这条链路唯一的委派证据。
+        if let Some(outcome) = forked_skill_outcome(output) {
+            return Some(outcome);
+        }
         if is_launch_receipt(output) {
             return Some(SubagentOutcome {
                 running: 1,
@@ -1232,6 +1261,47 @@ fn is_launch_receipt(text: &str) -> bool {
     text.trim_start().starts_with("Async agent launched")
 }
 
+/// forked skill 的回执 → 结局统计。实测三种首行(CC 2.1.246):
+///
+/// ```text
+/// Skill "code-review" launched (forked execution, running in the background).
+/// Skill "code-review" completed (forked execution).
+/// ```
+///
+/// 为什么这条回执值钱:`/code-review` 这类 skill 是 **fork 出去跑**的,主链上只有一条
+/// `Skill` 工具调用、**没有** `Agent` 委派,侧车 meta 也不带 `toolUseId`——若不认这条回执,
+/// 整场审查的十几个 agent 在 GUI 里一个都看不见(实拍:进度面板全空)。
+///
+/// 与 [`is_launch_receipt`] 同一条纪律:**行首锚定,禁 contains**。排查这套机制的会话里
+/// (比如此刻)Read/Grep 源码的工具结果会原样引用上面这几句,contains 会把它们记成幽灵
+/// 委派,而幽灵永远等不到结局——会话从此恒挂「运行中」。真回执以这句话开头。
+fn forked_skill_outcome(output: &str) -> Option<SubagentOutcome> {
+    let head = output.trim_start().lines().next()?;
+    if !head.starts_with("Skill \"") || !head.contains("(forked execution") {
+        return None;
+    }
+    // 引号后的动词才是结局。用 `" <verb> (forked` 整体匹配,避免 skill 名字里恰好含
+    // "completed" 之类的词把状态带偏。
+    let (running, completed, failed) = if head.contains("\" launched (forked execution") {
+        (1, 0, 0)
+    } else if head.contains("\" completed (forked execution") {
+        (0, 1, 0)
+    } else if head.contains("\" failed (forked execution") {
+        (0, 0, 1)
+    } else {
+        // 没见过的动词:不猜。宁可这条委派退回「无结局统计」(前端按未回执=在跑处理),
+        // 也不谎报成完成。
+        return None;
+    };
+    Some(SubagentOutcome {
+        running,
+        completed,
+        failed,
+        // forked skill 的回执不带任务 id;委派靠 tool_use_id 直连,不需要 task_id 路由。
+        task_id: None,
+    })
+}
+
 /// 从启动回执正文抠任务 id:`agentId: a9b726e3a088bafea (internal ID …)`。
 /// 手写扫描,取 `agentId: ` 后的连续字母数字;形态变了返回 None,徽标退回纯 running。
 fn launch_agent_id(output: &str) -> Option<String> {
@@ -1267,6 +1337,107 @@ impl ClaudeSubagents {
             return stream.is_file().then_some(stream);
         }
         None
+    }
+
+    /// forked skill 的侧车定位。
+    ///
+    /// fork 出的顶层 agent 的 meta **没有 `toolUseId`**（实测 CC 2.1.246：
+    /// `{"agentType":"general-purpose","description":"/code-review 1692 高强度",
+    /// "name":"code-review","spawnDepth":1}`），[`Self::locate_one`] 那条外键路走不通。
+    /// 唯一可用的关联是 `description` —— 它与主链那条 Skill 调用的 `/<skill> <args>`
+    /// 同形（见 [`skill_invocation_desc`]）。
+    ///
+    /// 同一会话可能把**同一条命令**跑好几次（实拍：`/code-review 1692 高强度` 两次），
+    /// 描述就不再唯一。故按**序号**配对：主链里这是第 n 次同款调用，就取第 n 个同款侧车。
+    /// 侧车的先后以 `meta.json` 的修改时间为准——它在 spawn 时写一次就不再动
+    /// （实测 meta 11:30:20 而 jsonl 仍在 11:32 增长），是稳定的出生时刻。
+    fn locate_forked(main_transcript: &Path, tool_use_id: &str) -> Option<PathBuf> {
+        let dir = Self::stream_dir(main_transcript)?;
+        let (desc, ordinal) = Self::skill_call_key(main_transcript, tool_use_id)?;
+        let mut matches: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+        for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+            let path = entry.path();
+            let Some(stem) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".meta.json"))
+            else {
+                continue;
+            };
+            let Ok(meta) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta) else {
+                continue;
+            };
+            // 只认顶层 fork：带 toolUseId 的是常规委派（locate_one 的地盘），
+            // spawnDepth > 1 的是 fork 内部再派的孙子——它们**有** toolUseId，
+            // 指向 fork 自己那条流里的调用，展开时照常走 locate_one，不该被这里截胡。
+            if meta.get("toolUseId").is_some() {
+                continue;
+            }
+            if meta.get("description").and_then(|v| v.as_str()) != Some(desc.as_str()) {
+                continue;
+            }
+            let stream = dir.join(format!("{stem}.jsonl"));
+            if !stream.is_file() {
+                continue;
+            }
+            let born = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            matches.push((born, stream));
+        }
+        matches.sort_by_key(|(born, _)| *born);
+        matches.into_iter().nth(ordinal).map(|(_, path)| path)
+    }
+
+    /// 回主 transcript 捞出这条 `Skill` 调用的 `/<skill> <args>`，以及它是第几次同款调用
+    /// （从 0 起）。按需路径（用户展开子任务才走），整扫一遍可接受；先用子串预筛，
+    /// 真正解析 JSON 的只有含 `"Skill"` 的那几行。
+    fn skill_call_key(main_transcript: &Path, tool_use_id: &str) -> Option<(String, usize)> {
+        let text = std::fs::read_to_string(main_transcript).ok()?;
+        let mut calls: Vec<(String, String)> = Vec::new(); // (tool_use_id, desc)
+        for line in text.lines() {
+            if !line.contains("\"Skill\"") {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let Some(blocks) = value
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            else {
+                continue;
+            };
+            for block in blocks {
+                if block.get("type").and_then(|v| v.as_str()) != Some("tool_use")
+                    || block.get("name").and_then(|v| v.as_str()) != Some("Skill")
+                {
+                    continue;
+                }
+                let (Some(id), Some(input)) = (
+                    block.get("id").and_then(|v| v.as_str()),
+                    block.get("input"),
+                ) else {
+                    continue;
+                };
+                let Some(skill) = input.get("skill").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                calls.push((
+                    id.to_string(),
+                    skill_invocation_desc(skill, input.get("args")),
+                ));
+            }
+        }
+        let index = calls.iter().position(|(id, _)| id == tool_use_id)?;
+        let desc = calls[index].1.clone();
+        let ordinal = calls[..index].iter().filter(|(_, d)| *d == desc).count();
+        Some((desc, ordinal))
     }
 }
 
@@ -2423,6 +2594,112 @@ mod tests {
         std::fs::write(&p, &content).unwrap();
         assert_eq!(analyze_transcript(p.to_str().unwrap()).busy_subagents, 0);
         std::fs::remove_file(&p).ok();
+    }
+
+    /// forked skill 的回执识别。真机取证(CC 2.1.246,`/code-review` 后台审查):
+    /// 主链只有 Skill 调用,fork 与否只写在回执里。
+    #[test]
+    fn forked_skill_receipt_maps_to_outcome() {
+        let launched = forked_skill_outcome(
+            "Skill \"code-review\" launched (forked execution, running in the background).\n\nRunning in the background as @code-review",
+        )
+        .expect("启动回执应认出");
+        assert_eq!((launched.running, launched.completed), (1, 0));
+        // forked skill 的回执不带任务 id:委派靠 tool_use_id 直连。
+        assert_eq!(launched.task_id, None);
+
+        let done = forked_skill_outcome("Skill \"code-review\" completed (forked execution).\n\nResult:\n…")
+            .expect("完成回执应认出");
+        assert_eq!((done.running, done.completed), (0, 1));
+
+        let failed = forked_skill_outcome("Skill \"x\" failed (forked execution).")
+            .expect("失败回执应认出");
+        assert_eq!(failed.failed, 1);
+    }
+
+    /// 幽灵免疫:排查这套机制的会话(比如写这段代码的这次)里,Read/Grep 的工具结果会
+    /// **引用**回执原文。contains 判据会把引用记成委派,而幽灵永远等不到结局——
+    /// 会话从此恒挂「运行中」。与启动回执同一条行首锚定纪律。
+    #[test]
+    fn quoted_forked_receipt_is_not_a_delegation() {
+        // 行首是行号/注释,回执文案在中段。
+        assert!(forked_skill_outcome(
+            "1278  /// 形如 Skill \"code-review\" launched (forked execution, running in the background)."
+        )
+        .is_none());
+        // 普通 skill(未 fork)的回执不带 (forked execution),不认。
+        assert!(forked_skill_outcome("Skill \"run\" completed.").is_none());
+        // 没见过的动词不猜:宁可退回「无结局统计」,也不谎报成完成。
+        assert!(forked_skill_outcome("Skill \"x\" queued (forked execution).").is_none());
+    }
+
+    /// Skill 调用的摘要 = 用户敲的那行命令。它同时是 forked skill 的外键(见 locate_forked),
+    /// 形态必须与侧车 meta 的 description 严格一致。
+    #[test]
+    fn skill_summary_is_the_slash_command() {
+        let input = serde_json::json!({"skill":"code-review","args":"1692 高强度"});
+        assert_eq!(tool_summary("Skill", Some(&input)), "/code-review 1692 高强度");
+        // 无 args / 空 args 只留命令本体。
+        let bare = serde_json::json!({"skill":"run"});
+        assert_eq!(tool_summary("Skill", Some(&bare)), "/run");
+        let blank = serde_json::json!({"skill":"run","args":"   "});
+        assert_eq!(tool_summary("Skill", Some(&blank)), "/run");
+    }
+
+    /// forked skill 的侧车定位:meta 没有 toolUseId,只能靠 description 配对;同一命令
+    /// 跑多次则按**序号**配对(侧车先后以 meta 的写入时刻为准)。
+    #[test]
+    fn locate_forked_pairs_repeated_invocations_in_order() {
+        let root = std::env::temp_dir().join(format!("cc_forked_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("sess").join("subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 主链:同一条命令跑两次,中间夹一次别的命令。
+        let main = root.join("sess.jsonl");
+        let mut content = String::new();
+        for (id, args) in [("t_a", "1692 高强度"), ("t_b", "1719 高强度"), ("t_c", "1692 高强度")] {
+            content.push_str(&format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"{id}","name":"Skill","input":{{"skill":"code-review","args":"{args}"}}}}]}}}}"#
+            ));
+            content.push('\n');
+        }
+        std::fs::write(&main, &content).unwrap();
+
+        let spawn = |stem: &str, desc: &str| {
+            std::fs::write(
+                dir.join(format!("{stem}.meta.json")),
+                format!(
+                    r#"{{"agentType":"general-purpose","description":"{desc}","name":"code-review","spawnDepth":1}}"#
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.join(format!("{stem}.jsonl")), "").unwrap();
+        };
+        // 出生顺序 = 写入顺序;sleep 拉开 mtime,避免同一时间戳导致排序不稳。
+        spawn("agent-first", "/code-review 1692 高强度");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        spawn("agent-other", "/code-review 1719 高强度");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        spawn("agent-second", "/code-review 1692 高强度");
+        // 噪声:fork 内部再派的孙子**带** toolUseId,是 locate_one 的地盘,不得被截胡。
+        std::fs::write(
+            dir.join("agent-child.meta.json"),
+            r#"{"agentType":"general-purpose","description":"/code-review 1692 高强度","toolUseId":"toolu_inner","parentAgentId":"first","spawnDepth":2}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("agent-child.jsonl"), "").unwrap();
+
+        let pick = |id: &str| {
+            ClaudeSubagents::locate_forked(&main, id)
+                .map(|p| p.file_stem().unwrap().to_str().unwrap().to_string())
+        };
+        // 第一次同款调用 → 第一个同款侧车;第二次 → 第二个。
+        assert_eq!(pick("t_a").as_deref(), Some("agent-first"));
+        assert_eq!(pick("t_c").as_deref(), Some("agent-second"));
+        assert_eq!(pick("t_b").as_deref(), Some("agent-other"));
+        // 主链上没有的 id 配不出东西。
+        assert_eq!(pick("toolu_nope"), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 非 claude agent 走默认实现：直接采信 DB cwd，不去翻 ~/.claude/projects。

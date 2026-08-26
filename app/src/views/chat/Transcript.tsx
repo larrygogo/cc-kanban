@@ -18,7 +18,7 @@ function dayLabel(date: Date, t: Dict): string {
 import { imageOnlyPaths, Message, UserImageGroup } from "./Message";
 import { SubagentBlock } from "./SubagentBlock";
 import { friendlyToolName, ToolActivity } from "./ToolActivity";
-import { type ToolResultItem, type ToolUseItem } from "./shared";
+import { isSubagentDelegation, type ToolResultItem, type ToolUseItem } from "./shared";
 
 type SubagentOutcomeInfo = NonNullable<ToolResultItem["subagent"]>;
 
@@ -124,7 +124,7 @@ export const Transcript = memo(function Transcript({ sessionId, items }: { sessi
     }
     // 子任务委派不并进「N 次工具操作」那一坨：它代表一整段独立工作，值得单独一行，
     // 且展开的是子任务时间线而不是一段参数文本。
-    if (item.type === "tool_use" && item.subagent) {
+    if (item.type === "tool_use" && isSubagentDelegation(item, outcomes)) {
       record.subagentId = item.id;
       record.nodes.push(<SubagentBlock
         key={item.id}
@@ -142,7 +142,7 @@ export const Transcript = memo(function Transcript({ sessionId, items }: { sessi
       while (index < items.length) {
         const candidate = items[index];
         // 子任务在上面已单独成块；遇到它就断组，别把它吞进这坨里。
-        if (candidate.type === "tool_use" && candidate.subagent) break;
+        if (candidate.type === "tool_use" && isSubagentDelegation(candidate, outcomes)) break;
         if (candidate.type !== "tool_use" && candidate.type !== "tool_result") break;
         tools.push(candidate);
         index += 1;

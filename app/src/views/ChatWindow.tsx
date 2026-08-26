@@ -27,6 +27,7 @@ import { TodoPanel } from "./chat/TodoPanel";
 import { QuestionPanels } from "./chat/QuestionPanels";
 import { ChatTitleMenu, ChatTodoMenu, type TodoPanelRow } from "./chat/TitleMenus";
 import { QuickSwitcher, RenameModal, ShortcutSheet } from "./chat/WindowModals";
+import { isSubagentDelegation } from "./chat/shared";
 import { Transcript } from "./chat/Transcript";
 import { ChatSidebar } from "./ChatSidebar";
 import { ChevronDownIcon } from "./sticker/icons";
@@ -689,7 +690,9 @@ export function ChatWindow() {
     const { outcomes, settledAt, finishedTs } = collectSubagentReceipts(items);
     const rows: TodoPanelRow[] = [];
     for (const item of items) {
-      if (item.type !== "tool_use" || !item.subagent) continue;
+      // 委派判据与对话流的子任务块同源(isSubagentDelegation):除解析时认出的 Agent 委派,
+      // 还含 forked skill——它的委派本体是条 Skill 调用,subagent 为空。
+      if (item.type !== "tool_use" || !isSubagentDelegation(item, outcomes)) continue;
       const outcome = outcomes.get(item.id);
       const status = outcome
         ? outcome.running > 0 ? "in_progress" : outcome.failed > 0 ? "failed" : "completed"
@@ -697,8 +700,8 @@ export function ChatWindow() {
       // 与任务列表同一条「不堆积」规则:已结束的委派只显示当前回合内结束的,
       // 历史旧账收走;还在跑的恒显示(跨回合的后台子任务正是最该盯的)。
       if (status !== "in_progress" && (settledAt.get(item.id) ?? -1) <= lastUserIdx) continue;
-      const count = item.subagent.count ?? 1;
-      const label = item.subagent.description || item.summary || "";
+      const count = item.subagent?.count ?? 1;
+      const label = item.subagent?.description || item.summary || "";
       rows.push({
         content: count > 1 ? `${label} ×${count}` : label,
         status,
