@@ -25,7 +25,19 @@ fn tag_text<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
 /// `<task-notification>` user 消息 → 该 tool_use 的合成回执。形态(真实 transcript 取证):
 /// `<task-notification><task-id>…<tool-use-id>toolu_x</tool-use-id><output-file>…
 /// <status>completed</status><summary>…</summary></task-notification>`。
-/// 不是通知、或缺 tool-use-id(没法关联)时返回 None,调用方按普通 user 文本处理。
+///
+/// **`tool-use-id` 不是恒有的**:forked skill(`/code-review` 等)的通知只带 `<task-id>`
+/// (真机取证 2026-08-26:`<task-id>acb7f0cbde2eb991a</task-id>` + `<status>failed</status>`,
+/// 整条通知没有 tool-use-id)。此前这里 `?` 直接短路,那条通知被当成普通用户消息丢掉,
+/// 于是后台 skill 的委派永远停在「运行中」——实拍:一条 11:36 就失败结束的审查,在会话
+/// 剩下的三个半小时里一直挂着运行中。
+///
+/// 缺 tool-use-id 时改用 `task-id` 当回执的挂载点,并把它填进 `task_id`——前端
+/// (`collectSubagentReceipts`)按 task_id 归属:启动回执早已用同一个 id 登记过属主
+/// (见 [`parse_events`] 给启动回执补 agentId 那段),这条结局便落回原委派。这与
+/// `TaskOutput` 拉取结局走的是同一条既有路由,不新增机制。
+///
+/// 两者都缺则无从关联,返回 None,调用方按普通 user 文本处理。
 fn task_notification_result(
     text: &str,
     base_id: &str,
@@ -34,22 +46,30 @@ fn task_notification_result(
     if !text.trim_start().starts_with("<task-notification>") {
         return None;
     }
-    let tool_use_id = tag_text(text, "tool-use-id")?.to_string();
+    let tool_use_id = tag_text(text, "tool-use-id")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let task_id = tag_text(text, "task-id")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    // 有 tool-use-id 就直连原委派(无需路由);否则靠 task-id 归属。
+    let anchor = tool_use_id.clone().or_else(|| task_id.clone())?;
     // status 缺省按 completed:通知本身就意味着「结束了」,分不清成败时宁可少报失败。
     let failed = tag_text(text, "status").is_some_and(|s| s.eq_ignore_ascii_case("failed"));
     let summary = tag_text(text, "summary").unwrap_or("task completed").to_string();
     Some(TranscriptEvent::ToolResult {
         id: base_id.to_string(),
         timestamp,
-        tool_call_id: Some(tool_use_id),
+        tool_call_id: Some(anchor),
         text: summary,
         is_error: failed,
         subagent: Some(SubagentOutcome {
             running: 0,
             completed: if failed { 0 } else { 1 },
             failed: if failed { 1 } else { 0 },
-            // 通知自带 tool-use-id，直接落到原委派上，无需再靠任务 id 路由。
-            task_id: None,
+            // 自带 tool-use-id 时直接落到原委派上,不必再路由;只有 task-id 的
+            // (forked skill)要靠它归属回启动回执登记的属主。
+            task_id: tool_use_id.is_none().then_some(task_id).flatten(),
         }),
     })
 }
@@ -246,7 +266,23 @@ fn parse_events(line: &str, allow_sidechain: bool) -> Vec<TranscriptEvent> {
                             // 「已回执」在这里只意味着「派出去了」,真结局由 task-notification
                             // 的合成回执(见 user 分支)后到覆盖。同步委派的回执没有结局
                             // 信号,如实留空,前端按「已回执=完成」处理。
-                            let subagent = CLAUDE_SUBAGENTS.detect_result(&text);
+                            let mut subagent = CLAUDE_SUBAGENTS.detect_result(&text);
+                            // 启动回执补任务 id:forked skill 的回执正文里**没有**任何 id
+                            // (`Skill "x" launched (forked execution…)`),而它的完成通知只带
+                            // `<task-id>`——两端要靠 CC 记在**行上**的 `toolUseResult.agentId`
+                            // 接起来(真机取证:`"status":"forked","agentId":"acb7f0…"`)。
+                            // 不补的话这条委派永远等不到结局,面板恒挂「运行中」。
+                            // 只补「在跑且尚无 id」的:已从正文抠到 id 的(Async agent launched)
+                            // 不动,非启动回执不碰。
+                            if let Some(outcome) = subagent.as_mut() {
+                                if outcome.running > 0 && outcome.task_id.is_none() {
+                                    outcome.task_id = v
+                                        .pointer("/toolUseResult/agentId")
+                                        .and_then(|x| x.as_str())
+                                        .filter(|s| !s.is_empty())
+                                        .map(str::to_string);
+                                }
+                            }
                             // GUI 代答 AskUserQuestion 走 PreToolUse deny,CC 把答案记成
                             // error 回执——对用户它是「已作答」不是失败,按哨兵压平,
                             // 否则对话流红块 + handoff 标 [失败]。在截断前的原始文本上
@@ -1349,11 +1385,20 @@ impl ClaudeSubagents {
     ///
     /// 同一会话可能把**同一条命令**跑好几次（实拍：`/code-review 1692 高强度` 两次），
     /// 描述就不再唯一。故按**序号**配对：主链里这是第 n 次同款调用，就取第 n 个同款侧车。
-    /// 侧车的先后以 `meta.json` 的修改时间为准——它在 spawn 时写一次就不再动
-    /// （实测 meta 11:30:20 而 jsonl 仍在 11:32 增长），是稳定的出生时刻。
+    ///
+    /// 侧车的先后以 `<stem>.forked-skill.json`(spawn 标记)的修改时间为准。**不能用
+    /// `meta.json`**：它并非「写一次就不再动」——真机反证(2026-08-26)`agent-acb7f0cbde2e`
+    /// 的 spawn 标记是 11:28:21、meta 却在 11:36:29 被重写，差 487 秒；跨夜 resume 的样本
+    /// 差了 15 小时。用它排序会让两次重叠的同款 fork 顺序颠倒，展开第一次看到的是第二次
+    /// 那条流的完整记录——**给错记录比给不出记录更糟**。标记文件缺失时退回 meta（聊胜于无）。
+    ///
+    /// 数量对不上就**拒绝配对**：ordinal 数的是主链调用，而这里只数得到**现存**侧车，
+    /// 少一个就整体错位（实测「completed (forked execution)」的内联完成压根不落侧车）。
+    /// 此时返回 None，前端显示「该子任务还没有留下记录」——空白是诚实的，错配不是。
+    /// 代价：刚派出去、侧车还没落盘的那几秒里，同款的既有委派也一并展不开，随后自愈。
     fn locate_forked(main_transcript: &Path, tool_use_id: &str) -> Option<PathBuf> {
         let dir = Self::stream_dir(main_transcript)?;
-        let (desc, ordinal) = Self::skill_call_key(main_transcript, tool_use_id)?;
+        let (desc, ordinal, total) = Self::skill_call_key(main_transcript, tool_use_id)?;
         let mut matches: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
         for entry in std::fs::read_dir(&dir).ok()?.flatten() {
             let path = entry.path();
@@ -1383,20 +1428,27 @@ impl ClaudeSubagents {
             if !stream.is_file() {
                 continue;
             }
-            let born = entry
-                .metadata()
+            // 出生时刻取 spawn 标记；标记不在(旧会话/被清理)才退回 meta。
+            let marker = dir.join(format!("{stem}.forked-skill.json"));
+            let born = std::fs::metadata(&marker)
+                .or_else(|_| entry.metadata())
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             matches.push((born, stream));
+        }
+        // 数量对不上 = 配对不可靠(理由见函数注释),宁可不给也不给错的。
+        if matches.len() != total {
+            return None;
         }
         matches.sort_by_key(|(born, _)| *born);
         matches.into_iter().nth(ordinal).map(|(_, path)| path)
     }
 
-    /// 回主 transcript 捞出这条 `Skill` 调用的 `/<skill> <args>`，以及它是第几次同款调用
-    /// （从 0 起）。按需路径（用户展开子任务才走），整扫一遍可接受；先用子串预筛，
+    /// 回主 transcript 捞出这条 `Skill` 调用的 `/<skill> <args>`、它是第几次同款调用
+    /// （从 0 起），以及同款调用**总数**（用于判断配对是否可靠，见 [`Self::locate_forked`]）。
+    /// 按需路径（用户展开子任务才走），整扫一遍可接受；先用子串预筛，
     /// 真正解析 JSON 的只有含 `"Skill"` 的那几行。
-    fn skill_call_key(main_transcript: &Path, tool_use_id: &str) -> Option<(String, usize)> {
+    fn skill_call_key(main_transcript: &Path, tool_use_id: &str) -> Option<(String, usize, usize)> {
         let text = std::fs::read_to_string(main_transcript).ok()?;
         let mut calls: Vec<(String, String)> = Vec::new(); // (tool_use_id, desc)
         for line in text.lines() {
@@ -1437,7 +1489,8 @@ impl ClaudeSubagents {
         let index = calls.iter().position(|(id, _)| id == tool_use_id)?;
         let desc = calls[index].1.clone();
         let ordinal = calls[..index].iter().filter(|(_, d)| *d == desc).count();
-        Some((desc, ordinal))
+        let total = calls.iter().filter(|(_, d)| *d == desc).count();
+        Some((desc, ordinal, total))
     }
 }
 
@@ -2665,7 +2718,7 @@ mod tests {
         }
         std::fs::write(&main, &content).unwrap();
 
-        let spawn = |stem: &str, desc: &str| {
+        let write_meta = |stem: &str, desc: &str| {
             std::fs::write(
                 dir.join(format!("{stem}.meta.json")),
                 format!(
@@ -2673,14 +2726,26 @@ mod tests {
                 ),
             )
             .unwrap();
-            std::fs::write(dir.join(format!("{stem}.jsonl")), "").unwrap();
         };
-        // 出生顺序 = 写入顺序;sleep 拉开 mtime,避免同一时间戳导致排序不稳。
+        // spawn 标记(.forked-skill.json)才是出生时刻;sleep 拉开 mtime 免得排序不稳。
+        let spawn = |stem: &str, desc: &str| {
+            write_meta(stem, desc);
+            std::fs::write(dir.join(format!("{stem}.jsonl")), "").unwrap();
+            std::fs::write(
+                dir.join(format!("{stem}.forked-skill.json")),
+                r#"{"skillName":"code-review"}"#,
+            )
+            .unwrap();
+        };
         spawn("agent-first", "/code-review 1692 高强度");
         std::thread::sleep(std::time::Duration::from_millis(20));
         spawn("agent-other", "/code-review 1719 高强度");
         std::thread::sleep(std::time::Duration::from_millis(20));
         spawn("agent-second", "/code-review 1692 高强度");
+        // 关键:把先出生那个的 meta **重写**成最新(真机如此,实测差 487 秒)。若排序仍按
+        // meta.json,下面 t_a/t_c 的断言会整个对调——这正是要防的「展开第一次看到第二次」。
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_meta("agent-first", "/code-review 1692 高强度");
         // 噪声:fork 内部再派的孙子**带** toolUseId,是 locate_one 的地盘,不得被截胡。
         std::fs::write(
             dir.join("agent-child.meta.json"),
@@ -2693,13 +2758,91 @@ mod tests {
             ClaudeSubagents::locate_forked(&main, id)
                 .map(|p| p.file_stem().unwrap().to_str().unwrap().to_string())
         };
-        // 第一次同款调用 → 第一个同款侧车;第二次 → 第二个。
+        // 第一次同款调用 → 第一个同款侧车;第二次 → 第二个(按 spawn 标记,不按 meta)。
         assert_eq!(pick("t_a").as_deref(), Some("agent-first"));
         assert_eq!(pick("t_c").as_deref(), Some("agent-second"));
         assert_eq!(pick("t_b").as_deref(), Some("agent-other"));
         // 主链上没有的 id 配不出东西。
         assert_eq!(pick("toolu_nope"), None);
+
+        // 侧车少一个(内联完成不落盘/被清理)→ 同款的全部拒绝配对。给错记录比给不出更糟:
+        // 若仍按序号取,t_a 会拿到 agent-second 那条流,用户对着不属于该次审查的记录做判断。
+        for suffix in ["meta.json", "jsonl", "forked-skill.json"] {
+            let _ = std::fs::remove_file(dir.join(format!("agent-first.{suffix}")));
+        }
+        assert_eq!(pick("t_a"), None, "数量对不上时不许配对");
+        assert_eq!(pick("t_c"), None, "数量对不上时不许配对");
+        // 另一条命令的配对不受牵连(序号与总数都按 desc 分别计)。
+        assert_eq!(pick("t_b").as_deref(), Some("agent-other"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// forked skill 的完成通知**不带** `tool-use-id`,只有 `task-id`(真机取证 2026-08-26)。
+    /// 此前这条通知被整条丢弃,后台 skill 的委派于是永远停在「运行中」——实拍:一条 11:36
+    /// 就结束的审查,在会话剩下的三个半小时里一直挂着。
+    #[test]
+    fn task_notification_without_tool_use_id_routes_by_task_id() {
+        let forked = task_notification_result(
+            "<task-notification>\n<task-id>acb7f0cbde2eb991a</task-id>\n<status>failed</status>\n<summary>Agent 失败</summary>\n</task-notification>",
+            "u1",
+            None,
+        )
+        .expect("只有 task-id 的通知也要转成回执");
+        let TranscriptEvent::ToolResult {
+            tool_call_id,
+            subagent,
+            is_error,
+            ..
+        } = forked
+        else {
+            panic!("应是 ToolResult");
+        };
+        // 挂载点退回 task-id,并把它填进 task_id 交给前端按属主归回原委派。
+        assert_eq!(tool_call_id.as_deref(), Some("acb7f0cbde2eb991a"));
+        let outcome = subagent.expect("带结局统计");
+        assert_eq!(outcome.failed, 1);
+        assert_eq!(outcome.task_id.as_deref(), Some("acb7f0cbde2eb991a"));
+        assert!(is_error);
+
+        // 自带 tool-use-id 的(常规 Agent 委派)维持原语义:直连委派,不进 task_id 路由。
+        let direct = task_notification_result(
+            "<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>toolu_x</tool-use-id>\n<status>completed</status>\n</task-notification>",
+            "u2",
+            None,
+        )
+        .expect("常规通知照常");
+        let TranscriptEvent::ToolResult {
+            tool_call_id,
+            subagent,
+            ..
+        } = direct
+        else {
+            panic!("应是 ToolResult");
+        };
+        assert_eq!(tool_call_id.as_deref(), Some("toolu_x"));
+        assert_eq!(subagent.unwrap().task_id, None);
+
+        // 两个 id 都没有 → 无从关联,按普通用户消息处理。
+        assert!(task_notification_result(
+            "<task-notification>\n<status>completed</status>\n</task-notification>",
+            "u3",
+            None,
+        )
+        .is_none());
+    }
+
+    /// 启动回执补 agentId:forked skill 的回执正文里没有任何 id,只有行上的
+    /// `toolUseResult.agentId` 能把它与只带 task-id 的完成通知接起来。
+    #[test]
+    fn forked_launch_receipt_picks_up_agent_id_from_the_line() {
+        let line = r#"{"type":"user","uuid":"u1","toolUseResult":{"status":"forked","background":true,"agentId":"acb7f0cbde2eb991a"},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_skill","content":[{"type":"text","text":"Skill \"code-review\" launched (forked execution, running in the background)."}]}]}}"#;
+        let events = parse_events(line, false);
+        let Some(TranscriptEvent::ToolResult { subagent, .. }) = events.into_iter().next() else {
+            panic!("应解析出一条 ToolResult");
+        };
+        let outcome = subagent.expect("启动回执带结局统计");
+        assert_eq!(outcome.running, 1);
+        assert_eq!(outcome.task_id.as_deref(), Some("acb7f0cbde2eb991a"));
     }
 
     /// 非 claude agent 走默认实现：直接采信 DB cwd，不去翻 ~/.claude/projects。

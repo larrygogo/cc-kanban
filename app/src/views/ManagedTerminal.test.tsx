@@ -24,6 +24,8 @@ const writeCallbacks = vi.hoisted(() => ({ manual: false, queue: [] as (() => vo
 // 终端选区：复制快捷键测试用（有选区的 Ctrl+C=复制不发 ^C，无选区照旧发）。
 const selection = vi.hoisted(() => ({ text: "" }));
 const terminalModes = vi.hoisted(() => ({ mouseTrackingMode: "none" as "none" | "x10" | "vt200" | "drag" | "any" }));
+// 当前 buffer 类型:备用屏(alternate)没有 scrollback,Shift+滚轮旁路必须放行给 TUI。
+const bufferType = vi.hoisted(() => ({ current: "normal" as "normal" | "alternate" }));
 // terminal.paste 的间谍（右键粘贴测试断言剪贴板文本进了 xterm 粘贴通路）。
 const pasteSpy = vi.hoisted(() => vi.fn());
 // terminal.scrollToBottom 的间谍（退出提示写入后必须滚底，否则上翻视口里提示在屏外）。
@@ -58,6 +60,13 @@ vi.mock("@xterm/xterm", () => ({
     attachCustomKeyEventHandler = (handler: (event: KeyboardEvent) => boolean) => { keyHandler.current = handler; };
     attachCustomWheelEventHandler = (handler: (event: WheelEvent) => boolean) => { wheelHandler.current = handler; };
     scrollLines = (amount: number) => scrollLinesSpy(amount);
+    // 只在备用屏用例下暴露 buffer:缺席时组件走 visibleTerminalText 兜底(与真实 xterm
+    // 尚未就绪时同路),屏幕识别的那批用例依赖这条路径,给个空壳 buffer 会把它们打断。
+    get buffer() {
+      return bufferType.current === "alternate"
+        ? { active: { type: "alternate" } }
+        : undefined;
+    }
     hasSelection = () => selection.text.length > 0;
     // TUI 的鼠标上报模式(?1000-1006h 经 xterm 解析后暴露);测试按需改成 "any"。
     modes = terminalModes;
@@ -112,6 +121,7 @@ describe("ManagedTerminal", () => {
     resizeGridSpy.mockReset();
     wheelHandler.current = null;
     scrollLinesSpy.mockReset();
+    bufferType.current = "normal";
     searchFindNext.mockReset().mockReturnValue(true);
     searchFindPrevious.mockReset().mockReturnValue(true);
     global.ResizeObserver = class {
@@ -263,6 +273,25 @@ describe("ManagedTerminal", () => {
     // 行制 deltaMode 的小数值靠下限保底,至少滚一行。
     expect(wheelHandler.current!(wheel({ shiftKey: true, deltaY: 3 }))).toBe(false);
     expect(scrollLinesSpy).toHaveBeenCalledWith(1);
+    // 有环境按住 Shift 时把纵向滚轮改派成 deltaX;两轴都取,免得旁路一次都不触发。
+    scrollLinesSpy.mockReset();
+    expect(wheelHandler.current!(wheel({ shiftKey: true, deltaY: 0, deltaX: 100 }))).toBe(false);
+    expect(scrollLinesSpy).toHaveBeenCalledWith(3);
+  });
+
+  it("备用屏里 Shift+滚轮放行给 TUI:那里没有 scrollback,吞掉只会变成按了没反应", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(noPty);
+      return Promise.resolve();
+    });
+    // claude 全屏渲染器(?1049h)就是这种情形:xterm 的备用屏 buffer 以 hasScrollback=false
+    // 构造,scrollLines 位移恒为 0——本地根本没有可翻的历史。
+    bufferType.current = "alternate";
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(wheelHandler.current).toBeTruthy());
+    const wheel = (init: Partial<WheelEvent>) => ({ preventDefault: vi.fn(), ...init }) as unknown as WheelEvent;
+    expect(wheelHandler.current!(wheel({ shiftKey: true, deltaY: 100 }))).toBe(true);
+    expect(scrollLinesSpy).not.toHaveBeenCalled();
   });
 
   it("退出即收回鼠标上报模式：崩溃时模式来不及关，滚轮/选区在尸体上永远失灵", async () => {

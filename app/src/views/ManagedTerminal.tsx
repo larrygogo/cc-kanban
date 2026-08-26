@@ -467,13 +467,25 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // Shift+滚轮 = 本地滚动旁路(xterm(1) 惯例:Shift 越过鼠标上报)。TUI 持有鼠标时普通
     // 滚轮整个交给它(既定方向:尊重 claude 配置),但 TUI 不理滚轮/正忙/假死时用户就
     // 彻底翻不了本地 scrollback。xterm 对 shift+wheel 本来就是 no-op(consumeWheelEvent
-    // 见 shift 直接返回 0,事件被吞但什么都不做),征用零损失。deltaY 常见像素制
-    // (Chromium 一格约 100),按 ~40px 折一行;行制(deltaMode=1)数值小,靠下限保底。
+    // 见 shift 直接返回 0,事件被吞但什么都不做),征用零损失。
+    //
+    // **备用屏里这条旁路无效,必须放行**:xterm 的备用屏 buffer 以 hasScrollback=false
+    // 构造(BufferSet.ts:44,注释原文 "The alt buffer should never have scrollback"),
+    // maxLength 恒等于行数,scrollLines 位移永远是 0——本地根本没有可翻的历史。此时
+    // 把事件还给 xterm(返回 true)让它按鼠标上报转发给 TUI,由 TUI 滚自己的视图,
+    // 好过在这里吞掉变成「按了没反应」。claude 全屏渲染器(?1049h)正是这种情形。
+    //
+    // deltaY 常见像素制(Chromium 一格约 100),按 ~40px 折一行;行制(deltaMode=1)数值小,
+    // 靠下限保底。按住 Shift 时部分环境会把纵向滚轮改派成 deltaX(未在 WebView2 实测),
+    // 故两轴都取,免得旁路一次都不触发。
     terminal.attachCustomWheelEventHandler((event) => {
-      if (!event.shiftKey || event.deltaY === 0) return true;
+      if (!event.shiftKey) return true;
+      if (terminal.buffer?.active?.type === "alternate") return true;
+      const delta = event.deltaY || event.deltaX;
+      if (!delta) return true;
       event.preventDefault();
-      const lines = Math.max(1, Math.round(Math.abs(event.deltaY) / 40));
-      terminal.scrollLines(event.deltaY > 0 ? lines : -lines);
+      const lines = Math.max(1, Math.round(Math.abs(delta) / 40));
+      terminal.scrollLines(delta > 0 ? lines : -lines);
       return false;
     });
     // 上面的放行有个盲区：剪贴板是**图片**时 paste 事件没有文本数据，xterm 的 paste 监听

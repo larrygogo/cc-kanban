@@ -472,7 +472,15 @@ pub fn map_to_provider_usage(u: &Usage) -> ProviderUsage {
             label: Some(w.label.clone()),
         });
     }
-    if u.model_weekly.is_empty() {
+    // 旧 seven_day_opus 只在 limits[] **没有覆盖 Opus** 时兜底。此前的条件是
+    // 「model_weekly 整个为空」——过渡期若同时给出非 null 的 seven_day_opus 和一条
+    // Fable 的 weekly_scoped,Opus 泳道会被整条吞掉(注释说的「重复表意」只在被限定
+    // 模型就是 Opus 时才成立)。
+    let opus_covered = u
+        .model_weekly
+        .iter()
+        .any(|w| w.label.eq_ignore_ascii_case("opus"));
+    if !opus_covered {
         if let Some(w) = &u.seven_day_opus {
             lanes.push(UsageLane {
                 kind: UsageKind::Opus,
@@ -825,26 +833,45 @@ mod tests {
         assert_eq!(u2.model_weekly[0].resets_at, "");
     }
 
+    /// 旧 `seven_day_opus` 的兜底只在 limits[] **确实覆盖了 Opus** 时让位。
+    /// 曾经写成「model_weekly 非空即让位」,于是过渡期同时给出 Fable 周限与 Opus 顶层字段时,
+    /// Opus 泳道被整条吞掉——用户在账号页和贴纸上都看不到自己的 Opus 用量。
     #[test]
-    fn map_to_provider_usage_prefers_model_weekly_over_legacy_opus() {
-        let u = Usage {
-            seven_day_opus: Some(UsageWindow {
-                utilization: 30.0,
-                resets_at: "2026-06-11T12:00:00Z".into(),
-            }),
+    fn legacy_opus_lane_only_yields_to_an_opus_scoped_limit() {
+        let fable = ScopedWindow {
+            label: "Fable".into(),
+            utilization: 83.0,
+            resets_at: "2026-08-27T02:59:59+08:00".into(),
+        };
+        let opus_legacy = UsageWindow {
+            utilization: 30.0,
+            resets_at: "2026-06-11T12:00:00Z".into(),
+        };
+        // 被限定的是 Fable ≠ Opus:两条都要在,谁也不吞谁。
+        let mixed = map_to_provider_usage(&Usage {
+            seven_day_opus: Some(opus_legacy.clone()),
+            model_weekly: vec![fable.clone()],
+            ..Default::default()
+        });
+        assert_eq!(mixed.lanes.len(), 2);
+        assert_eq!(mixed.lanes[0].kind, UsageKind::ModelWeekly);
+        assert_eq!(mixed.lanes[0].label.as_deref(), Some("Fable"));
+        assert_eq!(mixed.lanes[1].kind, UsageKind::Opus);
+        assert_eq!(mixed.lanes[1].used_pct, Some(30.0));
+
+        // limits[] 里就是 Opus:旧字段让位,不重复表意(大小写不敏感)。
+        let overlap = map_to_provider_usage(&Usage {
+            seven_day_opus: Some(opus_legacy),
             model_weekly: vec![ScopedWindow {
-                label: "Fable".into(),
-                utilization: 83.0,
-                resets_at: "2026-08-27T02:59:59+08:00".into(),
+                label: "opus".into(),
+                utilization: 61.0,
+                resets_at: String::new(),
             }],
             ..Default::default()
-        };
-        let pu = map_to_provider_usage(&u);
-        // 同现时只出 model_weekly(旧 Opus 泳道与之重复表意)。
-        assert_eq!(pu.lanes.len(), 1);
-        assert_eq!(pu.lanes[0].kind, UsageKind::ModelWeekly);
-        assert_eq!(pu.lanes[0].label.as_deref(), Some("Fable"));
-        assert_eq!(pu.lanes[0].used_pct, Some(83.0));
+        });
+        assert_eq!(overlap.lanes.len(), 1);
+        assert_eq!(overlap.lanes[0].kind, UsageKind::ModelWeekly);
+        assert_eq!(overlap.lanes[0].used_pct, Some(61.0));
     }
 
     #[test]

@@ -285,6 +285,50 @@ fn forked_skill_items_carry_what_the_progress_panel_needs() {
     eprintln!(
         "Skill 回执 {delegations} 条，其中 {with_outcome} 条带结局统计；`/命令` 形态摘要 {slash_summary} 条"
     );
+    // 后台 forked skill 的收尾:启动回执标 running 并带 task_id(取自行上的
+    // toolUseResult.agentId),结局由只带 <task-id> 的通知按同一个 id 归回。两端任一
+    // 缺失,这条委派就永远挂在「运行中」——实拍:一条 11:36 就结束的审查挂了三个半小时。
+    let (mut launched, mut with_task_id, mut settled) = (0, 0, 0);
+    for main in &mains {
+        let delta = meowo_agent::transcript::read_chat_delta(&CLAUDE_TRANSCRIPT, main, 0, None);
+        let mut running_ids: Vec<String> = Vec::new();
+        let mut settled_ids: Vec<String> = Vec::new();
+        for item in &delta.items {
+            let meowo_agent::transcript::ChatItem::ToolResult {
+                text,
+                subagent: Some(outcome),
+                ..
+            } = item
+            else {
+                continue;
+            };
+            if text.trim_start().starts_with("Skill \"") && outcome.running > 0 {
+                launched += 1;
+                if let Some(id) = &outcome.task_id {
+                    with_task_id += 1;
+                    running_ids.push(id.clone());
+                }
+            } else if outcome.running == 0 {
+                if let Some(id) = &outcome.task_id {
+                    settled_ids.push(id.clone());
+                }
+            }
+        }
+        settled += running_ids
+            .iter()
+            .filter(|id| settled_ids.contains(id))
+            .count();
+    }
+    eprintln!(
+        "forked 启动回执 {launched} 条，带 task_id {with_task_id} 条，其中 {settled} 条能靠 task_id 接到结局"
+    );
+    if launched > 0 {
+        // 拿不到 agentId = 两端接不起来 = 必然永挂运行中。
+        assert_eq!(
+            launched, with_task_id,
+            "有 forked 启动回执没拿到 agentId,它的结局通知将无处归属"
+        );
+    }
     if delegations == 0 {
         eprintln!("跳过：这些会话里没有 Skill 回执");
         return;

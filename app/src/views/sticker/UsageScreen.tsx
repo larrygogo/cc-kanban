@@ -65,7 +65,16 @@ export function UsageScreen({
   const sevenDayLane = usage?.lanes.find((l) => l.kind === "seven_day" || l.kind === "weekly") ?? null;
   // 模型专属周限(claude 的 Fable/Opus 周配额)。它常比总量先见顶(实测 Fable 83% vs
   // 总量 44%),是真正的约束项,不显示会误判还有余量。旧后端的 opus 泳道同槽展示。
-  const modelLane = usage?.lanes.find((l) => l.kind === "model_weekly") ?? usage?.lanes.find((l) => l.kind === "opus") ?? null;
+  //
+  // 可能同时下发多条(Opus 与 Fable 各一条),而小屏只放得下一条:取**用得最满**的那条。
+  // 曾经取数组第一条——顺序由服务端定,可能显示 44% 的那条、把 83% 的藏起来,恰好削掉
+  // 这条泳道的立项理由。
+  const modelLane = usage?.lanes
+    .filter((l) => l.kind === "model_weekly")
+    .reduce<UsageLane | null>((tightest, lane) => (
+      !tightest || (lane.used_pct ?? -1) > (tightest.used_pct ?? -1) ? lane : tightest
+    ), null)
+    ?? usage?.lanes.find((l) => l.kind === "opus") ?? null;
   const modelLabel = modelLane?.kind === "opus"
     ? t.account.laneOpus
     : modelLane?.label ? t.account.laneModelWeekly(modelLane.label) : t.account.laneWeekly;

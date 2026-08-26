@@ -793,10 +793,20 @@ pub(crate) fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .menu(&menu)
         // 左键留给「打开对话窗口」，菜单仅在右键弹出（设置仍在右键菜单里）。
         .show_menu_on_left_click(false)
+        // 托盘菜单事件在**主线程**派发(与下面的左键回调同源)。开窗口必须丢子线程:
+        // 直接 build() 会占住消息泵,而 WebView2 初始化依赖泵运转 → 卡在初始化 → 白屏
+        // (理由与 open_settings 命令版同源,见本文件顶部)。此前这两项是裸调,右键
+        // 「设置」/「使用引导」会把贴纸与对话窗一起卡住。
         .on_menu_event(|app, event| match event.id().as_ref() {
             "recall" => recall_sticker(app),
-            "guide" => open_onboarding_window(app),
-            "settings" => open_settings_window(app),
+            "guide" => {
+                let app = app.clone();
+                std::thread::spawn(move || open_onboarding_window(&app));
+            }
+            "settings" => {
+                let app = app.clone();
+                std::thread::spawn(move || open_settings_window(&app));
+            }
             "website" => {
                 let _ = crate::settings::open_url(crate::settings::SITE_URL.to_string());
             }

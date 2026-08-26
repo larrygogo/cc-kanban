@@ -1148,6 +1148,15 @@ export function ChatWindow() {
     selectorAnchors: chatUi?.selector_anchors ?? [],
     attentionPatterns: chatUi?.attention_patterns ?? [],
   }), [history?.provider, chatUi]);
+  // 文法的**值**指纹。下面的 PTY 探测 effect 只能依赖它,不能依赖 attentionGrammar 对象:
+  // runtime 清单未就绪时(claude 常态)chatUi 每 2s 被重新拉取一次,即便内容一字未变也是
+  // 新对象 → 新 grammar 引用 → effect 拆掉重建 → since 归零 → 整份 PTY backlog(上限
+  // 1 MiB)被重新拉取并逐字节解码,只为留最后 16 KB。活跃会话下这是每窗口约 0.7 MB/s 的
+  // 白流量,且恰好发生在 agent 正干活、主线程最吃紧的时候。ManagedTerminal 的 grammarKey
+  // 早就是这么做的,这里补齐。
+  const grammarKey = JSON.stringify(attentionGrammar);
+  const attentionGrammarRef = useRef(attentionGrammar);
+  attentionGrammarRef.current = attentionGrammar;
   // runtime 清单未就绪时，探测键随每次 650ms 轮询的 offset 变化而变化——不能每变一次就
   // 打一发 agent_chat_ui（后端要重扫命令目录、探 transcript）。同一会话内限频到 2s 一查；
   // 换会话/换 provider/换 cwd 仍立即查。
@@ -1191,7 +1200,7 @@ export function ChatWindow() {
         outputTail = appendTerminalText(outputTail, snapshot.data, decoder);
         since = snapshot.endOffset;
         if (snapshot.data) {
-          const attention = detectTerminalAttention(outputTail, markers, terminalInteractivePrompt, false, attentionGrammar);
+          const attention = detectTerminalAttention(outputTail, markers, terminalInteractivePrompt, false, attentionGrammarRef.current);
           if (attention) {
             if (attention.id !== reportedId) revealTerminalAttention(attention);
             reportedId = attention.id;
@@ -1211,7 +1220,9 @@ export function ChatWindow() {
     };
     void poll();
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [sessionId, startupAttentionMarkerKey, terminalInteractivePrompt, revealTerminalAttention, attentionGrammar]);
+    // 文法按值指纹入依赖(理由见 grammarKey);实时值走 ref,不吃陈旧闭包。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, startupAttentionMarkerKey, terminalInteractivePrompt, revealTerminalAttention, grammarKey]);
   // ↑ 取回历史消息(CLI 惯例):空输入框按 ↑ 进入浏览,↑/↓ 前后翻,翻回最新即回到空框;
   // 一旦手动编辑退出浏览态(当前文本保留成草稿)。只浏览自己发过的 user_text。
   const historyNavRef = useRef<{ index: number } | null>(null);
