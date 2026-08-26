@@ -263,6 +263,13 @@ pub(crate) async fn remote_access_info(
 /// 凭据读走新值。纯函数,便于单测钉住这条安全语义。
 fn strip_remote_token(mut s: crate::settings::Settings) -> crate::settings::Settings {
     s.remote_access_token = String::new();
+    // 代理地址可带 user:pass@,一并脱敏。持 token 者本就能执行命令,这不构成提权;但把
+    // 「令牌泄露」的后果从「能操作这台机器」扩大到「顺手拿走一份可离线复用的代理凭据」
+    // 是另一回事,与上面那条出口消毒的审计线也不一致。host/port 保留,远端仍看得出配了什么。
+    s.proxy.url = crate::proxy::redact_credentials(&s.proxy.url).into_owned();
+    for rule in s.proxy.per_agent.values_mut() {
+        rule.url = crate::proxy::redact_credentials(&rule.url).into_owned();
+    }
     s
 }
 

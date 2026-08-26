@@ -819,6 +819,26 @@ function ChangesView({ cwd, summary }: { cwd: string; summary: GitDiffSummaryDto
   );
 }
 
+/// 文件/图片缓存的上限。面板折叠时**不卸载**（打开的文件、树展开、diff 缓存全部保留，
+/// 见 ChatWindow 的注释），而 ChangesView 有 `[summary]` 重置、FilesView 一个都没有——
+/// 一次会话里翻几十个文件加十几张截图，就是几十 MB 只增不减地挂到换会话为止（图片还是
+/// 1.33 倍体积的 base64 data URL）。20 条足够覆盖「来回对照几个文件」的实际用法。
+const FILE_CACHE_MAX = 20;
+
+/// 写入并按 LRU 裁剪：命中/重写都挪到队尾，超限从队首淘汰。Map 保持插入序，
+/// 先 delete 再 set 即可把它变成访问序。
+function cappedCache<T>(prev: Map<string, T>, key: string, value: T): Map<string, T> {
+  const next = new Map(prev);
+  next.delete(key);
+  next.set(key, value);
+  while (next.size > FILE_CACHE_MAX) {
+    const oldest = next.keys().next().value;
+    if (oldest === undefined) break;
+    next.delete(oldest);
+  }
+  return next;
+}
+
 /** 「文件」页签：可搜索（文件名 + 内容）的懒加载目录树 + 单文件文本查看（返回行 + pre 文本）。 */
 function FilesView({ cwd }: { cwd: string }) {
   const t = useT();
@@ -936,18 +956,18 @@ function FilesView({ cwd }: { cwd: string }) {
 
   const fetchText = (rel: string) => {
     if (files.has(rel)) return;
-    setFiles((prev) => new Map(prev).set(rel, { loading: true, error: null, data: null }));
+    setFiles((prev) => cappedCache(prev, rel, { loading: true, error: null, data: null }));
     readFileText(cwd, rel)
-      .then((data) => setFiles((prev) => new Map(prev).set(rel, { loading: false, error: null, data })))
-      .catch((error) => setFiles((prev) => new Map(prev).set(rel, { loading: false, error: formatBackendError(error, t.locale), data: null })));
+      .then((data) => setFiles((prev) => cappedCache(prev, rel, { loading: false, error: null, data })))
+      .catch((error) => setFiles((prev) => cappedCache(prev, rel, { loading: false, error: formatBackendError(error, t.locale), data: null })));
   };
 
   const fetchImage = (rel: string) => {
     if (images.has(rel)) return;
-    setImages((prev) => new Map(prev).set(rel, { loading: true, error: null, data: null }));
+    setImages((prev) => cappedCache(prev, rel, { loading: true, error: null, data: null }));
     readImagePreview(cwd, rel)
-      .then((data) => setImages((prev) => new Map(prev).set(rel, { loading: false, error: null, data })))
-      .catch((error) => setImages((prev) => new Map(prev).set(rel, { loading: false, error: formatBackendError(error, t.locale), data: null })));
+      .then((data) => setImages((prev) => cappedCache(prev, rel, { loading: false, error: null, data })))
+      .catch((error) => setImages((prev) => cappedCache(prev, rel, { loading: false, error: formatBackendError(error, t.locale), data: null })));
   };
 
   const openFile = (rel: string, line: number | null = null) => {

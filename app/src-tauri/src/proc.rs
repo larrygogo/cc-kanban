@@ -112,8 +112,11 @@ pub(crate) fn pid_is_agent_ps(pid: i64) -> bool {
     if pid <= 0 {
         return false;
     }
+    // `-ww` 不可省:Darwin 的 ps 在 stdout 非 tty 时按 79 列截断最后一列,而 macOS 的 comm
+    // 是**全路径**。长路径被腰斩 → is_agent_process 判假 → 进程活着却被判死 → 回退 resume
+    // 起出重复会话(focus_session_terminal 的注释点名要防这个)。
     let Ok(out) = std::process::Command::new("ps")
-        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .args(["-ww", "-o", "comm=", "-p", &pid.to_string()])
         .output()
     else {
         return true; // 查不了 ≠ 已死：宁可暂当存活，等下一轮能查时再判
@@ -126,8 +129,9 @@ pub(crate) fn pid_is_agent_ps(pid: i64) -> bool {
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn claude_pids_snapshot() -> std::collections::HashSet<i64> {
     let mut set = std::collections::HashSet::new();
+    // -ww 理由同 pid_is_agent_ps：comm 是全路径，79 列截断会让长路径的 agent 漏出集合。
     let Ok(out) = std::process::Command::new("ps")
-        .args(["-axo", "pid=,comm="])
+        .args(["-ww", "-axo", "pid=,comm="])
         .output()
     else {
         return set;

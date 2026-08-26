@@ -34,8 +34,14 @@ pub fn init(app: &AppHandle) {
                 send_notification(&job.title, None, &job.body, None)
             {
                 // 点击后通知不会自动从"通知中心"消失，主动移除本应用的已投递通知。
-                // 与 send_notification 同线程调用（该线程已在跑通知中心的 runloop）。
-                clear_delivered();
+                //
+                // 必须回主线程:`NSUserNotificationCenter` 是 AppKit 单例,而「本线程已在跑
+                // 通知中心 runloop」这个前提在 mac-notification-sys 0.6.13 的**非主线程**分支下
+                // 并不成立——回调由主 runloop 投递,本线程只是在等信号量。从工作线程直接向
+                // AppKit 单例发消息属于线程亲和违规(表现为偶发无效/崩溃)。
+                if let Some((app, _)) = CLICK_CONTEXT.get() {
+                    let _ = app.run_on_main_thread(clear_delivered);
+                }
                 // 托管会话：PTY 归 Meowo，没有可聚焦的外部终端——打开对话窗口落在该会话上。
                 // 对话功能关闭（轻量模式）时对话窗不是合法落点，改把同一个 PTY 镜像进
                 // 外部终端（reveal_session 在关闭态强制走 attach 路径）。

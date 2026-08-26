@@ -21,8 +21,10 @@ fn tty_for_pid(pid: i64) -> Option<String> {
 /// comm 由 parse_ps_line 原样保留（含内部空白）——它会被截成 bundle 路径传给 `open`，
 /// 折叠空白的路径在磁盘上不存在。
 fn ancestor_chain(pid: i64) -> Vec<(i64, String)> {
+    // -ww：Darwin 的 ps 在 stdout 非 tty 时按 79 列截断最后一列，而这里要的 comm 正是
+    // bundle 全路径——截断后 `open` 拿到的路径在磁盘上不存在，终端宿主就聚焦不了。
     let Ok(out) = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,comm="])
+        .args(["-ww", "-axo", "pid=,ppid=,comm="])
         .output()
     else {
         return Vec::new();

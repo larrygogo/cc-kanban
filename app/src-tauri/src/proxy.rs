@@ -235,6 +235,26 @@ fn normalize_proxy_url(url: &str) -> Result<Cow<'_, str>, String> {
     Ok(Cow::Owned(format!("http://{user}:{pass}@{host}:{port}")))
 }
 
+/// 把代理地址里的 `user:pass@` 换成 `***@`，供**日志与出口下发**使用。
+///
+/// 代理地址是可以带凭据的（见 [`ProxyRule::url`]），而它会出现在两个不该出现的地方：
+/// 打日志（解析失败时原样 eprintln，开发/控制台构建直接上屏、被收集时长期留存）与
+/// `/rpc get_settings` 的响应（远端持 token 者本就能执行命令，但顺手拿走一份可离线复用的
+/// 代理凭据是另一回事）。两处共用这一个函数，避免各写各的漏一处。
+///
+/// 只动 userinfo：host/port/scheme 原样保留，日志仍然定位得到是哪个代理出的问题。
+pub(crate) fn redact_credentials(url: &str) -> Cow<'_, str> {
+    let (prefix, rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (format!("{scheme}://"), rest),
+        None => (String::new(), url),
+    };
+    // rsplit：密码里含 `@` 时也只认最后一个分隔符（与 ureq_compatible_url 同一口径）。
+    let Some((_, hostport)) = rest.rsplit_once('@') else {
+        return Cow::Borrowed(url);
+    };
+    Cow::Owned(format!("{prefix}***@{hostport}"))
+}
+
 /// ureq 2.x 自己用字符串切分代理地址，不会按 URL 规则解码 userinfo。其它消费者（reqwest、
 /// 模型 CLI）需要标准的百分号编码，因此只在交给 ureq 的最后一刻把用户名和密码还原。
 pub(crate) fn ureq_compatible_url(url: &str) -> Cow<'_, str> {

@@ -349,6 +349,41 @@ describe("ChatWindow", () => {
     // 普通消息不受影响：带参数的命令不是「裸命令」，不走菜单通道。
   });
 
+  it("窗口关掉后,静默探测的收尾 Esc 不得再写进那个会话（幽灵按键会打断 agent 的回合）", async () => {
+    // probeModelMenu 里 `await sendText(...)` 之后才调 endSilentProbe,而 sendText 内含
+    // 写后回显校验与拉终端,期间用户完全可能关窗。此前这条路没有活跃会话复核,晚到的
+    // Esc 会写进早已离开的会话——CI 实拍中它跨到了后面的用例里(sessionId 对不上)。
+    window.history.replaceState({}, "", "/?sessionId=77");
+    let failSend: (() => void) | null = null;
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 77, title: "换模型", status: "running", provider: "kimi", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, items: [], model: "K3",
+      });
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      if (command === "agent_chat_ui") return Promise.resolve(chatUi("kimi"));
+      if (command === "managed_terminal_snapshot") return Promise.resolve({
+        sessionId: 77, active: true, managed: true, data: btoa("ready"), startOffset: 0, endOffset: 5, exited: false, exitCode: null,
+      });
+      // 把 /model 的下发**挂住**,模拟「还在途中用户就关窗」;放行时让它失败,于是
+      // sendText 返回 false,probeModelMenu 走 `if (!sent) endSilentProbe()` 那条收尾路。
+      if (command === "write_managed_terminal" && (args as { data?: string })?.data === "/model") {
+        return new Promise<void>((_, reject) => { failSend = () => reject(new Error("发送失败")); });
+      }
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    fireEvent.click(await screen.findByRole("button", { name: "切换模型" }));
+    await waitFor(() => expect(failSend).toBeTruthy());
+    // 关窗,再让在途的那一发失败——收尾的 Esc 就是在这之后发出的。
+    cleanup();
+    await act(async () => {
+      failSend!();
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+    expect(invoke).not.toHaveBeenCalledWith("write_managed_terminal", { sessionId: 77, data: "\x1b" });
+  });
+
   it("菜单已打开时再点不重发命令（否则会打进搜索框把候选全过滤掉）", async () => {
     window.history.replaceState({}, "", "/?sessionId=19");
     invoke.mockImplementation((command: string) => {

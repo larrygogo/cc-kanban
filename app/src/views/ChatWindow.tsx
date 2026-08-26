@@ -507,6 +507,9 @@ export function ChatWindow() {
     priorItemIds: ReadonlySet<string>;
   }[]>([]);
   const echoIdRef = useRef(0);
+  // 只为把 15s 兜底的重算踢起来（见下方消解 effect 的计时器）：证据永不到达时，
+  // items/lastUserText 都不再变化，光靠它们做依赖那条兜底就永远轮不到执行。
+  const [echoSweep, setEchoSweep] = useState(0);
   // 渲染序列 = 真实 transcript + 乐观回显（以 user_text 形态挂在末尾）。
   // 消解/计数等逻辑一律读真实 items，回显只进显示层。交接注入语同样在显示层滤掉。
   const displayItems = useMemo<ChatItem[]>(() => {
@@ -609,6 +612,10 @@ export function ChatWindow() {
   if (view === "terminal") terminalEverShownRef.current = true;
   const terminalMounted = terminalEverShownRef.current || terminalMonitorNeeded;
   const activeSessionRef = useRef(sessionId);
+  // 组件是否还挂着。用于挡住**在途异步链的晚到副作用**：窗口关掉后，PTY 写入这类带
+  // 外部后果的动作绝不能再发出去（setState 晚到只是无害的 no-op，写终端不是）。
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
   // broker 审批/题面的接收通道（租约注册、push 监听、轮询兜底、领养、倒计时）抽在
   // useApprovalChannel.ts;本组件保留「回应」侧——queuedAnswer 的排队作答（点选的答案
   // 先记下,等屏幕识别确认表单在屏后才落键,绝不向未确认就绪的表单盲写）与 decideApproval。
@@ -2227,7 +2234,16 @@ export function ChatWindow() {
       });
       return next.length === current.length ? current : next;
     });
-  }, [items, history?.lastUserText]);
+  }, [items, history?.lastUserText, echoSweep]);
+  // 15s 兜底必须由**计时器**驱动。上面那个 effect 只在 items / lastUserText 变化时才重算，
+  // 而兜底要覆盖的恰恰是「消息其实没进 composer」——那时 transcript 不再增长、lastUserText
+  // 也不变,effect 永远不再执行,那条假的 user 气泡就一直挂在时间线末尾,用户以为发出去了。
+  // 有回显在场时每秒踢一次重算(setState 同值会被 React 短路,不会引起重渲染)。
+  useEffect(() => {
+    if (pendingEchoes.length === 0) return;
+    const timer = window.setInterval(() => setEchoSweep((n) => n + 1), 1_000);
+    return () => window.clearInterval(timer);
+  }, [pendingEchoes.length]);
   /// 斜杠命令直通 PTY——CLI 的 composer 收到 "/xxx" + 回车会当命令执行，无需特殊协议。
   const sendSlash = (command: string) => {
     if (sending) return;
@@ -2281,6 +2297,12 @@ export function ChatWindow() {
     modelMenuPendingRef.current = false;
     setModelProbing(false);
     setMenuWatchUntil(0);
+    // 幽灵按键防护。这个 Esc 会**打断 agent 正在跑的回合**,只有「这个会话此刻确实还归
+    // 本窗口」才允许发。兜底 timer 那条路早有 [sessionId] cleanup 挡着(见 1290 行注释),
+    // 但 probeModelMenu 里 `await sendText(...)` 之后的这条路没有:sendText 内含写后回显
+    // 校验(最长 1.5s)与拉终端(最长 45s),期间用户完全可能关窗或切走,晚到的 endSilentProbe
+    // 就会往早已离开的会话写 Esc。CI 实拍:该写入跨到了后面的用例里(sessionId 对不上)。
+    if (!mountedRef.current || activeSessionRef.current !== sessionId) return;
     void writeManagedTerminal(sessionId, "\x1b").catch(() => {});
   };
   finishSilentProbeRef.current = () => {

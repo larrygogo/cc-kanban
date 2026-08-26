@@ -72,8 +72,9 @@ fn ps_ppid(pid: u32) -> Option<u32> {
 /// `ps -o comm= -p <pid>` → 进程命令名（macOS 可能是可执行文件全路径，含 "claude" 即可匹配）。
 #[cfg(not(target_os = "windows"))]
 fn ps_comm(pid: u32) -> Option<String> {
+    // -ww：Darwin 的 ps 非 tty 输出按 79 列截断，而 macOS 的 comm 是全路径。
     let out = std::process::Command::new("ps")
-        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .args(["-ww", "-o", "comm=", "-p", &pid.to_string()])
         .output()
         .ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();

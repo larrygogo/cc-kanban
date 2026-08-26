@@ -33,7 +33,11 @@ fn agent_for(proxy: Option<&str>) -> ureq::Agent {
             Ok(px) => b = b.proxy(px),
             // 落盘前 set_settings 已校验过；能走到这儿多半是用户手改了 settings.json。
             // 降级直连并留日志——总好过让用量查询与安装整条挂掉。
-            Err(e) => eprintln!("[proxy] 代理地址无效，本次直连（{p}）：{e}"),
+            // 代理地址可带 user:pass@,原样打日志等于把凭据写进控制台/被收集的日志里。
+            Err(e) => eprintln!(
+                "[proxy] 代理地址无效，本次直连（{}）：{e}",
+                crate::proxy::redact_credentials(p)
+            ),
         }
     }
     let agent = b.build();
