@@ -10,6 +10,12 @@ use tauri_plugin_positioner::{Position, WindowExt};
 
 #[allow(non_upper_case_globals)]
 const NS_NONACTIVATING_PANEL: i32 = 1 << 7; // NSWindowStyleMaskNonActivatingPanel
+/// NSWindowStyleMaskResizable。`set_style_mask` 是 `setStyleMask:` 的直传——**整体替换**
+/// 而非按位或，只传 NonActivatingPanel 会把 tao 建窗时设好的 Resizable 位一起抹掉，
+/// 于是 macOS 用户拖不动贴纸边框（而 tauri.macos.conf.json 明写 `resizable: true`
+/// 并给了 minWidth/minHeight，Windows 上是能拖的）。
+#[allow(non_upper_case_globals)]
+const NS_RESIZABLE: i32 = 1 << 3;
 
 const RESIGN_EVENT: &str = "menubar_panel_did_resign_key";
 
@@ -49,7 +55,7 @@ pub fn convert_main_to_panel(app: &AppHandle) {
     }));
 
     panel.set_level(NSMainMenuWindowLevel + 1);
-    panel.set_style_mask(NS_NONACTIVATING_PANEL);
+    panel.set_style_mask(NS_NONACTIVATING_PANEL | NS_RESIZABLE);
     panel.set_collection_behaviour(
         NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary

@@ -36,6 +36,44 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("remote transport 的 open_link scheme 白名单", () => {
+  // 后端 open_link 只放行 http/https(理由:任由 transcript 内容触发本地程序是注入通道)。
+  // 远程桥把这条命令在前端就地兑现,那道守卫在手机路径上等于不存在——模型输出里的链接
+  // 就能把自定义 scheme 直接交给手机 OS 的对应 app。
+  const armWindowOpen = () => {
+    const open = vi.fn();
+    vi.stubGlobal("open", open);
+    return open;
+  };
+
+  it("http/https 照常打开", async () => {
+    const open = armWindowOpen();
+    await invoke("open_link", { url: "https://example.com/docs" });
+    expect(open).toHaveBeenCalledWith("https://example.com/docs", "_blank", "noopener");
+  });
+
+  it("非 http/https 一律拒绝,且不静默吞掉", async () => {
+    const open = armWindowOpen();
+    for (const url of [
+      "javascript:alert(1)",
+      "file:///C:/Windows/System32/calc.exe",
+      "intent://scan/#Intent;scheme=zxing;end",
+      "ms-settings:windowsupdate",
+    ]) {
+      await expect(invoke("open_link", { url })).rejects.toThrow("只支持 http/https 链接");
+    }
+    // open_url(应用自己的链接)同一条通道,同样门控。
+    await expect(invoke("open_url", { url: "file:///etc/passwd" })).rejects.toThrow();
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("解析不出的链接报「无效链接」而不是放行", async () => {
+    const open = armWindowOpen();
+    await expect(invoke("open_link", { url: "ht!tp://%%%" })).rejects.toThrow();
+    expect(open).not.toHaveBeenCalled();
+  });
+});
+
 describe("remote transport", () => {
   it("invoke 转 POST /rpc/<cmd>,带 X-Meowo-Token 与原样 camelCase 参数", async () => {
     setToken("tok-123");

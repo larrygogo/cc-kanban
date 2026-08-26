@@ -197,6 +197,20 @@ async fn check_update(
     state: State<'_, AppState>,
 ) -> Result<Option<AvailableUpdate>, String> {
     let mut builder = app.updater_builder();
+    // 「重启并更新」的退出收尾。Windows 上插件装完包直接 `std::process::exit(0)`
+    // (tauri-plugin-updater 2.10.1 updater.rs:865)——`RunEvent::Exit` **永不触发**,
+    // 于是 exit 分支里的 `ptys.shutdown()` 被整个跳过:托管 PTY 的子进程连同 conhost
+    // 被孤儿化、approval-broker.json 留成陈旧端点,正是那段注释点名要防的事。
+    //
+    // 插件为此留了这个钩子:它在**安装器已拉起、exit 之前**调用。收尾放这里而不是放
+    // install 调用前,是因为 install 失败时不该白杀用户的会话。shutdown 幂等,与退出
+    // 路径重复调用无害。macOS 的 install 不退进程,照常走 RunEvent::Exit。
+    {
+        let handle = app.clone();
+        builder = builder.on_before_exit(move || {
+            handle.state::<AppState>().ptys.shutdown();
+        });
+    }
     if let Some(proxy) = ports::resolve_proxy(None) {
         if meowo_agent::is_socks(&proxy) {
             return Err(

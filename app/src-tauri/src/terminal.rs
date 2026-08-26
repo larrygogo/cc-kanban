@@ -1194,19 +1194,80 @@ pub(crate) const PROXY_ENV_KEYS: [&str; 8] = [
     "no_proxy",
 ];
 
-/// PowerShell：先 `$env:K=$null; `，再 `$env:K='v'; `。单引号字面量内一切按字面处理（双引号内 `$`/反引号会插值），
-/// 内嵌单引号翻倍转义。与 `shell_join_for_windows` 的引用规则同源。
+/// 把 env 装进**我们自己 spawn 的**子进程（powershell / cmd）。密钥因此完全不经命令行——
+/// 命令行是同用户任意进程可读的（`Get-CimInstance Win32_Process`），而中转 API key 与带
+/// `user:pass@` 的代理地址都在这份 env 里。先清掉继承的代理变量，语义同 `env_prefix_powershell`
+/// 的 `$env:K=$null`（「直连」必须名副其实，不能让父进程的代理漏下去）。
+#[cfg(target_os = "windows")]
+fn apply_env_to_child(command: &mut std::process::Command, env: &[(String, String)]) {
+    for key in PROXY_ENV_KEYS {
+        command.env_remove(key);
+    }
+    for (key, value) in env {
+        command.env(key, value);
+    }
+}
+
+/// wt / wezterm 专用的 env 注入前缀：赋值写进临时文件，命令串里只出现文件路径。
+///
+/// 这两个终端**不是我们的子进程**（wezterm 由 mux server 起、wt 交给已存在的实例），
+/// [`apply_env_to_child`] 那条路走不通，只能经命令串——而命令串（哪怕 base64 编码）
+/// 对同机同用户进程完全可读。起因与 macOS 的 [`env_source_prefix_posix`] 一模一样。
+///
+/// 文件落在 `%TEMP%`（`C:\Users\<u>\AppData\Local\Temp`，继承的 ACL 就是「本人 + SYSTEM +
+/// Administrators」，与 unix 0600 等效），`create_new` 杜绝符号链接/抢占覆写，命令跑完即删。
+///
+/// **不用 `. 'x.ps1'` 点源**：那属于脚本文件执行，受 ExecutionPolicy 管辖，Restricted 策略下
+/// 直接失败。改用 `Get-Content` 逐行 `Set-Item env:`——它是普通 cmdlet 调用，不受策略限制，
+/// 也不必引入 `Invoke-Expression`。行格式 `KEY=VALUE`，按**首个** `=` 切分（代理地址里的
+/// `=` 不会被切坏）；值含换行的无法用行格式承载，直接丢弃（API key / 代理地址都是单行）。
+///
+/// env 为空时不建文件，只回清理语句——没有秘密可藏，少一个临时文件少一处失败点。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) fn env_prefix_powershell(env: &[(String, String)]) -> String {
+pub(crate) fn env_source_prefix_windows(env: &[(String, String)]) -> Result<String, String> {
     let clear: String = PROXY_ENV_KEYS
         .iter()
         .map(|k| format!("$env:{k}=$null; "))
         .collect();
-    let set: String = env
+    let usable: Vec<&(String, String)> = env
         .iter()
-        .map(|(k, v)| format!("$env:{k}='{}'; ", v.replace('\'', "''")))
+        .filter(|(k, v)| !k.contains(['\r', '\n']) && !v.contains(['\r', '\n']))
         .collect();
-    format!("{clear}{set}")
+    if usable.is_empty() {
+        return Ok(clear);
+    }
+    let mut content = String::new();
+    for (key, value) in &usable {
+        content.push_str(&format!("{key}={value}\n"));
+    }
+    let dir = std::env::temp_dir();
+    for _ in 0..3 {
+        let mut token = [0u8; 8];
+        if getrandom::fill(&mut token).is_err() {
+            token = u64::from(std::process::id()).to_le_bytes();
+        }
+        let token_hex: String = token.iter().map(|b| format!("{b:02x}")).collect();
+        let path = dir.join(format!("meowo-env-{}-{token_hex}.txt", std::process::id()));
+        let Ok(mut file) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        else {
+            continue;
+        };
+        use std::io::Write as _;
+        if let Err(error) = file.write_all(content.as_bytes()) {
+            let _ = std::fs::remove_file(&path);
+            return Err(format!("写入启动配置失败：{error}"));
+        }
+        drop(file);
+        // PowerShell 单引号字面量:内嵌单引号翻倍转义(与 env_prefix_powershell 同源)。
+        let quoted = path.to_string_lossy().replace('\'', "''");
+        return Ok(format!(
+            "{clear}Get-Content -LiteralPath '{quoted}' | ForEach-Object {{ $i = $_.IndexOf('='); if ($i -gt 0) {{ Set-Item -Path ('env:' + $_.Substring(0, $i)) -Value $_.Substring($i + 1) }} }}; Remove-Item -Force -LiteralPath '{quoted}'; "
+        ));
+    }
+    Err("无法创建 env 注入临时文件".into())
 }
 
 /// POSIX：`K='v' ` —— 命令前缀式赋值（只作用于这一条命令，无需 export）。
@@ -1581,15 +1642,27 @@ pub(crate) fn spawn_in_terminal(
         _ if wt_available() => "wt",
         _ => "powershell",
     };
+    // wt / wezterm 不是我们的子进程,env 只能经命令串注入,密钥于是落在命令行上——
+    // 同机任意同用户进程 `Get-CimInstance Win32_Process` 就能读走(EDR/脚本块日志同样留存)。
+    // 改成临时文件承载(见 env_source_prefix_windows);powershell/cmd 是我们自己 spawn 的,
+    // 走 Command::env 连命令行都不碰,最干净。macOS 早就为同一问题改过(env_source_prefix_posix)。
+    let outsourced_prefix = match eff {
+        "wezterm" | "wt" => match env_source_prefix_windows(env) {
+            Ok(prefix) => prefix,
+            Err(error) => {
+                eprintln!("准备终端环境变量失败：{error}");
+                return false;
+            }
+        },
+        _ => String::new(),
+    };
     let spawned: std::io::Result<()> = match eff {
         "powershell" => {
-            let cmd = format!(
-                "{}{}",
-                env_prefix_powershell(env),
-                shell_join_for_windows(argv, true)
-            );
+            // env 直接进子进程环境,不拼进 -Command:密钥不上命令行。
+            let cmd = shell_join_for_windows(argv, true);
             let mut c = Command::new("powershell");
             c.args(["-NoExit", "-Command", &cmd]);
+            apply_env_to_child(&mut c, env);
             if let Some(d) = &dir {
                 c.current_dir(d);
             }
@@ -1598,10 +1671,12 @@ pub(crate) fn spawn_in_terminal(
         "cmd" => {
             // cmd 没有能覆盖 %, !, ^, 嵌套引号等全部情况的字面 argv 语法。把真实 argv 放进
             // PowerShell EncodedCommand，cmd 只看到固定开关与 base64，避免用户路径/中转模型变成语法。
-            let wrapped = wrap_with_env_windows(argv, env);
+            // env 同样走子进程环境(cmd 是我们的子进程,内层 powershell 继承它)。
+            let wrapped = wrap_with_env_windows(argv, "");
             let cmd = shell_join_for_windows(&wrapped, false);
             let mut c = Command::new("cmd");
             c.raw_arg("/k").raw_arg(cmd);
+            apply_env_to_child(&mut c, env);
             if let Some(d) = &dir {
                 c.current_dir(d);
             }
@@ -1610,7 +1685,10 @@ pub(crate) fn spawn_in_terminal(
         // wezterm / wt 都不是我们的子进程（前者由 mux server 起、后者交给已存在的 wt 实例），
         // Command::env() 传不过去 → 有代理要注入时，改成让它们跑一层 PowerShell 来设变量。
         // 无代理时保持原样（直接跑 agent），把行为变更严格限制在用了代理的用户身上。
-        "wezterm" => wezterm::resume(dir.as_deref(), &wrap_with_env_windows(argv, env)),
+        "wezterm" => wezterm::resume(
+            dir.as_deref(),
+            &wrap_with_env_windows(argv, &outsourced_prefix),
+        ),
         _ => {
             let mut args: Vec<String> = vec!["-w".into(), "0".into(), "nt".into()];
             if let Some(p) = wt_default_profile() {
@@ -1621,7 +1699,7 @@ pub(crate) fn spawn_in_terminal(
                 args.push("-d".into());
                 args.push(d.clone());
             }
-            args.extend(wrap_with_env_windows(argv, env));
+            args.extend(wrap_with_env_windows(argv, &outsourced_prefix));
             Command::new("wt").args(&args).spawn().map(|_| ())
         }
     };
@@ -1640,14 +1718,10 @@ pub(crate) fn spawn_in_terminal(
 /// 必须使用 `-EncodedCommand`：Windows Terminal 会把普通 `-Command` 参数里的 `;` 重新解释成
 /// 自己的多命令分隔符，于是八条清理环境变量语句会各开一个 tab，并把末尾 agent 路径的引号拆坏。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) fn wrap_with_env_windows(argv: &[String], env: &[(String, String)]) -> Vec<String> {
+pub(crate) fn wrap_with_env_windows(argv: &[String], env_prefix: &str) -> Vec<String> {
     use base64::Engine;
 
-    let cmd = format!(
-        "{}{}",
-        env_prefix_powershell(env),
-        shell_join_for_windows(argv, true)
-    );
+    let cmd = format!("{env_prefix}{}", shell_join_for_windows(argv, true));
     let utf16le: Vec<u8> = cmd.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let encoded = base64::engine::general_purpose::STANDARD.encode(utf16le);
     vec![
@@ -2626,19 +2700,25 @@ mod proxy_env_tests {
     }
 
     #[test]
-    fn powershell_prefix_sets_vars_before_the_command() {
-        let p = env_prefix_powershell(&env("http://127.0.0.1:7890"));
+    fn windows_prefix_sets_vars_before_the_command() {
+        let p = env_source_prefix_windows(&env("http://127.0.0.1:7890")).unwrap();
+        // 清理继承的代理在前(直连语义),读取文件设值在后。
         assert!(p.starts_with("$env:HTTPS_PROXY=$null; "));
-        assert!(p.ends_with(
-            "$env:HTTPS_PROXY='http://127.0.0.1:7890'; $env:HTTP_PROXY='http://127.0.0.1:7890'; "
-        ));
-        // 与命令串拼起来必须是「先赋值、再执行」。
+        assert!(p.contains("Set-Item -Path ('env:' + "));
+        // 与命令串拼起来必须是「先设值、再执行」。
         let cmd = format!(
             "{p}{}",
             shell_join_for_windows(&["claude".to_string()], true)
         );
         assert!(cmd.starts_with("$env:HTTPS_PROXY="));
         assert!(cmd.ends_with("claude"));
+        if let Some(path) = p
+            .split_once("Get-Content -LiteralPath '")
+            .and_then(|(_, rest)| rest.split_once('\''))
+            .map(|(x, _)| x.to_string())
+        {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]
@@ -2716,26 +2796,39 @@ mod proxy_env_tests {
     fn quoting_survives_a_value_with_quotes() {
         let evil = vec![("HTTPS_PROXY".to_string(), "http://a'b;calc".to_string())];
 
-        // PowerShell：单引号翻倍 → 引号无法闭合，`;calc` 留在字符串里。
-        let ps = env_prefix_powershell(&evil);
-        assert!(ps.ends_with("$env:HTTPS_PROXY='http://a''b;calc'; "));
-
-        // POSIX：`'` → `'\''`，同样无法闭合。
+        // POSIX：`'` → `'\''`，引号无法闭合，`;calc` 留在字符串里。
         let sh = env_prefix_posix(&evil);
         assert!(sh.ends_with(r"HTTPS_PROXY='http://a'\''b;calc' "));
+
+        // Windows：值根本不进命令串(powershell/cmd 走 Command::env,wt/wezterm 走临时文件),
+        // 注入面因此消失——断言值原样落盘、命令串里找不到它。
+        let prefix = env_source_prefix_windows(&evil).unwrap();
+        assert!(!prefix.contains("calc"), "值不该出现在命令串里：{prefix}");
+        let path = prefix
+            .split_once("Get-Content -LiteralPath '")
+            .and_then(|(_, rest)| rest.split_once('\''))
+            .map(|(p, _)| p.to_string())
+            .expect("前缀里应含文件路径");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "HTTPS_PROXY=http://a'b;calc\n"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn empty_env_clears_inherited_proxy_before_launching() {
         // off 的意义是直连，故空 env 也必须清掉继承的代理，而不是原样启动。
-        assert!(env_prefix_powershell(&[]).contains("$env:ALL_PROXY=$null;"));
+        assert!(env_source_prefix_windows(&[])
+            .unwrap()
+            .contains("$env:ALL_PROXY=$null;"));
         assert!(env_prefix_posix(&[]).starts_with("unset HTTPS_PROXY"));
         let argv = vec![
             "claude".to_string(),
             "--resume".to_string(),
             "abc".to_string(),
         ];
-        let wrapped = wrap_with_env_windows(&argv, &[]);
+        let wrapped = wrap_with_env_windows(&argv, &env_source_prefix_windows(&[]).unwrap());
         assert_eq!(wrapped[0], "powershell");
         assert_eq!(wrapped[2], "-EncodedCommand");
         assert!(
@@ -2743,6 +2836,42 @@ mod proxy_env_tests {
             "WT 可见的参数里不能再出现命令分隔符"
         );
         assert!(decode_wrapped_command(&wrapped).contains("$env:ALL_PROXY=$null;"));
+    }
+
+    /// wt / wezterm 的 env 注入不得把值留在命令串上:命令行对同用户任意进程可读,而这份 env
+    /// 里有中转 API key 与可能带 user:pass 的代理地址。值应只存在于临时文件中。
+    #[test]
+    fn wt_env_values_live_in_a_file_not_on_the_command_line() {
+        let secrets = vec![
+            ("ANTHROPIC_API_KEY".to_string(), "sk-secret-123".to_string()),
+            (
+                "HTTPS_PROXY".to_string(),
+                "http://u:p@127.0.0.1:7890".to_string(),
+            ),
+        ];
+        let prefix = env_source_prefix_windows(&secrets).unwrap();
+        // 前缀里只有清理语句、文件路径与读取命令,没有任何密钥。
+        assert!(!prefix.contains("sk-secret-123"), "密钥泄漏进命令串:{prefix}");
+        assert!(!prefix.contains("u:p@"), "代理凭据泄漏进命令串:{prefix}");
+        assert!(prefix.starts_with("$env:HTTPS_PROXY=$null; "));
+        assert!(prefix.contains("Get-Content -LiteralPath '"));
+        // 落盘的文件确实带着值,且按首个 '=' 切分不会切坏代理地址。
+        let path = prefix
+            .split_once("Get-Content -LiteralPath '")
+            .and_then(|(_, rest)| rest.split_once('\''))
+            .map(|(p, _)| p.to_string())
+            .expect("前缀里应含文件路径");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("ANTHROPIC_API_KEY=sk-secret-123\n"));
+        assert!(body.contains("HTTPS_PROXY=http://u:p@127.0.0.1:7890\n"));
+        // 命令跑完自删;这里手工清掉测试残留。
+        assert!(prefix.contains("Remove-Item -Force -LiteralPath '"));
+        let _ = std::fs::remove_file(&path);
+
+        // 空 env 不建文件,只回清理语句(没有秘密可藏,少一处失败点)。
+        let bare = env_source_prefix_windows(&[]).unwrap();
+        assert!(!bare.contains("Get-Content"));
+        assert!(bare.contains("$env:ALL_PROXY=$null; "));
     }
 
     /// wt / wezterm 不是我们的子进程（前者交给已存在的 wt 实例、后者交给 mux server），
@@ -2754,16 +2883,26 @@ mod proxy_env_tests {
             "resume".to_string(),
             "sid".to_string(),
         ];
-        let w = wrap_with_env_windows(&argv, &env("http://127.0.0.1:7890"));
+        let prefix = env_source_prefix_windows(&env("http://127.0.0.1:7890")).unwrap();
+        let w = wrap_with_env_windows(&argv, &prefix);
         assert_eq!(w[0], "powershell");
         assert_eq!(w[1], "-NoExit");
         assert_eq!(w[2], "-EncodedCommand");
         assert!(!w[3].contains(';'), "WT 不得把脚本拆成多个 tab：{}", w[3]);
         let decoded = decode_wrapped_command(&w);
         assert!(decoded.starts_with("$env:HTTPS_PROXY=$null; "));
-        assert!(decoded.contains("$env:HTTPS_PROXY='http://127.0.0.1:7890'; "));
+        // 值走临时文件,命令串里只有读取语句(见 wt_env_values_live_in_a_file_not_on_the_command_line)。
+        assert!(decoded.contains("Get-Content -LiteralPath '"));
+        assert!(!decoded.contains("127.0.0.1:7890"), "代理值不该出现在命令串里");
         assert!(decoded.contains("codex.exe"), "原命令必须还在：{decoded}");
         assert!(decoded.ends_with("resume sid"));
+        if let Some(path) = prefix
+            .split_once("Get-Content -LiteralPath '")
+            .and_then(|(_, rest)| rest.split_once('\''))
+            .map(|(p, _)| p.to_string())
+        {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     /// macOS resume 的 cwd 准入：None/空白合法（走无目录脚本）；给了目录就必须真实存在，

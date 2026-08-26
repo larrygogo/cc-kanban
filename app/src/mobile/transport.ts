@@ -245,7 +245,25 @@ export function installRemoteTransport(): void {
       case "open_link":
       case "open_url": {
         const a = args as { url?: string } | undefined;
-        if (a?.url) window.open(a.url, "_blank", "noopener");
+        if (!a?.url) return null;
+        // scheme 白名单必须在这儿**再做一遍**:后端 open_link 对 http/https 之外一律拒绝
+        // (settings.rs,理由是「任由 transcript 内容触发本地程序是注入通道」),但远程桥
+        // 把这条命令在前端就地兑现,那道守卫在手机路径上等于不存在。模型输出里的链接
+        // (对话 Markdown 与终端 OSC 8 走同一条通道)于是能把 intent://、market:// 这类
+        // 自定义 scheme 直接交给手机 OS 的对应 app。错误串与后端逐字一致,errors.ts 的
+        // sentinel 表现成中英文案。
+        // 刻意**不传 base**:后端是 `url::Url::parse(&url)`,相对链接直接判无效。带 base
+        // 会把 "ht!tp://%%%" 这类串当相对路径解析成同源 http 而放行,两端语义就分叉了。
+        let scheme = "";
+        try {
+          scheme = new URL(a.url).protocol;
+        } catch {
+          throw new Error("无效链接");
+        }
+        if (scheme !== "http:" && scheme !== "https:") {
+          throw new Error("只支持 http/https 链接");
+        }
+        window.open(a.url, "_blank", "noopener");
         return null;
       }
       case "open_new_session_window": {

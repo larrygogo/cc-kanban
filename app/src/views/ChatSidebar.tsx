@@ -15,6 +15,7 @@ import { CheckIcon, ChevronDownIcon, MoreIcon, NoteIcon, TopIcon } from "./stick
 import { useT } from "../i18n";
 import { formatBackendError } from "../i18n/errors";
 import { isMac } from "../platform";
+import { reconcileRows, sameRefs, type RowCache } from "../rowCache";
 import type { Dict } from "../i18n/zh";
 
 /** 每翻一页新增的会话数。滚到底自动加载下一页，直到后端带回 next_cursor = null 为止。 */
@@ -400,6 +401,8 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
   const mountedRef = useRef(true);
   const limitRef = useRef(limit);
   limitRef.current = limit;
+  // 行级结构共享的缓存（键 = session.id，只增不清，量级是本窗口见过的会话数）。
+  const rowCacheRef = useRef<RowCache<LiveSession>>(new Map());
   // 目录筛选:选中的 cwd 走后端的**专用 cwd 参数**(斜杠归一后精确比较,子目录一并命中),
   // 不是 search 的子串 LIKE——理由见下面 load 里的注释。分页与排序仍全在后端做:前端过滤
   // 只能过滤「已加载的这一页」,筛出来的清单是残缺的。
@@ -489,14 +492,18 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
         if (archivedViewRef.current !== arch) return;
         if ((searchRef.current.trim() || null) !== q) return;
         setReachedEnd(page.next_cursor === null);
+        // 行级结构共享(与看板共用 reconcileRows):board-changed 多为空转刷新,不做这层的话
+        // 每 400ms 就是「整表重取 + 重建几百个卡片元素 + 全表 DOM reconcile」,而侧栏没有
+        // 虚拟化、几百条全在 DOM 里。命中时整表引用不变,setState 直接短路。
+        const fresh = reconcileRows(rowCacheRef.current, page.items);
         if (mode === "grow") {
           setSessions((prev) => {
-            if (!prev) return page.items;
+            if (!prev) return fresh;
             const seen = new Set(prev.map((s) => s.session.id));
-            return [...prev, ...page.items.filter((s) => !seen.has(s.session.id))];
+            return [...prev, ...fresh.filter((s) => !seen.has(s.session.id))];
           });
         } else {
-          setSessions(page.items);
+          setSessions((prev) => (prev && sameRefs(prev, fresh) ? prev : fresh));
         }
       })
       .catch(() => {

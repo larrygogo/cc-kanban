@@ -186,7 +186,14 @@ pub(crate) fn open_settings_window(app: &tauri::AppHandle) {
                     });
                 }
             }
-            Err(e) => eprintln!("创建设置窗口失败: {e}"),
+            Err(e) => {
+                eprintln!("创建设置窗口失败: {e}");
+                // 建窗失败也要还激活策略的计数:will_open 已经把 label 记进集合,不还就
+                // 永远 is_empty()==false,之后关掉所有窗口也切不回 Accessory,Dock 图标
+                // 从此常驻(纯托盘应用的明显退化)。下同,五个失败分支各还一次。
+                #[cfg(target_os = "macos")]
+                crate::macos::menubar::settings_window_did_close(app, "about");
+            }
         }
     }
 }
@@ -250,7 +257,11 @@ pub(crate) fn open_onboarding_window(app: &tauri::AppHandle) {
                 });
             }
         }
-        Err(e) => eprintln!("创建引导窗口失败: {e}"),
+        Err(e) => {
+            eprintln!("创建引导窗口失败: {e}");
+            #[cfg(target_os = "macos")]
+            crate::macos::menubar::settings_window_did_close(app, "onboarding");
+        }
     }
 }
 
@@ -314,7 +325,11 @@ pub(crate) fn open_update_window_impl(app: &tauri::AppHandle) {
                 });
             }
         }
-        Err(e) => eprintln!("创建更新窗口失败: {e}"),
+        Err(e) => {
+            eprintln!("创建更新窗口失败: {e}");
+            #[cfg(target_os = "macos")]
+            crate::macos::menubar::settings_window_did_close(app, "updater");
+        }
     }
 }
 
@@ -410,7 +425,11 @@ pub(crate) fn open_new_session_window_impl(
                 });
             }
         }
-        Err(e) => eprintln!("创建新建会话窗口失败: {e}"),
+        Err(e) => {
+            eprintln!("创建新建会话窗口失败: {e}");
+            #[cfg(target_os = "macos")]
+            crate::macos::menubar::settings_window_did_close(app, "new-session");
+        }
     }
 }
 
@@ -429,8 +448,11 @@ pub(crate) fn unify_titlebar_toolbar(window: &tauri::WebviewWindow) {
         if let Ok(ns_window) = w.ns_window() {
             let ns_window = ns_window as *mut AnyObject;
             unsafe {
-                let toolbar: *mut AnyObject = msg_send![class!(NSToolbar), new];
-                let _: () = msg_send![ns_window, setToolbar: toolbar];
+                // `new` 是 +1 引用计数的所有权返回,接成裸指针那份所有权就没人释放了
+                // (setToolbar: 自己另外 retain 一次)——每建一个对话窗漏一个 NSToolbar。
+                // 用 Retained 接管:作用域结束自动 release,窗口那份 retain 不受影响。
+                let toolbar: objc2::rc::Retained<AnyObject> = msg_send![class!(NSToolbar), new];
+                let _: () = msg_send![ns_window, setToolbar: &*toolbar];
                 // NSWindowToolbarStyleUnified = 3（macOS 11+，本应用最低 14.0）。
                 let _: () = msg_send![ns_window, setToolbarStyle: 3isize];
             }
@@ -596,9 +618,12 @@ pub(crate) fn open_chat_window_impl(
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
         .background_color(window_background_color(app));
-    let win = builder
-        .build()
-        .map_err(|e| format!("创建对话窗口失败: {e}"))?;
+    let win = builder.build().map_err(|e| {
+        // 同上:失败也要还激活策略计数,否则 Dock 图标永久常驻。
+        #[cfg(target_os = "macos")]
+        crate::macos::menubar::settings_window_did_close(app, "chat");
+        format!("创建对话窗口失败: {e}")
+    })?;
     // 对话窗标题栏行高 52px（.chat-bar/.chat-sidebar-head），红绿灯默认贴顶会和同行的
     // 标题/按钮错位；挂空 toolbar 让系统把它垂直居中（备忘录式侧栏惯例）。
     #[cfg(target_os = "macos")]

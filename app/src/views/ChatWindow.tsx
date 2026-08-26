@@ -1188,7 +1188,23 @@ export function ChatWindow() {
     let reportedId: string | null = null;
     const decoder = new TextDecoder();
     const markers = chatUi?.startup_attention_markers ?? [];
+    // 这条探测是**兜底**(主路径是 ManagedTerminal 的事件监听):PTY 一直不活跃时,原先固定
+    // 1.2s 一发、无退避也无停止条件——停在一个已结束的会话上就是每小时 3000 次空转 IPC,
+    // 每次都进 spawn_blocking 读一趟。十个窗口最小化去开两小时会白跑近 20 万次。
+    // 现在按 1.2s 起、每次 ×1.6 退到 30s 封顶;窗口不可见时不发(可见性一恢复立刻补一发,
+    // 见下面的 visibilitychange)。发现活跃 PTY 即转事件监听,与退避无关。
+    let delay = 1_200;
+    const nextDelay = () => {
+      delay = Math.min(30_000, Math.round(delay * 1.6));
+      return delay;
+    };
     const poll = async () => {
+      // 窗口不可见时不打 IPC:兜底探测的意义是「用户看着这个会话时别漏掉启动阻塞」,
+      // 最小化的窗口没有观众。重新可见时下面的监听会立刻补一发并把退避重置。
+      if (document.hidden) {
+        timer = window.setTimeout(() => void poll(), nextDelay());
+        return;
+      }
       try {
         const snapshot = await managedTerminalSnapshot(sessionId, since);
         if (cancelled) return;
@@ -1213,13 +1229,25 @@ export function ChatWindow() {
           setTerminalMonitorNeeded(true);
           return;
         }
-        timer = window.setTimeout(() => void poll(), 1_200);
+        timer = window.setTimeout(() => void poll(), nextDelay());
       } catch {
-        if (!cancelled) timer = window.setTimeout(() => void poll(), 1_200);
+        if (!cancelled) timer = window.setTimeout(() => void poll(), nextDelay());
       }
     };
+    // 窗口重新可见:退避归零并立刻补一发——用户切回来时不该再等最长 30s 才看到启动阻塞。
+    const onVisible = () => {
+      if (cancelled || document.hidden) return;
+      delay = 1_200;
+      window.clearTimeout(timer);
+      void poll();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     void poll();
-    return () => { cancelled = true; window.clearTimeout(timer); };
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
     // 文法按值指纹入依赖(理由见 grammarKey);实时值走 ref,不吃陈旧闭包。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, startupAttentionMarkerKey, terminalInteractivePrompt, revealTerminalAttention, grammarKey]);

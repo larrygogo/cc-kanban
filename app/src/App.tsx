@@ -17,6 +17,7 @@ import { CollapsedStrip } from "./views/CollapsedStrip";
 import { useUpdate } from "./useUpdate";
 import { useShowWhenReady } from "./useShowWhenReady";
 import { isMacPanel } from "./platform";
+import { reconcileRows, sameRefs, type RowCache as SharedRowCache } from "./rowCache";
 
 type Edge = "left" | "right" | "top";
 type Mode = "normal" | "collapsed" | "expanded";
@@ -36,19 +37,8 @@ const PAGE_SIZE = 100; // 贴纸会话每页条数，与首屏一致
 // 引用稳定，配合卡片层的 memo 只重渲染那一张。全字段 JSON 比较是刻意的**排除法**——按字段挑
 // 白名单的签名方案会在漏字段时让 UI 静默不更新（sameHistoryMeta 的注释记过三回同类事故）。
 // 缓存只增不清：键是 session.id，量级为窗口生命周期内见过的会话数，几百条小对象，不值得管理。
-type RowCache = Map<number, { json: string; item: Item }>;
-const reconcileRows = (cache: RowCache, rows: Item[]): Item[] =>
-  rows.map((row) => {
-    const id = row.session.id;
-    const json = JSON.stringify(row);
-    const hit = cache.get(id);
-    if (hit && hit.json === json) return hit.item;
-    cache.set(id, { json, item: row });
-    return row;
-  });
-// 行已结构共享，引用比较即语义比较。
-const sameRefs = (a: Item[], b: Item[]): boolean =>
-  a.length === b.length && a.every((x, i) => x === b[i]);
+// 实现移到 ../rowCache 与对话窗侧栏共用（那边此前缺这层，几百条时每次空转刷新都全表重建）。
+type RowCache = SharedRowCache<Item>;
 
 // 缩略条主轴逻辑长度：按 connected 点数贴合内容（点 10px + 间距 7px = 17，两端留白 26），最小 48。
 // 仅作折叠初值，CollapsedStrip 挂载后会按真实 DOM 尺寸精确校正。
