@@ -15,6 +15,7 @@ import { useT } from "../i18n";
 import { formatBackendError } from "../i18n/errors";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { collectSubagentReceipts, reduceChatEvents } from "../chat/reducer";
+import { buildTranscriptTodos, type TaskUpdateCache } from "../chat/transcriptTodos";
 import { ApprovalCard } from "./chat/ApprovalCard";
 import { composeAnswerBody, matchOptionByLabel, observeTranscriptForDismiss, parseAskUserQuestions, type QuestionAnswerDraft, type QuestionDismissTracker, type StructuredQuestion } from "./chat/askUserQuestion";
 import { detectAtToken, useAtFileCompletion, useSlashCompletion } from "./chat/composerCompletion";
@@ -654,38 +655,17 @@ export function ChatWindow() {
     () => items.reduce((acc, item, index) => (item.type === "user_text" ? index : acc), -1),
     [items],
   );
-  const transcriptTodos = useMemo(() => {
-    const byId = new Map<string, { content: string; status: string; touch: number }>();
-    const pendingCreates = new Map<string, string>();
-    items.forEach((item, index) => {
-      if (item.type === "tool_use" && item.name === "TaskCreate") {
-        pendingCreates.set(item.id, item.summary);
-      } else if (item.type === "tool_use" && item.name === "TaskUpdate") {
-        try {
-          const input = JSON.parse(item.summary) as { taskId?: unknown; status?: unknown; subject?: unknown };
-          const id = input.taskId == null ? "" : String(input.taskId);
-          if (!id) return;
-          if (input.status === "deleted") { byId.delete(id); return; }
-          const row = byId.get(id);
-          if (row) {
-            if (typeof input.status === "string") row.status = input.status;
-            if (typeof input.subject === "string") row.content = input.subject;
-            row.touch = index;
-          } else if (typeof input.subject === "string") {
-            // 错过 Create(如 transcript 截段)但这次带了标题 → 补建自愈。
-            byId.set(id, { content: input.subject, status: typeof input.status === "string" ? input.status : "pending", touch: index });
-          }
-        } catch { /* 摘要被截断等罕见形态:跳过这条,状态晚一拍好过整表消失 */ }
-      } else if (item.type === "tool_result" && item.tool_use_id && pendingCreates.has(item.tool_use_id)) {
-        const numbered = /Task #(\d+)/.exec(item.text ?? "");
-        if (numbered) byId.set(numbered[1], { content: pendingCreates.get(item.tool_use_id)!, status: "pending", touch: index });
-        pendingCreates.delete(item.tool_use_id);
-      }
-    });
-    return [...byId.values()]
-      .filter((row) => row.status !== "completed" || row.touch > lastUserIdx)
-      .map(({ content, status }) => ({ content, status }));
-  }, [items, lastUserIdx]);
+  // TaskUpdate 摘要的解析缓存。这条扫描是本页唯一昂贵的一处:实测 30000 条(三成是顶到
+  // 800 字上限的 TaskUpdate)时,带 parse 的一遍要 5.5~6.4 ms,而同批数据上 displayItems /
+  // lastUserIdx / collectSubagentReceipts / userHistory 全在 1 ms 以下;流式 200ms 一批,
+  // 6 ms 一次就吃掉小半帧。条目不可变(reducer 写时复制)、同 id 的 summary 永不变,按 id
+  // 缓存后降到 0.7~1.6 ms。换会话整只丢弃:id 不跨会话复用,也顺带封住无界增长。
+  const taskUpdateCacheRef = useRef<TaskUpdateCache>(new Map());
+  useEffect(() => { taskUpdateCacheRef.current = new Map(); }, [sessionId]);
+  const transcriptTodos = useMemo(
+    () => buildTranscriptTodos(items, lastUserIdx, taskUpdateCacheRef.current),
+    [items, lastUserIdx],
+  );
   // 标题栏任务进度面板与底部 TodoPanel 共用这一份数据。DB 快照(旧版 TodoWrite/kimi
   // 的 TodoList,hook 路线仍通)优先;空则用 transcript 重建的(claude 新版唯一来源)。
   const todos = history?.todos?.length ? history.todos : transcriptTodos;
