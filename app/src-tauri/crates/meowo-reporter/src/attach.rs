@@ -188,10 +188,39 @@ pub(crate) fn notify_claim(session_id: i64, agent_pid: Option<u32>) {
     }
 }
 
+/// TUI 遗留的私有模式收回序列。agent 自己正常退出时会收，**崩溃 / 被 Meowo 结束 /
+/// Ctrl-C 强退时来不及**——而 attach 客户端一退出，窗口就还给宿主 shell，本地终端却
+/// 还开着这些模式：
+///
+/// - **鼠标上报**（1000/1002/1003 + 编码 1005/1006/1015）：鼠标一动，终端就往 shell 的
+///   stdin 灌 `ESC[<35;x;yM`，PSReadLine 逐个回显——屏幕上字符不停地刷（实拍报告
+///   「退出 agent 后管道内的字符一直在刷」）。这是本序列的主要动机。
+/// - **括号粘贴**（2004）：之后在 shell 里粘贴会带上 `ESC[200~` 包裹，成为杂字符。
+/// - **备用屏**（1049 / 老式 1047、47）：shell 落在没有 scrollback 的备用屏里。
+/// - **硬件光标**（25）：claude 启动即 `?25l` 自绘光标，残留则 shell 里看不见光标。
+///
+/// 全部幂等：模式本来没开时写关闭序列无副作用。顺序上鼠标/粘贴在前、备用屏在后
+/// （`?1049l` 切回主屏并恢复光标位置，之后的 SGR 复位作用在主屏上）。
+///
+/// GUI 终端页有同款收回（`ManagedTerminal` 的 `MOUSE_MODES_OFF`），但那里**刻意不动
+/// 备用屏**——那是个只读画面容器，最后一帧正是用户要看的。外部终端这边处境相反：
+/// 窗口要交还给 shell 继续用，备用屏必须切回。
+const MODES_OFF: &[u8] = b"\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1005l\x1b[?1015l\x1b[?2004l\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b[?25h\x1b[0m";
+
+/// 把终端交还给宿主 shell：收回 TUI 遗留的模式，再退出 raw mode。幂等，可重复调用。
+fn restore_terminal() {
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(MODES_OFF);
+    let _ = stdout.flush();
+    let _ = crossterm::terminal::disable_raw_mode();
+}
+
+/// 退出守卫：**任何**返回路径都要还原终端——正常 EOF、`?` 传播的写失败、握手后的早退。
+/// 漏掉一条，用户就会拿到一扇「一动鼠标就刷字符」的 shell 窗口。
 struct RawGuard;
 impl Drop for RawGuard {
     fn drop(&mut self) {
-        let _ = crossterm::terminal::disable_raw_mode();
+        restore_terminal();
     }
 }
 
@@ -382,10 +411,12 @@ pub(crate) fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     done.store(true, Ordering::Release);
     drop(stdout);
-    // 先退出 raw mode 再说话，否则 \n 不回车、文本叠在残留画面上。
+    // 先还原终端再说话：raw mode 不退，\n 不回车、文本叠在残留画面上；备用屏不切回，
+    // 这句话就打在马上要被丢弃的那一屏上（见 MODES_OFF）。RawGuard 里还有一遍兜底
+    // 覆盖早退路径，幂等重复无副作用。
     // 连接断开必须有一句人话：服务端拒绝时错误已在上面原样上屏，这里补的是
     // 「正常结束」的情形——否则窗口就是一片无解释的静止画面（或纯空白）。
-    let _ = crossterm::terminal::disable_raw_mode();
+    restore_terminal();
     println!("\n[Meowo] 连接已关闭（会话已结束，或在 Meowo 中被停止）。");
     Ok(())
 }

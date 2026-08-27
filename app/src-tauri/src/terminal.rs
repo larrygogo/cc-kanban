@@ -1171,6 +1171,30 @@ pub(crate) fn shell_join_for_windows(args: &[String], powershell: bool) -> Strin
     }
 }
 
+/// 把 agent 命令串包进 `try { … } finally { … }`，退出时收回 TUI 遗留的 DEC 私有模式。
+///
+/// 外部终端是 `-NoExit`：agent 退出后窗口**留在 shell 提示符**，而 agent 崩溃 / 被
+/// Ctrl-C 强退时来不及自己收模式。残留的鼠标上报（1000/1002/1003）会让终端把每一次
+/// 鼠标移动都当输入灌进 shell 的 stdin，PSReadLine 逐个回显——屏幕上字符不停地刷
+/// （实拍报告「退出 agent 后管道内的字符一直在刷」）；括号粘贴 2004 让之后的粘贴带上
+/// `ESC[200~`；备用屏 1049 把 shell 关进没有 scrollback 的那一屏；`?25l` 让光标消失。
+/// attach 客户端有同款收回（reporter 的 `MODES_OFF`），这条路没有客户端进程可依靠，
+/// 只能由 shell 自己在 agent 之后补一句。
+///
+/// 用 `finally` 而不是 `;` 追加：Ctrl-C 会中断整条命令串，`;` 后的语句根本不执行——
+/// 而那**正是**最需要收回的场景（正常 `/exit` 的 agent 自己就收了）。finally 在
+/// PipelineStoppedException 下照常执行。
+///
+/// ESC 用 `[char]27` 而非双引号插值：`"$e[?1003l"` 里 PowerShell 会把 `$e[` 当索引解析。
+/// 序列内容与顺序见 reporter 的 `MODES_OFF`（鼠标/粘贴在前、备用屏在后）。全部幂等。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn wrap_with_terminal_restore(cmd: &str) -> String {
+    const MODES: &str = "'?1003l','?1002l','?1000l','?1006l','?1005l','?1015l','?2004l','?1049l','?1047l','?47l','?25h','0m'";
+    format!(
+        "try{{ {cmd} }}finally{{$e=[char]27;[Console]::Write(((@({MODES})|ForEach-Object{{$e+'['+$_}}) -join ''))}}"
+    )
+}
+
 // ═══ 代理环境变量的注入前缀 ═══
 //
 // codex / kimi 没法从配置文件配代理（见 meowo_agent::proxy 的能力表），只认进程环境变量。而
@@ -1659,7 +1683,7 @@ pub(crate) fn spawn_in_terminal(
     let spawned: std::io::Result<()> = match eff {
         "powershell" => {
             // env 直接进子进程环境,不拼进 -Command:密钥不上命令行。
-            let cmd = shell_join_for_windows(argv, true);
+            let cmd = wrap_with_terminal_restore(&shell_join_for_windows(argv, true));
             let mut c = Command::new("powershell");
             c.args(["-NoExit", "-Command", &cmd]);
             apply_env_to_child(&mut c, env);
@@ -1721,7 +1745,11 @@ pub(crate) fn spawn_in_terminal(
 pub(crate) fn wrap_with_env_windows(argv: &[String], env_prefix: &str) -> Vec<String> {
     use base64::Engine;
 
-    let cmd = format!("{env_prefix}{}", shell_join_for_windows(argv, true));
+    // 环境变量赋值留在 try 外：它们要对 agent 退出后用户在同一窗口手敲的命令继续生效。
+    let cmd = format!(
+        "{env_prefix}{}",
+        wrap_with_terminal_restore(&shell_join_for_windows(argv, true))
+    );
     let utf16le: Vec<u8> = cmd.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let encoded = base64::engine::general_purpose::STANDARD.encode(utf16le);
     vec![
@@ -2874,6 +2902,31 @@ mod proxy_env_tests {
         assert!(bare.contains("$env:ALL_PROXY=$null; "));
     }
 
+    /// 外部终端是 `-NoExit`：agent 退出后窗口留在 shell 提示符。agent 崩溃 / 被 Ctrl-C
+    /// 强退时来不及自己收 DEC 私有模式，残留的鼠标上报会让终端把每次鼠标移动都当输入
+    /// 灌进 shell、逐个回显——屏幕上字符不停地刷（实拍报告）。
+    ///
+    /// 收回必须挂 `finally`：Ctrl-C 中断整条命令串，`;` 追加的语句根本不执行，而那正是
+    /// 最需要收回的场景（正常 `/exit` 的 agent 自己就收了）。
+    #[test]
+    fn external_terminal_command_restores_modes_on_exit() {
+        let wrapped = wrap_with_terminal_restore("& 'C:/x/claude.exe' --resume ID");
+        assert!(
+            wrapped.starts_with("try{ & 'C:/x/claude.exe' --resume ID }finally{"),
+            "原命令整条进 try：{wrapped}"
+        );
+        // 鼠标上报全家 + 括号粘贴 + 备用屏 + 光标，与 reporter 的 MODES_OFF 同一份清单。
+        for mode in [
+            "?1003l", "?1002l", "?1000l", "?1006l", "?1005l", "?1015l", "?2004l", "?1049l",
+            "?1047l", "?47l", "?25h",
+        ] {
+            assert!(wrapped.contains(mode), "收回清单缺 {mode}：{wrapped}");
+        }
+        // ESC 走 [char]27：双引号插值里 `$e[` 会被 PowerShell 当成索引解析。
+        assert!(wrapped.contains("[char]27"), "ESC 必须用 [char]27：{wrapped}");
+        assert!(!wrapped.contains("\"$e["), "不得用双引号插值：{wrapped}");
+    }
+
     /// wt / wezterm 不是我们的子进程（前者交给已存在的 wt 实例、后者交给 mux server），
     /// Command::env() 传不过去 → 必须包一层 PowerShell 把赋值写进命令串。
     #[test]
@@ -2895,7 +2948,13 @@ mod proxy_env_tests {
         assert!(decoded.contains("Get-Content -LiteralPath '"));
         assert!(!decoded.contains("127.0.0.1:7890"), "代理值不该出现在命令串里");
         assert!(decoded.contains("codex.exe"), "原命令必须还在：{decoded}");
-        assert!(decoded.ends_with("resume sid"));
+        // 环境变量赋值在 try 外（要对退出后手敲的命令继续生效），agent 命令在 try 内，
+        // 终端模式收回在 finally（见 wrap_with_terminal_restore）。
+        assert!(
+            decoded.contains("try{ ") && decoded.contains("resume sid }finally{"),
+            "agent 命令必须整条落在 try 块里：{decoded}"
+        );
+        assert!(decoded.ends_with("}"), "finally 块收尾：{decoded}");
         if let Some(path) = prefix
             .split_once("Get-Content -LiteralPath '")
             .and_then(|(_, rest)| rest.split_once('\''))
