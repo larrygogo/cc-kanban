@@ -40,5 +40,15 @@ jobs:
           $url = "https://github.com/${{ github.repository }}/releases/download/$tag/Meowo_${ver}_x64-setup.exe"
           # 资产必须已在 release 上（tauri-action 上传后才 Publish，正常恒成立）。
           Invoke-WebRequest -Method Head -Uri $url | Out-Null
-          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          # 供应链纪律：wingetcreate 钉版本 + SHA-256 校验（风格同 scripts/fetch-conpty.mjs），
+          # 不用 aka.ms/wingetcreate/latest（无校验裸奔，且本 step 持有 WINGET_PAT）。
+          # 升级 wingetcreate 时，版本与哈希须一并更新（重算发布资产 wingetcreate.exe 的 SHA-256）。
+          $wcVersion = "1.12.13.0"
+          $wcSha256 = "24042bd37915805615e6cf969ac57c6439124c3fe85823327f5f3fb24bd9ffea"
+          Invoke-WebRequest "https://github.com/microsoft/winget-create/releases/download/v$wcVersion/wingetcreate.exe" -OutFile wingetcreate.exe
+          $actual = (Get-FileHash wingetcreate.exe -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $wcSha256) {
+            Write-Host "::error::wingetcreate.exe 哈希不符（供应链告警）`n  期望 $wcSha256`n  实际 $actual"
+            exit 1
+          }
           .\wingetcreate.exe update larrygogo.Meowo --version $ver --urls $url --submit --token $env:WINGET_PAT
