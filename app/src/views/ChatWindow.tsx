@@ -274,7 +274,13 @@ function loadStoredDrafts(): Map<number, { prompt: string; attachments: Attachme
     const legacy = localStorage.getItem(DRAFTS_KEY);
     if (legacy) {
       for (const [id, value] of Object.entries(JSON.parse(legacy) as Record<string, StoredDraft>)) {
-        if (parseStoredDraft(value)) localStorage.setItem(DRAFT_KEY_PREFIX + id, JSON.stringify(value));
+        // 落盘用 parseStoredDraft 的规范化结果而不是原始 value——否则未清洗的
+        // attachments(以及非数字 at)会被原样迁进新格式。at 非数字时按现在计,
+        // 保证 LRU 清扫有可比较的时间戳。
+        const parsed = parseStoredDraft(value);
+        if (!parsed) continue;
+        const at = typeof value?.at === "number" ? value.at : Date.now();
+        localStorage.setItem(DRAFT_KEY_PREFIX + id, JSON.stringify({ ...parsed, at }));
       }
       localStorage.removeItem(DRAFTS_KEY);
     }

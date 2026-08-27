@@ -59,7 +59,10 @@ export function RemoteAccessCard() {
 
   const enabled = settings?.remote_access_enabled ?? false;
   const port = settings?.remote_access_port ?? 18620;
-  const bind = settings?.remote_access_bind ?? "all";
+  // 持久化值可能是未知字符串(手改 settings.json / 旧数据损坏),直接传给 Dropdown 会
+  // 显示空标签。未知值回退 "all",与后端 unknown→all 的兼容语义一致。
+  const rawBind = settings?.remote_access_bind;
+  const bind: RemoteBindMode = rawBind === "loopback" || rawBind === "tailscale" ? rawBind : "all";
 
   // 开关/端口落盘后重取信息：remote::apply 是 fire-and-forget,set_settings resolve 时
   // server 往往还没 bind 完——立刻 refresh 会读到 apply 前的 last_error(端口被占也显
