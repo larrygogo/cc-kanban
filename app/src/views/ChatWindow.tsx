@@ -252,20 +252,39 @@ function attachmentOf(path: string): Attachment {
 
 /** 草稿持久化（localStorage）：关窗/重启不丢——此前只在内存 Map，窗口一关半屏提示词
  *  就没了（附件反而因落盘临时文件幸存）。只存正式会话（负数临时 id 认领后会换号）；
- *  LRU 保 20 条防膨胀。 */
-const DRAFTS_KEY = "meowo-chat-drafts";
+ *  LRU 保 20 条防膨胀。
+ *  每会话一个 key：可同时开多个对话窗，整表「读-改-写」会让后写方覆盖先写方（另一窗
+ *  草稿静默丢），各写各的 key 才没有竞态。 */
+const DRAFTS_KEY = "meowo-chat-drafts"; // 旧版整表格式，首次读取时拆成按会话 key 后删除
+const DRAFT_KEY_PREFIX = "meowo-chat-draft:";
 type StoredDraft = { prompt: string; attachments: Attachment[]; at?: number };
+/** 校验一条草稿的形状；坏数据返回 null（当无草稿）。 */
+function parseStoredDraft(value: unknown): { prompt: string; attachments: Attachment[] } | null {
+  const draft = value as StoredDraft | null;
+  if (typeof draft?.prompt !== "string") return null;
+  const attachments = Array.isArray(draft.attachments)
+    ? draft.attachments.filter((file) => file && typeof file.path === "string")
+    : [];
+  return { prompt: draft.prompt, attachments };
+}
 function loadStoredDrafts(): Map<number, { prompt: string; attachments: Attachment[] }> {
   const map = new Map<number, { prompt: string; attachments: Attachment[] }>();
   try {
-    const raw = JSON.parse(localStorage.getItem(DRAFTS_KEY) || "{}") as Record<string, StoredDraft>;
-    for (const [key, value] of Object.entries(raw)) {
-      const id = Number(key);
-      if (!Number.isSafeInteger(id) || typeof value?.prompt !== "string") continue;
-      const attachments = Array.isArray(value.attachments)
-        ? value.attachments.filter((file) => file && typeof file.path === "string")
-        : [];
-      map.set(id, { prompt: value.prompt, attachments });
+    // 旧版整表迁移：逐条落成按会话 key 再删整表；中途失败留下次启动再迁（整表还在）。
+    const legacy = localStorage.getItem(DRAFTS_KEY);
+    if (legacy) {
+      for (const [id, value] of Object.entries(JSON.parse(legacy) as Record<string, StoredDraft>)) {
+        if (parseStoredDraft(value)) localStorage.setItem(DRAFT_KEY_PREFIX + id, JSON.stringify(value));
+      }
+      localStorage.removeItem(DRAFTS_KEY);
+    }
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith(DRAFT_KEY_PREFIX)) continue;
+      const id = Number(key.slice(DRAFT_KEY_PREFIX.length));
+      if (!Number.isSafeInteger(id)) continue;
+      const draft = parseStoredDraft(JSON.parse(localStorage.getItem(key) || "null"));
+      if (draft) map.set(id, draft);
     }
   } catch { /* 坏数据当无草稿 */ }
   return map;
@@ -590,20 +609,30 @@ export function ChatWindow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅首帧恢复一次
   }, []);
   // 草稿落盘:400ms 防抖合并连续击键;空草稿删条目(发送成功清空输入框即自动清理)。
+  // 每会话一个 key,只写/删自己这条——多窗并存互不覆盖,无读-改-写竞态。
   useEffect(() => {
     if (sessionId <= 0) return;
     const timer = window.setTimeout(() => {
       try {
-        const raw = JSON.parse(localStorage.getItem(DRAFTS_KEY) || "{}") as Record<string, StoredDraft>;
-        const key = String(sessionId);
-        if (!prompt.trim() && attachments.length === 0) delete raw[key];
-        else raw[key] = { prompt, attachments, at: Date.now() };
-        const entries = Object.entries(raw);
-        if (entries.length > 20) {
-          entries.sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0));
-          for (const [stale] of entries.slice(20)) delete raw[stale];
+        if (!prompt.trim() && attachments.length === 0) {
+          localStorage.removeItem(DRAFT_KEY_PREFIX + sessionId);
+        } else {
+          const draft: StoredDraft = { prompt, attachments, at: Date.now() };
+          localStorage.setItem(DRAFT_KEY_PREFIX + sessionId, JSON.stringify(draft));
         }
-        localStorage.setItem(DRAFTS_KEY, JSON.stringify(raw));
+        // LRU 保 20 条:先收集再删——localStorage.key 按下标枚举,边删边数会跳项。
+        const stored: { key: string; at: number }[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (!key?.startsWith(DRAFT_KEY_PREFIX)) continue;
+          let at = 0;
+          try { at = (JSON.parse(localStorage.getItem(key) || "{}") as StoredDraft).at ?? 0; } catch { /* 坏数据排最旧 */ }
+          stored.push({ key, at });
+        }
+        if (stored.length > 20) {
+          stored.sort((a, b) => b.at - a.at);
+          for (const stale of stored.slice(20)) localStorage.removeItem(stale.key);
+        }
       } catch { /* 存储失败不影响输入 */ }
     }, 400);
     return () => window.clearTimeout(timer);
