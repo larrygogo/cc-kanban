@@ -72,6 +72,11 @@ fn default_terminal_line_height() -> String {
 fn default_remote_port() -> u32 {
     18620
 }
+/// 远程桥默认绑定模式：all = 所有网卡（0.0.0.0）。缺省保持旧行为，不破坏已开启的用户；
+/// 收窄（loopback/tailscale）必须由用户显式选择。
+fn default_remote_bind() -> String {
+    "all".to_string()
+}
 
 /// 应用设置（持久化到 ~/.meowo/settings.json）。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -172,9 +177,14 @@ pub(crate) struct Settings {
     /// 远程访问监听端口。缺省 18620，兼容老 settings.json。
     #[serde(default = "default_remote_port")]
     pub(crate) remote_access_port: u32,
+    /// 远程桥绑定网卡：all = 所有网卡（0.0.0.0，缺省，兼容旧行为）/ loopback = 仅本机
+    /// （127.0.0.1）/ tailscale = 仅 Tailscale 接口。全程明文 HTTP，绑得越窄暴露面越小；
+    /// tailscale 模式找不到接口时拒绝启动而非回退 0.0.0.0（见 remote.rs resolve_bind_addr）。
+    #[serde(default = "default_remote_bind")]
+    pub(crate) remote_access_bind: String,
     /// 远程访问 token（64 位十六进制，remote::generate_token 严格生成）。空 = 未生成，
-    /// server 不会启动。随 Settings 序列化（settings-changed 事件只发给本机窗口，
-    /// 与 relay 密钥的「绝不序列化」不同级：token 的威胁面就是本机之外）。
+    /// server 不会启动。落盘持久化，但**不随 get_settings/settings-changed 下发**——
+    /// 窗口侧唯一的取得口是配对命令 remote_access_info（见 without_remote_token）。
     #[serde(default)]
     pub(crate) remote_access_token: String,
 }
@@ -210,6 +220,7 @@ impl Default for Settings {
             onboarding_seen: false,
             remote_access_enabled: false,
             remote_access_port: default_remote_port(),
+            remote_access_bind: default_remote_bind(),
             remote_access_token: String::new(),
         }
     }
@@ -279,10 +290,42 @@ fn settings_path() -> PathBuf {
 static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn load_settings_unlocked() -> Settings {
-    std::fs::read_to_string(settings_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    load_settings_from(&settings_path())
+}
+
+/// 读盘/解析失败一律回退默认，但**先把原文件隔离**为 `<文件名>.corrupt-<毫秒>`：回退之后
+/// 任何一次 update_settings 都会把默认值全量落盘，不挪走原文件的话，用户配置（代理、
+/// 中转元数据、profiles、远程 token）会被静默覆盖，连恢复线索都不剩。「文件不存在」是
+/// 正常首启，不算损坏、不备份。隔离失败只打日志不阻塞启动——回退默认已是兜底，
+/// 兜底自身不能再拖死启动。
+fn load_settings_from(path: &std::path::Path) -> Settings {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(settings) => settings,
+            Err(e) => {
+                eprintln!("[settings] settings.json 解析失败，回退默认设置（原文件已隔离）: {e}");
+                quarantine_corrupt_settings(path);
+                Settings::default()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+        Err(e) => {
+            eprintln!("[settings] settings.json 读取失败，回退默认设置（原文件已隔离）: {e}");
+            quarantine_corrupt_settings(path);
+            Settings::default()
+        }
+    }
+}
+
+fn quarantine_corrupt_settings(path: &std::path::Path) {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("settings.json");
+    let backup = path.with_file_name(format!("{name}.corrupt-{}", crate::now_ms()));
+    if let Err(e) = std::fs::rename(path, &backup) {
+        eprintln!("[settings] 隔离损坏的 settings.json 失败（配置可能被默认值覆盖）: {e}");
+    }
 }
 
 pub(crate) fn load_settings() -> Settings {
@@ -319,14 +362,22 @@ pub(crate) fn update_settings<T>(
 /// `update_settings` 全量序列化，字段从此显式在场——种子只生效这一次。
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn adopt_chat_enabled_seed(enabled: bool) {
-    let raw = std::fs::read_to_string(settings_path()).unwrap_or_default();
-    if chat_enabled_field_present(&raw) {
-        return;
-    }
     let _ = update_settings(|s| {
-        s.chat_enabled = enabled;
+        // 在场性判断必须在这把锁内做：此前先在锁外裸读判在场、再 update_settings 落盘是
+        // 两段式 TOCTOU——两次调用之间用户的写入会被全量落盘整体覆盖。此刻 load 已完成，
+        // 损坏文件已被隔离（见 load_settings_from），这里读不到按缺席处理，语义不变。
+        let raw = std::fs::read_to_string(settings_path()).unwrap_or_default();
+        apply_chat_enabled_seed(&raw, s, enabled);
         Ok(())
     });
+}
+
+/// 锁内种子合并的纯判断（拆出便于单测）：字段在场 = 用户已做过选择，种子不得覆盖；
+/// 缺席（含文件损坏被隔离后的读取失败）才采纳。
+fn apply_chat_enabled_seed(raw: &str, s: &mut Settings, enabled: bool) {
+    if !chat_enabled_field_present(raw) {
+        s.chat_enabled = enabled;
+    }
 }
 
 /// 裸 JSON 的字段在场性（拆出便于单测；解析失败按缺席算——文件损坏时 load 也会回默认）。
@@ -338,7 +389,7 @@ fn chat_enabled_field_present(raw: &str) -> bool {
 
 #[cfg(test)]
 mod seed_tests {
-    use super::chat_enabled_field_present;
+    use super::{apply_chat_enabled_seed, chat_enabled_field_present, Settings};
 
     /// 种子合并的准入判断：字段在场（无论 true/false）都算用户已选择，种子必须被忽略；
     /// 缺席、空文件、损坏 JSON 都算未选择。
@@ -350,13 +401,112 @@ mod seed_tests {
         assert!(!chat_enabled_field_present(""));
         assert!(!chat_enabled_field_present("{broken"));
     }
+
+    /// 锁内合并语义：字段在场（用户已选择）时种子不得覆盖现值——哪怕与种子相反；
+    /// 缺席/损坏才采纳种子。
+    #[test]
+    fn seed_applies_only_when_field_absent() {
+        let mut chosen = Settings {
+            chat_enabled: false,
+            ..Settings::default()
+        };
+        apply_chat_enabled_seed(r#"{"chat_enabled": false}"#, &mut chosen, true);
+        assert!(!chosen.chat_enabled, "用户已选 false，种子 true 不得覆盖");
+
+        let mut absent = Settings::default();
+        apply_chat_enabled_seed(r#"{"theme": "dark"}"#, &mut absent, false);
+        assert!(!absent.chat_enabled, "字段缺席，种子 false 应落盘");
+
+        let mut broken = Settings::default();
+        apply_chat_enabled_seed("{broken", &mut broken, false);
+        assert!(!broken.chat_enabled, "损坏按缺席算，种子生效");
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::{load_settings_from, Settings};
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "meowo-settings-test-{}-{}-{tag}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn corrupt_backups(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.file_name().unwrap().to_string_lossy().contains(".corrupt-"))
+            .collect()
+    }
+
+    /// 文件不存在 = 正常首启：回退默认，且不得产生任何隔离备份。
+    #[test]
+    fn missing_file_is_clean_first_run() {
+        let dir = temp_dir("missing");
+        let path = dir.join("settings.json");
+        let s = load_settings_from(&path);
+        assert!(s.chat_enabled, "缺省值");
+        assert!(corrupt_backups(&dir).is_empty(), "首启不该有备份");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 解析失败：回退默认前先把原文件隔离——否则随后任意 update_settings 会把默认值
+    /// 落盘覆盖原文件，用户配置（代理/远程 token 等）静默蒸发。
+    #[test]
+    fn corrupt_file_is_quarantined_before_fallback() {
+        let dir = temp_dir("corrupt");
+        let path = dir.join("settings.json");
+        std::fs::write(&path, "{broken json").unwrap();
+
+        let s = load_settings_from(&path);
+        assert!(s.chat_enabled, "回退默认值");
+        assert!(!path.exists(), "原文件已被挪走，不会被默认值覆盖");
+        let backups = corrupt_backups(&dir);
+        assert_eq!(backups.len(), 1, "恰好一份隔离备份");
+        assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), "{broken json");
+
+        // 再次加载：原文件已不在，按首启处理，不得重复备份。
+        let _ = load_settings_from(&path);
+        assert_eq!(corrupt_backups(&dir).len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 正常文件：按内容解析，文件原地不动、无备份。
+    #[test]
+    fn valid_file_loads_in_place() {
+        let dir = temp_dir("valid");
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"chat_enabled": false}"#).unwrap();
+        let s: Settings = load_settings_from(&path);
+        assert!(!s.chat_enabled);
+        assert!(path.exists());
+        assert!(corrupt_backups(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 // 本文件的 command 一律 async + spawn_blocking：同步命令跑在主线程，settings.json 虽小，
 // 但杀软扫描/同步盘接管目录时任何一次读写都可能拖到秒级，冻住消息泵。
+/// get_settings / settings-changed 的出口收敛：远程 token 不下发给任何本地窗口。所有
+/// webview（含 confirm-* 审批小窗）都能调 get_settings，整份下发等于把「手机进门凭据」
+/// 摊给每个窗口；窗口侧唯一取得口是设置页配对命令 remote_access_info（remote.rs）。
+/// 空串回传不坏写路径：set_settings 落盘前会以磁盘值回填 token
+/// （preserve_independently_managed_fields）。纯函数便于单测。
+fn without_remote_token(mut s: Settings) -> Settings {
+    s.remote_access_token = String::new();
+    s
+}
+
 #[tauri::command]
 pub(crate) async fn get_settings() -> Result<Settings, String> {
-    tauri::async_runtime::spawn_blocking(load_settings)
+    tauri::async_runtime::spawn_blocking(|| without_remote_token(load_settings()))
         .await
         .map_err(|e| e.to_string())
 }
@@ -433,8 +583,9 @@ pub(crate) async fn set_settings(
     let menu_app = app.clone();
     app.run_on_main_thread(move || apply_language(&menu_app, lang, chat_enabled))
         .map_err(|e| e.to_string())?;
-    // 通知贴纸窗口实时套用新设置。
-    let _ = app.emit("settings-changed", settings);
+    // 通知贴纸窗口实时套用新设置。与 get_settings 同一出口收敛:事件载荷不含远程 token
+    // （前端快照写回由 preserve_independently_managed_fields 兜底,不丢 token）。
+    let _ = app.emit("settings-changed", without_remote_token(settings.clone()));
     // 远程访问开关/端口热生效（fire-and-forget，内部自行读最新 settings 并比对差异）。
     crate::remote::apply(&app);
     Ok(())
@@ -558,11 +709,11 @@ fn spawn_browser(url: String) -> Result<(), String> {
         let _ = std::process::Command::new("explorer").arg(&url).status();
     });
     // macOS：open 偶发慢（默认浏览器冷启动），放后台线程不挡主线程。
-    // status() 而非 spawn()：spawn 后不 wait，Unix 上 Child 被 drop 不会 reap，
-    // 常驻托盘的本进程会积累 <defunct> 僵尸；已在后台线程，阻塞等待无害。
+    // spawn_detached 负责拉起后 wait 回收：spawn 后不 wait，Unix 上 Child 被 drop 不会
+    // reap，常驻托盘的本进程会积累 <defunct> 僵尸。本函数语义不在乎拉起成败，错误吞掉。
     #[cfg(target_os = "macos")]
     std::thread::spawn(move || {
-        let _ = std::process::Command::new("open").arg(&url).status();
+        let _ = crate::fsutil::spawn_detached(std::process::Command::new("open").arg(&url));
     });
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let _ = url;
@@ -712,6 +863,34 @@ mod tests {
         let json = serde_json::to_string(&v).unwrap();
         assert!(json.contains(r#""remote_access_port":9999"#));
         assert!(json.contains(r#""remote_access_token":"deadbeef""#));
+    }
+
+    #[test]
+    fn old_settings_json_without_remote_bind_defaults_to_all() {
+        // 老 settings.json 无绑定字段:必须落 all(= 0.0.0.0,旧行为),升级不得静默收窄
+        // 已开启用户的监听面(手机突然连不上)。
+        let v: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(v.remote_access_bind, "all");
+        assert_eq!(Settings::default().remote_access_bind, "all");
+    }
+
+    /// get_settings / settings-changed 的出口收敛:token 置空下发,其余字段原样。
+    /// 持久化路径(落盘 JSON)不受影响,仍由上面的 round_trip 测试钉住。
+    #[test]
+    fn local_egress_strips_remote_token_only() {
+        let s = Settings {
+            remote_access_token: "1f1325d4deadbeef".into(),
+            remote_access_port: 18621,
+            remote_access_bind: "tailscale".into(),
+            ..Default::default()
+        };
+        let out = without_remote_token(s);
+        assert!(out.remote_access_token.is_empty());
+        assert_eq!(out.remote_access_port, 18621);
+        assert_eq!(out.remote_access_bind, "tailscale");
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(json.contains(r#""remote_access_token":"""#));
+        assert!(!json.contains("deadbeef"));
     }
 
     /// 设置窗口回传的是打开时的整对象快照：由独立命令维护的字段必须以磁盘最新值为准，

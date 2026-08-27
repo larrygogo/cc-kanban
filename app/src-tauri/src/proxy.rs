@@ -316,9 +316,9 @@ pub struct AgentProxyReport {
 /// 于是只覆盖得到 **Meowo 自己拉起**的会话；用户在自己终端里敲的，得靠用户级环境变量。
 /// ⚠️ **这只是代理变量，不含账号（profile）隔离变量。**
 ///
-/// 拉起 agent 时**不要直接用它**——请用 [`crate::terminal::launch_env_for_profile`]（新建会话）
-/// 或 [`crate::terminal::launch_env_for_session`]（恢复会话），它们会在代理之上补上
-/// `CLAUDE_CONFIG_DIR` 之类的账号隔离变量。
+/// 拉起 agent 时**不要直接用它**——请用 [`crate::terminal::launch_env_for_profile`]，
+/// 它会在代理之上补上 `CLAUDE_CONFIG_DIR` 之类的账号隔离变量（恢复会话的账号推导
+/// 由 `prepare_session_for_active_profile` 完成，取到的实际账号同样走它）。
 ///
 /// `new_session` 曾直接调这里，后果是**多账号完全不生效**：设置页明明切到了另一个账号，新开的
 /// 会话却仍跑在默认账号上，而且毫无迹象——用户只能靠 `/status` 里的邮箱才发现。

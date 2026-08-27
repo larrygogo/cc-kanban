@@ -620,47 +620,54 @@ fn save_pasted_attachment_blocking(
 /// 默认没人清 %TEMP%，不主动清就永久累积。取 30 天而不是更短：这里的文件会被回读——
 /// `queued/` 下是 transcript 渲染的插话/用户消息图片（fsutil::persist_paste_bytes 的
 /// 消费方），粘贴目录的路径也进了 transcript 正文供历史附件展示，删早了历史对话里
-/// 的图就成了裂图。
+/// 的图就成了裂图。meowo-handoff 的交接文件没有回读方，但同为一次性临时落盘，
+/// 复用同一期限一并回收，不再单独立一套规矩。
 const PASTE_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
 
-/// 启动时后台清理过期的粘贴/插话附件。全程尽力而为：任何一步失败都静默跳过，
+/// 启动时后台清理过期的粘贴/插话附件与交接文件。全程尽力而为：任何一步失败都静默跳过，
 /// 绝不阻塞启动、不打扰用户。
 pub(crate) fn spawn_paste_cleanup() {
     std::thread::spawn(|| {
-        let root = paste_root();
-        let Ok(entries) = std::fs::read_dir(&root) else { return };
-        let now = std::time::SystemTime::now();
-        let expired = |meta: &std::fs::Metadata| {
-            meta.modified()
-                .ok()
-                .and_then(|mtime| now.duration_since(mtime).ok())
-                .is_some_and(|age| age > PASTE_TTL)
-        };
-        for entry in entries.flatten() {
-            // queued/ 是长期目录（transcript 图片按内容名幂等复用，新旧文件混住）：
-            // 按整目录 mtime 删会把仍在被回读的新图连坐，按单个文件逐个清。
-            if entry.file_name() == "queued" {
-                let Ok(files) = std::fs::read_dir(entry.path()) else { continue };
-                for file in files.flatten() {
-                    if file.metadata().is_ok_and(|meta| expired(&meta)) {
-                        let _ = std::fs::remove_file(file.path());
-                    }
-                }
-                continue;
-            }
-            // 其余是 `{时间戳}-{序号}` 的一次性粘贴目录：落盘后不再写入，
-            // 目录 mtime 即落盘时间，过期整目录删。
-            let Ok(meta) = entry.metadata() else { continue };
-            if !expired(&meta) {
-                continue;
-            }
-            if meta.is_dir() {
-                let _ = std::fs::remove_dir_all(entry.path());
-            } else {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+        cleanup_expired_under(&paste_root());
+        cleanup_expired_under(&meowo_agent::fsutil::handoff_root());
     });
+}
+
+/// 按 mtime 清掉 `root` 下过期的条目：一次性目录（`{时间戳}-…`）整目录删，
+/// 长期目录（paste 的 `queued/`）逐文件清。两个临时根的结构约定一致，共用这一份。
+fn cleanup_expired_under(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    let now = std::time::SystemTime::now();
+    let expired = |meta: &std::fs::Metadata| {
+        meta.modified()
+            .ok()
+            .and_then(|mtime| now.duration_since(mtime).ok())
+            .is_some_and(|age| age > PASTE_TTL)
+    };
+    for entry in entries.flatten() {
+        // queued/ 是长期目录（transcript 图片按内容名幂等复用，新旧文件混住）：
+        // 按整目录 mtime 删会把仍在被回读的新图连坐，按单个文件逐个清。
+        if entry.file_name() == "queued" {
+            let Ok(files) = std::fs::read_dir(entry.path()) else { continue };
+            for file in files.flatten() {
+                if file.metadata().is_ok_and(|meta| expired(&meta)) {
+                    let _ = std::fs::remove_file(file.path());
+                }
+            }
+            continue;
+        }
+        // 其余是 `{时间戳}-{序号}` 的一次性粘贴/交接目录：落盘后不再写入，
+        // 目录 mtime 即落盘时间，过期整目录删。
+        let Ok(meta) = entry.metadata() else { continue };
+        if !expired(&meta) {
+            continue;
+        }
+        if meta.is_dir() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        } else {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// 原生图片附加的剪贴板快照。发送时逐张把附件写进系统剪贴板（Ctrl-V 让 TUI 自己读、
@@ -963,6 +970,34 @@ mod tests {
         let oversized = "A".repeat(PASTE_MAX_BYTES / 3 * 4 + 8);
         assert!(save_pasted_attachment_blocking("big.bin".into(), oversized).is_err());
         assert!(save_pasted_attachment_blocking("empty.bin".into(), String::new()).is_err());
+    }
+
+    /// 过期条目（mtime 早于 TTL）删除、新鲜条目保留——paste 与 handoff 两个根共用
+    /// 这一份清理，规则本身与根无关，用独立临时目录测即可。
+    #[test]
+    fn cleanup_removes_expired_entries_and_keeps_fresh_ones() {
+        let root = std::env::temp_dir().join(format!("meowo-cleanup-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // 过期的一次性条目：mtime 拨到 TTL 之前。
+        let stale = root.join("1000-1");
+        std::fs::write(&stale, b"x").unwrap();
+        let old = std::time::SystemTime::now() - PASTE_TTL - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        // 新鲜的一次性目录。
+        let fresh = root.join("9999-2");
+        std::fs::create_dir_all(&fresh).unwrap();
+
+        cleanup_expired_under(&root);
+
+        assert!(!stale.exists(), "过期条目应被清掉");
+        assert!(fresh.exists(), "新鲜条目不该被误删");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn any_path() -> std::path::PathBuf {

@@ -586,6 +586,11 @@ pub(crate) struct PageReq {
     pub(crate) limit: usize,
 }
 
+/// 单页条数上限。limit 是 IPC/远程桥入参，不钳制时超大值会让 `Vec::with_capacity`
+/// 做巨额分配——分配失败在 Rust 里是 allocation abort，整个进程直接被带崩。
+/// 500 已远超侧栏实际页长（常态 20-60），够补页循环用又不留滥用面。
+const MAX_PAGE_LIMIT: usize = 500;
+
 /// 一次列表查询共享的**外部事实观测**：DB 之外、随时可变、必须现采的那几样。三者的采样
 /// 都在同一个 spawn_blocking 里完成、生命周期一致，故打包同行——而不是各占一个参数位。
 pub(crate) struct LiveContext<'a> {
@@ -622,6 +627,12 @@ pub(crate) fn live_sessions_blocking(
             next_cursor: None,
         });
     }
+    // 入口钳制：limit 来自 IPC/远程桥入参，with_capacity/batch_limit 都由它派生，
+    // 在这里收敛一次，下游全部按钳制后的值走（上限理由见 MAX_PAGE_LIMIT）。
+    let page = PageReq {
+        limit: page.limit.min(MAX_PAGE_LIMIT),
+        ..page
+    };
     let store = super::open_store(db_path)?;
     let now = super::now_ms();
     // waiting|running 时 SQL 给的是候选并集（见 store 的谓词注释），真正的 tab 归属
@@ -1217,6 +1228,64 @@ mod tests {
         }
 
         assert_eq!(seen.len(), TOTAL as usize, "游标翻页漏掉了会话");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// limit 是 IPC/远程桥入参：超大值必须先经 MAX_PAGE_LIMIT 钳制，否则
+    /// `Vec::with_capacity(limit)` 的巨额分配失败会直接 abort 掉整个进程。
+    /// 这里直接传 usize::MAX——未钳制的实现根本走不到断言。
+    #[test]
+    fn oversized_page_limit_is_clamped() {
+        let dir = std::env::temp_dir().join(format!("meowo-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("limit.db");
+        let _ = std::fs::remove_file(&db);
+        let old = super::super::now_ms() - RESUME_GRACE_MS * 10;
+
+        {
+            let store = meowo_store::Store::open(&db).unwrap();
+            let project = store.upsert_project_by_root("/tmp/p", "p", old).unwrap();
+            for i in 0..3 {
+                let (sid, _) = store
+                    .start_session(project, &format!("cc-{i}"), old + i)
+                    .unwrap();
+                store
+                    .set_session_title(sid, &format!("会话 {i}"), old + i)
+                    .unwrap();
+                store
+                    .set_session_status(sid, meowo_store::SessionStatus::Ended, old + i)
+                    .unwrap();
+            }
+        }
+
+        let cache = Mutex::new(meowo_agent::TranscriptCache::default());
+        let alive = std::collections::HashSet::new();
+        let pty_none = std::collections::HashSet::new();
+        let no_runtimes = SessionRuntimeIndex::new();
+        let no_approvals = std::collections::HashSet::new();
+        let no_screens = std::collections::HashMap::new();
+        let page = live_sessions_blocking(
+            &db,
+            &cache,
+            LiveContext {
+                alive: &alive,
+                pty_live: &pty_none,
+                runtimes: &no_runtimes,
+                approvals: &no_approvals,
+                screen_states: &no_screens,
+            },
+            "all",
+            None,
+            None,
+            PageReq {
+                before_last_event_at: None,
+                before_id: None,
+                limit: usize::MAX,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.items.len(), 3);
+        assert!(page.next_cursor.is_none());
         let _ = std::fs::remove_file(&db);
     }
 

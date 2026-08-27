@@ -97,20 +97,31 @@ pub(crate) async fn switch_session_provider(
         ));
         let argv = crate::relay::augment_argv(target.id(), argv);
         let env = crate::terminal::launch_env_for_profile(Some(&target_provider), None);
-        let temp_id = broker.start_pending(
-            app.clone(),
-            &argv,
-            Some(&dir),
-            &env,
-            100,
-            30,
-            target.id().as_str(),
-            &selections,
-            Some(session_id),
-            // 附加目录不随换代继承:目标 agent 未必声明该 flag,argv 也在本函数按目标
-            // agent 重新构造——静默带过去等于对用户谎报访问范围。
-            &[],
-        )?;
+        let temp_id = broker
+            .start_pending(
+                app.clone(),
+                &argv,
+                Some(&dir),
+                &env,
+                100,
+                30,
+                target.id().as_str(),
+                &selections,
+                Some(session_id),
+                // 附加目录不随换代继承:目标 agent 未必声明该 flag,argv 也在本函数按目标
+                // agent 重新构造——静默带过去等于对用户谎报访问范围。
+                &[],
+            )
+            // 失败时旧进程已杀、DB 已 end_session，不做复杂回滚——但报错必须给出两条出路：
+            // 旧会话仍可手动 resume 回旧引擎（接续链只在 claim 时落库，它没被标记已接替）；
+            // 交接文件刻意留在盘上不删，路径随报错给出，用户可手动喂给新 agent。
+            .map_err(|e| {
+                format!(
+                    "启动新会话失败: {e}。旧会话已结束，可在会话列表中手动 resume 恢复；\
+                     交接文件已保留: {}",
+                    handoff_path.display()
+                )
+            })?;
         crate::watch::emit_board_changed(&app, "switch_provider");
         Ok(SwitchStartedDto {
             temp_id,

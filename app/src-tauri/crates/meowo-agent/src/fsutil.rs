@@ -102,7 +102,8 @@ pub fn persist_paste_bytes(stem: &str, ext: &str, bytes: &[u8]) -> Option<std::p
 
 /// 跨 provider 切换的交接文件根目录（`$TEMP/meowo-handoff`）。文件由目标 agent 用
 /// 自己的读文件工具读取，不经 webview，故**不需要**进 asset scope——与 meowo-paste
-/// 的差别仅此一点。交给 OS 临时目录策略回收，不做主动清理。
+/// 的差别仅此一点。回收由 meowo-app 启动时的 TTL 清理负责（chat::spawn_paste_cleanup
+/// 同时扫这个根），OS 临时目录策略靠不住（Windows 默认不清 %TEMP%）。
 pub fn handoff_root() -> std::path::PathBuf {
     std::env::temp_dir().join("meowo-handoff")
 }

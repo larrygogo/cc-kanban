@@ -88,7 +88,9 @@ pub(crate) fn list_for_path(path: &Path) -> Vec<FileOpenerDto> {
     let key = format!("{ext}|{text}");
     static CACHE: OnceLock<Mutex<HashMap<String, Vec<FileOpenerDto>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(cached) = cache.lock().unwrap().get(&key) {
+    // 锁中毒按全仓一致策略恢复（confirm.rs/ports.rs/pty.rs 同款）：缓存只是读多写少的
+    // 备忘，中毒不代表数据损坏，没必要让一个 panic 拖垮「打开方式」面板。
+    if let Some(cached) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return cached.clone();
     }
     let list = if text {
@@ -113,7 +115,7 @@ pub(crate) fn list_for_path(path: &Path) -> Vec<FileOpenerDto> {
     } else {
         enumerate_openers(&ext)
     };
-    cache.lock().unwrap().insert(key, list.clone());
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(key, list.clone());
     list
 }
 
