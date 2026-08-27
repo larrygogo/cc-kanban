@@ -1,6 +1,6 @@
 [package]
 name = "meowo-app"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2021"
 
 # 全部 Rust 都住在 app/src-tauri 下:本包既是 Tauri 应用 crate,也是 workspace 根
