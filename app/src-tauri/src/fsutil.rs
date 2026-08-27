@@ -446,6 +446,22 @@ pub(crate) fn display_path(path: &Path) -> String {
     }
 }
 
+/// fire-and-forget 拉起外部命令并立即返回：只报告「是否拉起成功」，不关心退出码。
+/// spawn 失败照常报错；拉起成功后 Child 不能随手 drop——Unix 上不 wait 的子进程退出后
+/// 会成 <defunct> 僵尸，挂在常驻托盘的本进程名下越攒越多（教训见 settings.rs
+/// spawn_browser 的注释）。故把 wait 挪到后台线程：等待不再挡调用线程，阻塞无害。
+/// Windows 无僵尸问题，但统一走一条路径，免得每个调用点各写一份分平台分支。
+// 生产调用点全在 macOS/Linux 分支里（Windows 的 explorer 无僵尸问题，维持原样）——
+// Windows 构建下只有测试用到它。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub(crate) fn spawn_detached(command: &mut std::process::Command) -> Result<(), String> {
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// 用指定方式打开 cwd 内的文件/目录：opener 为 "default"（系统默认关联/文件管理器）
 /// 或 EDITOR_DEFS 里的编辑器 id。路径经 resolve_inside 校验；不经 shell、目标作为
 /// 独立 argv 传入，无注入面。spawn 后不等退出（打开动作 fire-and-forget，同 open_project_dir）。
@@ -469,14 +485,12 @@ fn open_path_with_blocking(cwd: &str, rel: &str, opener: &str) -> Result<(), Str
         }
         #[cfg(target_os = "macos")]
         {
-            std::process::Command::new("open").arg(&target).spawn().map_err(|e| e.to_string())?;
+            spawn_detached(std::process::Command::new("open").arg(&target))?;
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         {
-            std::process::Command::new("xdg-open")
-                .arg(&target)
-                .spawn()
-                .map_err(|e| e.to_string())?;
+            // Linux 同属 Unix：xdg-open 也要 wait 回收，见 spawn_detached。
+            spawn_detached(std::process::Command::new("xdg-open").arg(&target))?;
         }
         return Ok(());
     }
@@ -491,19 +505,16 @@ fn open_path_with_blocking(cwd: &str, rel: &str, opener: &str) -> Result<(), Str
         let launcher = editor_launcher(opener).ok_or_else(|| "未检测到该编辑器".to_string())?;
         #[cfg(target_os = "macos")]
         {
-            std::process::Command::new("open")
-                .arg("-a")
-                .arg(&launcher)
-                .arg(&target)
-                .spawn()
-                .map_err(|e| e.to_string())?;
+            spawn_detached(
+                std::process::Command::new("open")
+                    .arg("-a")
+                    .arg(&launcher)
+                    .arg(&target),
+            )?;
         }
         #[cfg(not(target_os = "macos"))]
         {
-            std::process::Command::new(&launcher)
-                .arg(&target)
-                .spawn()
-                .map_err(|e| e.to_string())?;
+            spawn_detached(std::process::Command::new(&launcher).arg(&target))?;
         }
         Ok(())
     }
@@ -531,21 +542,14 @@ fn reveal_path_blocking(cwd: &str, rel: &str) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg("-R")
-            .arg(&target)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        spawn_detached(std::process::Command::new("open").arg("-R").arg(&target))?;
         Ok(())
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         // Linux 文件管理器无统一「选中」协议：退而求其次打开父目录。
         let parent = target.parent().unwrap_or(target.as_path());
-        std::process::Command::new("xdg-open")
-            .arg(parent)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        spawn_detached(std::process::Command::new("xdg-open").arg(parent))?;
         Ok(())
     }
 }
@@ -576,6 +580,25 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn spawn_detached_reports_spawn_failure_and_reaps_success() {
+        // 不存在的可执行文件：spawn 本身失败必须报错（调用方据此提示用户）。
+        assert!(spawn_detached(&mut std::process::Command::new(
+            "meowo-definitely-not-a-real-binary-9f8d7c"
+        ))
+        .is_err());
+        // 能拉起的命令立即返回 Ok，退出回收在后台线程完成。
+        #[cfg(target_os = "windows")]
+        let mut noop = {
+            let mut cmd = std::process::Command::new("cmd");
+            cmd.args(["/c", "exit 0"]);
+            cmd
+        };
+        #[cfg(not(target_os = "windows"))]
+        let mut noop = std::process::Command::new("true");
+        assert!(spawn_detached(&mut noop).is_ok());
     }
 
     #[test]

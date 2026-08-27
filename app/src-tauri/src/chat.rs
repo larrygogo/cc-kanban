@@ -3,7 +3,9 @@
 //! command 只负责调度 blocking 工作。DB 读取、transcript 路径解析、文件增量解析、
 //! 分页与 mtime 并发控制都住在这里——crate 根不再持有第二台对话状态机。
 
-use meowo_protocol::ipc::{AgentModeDto, ChatHistoryDto as ChatHistory, PendingReviewKind};
+use meowo_protocol::ipc::{
+    AgentModeDto, ChatHistoryDto as ChatHistory, PendingReviewKind, SubagentProbeDto,
+};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -310,6 +312,52 @@ fn load_subagent_transcript(
     Ok(runs)
 }
 
+/// 实测若干条**未结**委派此刻的状态（用户展开进度面板时按需调用）。
+///
+/// 折叠状态下的进度只能来自主链回执，而并行委派的回执要等同一步里的工具全部跑完才
+/// 一起写盘——整批跑完之前，先收工的子任务在主链上毫无痕迹，面板只能一律显示「在跑」
+/// （实拍：4 个 explore 里 1 个已完成，面板仍是 0/4，四行耗时全按委派时刻起算）。
+/// 侧车流自己带着终结标记，这里逐条读它的尾部补齐。
+///
+/// 与 [`load_subagent_transcript`] 同样**不进** 650ms 的历史轮询热路径：只在面板展开
+/// 且确有在跑的委派时调用，读的也只是各侧车的尾部窗口。
+///
+/// 定位不到侧车、或该 provider 不留状态信号时，这条 id 直接缺席返回值——调用方维持
+/// 原判即可，「读不到」不等于「已结束」。整个会话读不出来也返回空表而不是错误：这条
+/// 路径每秒都会走一次，不该在界面上刷错误。
+fn probe_subagents(
+    db_path: &Path,
+    session_id: i64,
+    tool_use_ids: &[String],
+) -> Result<std::collections::HashMap<String, SubagentProbeDto>, String> {
+    let mut probes = std::collections::HashMap::new();
+    if tool_use_ids.is_empty() {
+        return Ok(probes);
+    }
+    let store = super::open_store(db_path)?;
+    let header = store
+        .session_header(session_id)
+        .map_err(|e| e.to_string())?;
+    let Some(spec) = meowo_agent::by_id(&header.provider)
+        .and_then(|agent| agent.telemetry())
+        .and_then(|telemetry| telemetry.transcript())
+    else {
+        return Ok(probes);
+    };
+    let Some(path) =
+        spec.resolve_transcript_path(None, header.cwd.as_deref(), &header.cc_session_id)
+    else {
+        return Ok(probes);
+    };
+    for tool_use_id in tool_use_ids {
+        if let Some(probe) = meowo_agent::transcript::probe_subagent_state(spec, &path, tool_use_id)
+        {
+            probes.insert(tool_use_id.clone(), probe);
+        }
+    }
+    Ok(probes)
+}
+
 /// 重读该会话当前的模型并落库。
 ///
 /// 模型平时由 Stop hook 写入，但 `/model` 切换本身不产生 Stop——不发下一条消息就永远不刷新，
@@ -418,6 +466,20 @@ pub(crate) async fn get_subagent_transcript(
     let db_path = state.db_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         load_subagent_transcript(&db_path, session_id, &tool_use_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn probe_subagent_states(
+    state: State<'_, super::AppState>,
+    session_id: i64,
+    tool_use_ids: Vec<String>,
+) -> Result<std::collections::HashMap<String, SubagentProbeDto>, String> {
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        probe_subagents(&db_path, session_id, &tool_use_ids)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -558,47 +620,54 @@ fn save_pasted_attachment_blocking(
 /// 默认没人清 %TEMP%，不主动清就永久累积。取 30 天而不是更短：这里的文件会被回读——
 /// `queued/` 下是 transcript 渲染的插话/用户消息图片（fsutil::persist_paste_bytes 的
 /// 消费方），粘贴目录的路径也进了 transcript 正文供历史附件展示，删早了历史对话里
-/// 的图就成了裂图。
+/// 的图就成了裂图。meowo-handoff 的交接文件没有回读方，但同为一次性临时落盘，
+/// 复用同一期限一并回收，不再单独立一套规矩。
 const PASTE_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
 
-/// 启动时后台清理过期的粘贴/插话附件。全程尽力而为：任何一步失败都静默跳过，
+/// 启动时后台清理过期的粘贴/插话附件与交接文件。全程尽力而为：任何一步失败都静默跳过，
 /// 绝不阻塞启动、不打扰用户。
 pub(crate) fn spawn_paste_cleanup() {
     std::thread::spawn(|| {
-        let root = paste_root();
-        let Ok(entries) = std::fs::read_dir(&root) else { return };
-        let now = std::time::SystemTime::now();
-        let expired = |meta: &std::fs::Metadata| {
-            meta.modified()
-                .ok()
-                .and_then(|mtime| now.duration_since(mtime).ok())
-                .is_some_and(|age| age > PASTE_TTL)
-        };
-        for entry in entries.flatten() {
-            // queued/ 是长期目录（transcript 图片按内容名幂等复用，新旧文件混住）：
-            // 按整目录 mtime 删会把仍在被回读的新图连坐，按单个文件逐个清。
-            if entry.file_name() == "queued" {
-                let Ok(files) = std::fs::read_dir(entry.path()) else { continue };
-                for file in files.flatten() {
-                    if file.metadata().is_ok_and(|meta| expired(&meta)) {
-                        let _ = std::fs::remove_file(file.path());
-                    }
-                }
-                continue;
-            }
-            // 其余是 `{时间戳}-{序号}` 的一次性粘贴目录：落盘后不再写入，
-            // 目录 mtime 即落盘时间，过期整目录删。
-            let Ok(meta) = entry.metadata() else { continue };
-            if !expired(&meta) {
-                continue;
-            }
-            if meta.is_dir() {
-                let _ = std::fs::remove_dir_all(entry.path());
-            } else {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+        cleanup_expired_under(&paste_root());
+        cleanup_expired_under(&meowo_agent::fsutil::handoff_root());
     });
+}
+
+/// 按 mtime 清掉 `root` 下过期的条目：一次性目录（`{时间戳}-…`）整目录删，
+/// 长期目录（paste 的 `queued/`）逐文件清。两个临时根的结构约定一致，共用这一份。
+fn cleanup_expired_under(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    let now = std::time::SystemTime::now();
+    let expired = |meta: &std::fs::Metadata| {
+        meta.modified()
+            .ok()
+            .and_then(|mtime| now.duration_since(mtime).ok())
+            .is_some_and(|age| age > PASTE_TTL)
+    };
+    for entry in entries.flatten() {
+        // queued/ 是长期目录（transcript 图片按内容名幂等复用，新旧文件混住）：
+        // 按整目录 mtime 删会把仍在被回读的新图连坐，按单个文件逐个清。
+        if entry.file_name() == "queued" {
+            let Ok(files) = std::fs::read_dir(entry.path()) else { continue };
+            for file in files.flatten() {
+                if file.metadata().is_ok_and(|meta| expired(&meta)) {
+                    let _ = std::fs::remove_file(file.path());
+                }
+            }
+            continue;
+        }
+        // 其余是 `{时间戳}-{序号}` 的一次性粘贴/交接目录：落盘后不再写入，
+        // 目录 mtime 即落盘时间，过期整目录删。
+        let Ok(meta) = entry.metadata() else { continue };
+        if !expired(&meta) {
+            continue;
+        }
+        if meta.is_dir() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        } else {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// 原生图片附加的剪贴板快照。发送时逐张把附件写进系统剪贴板（Ctrl-V 让 TUI 自己读、
@@ -901,6 +970,34 @@ mod tests {
         let oversized = "A".repeat(PASTE_MAX_BYTES / 3 * 4 + 8);
         assert!(save_pasted_attachment_blocking("big.bin".into(), oversized).is_err());
         assert!(save_pasted_attachment_blocking("empty.bin".into(), String::new()).is_err());
+    }
+
+    /// 过期条目（mtime 早于 TTL）删除、新鲜条目保留——paste 与 handoff 两个根共用
+    /// 这一份清理，规则本身与根无关，用独立临时目录测即可。
+    #[test]
+    fn cleanup_removes_expired_entries_and_keeps_fresh_ones() {
+        let root = std::env::temp_dir().join(format!("meowo-cleanup-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // 过期的一次性条目：mtime 拨到 TTL 之前。
+        let stale = root.join("1000-1");
+        std::fs::write(&stale, b"x").unwrap();
+        let old = std::time::SystemTime::now() - PASTE_TTL - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        // 新鲜的一次性目录。
+        let fresh = root.join("9999-2");
+        std::fs::create_dir_all(&fresh).unwrap();
+
+        cleanup_expired_under(&root);
+
+        assert!(!stale.exists(), "过期条目应被清掉");
+        assert!(fresh.exists(), "新鲜条目不该被误删");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn any_path() -> std::path::PathBuf {

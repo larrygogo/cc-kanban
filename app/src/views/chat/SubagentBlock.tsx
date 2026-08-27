@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { getSubagentTranscript, type ChatItem, type SubagentRun } from "../../api";
 import { useT } from "../../i18n";
 import { formatBackendError } from "../../i18n/errors";
@@ -77,6 +77,10 @@ export const SubagentBlock = memo(function SubagentBlock({ sessionId, item, outc
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [open, setOpen] = useState(false);
+  // 卸载后晚到的拉取结果不得再 setState（同文件 3s 轮询路径用局部 cancelled；
+  // onToggle 触发的首次拉取在 effect 之外，只能用 ref）。
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
   const subagent = item.subagent;
   // 侧车流和主 transcript 一样是逐条事件（kimi 更是 chunk 级增量），必须走同一套归一化——
   // 直接渲染原始事件会把一句话散成几十个碎片气泡。
@@ -87,7 +91,11 @@ export const SubagentBlock = memo(function SubagentBlock({ sessionId, item, outc
     if (runs || loading) return;
     setLoading(true);
     setError("");
-    fetchRuns().then(setRuns).catch((e) => setError(formatBackendError(e, t.locale))).finally(() => setLoading(false));
+    // 展开拉取由 onToggle 触发（不在 effect 里），卸载守卫用 mountedRef 而非局部 cancelled。
+    fetchRuns()
+      .then((fetched) => { if (mountedRef.current) setRuns(fetched); })
+      .catch((e) => { if (mountedRef.current) setError(formatBackendError(e, t.locale)); })
+      .finally(() => { if (mountedRef.current) setLoading(false); });
   };
   // 展开着且还有分支在跑时定期重取：子任务边跑边写，静态快照会一直停在打开那一刻。
   // 收起或全部结束就停——不给已完结的子任务留一个永动的轮询。

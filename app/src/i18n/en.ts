@@ -643,6 +643,13 @@ export const en: Dict = {
     enableDesc: "View and send messages from your phone on the same LAN or Tailscale",
     port: "Port",
     portDesc: "Port the phone connects to, default 18620",
+    bind: "Bind interface",
+    bindDesc: "Traffic is plain HTTP — a narrower bind means a smaller exposure",
+    bindAll: "All interfaces (LAN + Tailscale)",
+    bindLoopback: "This device only (for debugging)",
+    bindTailscale: "Tailscale only (recommended)",
+    bindWarnAll:
+      "Plain HTTP on all interfaces: devices on the same network can sniff the token and chat content. Use Tailscale on untrusted networks",
     scan: "Scan to connect",
     scanHint: "Scan with your phone, or copy the address into a browser",
     netTailscale: "Tailscale",

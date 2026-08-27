@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 
 /// GUI 对话窗口消费的 provider 无关消息单元。终端 ANSI 只负责还原终端，结构化对话始终来自
 /// agent 自己的 transcript，避免把光标移动、spinner 和重绘误当正文。
-pub use meowo_protocol::ipc::{ChatItem, SubagentOutcome, SubagentRef, SubagentRun};
+pub use meowo_protocol::ipc::{
+    ChatItem, SubagentOutcome, SubagentProbeDto, SubagentRef, SubagentRun,
+};
 
 /// 一条待读取的子任务侧车流。
 pub struct SubagentStream {
@@ -19,6 +21,9 @@ pub struct SubagentStream {
     pub label: Option<String>,
     /// 归一化状态 `running` / `completed` / `failed`；provider 未留下信号时为 None。
     pub status: Option<String>,
+    /// 侧车最后一次落盘的时刻（ISO-8601）；provider 不留时间信号时为 None。
+    /// 只有已结束的流才有意义——还在跑的流「最后一次落盘」随时会变。
+    pub finished_at: Option<String>,
     pub path: PathBuf,
 }
 
@@ -469,6 +474,69 @@ pub fn read_subagent_chat(
             })
         })
         .collect()
+}
+
+/// 实测一次**未结**委派此刻的状态——主链回执还没落盘时的唯一来源。
+///
+/// 并行委派的回执要等同一步里的工具全部跑完才一起写盘，于是整批跑完之前，先收工的
+/// 子任务在主链上毫无痕迹，折叠徽标与进度面板只能一律显示「在跑」。侧车流自己带着
+/// 终结标记（kimi 的 `step.end`），[`SubagentSpec::locate_streams`] 已经把它读了出来，
+/// 这里只负责把一次委派的多条流（`AgentSwarm`）聚合成一个状态。
+///
+/// 与 [`read_subagent_chat`] 同样是**按需** I/O（面板展开时），不进 650ms 轮询热路径。
+///
+/// 返回 None = 这条调用定位不到侧车流，或该 provider 不留状态信号（claude 的 meta.json
+/// 只记身份不记结果）——此时不能反过来断言「它结束了」，交由调用方维持原判。
+pub fn probe_subagent_state(
+    spec: &dyn TranscriptSpec,
+    main_transcript: &Path,
+    tool_use_id: &str,
+) -> Option<SubagentProbeDto> {
+    let subagents = spec.subagents()?;
+    let streams = subagents.locate_streams(main_transcript, tool_use_id);
+    if streams.is_empty() {
+        return None;
+    }
+    let mut running = false;
+    let mut failed = false;
+    let mut known = false;
+    let mut finished_at: Option<String> = None;
+    for stream in &streams {
+        match stream.status.as_deref() {
+            Some("running") => {
+                known = true;
+                running = true;
+            }
+            Some("failed") => {
+                known = true;
+                failed = true;
+            }
+            Some("completed") => known = true,
+            // 没留下信号的流不能算「已结束」——一批里只要有一条说不准，整次委派就还没完。
+            _ => running = true,
+        }
+        // 一次委派的多条流各自收工，整体结束于最后一条。
+        if let Some(ts) = &stream.finished_at {
+            if finished_at.as_deref().is_none_or(|seen| seen < ts.as_str()) {
+                finished_at = Some(ts.clone());
+            }
+        }
+    }
+    if !known {
+        return None;
+    }
+    let status = if running {
+        "running"
+    } else if failed {
+        "failed"
+    } else {
+        "completed"
+    };
+    Some(SubagentProbeDto {
+        status: status.to_string(),
+        // 还在跑就没有「结束时刻」可言：侧车尾部的时间只是最近一次落盘。
+        finished_at: finished_at.filter(|_| !running),
+    })
 }
 
 /// 从 `offset` 起只解析新增的完整 JSONL 行。文件被截断/重建时自动从头开始并标记 reset，前端据此

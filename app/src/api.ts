@@ -18,6 +18,7 @@ import type { RelayUi } from "./generated/contracts/RelayUi";
 import type { SlashCommand } from "./generated/contracts/SlashCommand";
 import type { ChatItem as GeneratedChatItem } from "./generated/contracts/ChatItem";
 import type { SubagentRun as GeneratedSubagentRun } from "./generated/contracts/SubagentRun";
+import type { SubagentProbeDto } from "./generated/contracts/SubagentProbeDto";
 import type { ManagedTerminalSnapshotDto } from "./generated/contracts/ManagedTerminalSnapshotDto";
 import type { LineageEntryDto } from "./generated/contracts/LineageEntryDto";
 import type { PendingApprovalDto } from "./generated/contracts/PendingApprovalDto";
@@ -159,6 +160,8 @@ export type ChatItem = GeneratedChatItem;
 export type ChatHistory = ChatHistoryDto;
 /** 一次委派可能派出多个子任务（kimi 的 AgentSwarm），故按分支返回。 */
 export type SubagentRun = GeneratedSubagentRun;
+/** 一次未结委派的侧车实测状态，见 {@link probeSubagentStates}。 */
+export type SubagentProbe = SubagentProbeDto;
 
 export type PendingApproval = PendingApprovalDto;
 
@@ -179,6 +182,23 @@ export function getChatHistory(sessionId: number, offset: number, full?: boolean
  */
 export function getSubagentTranscript(sessionId: number, toolUseId: string): Promise<SubagentRun[]> {
   return invoke("get_subagent_transcript", { sessionId, toolUseId });
+}
+
+/**
+ * 实测若干条**未结**委派此刻的状态（进度面板展开时才调用）。
+ *
+ * 折叠状态下的进度只能来自主链回执，而并行委派的回执要等同一步里的工具全部跑完才一起
+ * 写盘——整批跑完之前，先收工的子任务在主链上毫无痕迹，面板只能一律显示「在跑」。侧车流
+ * 自己带着终结标记，这条按需 I/O 逐条读它的尾部补齐；同 {@link getSubagentTranscript}，
+ * 刻意不并进 650ms 的历史轮询。
+ *
+ * 返回值按 tool_use_id 索引，读不出状态的 id 直接缺席——「读不到」不等于「已结束」。
+ */
+export function probeSubagentStates(
+  sessionId: number,
+  toolUseIds: string[],
+): Promise<Record<string, SubagentProbe>> {
+  return invoke("probe_subagent_states", { sessionId, toolUseIds });
 }
 
 /**
@@ -330,6 +350,16 @@ export function writeManagedTerminal(sessionId: number, data: string): Promise<v
 }
 export function resizeManagedTerminal(sessionId: number, cols: number, rows: number): Promise<void> {
   return invoke("resize_managed_terminal", { sessionId, cols, rows });
+}
+
+/**
+ * 取 PTY 当前**生效**的网格尺寸 `[cols, rows]`；未知（会话不在/后台旁路/尚未设过）为 `[0, 0]`。
+ *
+ * 终端页可见时每隔几秒查一次，与本地 fit 出的网格比对——不等就说明某次 resize 没落地，
+ * 补发一次把 PTY 拉齐。刻意不复用快照：那个要把整个 backlog（可达 1 MiB）编码重传。
+ */
+export function managedTerminalGrid(sessionId: number): Promise<[number, number]> {
+  return invoke("managed_terminal_grid", { sessionId });
 }
 export function stopManagedTerminal(sessionId: number): Promise<void> {
   return invoke("stop_managed_terminal", { sessionId });
@@ -599,9 +629,15 @@ export type Settings = {
   remote_access_enabled: boolean;
   /** 远程 HTTP 服务端口。默认 18620。 */
   remote_access_port: number;
-  /** 远程访问 token。由 remote_access_info 惰性生成落盘；set_settings 忽略回传值(后端以磁盘值为准)。 */
+  /** 远程桥绑定网卡：all = 所有网卡(默认,旧行为) / loopback = 仅本机 / tailscale = 仅 Tailscale。 */
+  remote_access_bind: RemoteBindMode;
+  /** 远程访问 token。由 remote_access_info 惰性生成落盘；get_settings 不返回明文(恒空串),
+   *  set_settings 忽略回传值(后端以磁盘值为准)。 */
   remote_access_token: string;
 };
+
+/** 远程桥绑定模式（与后端 settings.rs remote_access_bind 逐值对齐）。 */
+export type RemoteBindMode = "all" | "loopback" | "tailscale";
 
 export type RelayAuth = string;
 export type RelayProtocol = string;

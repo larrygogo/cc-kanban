@@ -2,14 +2,16 @@
 //!
 //! # 威胁模型与安全基线（审计从这里开始）
 //!
-//! 与 pty.rs 的 attach broker 不同，本服务**监听所有网卡**——网络层安全交给
-//! Tailscale/局域网（文档明示：公网勿开），应用层只保两件事：
+//! 与 pty.rs 的 attach broker 不同，本服务**默认监听所有网卡**——全程明文 HTTP，
+//! 网络层安全交给绑定面收敛与局域网/Tailscale 假设（文档明示：公网勿开）。绑定面
+//! 由 `remote_access_bind` 设置收敛（settings.rs）：all（0.0.0.0，缺省兼容）/
+//! loopback / tailscale；tailscale 模式找不到接口**拒绝启动**，绝不静默回退 0.0.0.0。
+//! 应用层只保两件事：
 //!
 //! 1. **token 门**：`/rpc` 走 `X-Meowo-Token` 头、`/file` 走 `?token=` 查询串
 //!    （`<img src>` 发不了自定义头），常量时间比较。token 由 [`generate_token`]
-//!    严格生成（OS RNG 失败即拒绝，不做 pty.rs `random_token` 那种弱回退——那个
-//!    回退的安全论证依赖「只监听 loopback」，在这里不成立）。静态资源不鉴权
-//!    （构建产物无秘密）。
+//!    严格生成（OS RNG 失败即拒绝；pty.rs 的 broker token 也复用它——只听 loopback
+//!    不等于可以接受可预测的弱随机）。静态资源不鉴权（构建产物无秘密）。
 //! 2. **命令白名单（default-deny）**：`/rpc` 只放行 [`BRIDGED_COMMANDS`]。以下
 //!    类别**明确拒绝**，新增放行项时逐条对照：
 //!    - 密钥类：`get_relay_secrets` / `set_relay_secret`（明文 API key）
@@ -73,6 +75,7 @@ pub(crate) const BRIDGED_COMMANDS: &[&str] = &[
     "refresh_session_todos",
     // 托管 PTY（发送/打断/答题都经 write_managed_terminal 的按键序列）
     "managed_terminal_snapshot",
+    "managed_terminal_grid",
     "managed_terminal_binding",
     "write_managed_terminal",
     "resize_managed_terminal",
@@ -127,6 +130,8 @@ struct RuntimeInner {
 
 struct Running {
     port: u16,
+    /// 实际绑定的监听地址：换绑定模式（all/loopback/tailscale）要触发重启，差异比对靠它。
+    bind: std::net::IpAddr,
     token: String,
     /// /file 降级凭据(见 Ctx::file_token)。每次启动新发,重启即吊销旧值。
     file_token: String,
@@ -134,8 +139,9 @@ struct Running {
     shutdown: Arc<tokio::sync::Notify>,
 }
 
-/// 严格 token 生成：OS RNG 不可用直接失败（调用方应拒绝启用远程访问）。
-/// 刻意不复用 pty.rs::random_token——它的弱回退（pid+时间）只在 loopback 语境下可接受。
+/// 严格 token 生成：OS RNG 不可用直接失败（调用方应拒绝启用对应功能）。
+/// pty.rs 的 broker/launch token 亦走本函数——那里曾有 pid+时间戳的弱随机回退，
+/// 已删除：loopback 语境的论证（只听本机）不成立，本机任意进程同样能来试门。
 /// 生产调用方是设置页的 [`remote_access_info`]（随二维码配对一并交付）。
 pub(crate) fn generate_token() -> Result<String, String> {
     let mut bytes = [0u8; 32];
@@ -178,28 +184,55 @@ fn classify_ip(ip: std::net::IpAddr) -> Option<&'static str> {
     None
 }
 
-/// 可达地址枚举（零依赖）：UDP `connect` 只让内核按路由表选出口网卡、不实际发包，
-/// 再读 `local_addr` 拿本机在该网卡上的地址。`100.100.100.100`（Tailscale 的
-/// CGNAT 探针）取 tailnet 出口，`8.8.8.8` 取默认网卡出口。Tailscale 探测在前：
-/// 有 tailnet 时它是唯一不挑手机所在网络的地址，列表首位即前端默认选中项。
+/// UDP 路由探针（零依赖）：`connect` 只让内核按路由表选出口网卡、不实际发包，
+/// 再读 `local_addr` 拿本机在该网卡上的地址。local_ips 与 tailscale_ipv4 共用。
+fn route_probe_ip(probe: &str) -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect(probe).ok()?;
+    sock.local_addr().ok().map(|a| a.ip())
+}
+
+/// 本机 Tailscale IPv4（100.64.0.0/10），tailscale 绑定模式的探测。不枚举网卡、不 spawn
+/// `tailscale ip -4`（CLI 不一定在 PATH，还多一个进程依赖）：Tailscale 接管 100.64/10 的
+/// 路由，CGNAT 探针的 local_addr 即 tailnet 地址；没装 Tailscale 时探针按默认路由回
+/// 局域网地址，classify_ip 兜住判 None。Windows 上 Tailscale 是 Wintun 接口，路由表行为一致。
+fn tailscale_ipv4() -> Option<std::net::IpAddr> {
+    let ip = route_probe_ip("100.100.100.100:80")?;
+    (classify_ip(ip) == Some("tailscale")).then_some(ip)
+}
+
+/// 绑定模式 → 实际监听地址。纯函数（探测结果由调用方注入）便于单测。
+/// tailscale 模式找不到地址是 Err——调用方拒绝启动，绝不静默回退 0.0.0.0：
+/// 用户显式收窄过的暴露面，不能因 Tailscale 掉线悄悄放大回全网卡。
+/// 未知值按 all 处理：旧版没有此字段，行为就是 0.0.0.0（手改 settings.json 塞错值同理）。
+fn resolve_bind_addr(
+    mode: &str,
+    tailscale_ip: Option<std::net::IpAddr>,
+) -> Result<std::net::IpAddr, String> {
+    match mode {
+        "loopback" => Ok(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+        "tailscale" => tailscale_ip.ok_or_else(|| {
+            "未找到 Tailscale 接口（100.x 地址），远程访问未启动——请确认 Tailscale 已登录，或改用其他绑定模式".to_string()
+        }),
+        _ => Ok(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+    }
+}
+
+/// 可达地址枚举：`100.100.100.100`（Tailscale 的 CGNAT 探针）取 tailnet 出口，
+/// `8.8.8.8` 取默认网卡出口。Tailscale 探测在前：有 tailnet 时它是唯一不挑手机所在
+/// 网络的地址，列表首位即前端默认选中项。
 /// 归类失败（如 TUN 假地址）逐个丢弃，全空则设置页回退提示手输 IP。
 fn local_ips() -> Vec<IpCandidate> {
     let mut out: Vec<IpCandidate> = Vec::new();
     for probe in ["100.100.100.100:80", "8.8.8.8:80"] {
-        let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") else {
-            continue;
-        };
-        if sock.connect(probe).is_err() {
-            continue;
-        }
-        let Ok(addr) = sock.local_addr() else {
+        let Some(ip) = route_probe_ip(probe) else {
             continue;
         };
         // 没装 Tailscale 时 CGNAT 探针照样按默认路由回局域网地址——归类兜住，去重兜住。
-        let Some(kind) = classify_ip(addr.ip()) else {
+        let Some(kind) = classify_ip(ip) else {
             continue;
         };
-        let ip = addr.ip().to_string();
+        let ip = ip.to_string();
         if !out.iter().any(|c| c.ip == ip) {
             out.push(IpCandidate { ip, kind });
         }
@@ -416,21 +449,61 @@ pub(crate) fn apply(app: &tauri::AppHandle) {
             settings.remote_access_enabled,
             settings.remote_access_port,
             settings.remote_access_token,
+            &settings.remote_access_bind,
         )
         .await;
     });
 }
 
-async fn apply_with(app: &tauri::AppHandle, enabled: bool, port: u32, token: String) {
+async fn apply_with(
+    app: &tauri::AppHandle,
+    enabled: bool,
+    port: u32,
+    token: String,
+    bind_mode: &str,
+) {
     let runtime = app.state::<RemoteRuntime>();
     let _serial = runtime.apply_lock.lock().await;
+
+    let set_error = |error: Option<String>| {
+        let mut inner = runtime.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.last_error = error;
+    };
+
+    // 绑定地址解析在锁外做（tailscale 模式有一次 UDP 路由探测，见 tailscale_ipv4）。
+    // 找不到 Tailscale 接口是硬错误：停掉旧 server、报错拒绝启动——静默回退 0.0.0.0
+    // 会把用户显式收窄的暴露面悄悄放大回全网卡明文。
+    let bind_addr = if enabled {
+        let probe = if bind_mode == "tailscale" {
+            tailscale_ipv4()
+        } else {
+            None
+        };
+        match resolve_bind_addr(bind_mode, probe) {
+            Ok(a) => a,
+            Err(e) => {
+                let to_stop = {
+                    let mut inner = runtime.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    inner.running.take()
+                };
+                if let Some(running) = to_stop {
+                    running.shutdown.notify_one();
+                }
+                set_error(Some(e));
+                return;
+            }
+        }
+    } else {
+        // 占位值，disabled 分支不会用到。
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    };
 
     // 临界区不跨 await：先在锁内比对并摘下旧 server，再在锁外发关停信号。
     let to_stop = {
         let mut inner = runtime.inner.lock().unwrap_or_else(|e| e.into_inner());
         let unchanged = matches!(
             &inner.running,
-            Some(r) if enabled && u32::from(r.port) == port && r.token == token
+            Some(r) if enabled && u32::from(r.port) == port && r.token == token && r.bind == bind_addr
         );
         if unchanged {
             inner.last_error = None;
@@ -442,10 +515,6 @@ async fn apply_with(app: &tauri::AppHandle, enabled: bool, port: u32, token: Str
         running.shutdown.notify_one();
     }
 
-    let set_error = |error: Option<String>| {
-        let mut inner = runtime.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.last_error = error;
-    };
     if !enabled {
         set_error(None);
         return;
@@ -468,7 +537,7 @@ async fn apply_with(app: &tauri::AppHandle, enabled: bool, port: u32, token: Str
     let listener = {
         let mut attempt = 0u32;
         loop {
-            match tokio::net::TcpListener::bind(("0.0.0.0", port16)).await {
+            match tokio::net::TcpListener::bind((bind_addr, port16)).await {
                 Ok(l) => break l,
                 Err(e) if attempt < 10 => {
                     attempt += 1;
@@ -476,7 +545,7 @@ async fn apply_with(app: &tauri::AppHandle, enabled: bool, port: u32, token: Str
                     let _ = e;
                 }
                 Err(e) => {
-                    set_error(Some(format!("绑定端口 {port16} 失败：{e}")));
+                    set_error(Some(format!("绑定 {bind_addr}:{port16} 失败：{e}")));
                     return;
                 }
             }
@@ -497,13 +566,20 @@ async fn apply_with(app: &tauri::AppHandle, enabled: bool, port: u32, token: Str
         let mut inner = runtime.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.running = Some(Running {
             port: port16,
+            bind: bind_addr,
             token,
             file_token,
             shutdown: shutdown.clone(),
         });
         inner.last_error = None;
     }
-    eprintln!("[remote] 远程访问已启动：0.0.0.0:{port16}");
+    if bind_addr.is_unspecified() {
+        eprintln!(
+            "[remote] 远程访问已启动：{bind_addr}:{port16}（全网卡明文 HTTP：token、聊天与按键内容对同网设备可见，不可信网络请改用 Tailscale/loopback 绑定）"
+        );
+    } else {
+        eprintln!("[remote] 远程访问已启动：{bind_addr}:{port16}");
+    }
     tauri::async_runtime::spawn(async move {
         let result = axum::serve(listener, router)
             .with_graceful_shutdown(async move { shutdown.notified().await })
@@ -766,6 +842,10 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
         "refresh_session_todos" => {
             let a = args!(SessionArg);
             reply(crate::chat::refresh_session_todos(state, a.session_id).await)
+        }
+        "managed_terminal_grid" => {
+            let a = args!(SessionArg);
+            reply(crate::managed_terminal::managed_terminal_grid(state, a.session_id).await)
         }
         "managed_terminal_snapshot" => {
             #[derive(Deserialize)]
@@ -1392,6 +1472,26 @@ mod tests {
         assert_eq!(c("0.0.0.0"), None);
         assert_eq!(c("8.8.8.8"), None); // 公网
         assert_eq!(c("fe80::1"), None); // v6 一律不收
+    }
+
+    /// 绑定模式解析（纯函数）：loopback/all 直接给地址；tailscale 模式消费探测结果——
+    /// 有 100.x 地址绑它，没有是硬错误（调用方拒绝启动），绝不静默回退 0.0.0.0；
+    /// 未知值按 all（旧版无此字段，行为兼容）。tailscale_ipv4 本体走真路由表，不在这里测。
+    #[test]
+    fn resolve_bind_addr_maps_modes_and_refuses_silent_fallback() {
+        let loopback = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let any = std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+        let ts: std::net::IpAddr = "100.64.0.7".parse().unwrap();
+
+        assert_eq!(resolve_bind_addr("loopback", None).unwrap(), loopback);
+        assert_eq!(resolve_bind_addr("all", None).unwrap(), any);
+        assert_eq!(resolve_bind_addr("garbage", None).unwrap(), any);
+        assert_eq!(resolve_bind_addr("tailscale", Some(ts)).unwrap(), ts);
+        let err = resolve_bind_addr("tailscale", None).unwrap_err();
+        assert!(err.contains("Tailscale"), "{err}");
+        // 非 tailscale 模式不消费探测结果（传了也忽略）。
+        assert_eq!(resolve_bind_addr("all", Some(ts)).unwrap(), any);
+        assert_eq!(resolve_bind_addr("loopback", Some(ts)).unwrap(), loopback);
     }
 
     /// 目录浏览契约:只列目录、藏点开头、按名排序;根列表(空参)给磁盘/根且无 parent。

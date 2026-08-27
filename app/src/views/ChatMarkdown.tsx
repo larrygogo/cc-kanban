@@ -177,18 +177,24 @@ const components: Components = {
   },
   // 链接绝不能让 webview 自己导航（这个窗口没有地址栏，跳走就回不来了）；
   // 交给后端在默认浏览器打开，scheme 校验也在后端。
-  a: ({ href, children }) => (
-    <a
-      href={href}
-      title={href}
-      onClick={(event) => {
-        event.preventDefault();
-        if (href) void openLink(href).catch(() => {});
-      }}
-    >
-      {children}
-    </a>
-  ),
+  a: ({ href, children }) => {
+    // 后端 open_link 只放行 http/https：mailto:/xmpp: 这类链接点了必然被拒，
+    // 「可点却必失败」比不可点更糟——渲染层直接降级为纯文本（终端侧另有显示
+    // 拒绝原因的通道，见 ManagedTerminal；消息气泡里没有错误展示位）。
+    if (!href || !/^https?:\/\//i.test(href)) return <>{children}</>;
+    return (
+      <a
+        href={href}
+        title={href}
+        onClick={(event) => {
+          event.preventDefault();
+          void openLink(href).catch(() => {});
+        }}
+      >
+        {children}
+      </a>
+    );
+  },
 };
 
 /**

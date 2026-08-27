@@ -31,6 +31,7 @@ export const SETTINGS_DEFAULTS: Settings = {
   relay: { per_agent: {} },
   remote_access_enabled: false,
   remote_access_port: 18620,
+  remote_access_bind: "all",
   remote_access_token: "",
 };
 

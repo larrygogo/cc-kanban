@@ -712,7 +712,7 @@ describe("ChatWindow", () => {
       supported: true, offset: 0, reset: false, pendingReview: null,
       items: [
         { type: "user_text", id: "u1", timestamp: null, text: "# 不是标题" },
-        { type: "assistant_text", id: "a1", timestamp: null, text: "看 **重点** 和 `code`，详见 [官网](https://example.com/docs)" },
+        { type: "assistant_text", id: "a1", timestamp: null, text: "看 **重点** 和 `code`，详见 [官网](https://example.com/docs)，来信 [邮箱](mailto:a@b.com)" },
         { type: "assistant_text", id: "a2", timestamp: null, text: "```\n┌─────┐\n│ 会话A │\n└─────┘\n```" },
       ],
     });
@@ -728,12 +728,41 @@ describe("ChatWindow", () => {
     fireEvent.click(link);
     expect(invoke).toHaveBeenCalledWith("open_link", { url: "https://example.com/docs" });
     expect(window.location.href).not.toContain("example.com");
+    // mailto: 这类非 http(s) 链接后端 open_link 必然拒绝，渲染层直接降级为纯文本——
+    // 「可点却必失败」比不可点更糟。
+    expect(screen.queryByRole("link", { name: "邮箱" })).toBeNull();
+    expect(screen.getByText(/来信/).textContent).toContain("邮箱");
+    expect(invoke).not.toHaveBeenCalledWith("open_link", { url: "mailto:a@b.com" });
     // 含框线字符的代码块被钉到字符网格：中文锁 2ch 盒子（renderGrid 拆成单字符 span），
     // 整块标记 chat-md-diagram；普通行内代码不受牵连、不被拆分。
     const wide = screen.getByText("话");
     expect(wide.className).toBe("chat-md-cell2");
     expect(wide.closest("code")?.className).toContain("chat-md-diagram");
     expect(screen.getByText("code").className).not.toContain("chat-md-diagram");
+  });
+
+  it("persists drafts under a per-session key and migrates the legacy whole-map format", async () => {
+    // 旧版整表格式：首次加载拆成按会话 key（多窗整表读-改-写会互相覆盖草稿）并恢复进输入框。
+    localStorage.setItem("meowo-chat-drafts", JSON.stringify({
+      "21": { prompt: "旧草稿", attachments: [], at: 1 },
+    }));
+    window.history.replaceState({}, "", "/?sessionId=21");
+    respondWithHistory({
+      sessionId: 21, title: "草稿", status: "running", provider: "claude", cwd: null,
+      supported: true, offset: 0, reset: false, pendingReview: null, items: [],
+    });
+    render(<ChatWindow />);
+    const input = await screen.findByRole("textbox", { name: "发送消息给 Agent" });
+    await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe("旧草稿"));
+    // 迁移完成：旧整表已删，按会话 key 在场。
+    expect(localStorage.getItem("meowo-chat-drafts")).toBeNull();
+    expect(localStorage.getItem("meowo-chat-draft:21")).toContain("旧草稿");
+    // 继续编辑只写自己这条 key（400ms 防抖）。
+    fireEvent.change(input, { target: { value: "新草稿" } });
+    await waitFor(() => expect(localStorage.getItem("meowo-chat-draft:21")).toContain("新草稿"), { timeout: 2000 });
+    // 清空即删条目。
+    fireEvent.change(input, { target: { value: "" } });
+    await waitFor(() => expect(localStorage.getItem("meowo-chat-draft:21")).toBeNull(), { timeout: 2000 });
   });
 
   it("shows agent badge, running pulse, slash completions and model switcher", async () => {

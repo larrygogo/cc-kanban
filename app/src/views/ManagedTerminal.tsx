@@ -19,6 +19,7 @@ import {
   openAttachedTerminal,
   openLink,
   registerTerminalViewer,
+  managedTerminalGrid,
   resizeManagedTerminal,
   startManagedTerminal,
   takeoverManagedTerminal,
@@ -127,6 +128,43 @@ const LINE_HEIGHTS: Record<string, number> = { compact: 1.1, normal: 1.22, relax
 /// 位置采样,只有最新一条有意义——可以合并,不像按键一个都不能丢。
 /// 移动上报的合并窗口:一帧。再长鼠标悬停反馈会明显拖尾,再短合并不到几条。
 const MOTION_FLUSH_MS = 16;
+
+/// PTY 的网格上限，对应后端 `pty::size` 的 clamp(2, 500)。可见期的网格自愈拿本地行列数
+/// 与快照里的 PTY 尺寸比对，不先按同一边界收一次的话，超限的那一侧永远比不相等，
+/// 每帧都在重发 resize。
+const PTY_GRID_MAX = 500;
+/// 同一目标尺寸的网格自愈重试间隔。resize 会失败（撞上后端有界锁、会话正在重启），
+/// 失败就该再试；但要是后端因为别的理由永远不接受这个尺寸，也不能每帧一发——
+/// TUI 每次都吃一发 SIGWINCH 整屏重排。
+const GRID_RESYNC_RETRY_MS = 5_000;
+/// 网格自愈的比对间隔。错位是「一直错着」而不是一闪而过，秒级发现足够；而每次比对
+/// 就是一趟只回两个数的 IPC，压不到什么。
+const GRID_POLL_MS = 4_000;
+
+/// 网格自愈的判定：本地网格 `local` 与 PTY 生效尺寸 `pty` 不一致时，返回该下发的目标
+/// 尺寸；无需下发时返回 null。调度与 IPC 留在组件里，这里只有判据。
+///
+/// - `pty` 的任一维 ≤1 = 尺寸未知（会话不在、后台旁路、还没设过），跳过：不能拿「不知道」
+///   当成「不一致」去发 resize。
+/// - 目标尺寸按 [`PTY_GRID_MAX`] 收一次，与后端 `pty::size` 的 clamp 同一边界——不收的话
+///   超限的那一侧永远比不相等，每一轮都在重发。
+/// - `last` 是上次下发的目标与时刻：同一目标在 [`GRID_RESYNC_RETRY_MS`] 内不重发。失败要
+///   重试（撞上后端有界锁、会话正在重启都是暂时的），但后端若始终不接受这个尺寸，每轮
+///   一发只会让 TUI 一直吃 SIGWINCH 整屏重排。
+export function gridResyncTarget(
+  local: { cols: number; rows: number },
+  pty: { cols: number; rows: number },
+  last: { cols: number; rows: number; at: number } | null,
+  now: number,
+): { cols: number; rows: number } | null {
+  if (pty.cols <= 1 || pty.rows <= 1) return null;
+  const cols = Math.min(PTY_GRID_MAX, local.cols);
+  const rows = Math.min(PTY_GRID_MAX, local.rows);
+  if (cols <= 1 || rows <= 1) return null;
+  if (cols === pty.cols && rows === pty.rows) return null;
+  if (last && last.cols === cols && last.rows === rows && now - last.at < GRID_RESYNC_RETRY_MS) return null;
+  return { cols, rows };
+}
 
 export function isMouseMotionReport(data: string): boolean {
   return /^\x1b\[<(?:35|39|43|47|51|55|59|63);\d+;\d+M$/.test(data);
@@ -291,12 +329,42 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   // 最近一次下发给 PTY 的尺寸：同值跳过。切回终端 tab 时曾无条件重发 resize，后端照样
   // 调 master.resize → agent 收到 SIGWINCH 整屏重排，对话↔终端来回切一次闪一次。
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
+  // fit 至少跑过一次没有：没跑过时 terminal.cols/rows 还是 xterm 的默认 80×24，不是
+  // 这个容器该有的网格，不能拿它去校正 PTY。
+  const fittedRef = useRef(false);
+  // 上一次网格自愈下发的目标尺寸与时刻（见 GRID_RESYNC_RETRY_MS）。
+  const gridResyncRef = useRef<{ cols: number; rows: number; at: number } | null>(null);
   const resizeIfChanged = (sid: number, cols: number, rows: number) => {
     const last = lastSentSizeRef.current;
     if (last && last.cols === cols && last.rows === rows) return;
     lastSentSizeRef.current = { cols, rows };
     void resizeManagedTerminal(sid, cols, rows).catch(() => {
       // 失败则清记录：下次同尺寸仍要重试（后端可能根本没收到）。
+      lastSentSizeRef.current = null;
+    });
+  };
+  /// 网格自愈：PTY 的生效尺寸（`ptyCols`/`ptyRows`，0 = 未知）与本地 fit 出的网格不等，
+  /// 就补发一次把 PTY 拉齐。
+  ///
+  /// resize 平时只由容器尺寸变化驱动，一旦某次没落地——撞上后端那把有界锁
+  /// （ResizePseudoConsole 在 conhost 僵死时永不返回，后来者快速失败）、会话正在重启
+  /// ——就没有「下一次」把它纠回来：用户不再动窗口，错位就固化下来。TUI 按窄网格重绘、
+  /// xterm 按宽网格显示，于是行右侧露出上一屏的残字、光标上移落在错行、同一块区域重画
+  /// 成好几份，而 TUI 画在最底下的那行输入框被挤出可视区——实拍反馈：「有时候会看不到
+  /// 终端的输入框」。
+  ///
+  /// 可见期才做，且方向与隐藏期相反：隐藏时 fit 的对象是屏外停靠盒，网格得反过来跟着
+  /// PTY 走（见 inspectSnapshot）。
+  const resyncGridIfDrifted = (sid: number, ptyCols: number, ptyRows: number) => {
+    const terminal = terminalRef.current;
+    // fit 没跑过时 terminal.cols/rows 还是 xterm 默认的 80×24，不是这个容器该有的网格。
+    if (!terminal || !visibleRef.current || !fittedRef.current) return;
+    const target = gridResyncTarget(terminal, { cols: ptyCols, rows: ptyRows }, gridResyncRef.current, Date.now());
+    if (!target) return;
+    gridResyncRef.current = { ...target, at: Date.now() };
+    lastSentSizeRef.current = target;
+    void resizeManagedTerminal(sid, target.cols, target.rows).catch(() => {
+      // 同 resizeIfChanged：失败就清记录，别让同尺寸的下一次被短路挡掉。
       lastSentSizeRef.current = null;
     });
   };
@@ -593,7 +661,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // 到达的帧会按错误宽度换行、错行叠画——切回终端页看到的就是花屏，而且若
     // PTY 尺寸未变，resize 同值短路不触发 TUI 重画，花屏永不自愈（实拍反馈）。
     // 隐藏态的网格对齐交给快照的 cols/rows（见 inspectSnapshot）。
-    requestAnimationFrame(() => { if (visibleRef.current) fit.fit(); });
+    requestAnimationFrame(() => { if (visibleRef.current) { fit.fit(); fittedRef.current = true; } });
 
     // 写失败必须可见：典型场景是整段粘贴超过后端单次输入上限被拒——
     // 静默吞掉的话，粘贴无声消失，终端画面纹丝不动。
@@ -710,6 +778,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       // 隐藏时跳过 fit（理由见 ResizeObserver 处）：切回时的 visible effect 会补。
       if (visibleRef.current) {
         fit.fit();
+        fittedRef.current = true;
         // 重测可能改变行列数，PTY 侧要跟着调，否则 TUI 按旧尺寸画、连输入框的位置都是错的。
         if (terminal.cols > 1 && terminal.rows > 1) {
           void resizeManagedTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {});
@@ -728,6 +797,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       // 隐藏时跳过 fit（理由见 ResizeObserver 处）：切回时的 visible effect 会补。
       if (visibleRef.current) {
         fit.fit();
+        fittedRef.current = true;
         if (terminal.cols > 1 && terminal.rows > 1) {
           void resizeManagedTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {});
         }
@@ -912,6 +982,10 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
         && (terminal.cols !== snapshot.cols || terminal.rows !== snapshot.rows)) {
         terminal.resize(snapshot.cols, snapshot.rows);
       }
+      // 可见期反过来:以本地 fit 出的网格为准,把 PTY 拉齐(见 resyncGridIfDrifted)。
+      // 快照顺路带着 PTY 的生效尺寸,走到这里就一并对一次;常态下的自愈靠那条心跳,
+      // 快照不能拿来轮询——它要把整个 backlog 编码重传一遍。
+      resyncGridIfDrifted(sessionId, snapshot.cols, snapshot.rows);
       // 重对齐终局:请求的缺口段已被后端 1MiB backlog 淘汰(前端整体落后太多),
       // 字节永久丢失,重试无意义。reset 后按现存 backlog 全量重画(远超一屏,足以
       // 还原可见画面);回放的是历史,里面的查询都答过,拦 xterm 的重复应答。
@@ -1115,6 +1189,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
         // 网格冻结在最后一次可见时的尺寸 = 与 PTY 一致，隐藏期的帧照常排对。
         if (!visibleRef.current) return;
         fit.fit();
+        fittedRef.current = true;
         if (terminal.cols > 1 && terminal.rows > 1) {
           resizeIfChanged(sessionId, terminal.cols, terminal.rows);
         }
@@ -1201,6 +1276,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     if (!terminal || !fit) return;
     const raf = requestAnimationFrame(() => {
       fit.fit();
+      fittedRef.current = true;
       if (terminal.cols > 1 && terminal.rows > 1) {
         resizeIfChanged(sessionId, terminal.cols, terminal.rows);
       }
@@ -1212,6 +1288,23 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, sessionId]);
+
+  // 网格自愈的心跳。resize 平时由容器尺寸变化驱动,某次没落地就没有下一次纠正它
+  // ——错位固化,底部那行输入框被挤出可视区(见 resyncGridIfDrifted)。这里定期比一次
+  // PTY 的生效尺寸,不必等用户去拖窗口。
+  //
+  // 查的是只回两个数的轻量命令,不是快照(快照要把整个 backlog 编码重传)。会话没在跑
+  // /已退出/临时 id 时不查:那时没有 PTY 可对齐。
+  useEffect(() => {
+    if (!visible || !active || exitCode !== undefined || sessionId < 0) return;
+    const timer = window.setInterval(() => {
+      managedTerminalGrid(sessionId)
+        .then(([cols, rows]) => resyncGridIfDrifted(sessionId, cols, rows))
+        .catch(() => {});
+    }, GRID_POLL_MS);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, active, exitCode, sessionId]);
 
   const initializing = !snapshotReady || ((active || sessionId < 0) && !initialized);
 

@@ -84,7 +84,7 @@ export function I18nProvider({ children, initial }: { children: ReactNode; initi
       apply((e as CustomEvent).detail as Settings);
     };
     if (remoteUi()) window.addEventListener(REMOTE_SETTINGS_EVENT, onRemote);
-    getSettings().then((s) => { if (!eventApplied) apply(s); }).catch(() => {});
+    getSettings().then((s) => { if (!cancelled && !eventApplied) apply(s); }).catch(() => {});
     return () => {
       cancelled = true;
       un?.();

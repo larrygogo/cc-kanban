@@ -12,7 +12,8 @@ fn default_auth() -> String {
     "bearer".into()
 }
 
-/// 单个 agent 的中转规则。密钥不在这里，见 `relay-secrets.json`。
+/// 单个 agent 的中转规则。密钥不在这里，见 relay-secrets.json
+/// （Windows 为 DPAPI 加密信封；macOS 为登录 Keychain 条目）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RelayRule {
     #[serde(default)]
@@ -185,7 +186,28 @@ fn validate_http_url(raw: &str) -> Result<(), String> {
     if uri.host_str().is_none() {
         return Err("中转地址缺少主机名".into());
     }
+    // http 是明文：Bearer/x-api-key 会随 /models 请求原样出门（list_relay_models），
+    // 误配非本机 http 地址等于把中转密钥交给链路上的任何人。只放行回环地址
+    // （本地 relay 是合理场景），其余一律要求 https。
+    if uri.scheme() == "http" && !is_loopback_host(&uri) {
+        return Err(
+            "http:// 明文地址仅允许本机回环（127.0.0.1、::1、localhost），远程中转请改用 https://"
+                .into(),
+        );
+    }
     Ok(())
+}
+
+/// 回环判定走 url crate 解析出的 Host 而非字符串前缀：http://127.1、http://2130706433
+/// 这类 IPv4 简写/十进制形式会被规范化为 127.0.0.1，伪装域名（127.0.0.1.evil.com）则
+/// 落在 Domain 分支被正确拒绝。
+fn is_loopback_host(uri: &url::Url) -> bool {
+    match uri.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false, // 缺主机名已在上面报错
+    }
 }
 
 type SecretMap = BTreeMap<String, String>;
@@ -195,22 +217,215 @@ fn secrets_path() -> std::path::PathBuf {
     crate::db_path().with_file_name("relay-secrets.json")
 }
 
+// ═══ 密钥的 OS 级加密存储 ═══
+//
+// 全部中转 key 以明文 JSON 落盘，等于交给任何能读到该文件的进程（备份同步盘、其它会话、
+// 扫描器）。各平台改用 OS 提供的按用户加密：
+// - macOS：整份映射序列化为一条登录 Keychain generic-password 条目（复用 ports.rs 的
+//   `security` CLI 机制，与 Claude OAuth 凭据同法），密钥不再落盘；旧明文文件迁移成功后删除。
+// - Windows：DPAPI（CryptProtectData，按当前用户加密）后以 {"v":1,"data":base64} 信封
+//   仍写 relay-secrets.json；换用户/换机器解不开。
+// - Linux：无现成 keyring 基建，刻意不引 libsecret 依赖，保留明文 0600 文件。
+
+/// 加密落盘的信封格式（仅 Windows 产出/识别）：data = base64(DPAPI(serde_json(SecretMap)))。
+#[cfg(target_os = "windows")]
+#[derive(Serialize, Deserialize)]
+struct ProtectedSecrets {
+    v: u32,
+    data: String,
+}
+
+#[cfg(target_os = "windows")]
+mod dpapi {
+    //! DPAPI 最小封装：CryptProtectData / CryptUnprotectData，按当前 Windows 用户加密。
+
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+    };
+
+    pub(super) fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
+        crypt(plain, true)
+    }
+
+    pub(super) fn unprotect(cipher: &[u8]) -> Result<Vec<u8>, String> {
+        crypt(cipher, false)
+    }
+
+    fn crypt(input: &[u8], protect: bool) -> Result<Vec<u8>, String> {
+        let in_blob = CRYPT_INTEGER_BLOB {
+            cbData: input.len() as u32,
+            pbData: input.as_ptr() as *mut u8,
+        };
+        let mut out_blob = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        let ok = unsafe {
+            if protect {
+                CryptProtectData(
+                    &in_blob,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    // 密钥操作跑在 spawn_blocking 工作线程，绝不许弹系统 UI 阻塞它。
+                    CRYPTPROTECT_UI_FORBIDDEN,
+                    &mut out_blob,
+                )
+            } else {
+                CryptUnprotectData(
+                    &in_blob,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    CRYPTPROTECT_UI_FORBIDDEN,
+                    &mut out_blob,
+                )
+            }
+        };
+        if ok == 0 {
+            let e = std::io::Error::last_os_error();
+            return Err(format!("DPAPI {}失败：{e}", if protect { "加密" } else { "解密" }));
+        }
+        let out =
+            unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) }.to_vec();
+        unsafe { LocalFree(out_blob.pbData.cast()) };
+        Ok(out)
+    }
+}
+
+/// 解码结果。LegacyPlaintext（旧版明文 map）仅 Windows 需要区分：读到后要立即重写为加密信封。
+enum DecodedSecrets {
+    Current(SecretMap),
+    #[cfg(target_os = "windows")]
+    LegacyPlaintext(SecretMap),
+}
+
+/// 密钥映射 → 落盘文本：Windows 为 DPAPI 信封。Linux/macOS 的文件后端（Linux 主存储、
+/// macOS 仅遗留文件与单测）仍是明文 JSON——macOS 的真实保护在 Keychain 层。
+#[cfg(target_os = "windows")]
+fn encode_secrets(secrets: &SecretMap) -> Result<String, String> {
+    use base64::Engine as _;
+    let plain = serde_json::to_string(secrets).map_err(|e| e.to_string())?;
+    let cipher = dpapi::protect(plain.as_bytes())?;
+    serde_json::to_string(&ProtectedSecrets {
+        v: 1,
+        data: base64::engine::general_purpose::STANDARD.encode(cipher),
+    })
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(all(not(target_os = "windows"), any(not(target_os = "macos"), test)))]
+fn encode_secrets(secrets: &SecretMap) -> Result<String, String> {
+    serde_json::to_string(secrets).map_err(|e| e.to_string())
+}
+
+/// 落盘文本 → 密钥映射。Windows 先认加密信封，认不出再按旧明文 map 解析（触发迁移重写）；
+/// 解不开（他机拷贝来的文件、被改过的密文）返回 None，调用方按「无密钥」处理——文件仍在，
+/// 不覆盖不删除，等用户重存。
+#[cfg(target_os = "windows")]
+fn decode_secrets(raw: &str) -> Option<DecodedSecrets> {
+    use base64::Engine as _;
+    if let Ok(envelope) = serde_json::from_str::<ProtectedSecrets>(raw) {
+        if envelope.v != 1 {
+            return None;
+        }
+        let cipher = base64::engine::general_purpose::STANDARD
+            .decode(envelope.data)
+            .ok()?;
+        let plain = dpapi::unprotect(&cipher).ok()?;
+        let plain = String::from_utf8(plain).ok()?;
+        return serde_json::from_str(&plain).ok().map(DecodedSecrets::Current);
+    }
+    serde_json::from_str::<SecretMap>(raw)
+        .ok()
+        .map(DecodedSecrets::LegacyPlaintext)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn decode_secrets(raw: &str) -> Option<DecodedSecrets> {
+    serde_json::from_str::<SecretMap>(raw)
+        .ok()
+        .map(DecodedSecrets::Current)
+}
+
+/// macOS Keychain 条目的 service 名与「写回时的 account 兜底值」。
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "meowo-relay-secrets";
+#[cfg(target_os = "macos")]
+const KEYCHAIN_ACCOUNT_FALLBACK: &str = "relay-secrets";
+
+#[cfg(target_os = "macos")]
+fn read_secrets_keychain() -> Option<SecretMap> {
+    use meowo_agent::KeychainPort as _;
+    let raw = crate::ports::SystemKeychain.read_password(KEYCHAIN_SERVICE)?;
+    serde_json::from_str(&raw).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn write_secrets_keychain(secrets: &SecretMap) -> Result<(), String> {
+    use meowo_agent::KeychainPort as _;
+    let keychain = crate::ports::SystemKeychain;
+    // 与 Claude 凭据写回同法：读得到既有 account 按同名更新，读不到用兜底值。
+    let account = keychain
+        .read_account(KEYCHAIN_SERVICE)
+        .unwrap_or_else(|| KEYCHAIN_ACCOUNT_FALLBACK.to_string());
+    let body = serde_json::to_string(secrets).map_err(|e| e.to_string())?;
+    keychain.write_password(KEYCHAIN_SERVICE, &account, &body)
+}
+
 fn read_secrets() -> SecretMap {
-    read_secrets_from(&secrets_path())
+    read_secrets_at(&secrets_path())
+}
+
+/// 真实读取入口。macOS 主存储在 Keychain、path 只用于发现遗留明文文件；
+/// 其它平台（以及全部单测）就是 path 指向的文件。
+#[cfg(target_os = "macos")]
+fn read_secrets_at(path: &std::path::Path) -> SecretMap {
+    if let Some(secrets) = read_secrets_keychain() {
+        return secrets;
+    }
+    let legacy = read_secrets_from(path);
+    if !legacy.is_empty() {
+        // 迁移失败（Keychain 锁定/被拒）保留明文文件——密钥不能丢，下次读取再试；
+        // 写库成功才删文件，此后明文不再残留。
+        if write_secrets_keychain(&legacy).is_ok() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    legacy
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_secrets_at(path: &std::path::Path) -> SecretMap {
+    read_secrets_from(path)
 }
 
 fn read_secrets_from(path: &std::path::Path) -> SecretMap {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return SecretMap::default();
+    };
+    match decode_secrets(&raw) {
+        Some(DecodedSecrets::Current(secrets)) => secrets,
+        #[cfg(target_os = "windows")]
+        Some(DecodedSecrets::LegacyPlaintext(secrets)) => {
+            // 旧明文文件：立即重写为加密信封。原子写失败则旧文件原样保留（密钥不丢），下次读取再试。
+            let _ = write_secrets_to(path, &secrets);
+            secrets
+        }
+        None => SecretMap::default(),
+    }
 }
 
+// macOS 非测试构建不走文件写路径（密钥在 Keychain），仅 Linux/Windows 与各平台单测使用。
+#[cfg(any(not(target_os = "macos"), test))]
 fn write_secrets_to(path: &std::path::Path, secrets: &SecretMap) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let body = serde_json::to_string(secrets).map_err(|e| e.to_string())?;
+    let body = encode_secrets(secrets)?;
     meowo_agent::fsutil::write_atomic_secure(path, &body).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
@@ -221,12 +436,9 @@ fn write_secrets_to(path: &std::path::Path, secrets: &SecretMap) -> Result<(), S
     Ok(())
 }
 
-fn update_secret_at(path: &std::path::Path, agent: &str, secret: &str) -> Result<(), String> {
-    // 必须把整个读-改-写包在同一把锁内；仅靠原子 rename 只能防半截文件，不能防两个调用方
-    // 都基于旧快照写回而互相覆盖。
-    let _guard = RELAY_SECRETS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut secrets = read_secrets_from(path);
-    // 令牌里的零宽字符会原样进 Authorization 头，中转端一律 401，用户毫无线索——先洗掉。
+/// 令牌里的零宽字符会原样进 Authorization 头，中转端一律 401，用户毫无线索——先洗掉。
+/// 空值表示删除。
+fn set_secret_entry(secrets: &mut SecretMap, agent: &str, secret: &str) {
     let cleaned = strip_invisible(secret);
     let value = cleaned.trim();
     if value.is_empty() {
@@ -234,6 +446,36 @@ fn update_secret_at(path: &std::path::Path, agent: &str, secret: &str) -> Result
     } else {
         secrets.insert(agent.to_string(), value.to_string());
     }
+}
+
+/// 真实写入入口：macOS 写 Keychain，其它平台写文件。
+#[cfg(target_os = "macos")]
+fn update_secret(agent: &str, secret: &str) -> Result<(), String> {
+    // 必须把整个读-改-写包在同一把锁内（理由见 update_secret_at）。
+    let _guard = RELAY_SECRETS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = secrets_path();
+    // 读经由 read_secrets_at：遗留明文文件在此一并迁移进 Keychain。
+    let mut secrets = read_secrets_at(&path);
+    set_secret_entry(&mut secrets, agent, secret);
+    write_secrets_keychain(&secrets)?;
+    // 写库成功才删遗留文件：删早了一旦写库失败密钥就丢了。
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn update_secret(agent: &str, secret: &str) -> Result<(), String> {
+    update_secret_at(&secrets_path(), agent, secret)
+}
+
+// macOS 非测试构建不走文件后端，仅 Linux/Windows 与各平台单测使用。
+#[cfg(any(not(target_os = "macos"), test))]
+fn update_secret_at(path: &std::path::Path, agent: &str, secret: &str) -> Result<(), String> {
+    // 必须把整个读-改-写包在同一把锁内；仅靠原子 rename 只能防半截文件，不能防两个调用方
+    // 都基于旧快照写回而互相覆盖。
+    let _guard = RELAY_SECRETS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut secrets = read_secrets_from(path);
+    set_secret_entry(&mut secrets, agent, secret);
     write_secrets_to(path, &secrets)
 }
 
@@ -276,6 +518,11 @@ pub(crate) async fn get_relay_secret_status() -> Result<BTreeMap<String, bool>, 
 /// 直接写坏密钥。外泄前提是渲染层已被攻破 + 存在出网信道；后者已由 CSP 收紧
 /// （img-src 不再放行任意 https）切断。后续若要进一步收紧，应连同前端改成
 /// 「不回填、留空表示不变」，单改后端做不到。
+///
+/// 信任边界：密钥只出本地 Tauri IPC 这一条口——remote.rs 的远端命令桥已把本命令
+/// （连同 set_relay_secret）列入黑名单，局域网/远程访问面拿不到；webview 进程本身在
+/// 威胁模型内视为可信（它本来就代用户编辑这些值）。密钥落盘/入库见上方
+/// 「密钥的 OS 级加密存储」一节。
 #[tauri::command]
 pub(crate) async fn get_relay_secrets() -> Result<BTreeMap<String, String>, String> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -303,7 +550,7 @@ pub(crate) async fn set_relay_secret(agent: String, secret: String) -> Result<()
         if !cap.supports_variant(installation.variant_tag) {
             return Err("当前安装版本不支持 API 中转".into());
         }
-        update_secret_at(&secrets_path(), &agent, &secret)
+        update_secret(&agent, &secret)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -487,6 +734,25 @@ mod tests {
         assert!(validate_http_url("socks5://relay.example").is_err());
     }
 
+    /// http 是明文，Bearer/x-api-key 会随 /models 请求原样出门：仅放行回环地址
+    /// （本地 relay 场景），非回环 http 一律拒绝且报错提示改用 https。
+    #[test]
+    fn http_is_only_allowed_on_loopback() {
+        assert!(validate_http_url("http://127.0.0.1:4000").is_ok());
+        assert!(validate_http_url("http://127.1:4000").is_ok()); // url 规范化为 127.0.0.1
+        assert!(validate_http_url("http://localhost:8317/v1").is_ok());
+        assert!(validate_http_url("http://LOCALHOST").is_ok());
+        assert!(validate_http_url("http://[::1]:4000").is_ok());
+        // 伪装回环的域名不是回环；内网/公网 IP 也不是。
+        assert!(validate_http_url("http://127.0.0.1.evil.example").is_err());
+        assert!(validate_http_url("http://192.168.1.10:4000").is_err());
+        assert!(validate_http_url("http://10.0.0.2").is_err());
+        let err = validate_http_url("http://relay.example/v1").unwrap_err();
+        assert!(err.contains("https"), "报错应提示改用 https：{err}");
+        // https 不受限。
+        assert!(validate_http_url("https://relay.example/v1").is_ok());
+    }
+
     /// 用户反馈：地址「明明是 https:// 开头」却报前缀错误——粘贴带入的零宽字符/全角冒号
     /// 在输入框里不可见。normalize 洗掉后应能通过校验并落盘干净值。
     #[test]
@@ -530,6 +796,66 @@ mod tests {
             Some("sk-abc")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 旧版明文 JSON 各平台都必须仍能读出（向后兼容）。Windows 读出即迁移重写为 DPAPI
+    /// 信封、明文不再落盘；macOS 的「文件 → Keychain」迁移走真实 Keychain，无法在本进程
+    /// 单测，仅编译期（cfg）覆盖。
+    #[test]
+    fn legacy_plaintext_secrets_file_is_migrated() {
+        let dir =
+            std::env::temp_dir().join(format!("meowo-relay-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("relay-secrets.json");
+        std::fs::write(&path, r#"{"claude":"sk-legacy","kimi":"kk-1"}"#).unwrap();
+        let secrets = read_secrets_from(&path);
+        assert_eq!(
+            secrets.get("claude").map(String::as_str),
+            Some("sk-legacy")
+        );
+        assert_eq!(secrets.get("kimi").map(String::as_str), Some("kk-1"));
+        #[cfg(target_os = "windows")]
+        {
+            // 迁移后文件不得再含明文，且再读仍一致（走加密信封分支）。
+            let raw = std::fs::read_to_string(&path).unwrap();
+            assert!(!raw.contains("sk-legacy"), "迁移后明文残留：{raw}");
+            let reread = read_secrets_from(&path);
+            assert_eq!(reread.get("kimi").map(String::as_str), Some("kk-1"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows：落盘内容不得含明文密钥，读回一致（真实 DPAPI 往返）。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn written_secrets_file_is_dpapi_encrypted() {
+        let dir = std::env::temp_dir().join(format!("meowo-relay-dpapi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("relay-secrets.json");
+        update_secret_at(&path, "claude", "sk-roundtrip-1").unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("sk-roundtrip-1"), "落盘含明文：{raw}");
+        assert!(raw.contains("\"v\":1"), "应为加密信封：{raw}");
+        assert_eq!(
+            read_secrets_from(&path).get("claude").map(String::as_str),
+            Some("sk-roundtrip-1")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows：DPAPI 直接往返；篡改密文应解密失败，而不是产出乱码明文。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn dpapi_roundtrip_and_tamper_fails() {
+        let cipher = dpapi::protect(b"sk-test-123").unwrap();
+        assert_ne!(cipher.as_slice(), b"sk-test-123");
+        assert_eq!(dpapi::unprotect(&cipher).unwrap().as_slice(), b"sk-test-123");
+        let mut tampered = cipher.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0xFF;
+        assert!(dpapi::unprotect(&tampered).is_err());
     }
 
     /// S2：密钥只随「已保存中转配置的 origin」出门。host/端口/scheme 任一不同、

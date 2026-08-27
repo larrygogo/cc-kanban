@@ -14,6 +14,7 @@ import { I18nProvider } from "../i18n";
 import { TooltipLayer } from "../Tooltip";
 import { installInputModality } from "../input-modality";
 import { bootAppearance } from "../appearance";
+import { setHostOsUnknown } from "../platform";
 import "../fonts";
 import "../styles.css";
 import "./mobile.css";
@@ -22,6 +23,9 @@ markRemoteUi();
 installRemoteTransport();
 installInputModality();
 bootAppearance({ scale: false });
+// 远程端 hostOs 语义未定义:显式钉死 unknown(isMac()/isWindows()/isMacPanel() 恒 false,
+// 与此前从未探测的隐式行为一致)。约定:不要用它们门控远程行为,远程布局门控一律用 remoteUi()。
+setHostOsUnknown();
 
 // settings-changed 的远程替身:12s 轮询 get_settings,内容变了就派发 REMOTE_SETTINGS_EVENT
 // (appearance/i18n 订阅它跟随主题/语言)。设置改动是低频事件,12s 时延可接受;

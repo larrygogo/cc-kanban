@@ -469,38 +469,16 @@ pub(crate) fn resume_argv_for(provider: Option<&str>, session_id: Option<&str>) 
         .unwrap_or_default()
 }
 
-/// 拉起该 provider 时要注入的代理环境变量。未知 agent → 空（不注入）。
-///
-/// claude 也返回空——它的代理已写进 settings.json 的 `env` 块，对所有启动方式生效，无须再注入。
-/// 详见 [`crate::proxy::launch_env`]。
-///
-/// 与 `resume_argv_for` 同理**刻意定义在 cfg 之外**：只用平台无关的 agent API，
-/// 埋进 cfg 块会让另一平台的编译器看不到它，改签名时一路漏到对方 CI 才炸。
-/// **恢复某个会话**时要注入的环境变量。
-///
-/// Claude 的会话可跨账号继续：恢复前会把会话资料同步到当前活跃账号，因此这里也必须使用当前
-/// 活跃账号。其余 provider 尚未声明跨账号会话迁移能力，仍沿用该会话原先所属的账号。
-/// 恢复路径改为一律按 `prepare_session_for_active_profile` 算出的实际账号取 env 之后，
-/// 本函数只剩 macOS 的聚焦回退路径在用（它没有 prepare 的结果可依，只能自行推导）。
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn launch_env_for_session(
-    provider: Option<&str>,
-    session_id: &str,
-) -> Vec<(String, String)> {
-    let stored = profile_of_session(session_id);
-    let active = provider.and_then(crate::profile::active_id);
-    let profile = resume_profile(provider, stored, active);
-    launch_env_for_profile(provider, profile.as_deref())
-}
-
 /// 声明了跨账号迁移的 agent 用**当前活跃账号**恢复（恢复前会把会话资料同步过去）；
 /// 其余沿用该会话原先所属的账号。判据取自插件声明，不认识任何具体 agent。
 fn supports_cross_account_resume(provider: Option<&str>) -> bool {
     meowo_agent::resolve(provider).is_some_and(|agent| agent.cross_account_session().is_some())
 }
 
-/// 同 [`launch_env_for_session`]：非 macOS 下只有它的单测在用。
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// 恢复会话的账号推导。唯一的生产调用方曾是 macOS 聚焦回退的 `launch_env_for_session`——
+/// 它算出的 env 只喂给内联前缀，已随该前缀一并删除（密钥不得进可见命令行，见
+/// `env_source_prefix_posix` 的起因注释）；本函数现仅单测在用。
+#[cfg(test)]
 fn resume_profile(
     provider: Option<&str>,
     stored: Option<String>,
@@ -909,18 +887,11 @@ pub(crate) async fn focus_session(
         tauri::async_runtime::spawn_blocking(move || {
             let resume_argv = resume_argv_for(provider.as_deref(), session_id.as_deref());
             // 保留恢复参数供聚焦期间进程退出的判定路径使用；实际恢复改由前端明确确认。
-            // 账号按**该会话自己的**取（没有 session_id 就退回当前活跃账号）。
-            let env = match session_id.as_deref() {
-                Some(sid) => launch_env_for_session(provider.as_deref(), sid),
-                None => launch_env_for_profile(provider.as_deref(), None),
-            };
-            let env_prefix = env_prefix_posix(&env);
             crate::macos::terminal::focus_session_terminal(
                 pid,
                 cwd.as_deref(),
                 &resume_argv,
                 resume_terminal_kind(),
-                &env_prefix,
             )
         })
         .await
@@ -959,12 +930,13 @@ fn open_project_dir_blocking(cwd: &str) -> Result<(), String> {
             .spawn()
             .map_err(|e| e.to_string())?;
     }
-    // macOS：open 偶发慢（Finder 冷启动），放后台线程；status() 等待回收，避免僵尸进程。
+    // macOS：open 偶发慢（Finder 冷启动），放后台线程；spawn_detached 负责 wait 回收，
+    // 避免僵尸进程（教训见 fsutil::spawn_detached）。本函数语义不在乎拉起成败，错误吞掉。
     #[cfg(target_os = "macos")]
     {
         let dir = dir.to_string();
         std::thread::spawn(move || {
-            let _ = std::process::Command::new("open").arg(&dir).status();
+            let _ = crate::fsutil::spawn_detached(std::process::Command::new("open").arg(&dir));
         });
     }
     Ok(())
@@ -1294,21 +1266,6 @@ pub(crate) fn env_source_prefix_windows(env: &[(String, String)]) -> Result<Stri
     Err("无法创建 env 注入临时文件".into())
 }
 
-/// POSIX：`K='v' ` —— 命令前缀式赋值（只作用于这一条命令，无需 export）。
-///
-/// **键名必须不加引号**，否则 shell 不再把它识别为赋值（`'K=v' cmd` 会被当成一个命令名）——
-/// 这正是不能把 `K=v` 当作一个 argv 项塞进 AppleScript 的原因（那边每项都套了 `quoted form`）。
-/// 键名是我们自己的常量（安全），值按 POSIX 单引号规则转义（`'` → `'\''`）。
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn env_prefix_posix(env: &[(String, String)]) -> String {
-    let clear = format!("unset {}; ", PROXY_ENV_KEYS.join(" "));
-    let set: String = env
-        .iter()
-        .map(|(k, v)| format!("{k}='{}' ", v.replace('\'', r"'\''")))
-        .collect();
-    format!("{clear}{set}")
-}
-
 /// POSIX shell 参数逐项单引号包裹并拼接；单引号按 `'\''` 转义。
 ///
 /// 例：`["a", "b'c"] -> "'a' 'b'\''c'"`。
@@ -1354,24 +1311,26 @@ fn resume_session_ghostty(cwd: Option<&str>, argv: &[String], env_prefix: &str) 
     let Some(cmd) = ghostty_shell_command(cwd, argv, env_prefix) else {
         return false;
     };
-    std::process::Command::new("open")
-        .args(["-na", "Ghostty", "--args", "-e", "/bin/sh", "-lc", &cmd])
-        .spawn()
-        .is_ok()
+    // spawn_detached：拉起后后台 wait 回收，常驻进程下不留 <defunct> 僵尸。
+    crate::fsutil::spawn_detached(
+        std::process::Command::new("open").args(["-na", "Ghostty", "--args", "-e", "/bin/sh", "-lc", &cmd]),
+    )
+    .is_ok()
 }
 
 /// macOS 恢复会话的 env 注入文件：赋值写进临时文件（unix 下创建即 0600），终端命令只出现
 /// `source '<tmp>' && rm -f '<tmp>' && ` 前缀——密钥值不再落在可见命令行上。
 ///
 /// 起因：恢复会话的 env 带着中转 API key（ANTHROPIC_API_KEY / KIMI_MODEL_API_KEY /
-/// GEMINI_API_KEY），此前由 [`env_prefix_posix`] 拼成 `K='sk-…' ` 前缀直接进终端命令——
-/// iTerm2 会把这行命令写进 ~/.zsh_history，Terminal.app 则留在滚动缓冲区，都是明文落盘。
+/// GEMINI_API_KEY），此前由内联前缀（已删除的 `env_prefix_posix`）拼成 `K='sk-…' `
+/// 直接进终端命令——iTerm2 会把这行命令写进 ~/.zsh_history，Terminal.app 则留在滚动
+/// 缓冲区，都是明文落盘。
 /// 文件由恢复命令 source 成功后立即自删；命令若没来得及执行（窗口被直接关掉），残留文件
 /// 权限 0600 仅本人可读，并随 $TMPDIR 周期清理。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn env_source_prefix_posix(env: &[(String, String)]) -> Result<String, String> {
-    // source 进来的赋值必须 export 才会传给恢复出来的子进程；unset 清掉继承的代理变量
-    // （语义同 env_prefix_posix），值按同一套 POSIX 单引号规则转义。
+    // source 进来的赋值必须 export 才会传给恢复出来的子进程；unset 清掉继承的代理变量，
+    // 值按 POSIX 单引号规则转义（`'` → `'\''`）。
     let mut content = format!("unset {}\n", PROXY_ENV_KEYS.join(" "));
     for (key, value) in env {
         content.push_str(&format!(
@@ -2135,7 +2094,8 @@ fn activate_resume_terminal_app(terminal: &str) {
     } else {
         "Terminal"
     };
-    let _ = std::process::Command::new("open").args(["-a", app]).spawn();
+    // fire-and-forget：拉起即可；wait 回收交给 spawn_detached，常驻进程下不留僵尸。
+    let _ = crate::fsutil::spawn_detached(std::process::Command::new("open").args(["-a", app]));
 }
 
 /// 外部终端是不是用户的首选视图：显式选择 `session_open_in=terminal`，或对话功能整体
@@ -2749,18 +2709,6 @@ mod proxy_env_tests {
         }
     }
 
-    #[test]
-    fn posix_prefix_leaves_the_name_unquoted() {
-        // 关键：**键名不能带引号**——`'K=v' cmd` 会被 shell 当成一个命令名而不是赋值。
-        // 值则必须单引号包裹（AppleScript 会把它原样拼进 shell 命令串）。
-        let p = env_prefix_posix(&env("http://127.0.0.1:7890"));
-        assert!(p.starts_with("unset HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY "));
-        assert!(
-            p.ends_with("HTTPS_PROXY='http://127.0.0.1:7890' HTTP_PROXY='http://127.0.0.1:7890' ")
-        );
-        assert!(!p.starts_with('\''), "键名不得被引起来");
-    }
-
     /// 恢复会话的 env 带着中转 API key：赋值必须写进 0600 临时文件，可见命令行只剩
     /// `source <tmp> && rm -f <tmp> &&`——否则 iTerm2 把它写进 ~/.zsh_history、
     /// Terminal.app 留在滚动缓冲区，都是明文落盘。
@@ -2803,7 +2751,7 @@ mod proxy_env_tests {
         std::fs::remove_file(path).unwrap();
     }
 
-    /// env 文件与内联前缀同一套转义纪律：值里的单引号闭合不了，注入留在字符串里。
+    /// env 文件的转义纪律：值里的单引号闭合不了，注入留在字符串里。
     #[test]
     fn posix_env_file_escapes_quotes_in_values() {
         let evil = vec![("K".to_string(), "a'b;calc".to_string())];
@@ -2818,15 +2766,12 @@ mod proxy_env_tests {
         std::fs::remove_file(path).unwrap();
     }
 
-    /// 代理串是用户输入，会被拼进 shell 命令串——三种 shell 的转义都必须挡住「闭合引号后接命令」
-    /// 的注入。值虽已过 validate（无空格、协议白名单），这里仍按「一律正确转义」把关，不赌。
+    /// 代理串是用户输入，会被拼进 shell 命令串——转义必须挡住「闭合引号后接命令」的注入。
+    /// 值虽已过 validate（无空格、协议白名单），这里仍按「一律正确转义」把关，不赌。
+    /// POSIX 臂见 `posix_env_file_escapes_quotes_in_values`。
     #[test]
     fn quoting_survives_a_value_with_quotes() {
         let evil = vec![("HTTPS_PROXY".to_string(), "http://a'b;calc".to_string())];
-
-        // POSIX：`'` → `'\''`，引号无法闭合，`;calc` 留在字符串里。
-        let sh = env_prefix_posix(&evil);
-        assert!(sh.ends_with(r"HTTPS_PROXY='http://a'\''b;calc' "));
 
         // Windows：值根本不进命令串(powershell/cmd 走 Command::env,wt/wezterm 走临时文件),
         // 注入面因此消失——断言值原样落盘、命令串里找不到它。
@@ -2850,7 +2795,7 @@ mod proxy_env_tests {
         assert!(env_source_prefix_windows(&[])
             .unwrap()
             .contains("$env:ALL_PROXY=$null;"));
-        assert!(env_prefix_posix(&[]).starts_with("unset HTTPS_PROXY"));
+        // POSIX 的空 env unset 由 posix_env_moves_secrets_into_a_sourced_file 覆盖。
         let argv = vec![
             "claude".to_string(),
             "--resume".to_string(),

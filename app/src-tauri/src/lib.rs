@@ -47,8 +47,8 @@ mod window;
 // run() 的 generate_handler 以裸标识符登记这些命令，须在 crate 根作用域可见。
 use chat::{
     clipboard_restore, clipboard_set_image, clipboard_text, get_chat_history,
-    get_subagent_transcript, refresh_session_model, refresh_session_todos, save_pasted_attachment,
-    search_chat_transcripts,
+    get_subagent_transcript, probe_subagent_states, refresh_session_model, refresh_session_todos,
+    save_pasted_attachment, search_chat_transcripts,
 };
 use handoff::{get_session_lineage, switch_session_provider};
 use fsutil::{
@@ -62,7 +62,8 @@ use install::{
 };
 use managed_terminal::{
     awaiting_interaction_sessions, dismiss_interactive_question, managed_terminal_binding,
-    managed_terminal_snapshot, attach_background_session, open_attached_terminal,
+    managed_terminal_grid, managed_terminal_snapshot, attach_background_session,
+    open_attached_terminal,
     pending_interaction, register_approval_consumer, register_terminal_viewer,
     resize_managed_terminal, screen_detect_explain, screen_detect_explain_text,
     send_background_prompt,
@@ -982,7 +983,9 @@ pub fn run() {
     let path = db_path();
     let tx_cache: Arc<Mutex<meowo_agent::TranscriptCache>> =
         Arc::new(Mutex::new(meowo_agent::TranscriptCache::new()));
-    let ptys = pty::PtyBroker::default();
+    // OS RNG 不可用 → fail-closed 放弃启动：broker token 是 loopback 服务唯一的门闩，
+    // 弱随机回退等于把门闩换成摆设（见 pty.rs random_token）。
+    let ptys = pty::PtyBroker::new().unwrap_or_else(|e| panic!("PTY broker 启动失败: {e}"));
     let approval_ptys = ptys.clone();
     let exit_ptys = ptys.clone();
     if let Err(error) = ptys.start_attach_server() {
@@ -1066,6 +1069,7 @@ pub fn run() {
             confirm::confirm_dialog_payload,
             confirm::confirm_dialog_result,
             get_subagent_transcript,
+            probe_subagent_states,
             refresh_session_model,
             refresh_session_todos,
             save_pasted_attachment,
@@ -1079,6 +1083,7 @@ pub fn run() {
             session_launch_selections,
             set_session_launch_selection,
             managed_terminal_snapshot,
+            managed_terminal_grid,
             managed_terminal_binding,
             write_managed_terminal,
             resize_managed_terminal, send_background_prompt,
@@ -1334,8 +1339,8 @@ pub fn run() {
             spawn_db_watcher(app.handle().clone(), path.clone());
             spawn_liveness_watch(app.handle().clone(), path.clone(), tx_cache.clone());
             spawn_first_import(app.handle().clone(), path.clone());
-            // %TEMP%\meowo-paste 没有任何 OS 侧回收（Windows 不清 %TEMP%），启动时后台
-            // 按 mtime 清过期附件（TTL 与回读方的取舍见 chat::PASTE_TTL）。
+            // %TEMP%\meowo-paste / meowo-handoff 没有任何 OS 侧回收（Windows 不清 %TEMP%），
+            // 启动时后台按 mtime 清过期附件与交接文件（TTL 与回读方的取舍见 chat::PASTE_TTL）。
             chat::spawn_paste_cleanup();
             // 首次启动（新装 / 老用户升级后第一次）自动弹使用引导。延迟一拍让贴纸先画出来，
             // 引导窗口叠在已成型的应用上；看完/关闭时前端置 onboarding_seen=true，之后只手动打开。

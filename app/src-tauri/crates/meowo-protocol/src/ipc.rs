@@ -58,6 +58,24 @@ pub struct SubagentRun {
     pub items: Vec<ChatItem>,
 }
 
+/// 一次**未结**委派的侧车实测状态。折叠状态下的结局统计只来自主链回执，而并行委派的
+/// 回执必须等同一步里的工具**全部**跑完才一起写盘——整批跑完之前，先收工的子任务在
+/// 主链上毫无痕迹（实拍：4 个 explore 里 1 个已完成，进度面板仍是 0/4，四行耗时一律
+/// 按「委派时刻→现在」算）。而侧车流自己带着终结标记，这里据此实测补齐。
+///
+/// 按需读取（用户展开进度面板时），不进 650ms 的历史轮询热路径——同 `SubagentRun`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+pub struct SubagentProbeDto {
+    /// 归一化状态：`running` / `completed` / `failed`。
+    pub status: String,
+    /// 侧车最后一次落盘的时刻（ISO-8601）。面板据此把耗时从「委派→现在」纠正成
+    /// 真实执行时长；还在跑时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+}
+
 /// Provider 日志经插件解析后交给聊天归一化层的稳定消息单元。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]

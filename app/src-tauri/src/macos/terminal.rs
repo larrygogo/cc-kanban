@@ -153,7 +153,6 @@ pub fn focus_session_terminal(
     cwd: Option<&str>,
     resume_argv: &[String],
     resume_kind: TermKind,
-    env_prefix: &str,
 ) -> crate::terminal::FocusSessionResult {
     let chain = ancestor_chain(pid);
     let result = focus_tab_of_kind(pid, detect_term_kind(&chain_names(&chain)));
@@ -173,7 +172,12 @@ pub fn focus_session_terminal(
         return result;
     }
     // 点击与进程退出竞态时交给前端提示“会话已断开”，由用户明确选择重新打开，避免静默 fork。
-    let _ = (cwd, resume_argv, resume_kind, env_prefix);
+    //
+    // 若将来恢复 resume 回退：不得恢复内联 `K='v' ` env 前缀——恢复 env 带着中转 API key，
+    // 内联进命令串会落 ~/.zsh_history / 滚动缓冲区（明文落盘）。密钥须走 env_source 文件
+    // 前缀方式（0600 临时文件 + source，见 crate::terminal::env_source_prefix_posix 的
+    // 起因注释）。
+    let _ = (cwd, resume_argv, resume_kind);
     crate::terminal::FocusSessionResult::ProcessEnded
 }
 

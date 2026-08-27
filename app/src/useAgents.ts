@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listAgents, agentName, type AgentDescriptor, type AgentId } from "./api";
 import { useTauriEvent } from "./hooks/useTauriEvent";
 
@@ -27,8 +27,11 @@ export function useAgents(): {
   reload: () => void;
 } {
   const [agents, setAgents] = useState<AgentDescriptor[] | null>(null);
+  // 事件订阅里的 reload 可能晚于卸载才 resolve:卸载后不得再 setState。
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
   const reload = () => {
-    listAgents().then(setAgents).catch(() => {});
+    listAgents().then((list) => { if (mountedRef.current) setAgents(list); }).catch(() => {});
   };
   useEffect(reload, []);
   useAgentListRefresh(reload); // 装完新 agent 立刻反映，不必重开页面

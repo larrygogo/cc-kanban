@@ -258,7 +258,16 @@ static COMPLETED_SEQ: AtomicU64 = AtomicU64::new(0);
 
 struct AttachState {
     endpoint: Mutex<Option<SocketAddr>>,
+    /// full token：完整权限凭据，只做两件事——attach（读写任意会话 PTY 帧）与兜底
+    /// 所有 reporter 操作。它不出主进程的可信边界：attach 客户端经 discovery 文件
+    /// （unix 0600）领取，agent 子进程环境拿的是下面的 scoped token。
     token: String,
+    /// 注入 agent 子进程环境的 scoped reporter token（token → 签发时绑定的会话 id；
+    /// start_pending 是负数临时 id，resume/重启是真实 id）。第二级凭据：只许认领自己
+    /// 那次 launch、只许为自己的会话提交审批，不能 attach 读写 PTY 帧、不能碰其它
+    /// 会话。agent 的后代进程（MCP server、postinstall 脚本等）天然继承环境变量，
+    /// 泄露面的权限必须收敛到「reporter 为自己会话必须做的事」。PTY 退出即吊销。
+    scoped_tokens: Mutex<HashMap<String, i64>>,
     started: AtomicBool,
     next_subscriber: AtomicU64,
     next_pending: AtomicI64,
@@ -298,6 +307,17 @@ struct AttachState {
 struct PendingApproval {
     request: ApprovalRequest,
     response: mpsc::Sender<ApprovalDecision>,
+}
+
+/// broker 凭据级别。鉴权一律 default-deny：[`PtyBroker::token_level`] 解不出级别的
+/// token（未知、锁中毒）在所有入口都被拒绝，不存在「级别缺失按全权限放行」的路径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenLevel {
+    /// 进程内持有的完整凭据：attach（读写任意会话 PTY 帧）与一切 reporter 操作。
+    Full,
+    /// 注入 agent 环境的 reporter 凭据，值为签发时绑定的会话 id（临时负 id 或真实 id）。
+    /// 只允许 Claim 自己那次 launch、为自己会话提交 Approval。
+    Scoped(i64),
 }
 
 /// 远端审批消费者租约的保鲜期。手机端（useApprovalChannel 远程模式）每 20s 重注册
@@ -358,9 +378,14 @@ pub(crate) struct PtyBroker {
     detect_started: Arc<AtomicBool>,
 }
 
-impl Default for PtyBroker {
-    fn default() -> Self {
-        let token = random_token();
+impl PtyBroker {
+    /// 生产构造：token 生成 fail-closed——OS RNG 不可用时返回错误，由调用方拒绝启动
+    /// （见 [`random_token`]）。测试走 [`Default`]（测试环境 RNG 恒可用）。
+    pub(crate) fn new() -> Result<Self, String> {
+        Ok(Self::with_token(random_token()?))
+    }
+
+    fn with_token(token: String) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             viewed_session: Arc::new(AtomicI64::new(0)),
@@ -371,6 +396,7 @@ impl Default for PtyBroker {
             attach: Arc::new(AttachState {
                 endpoint: Mutex::new(None),
                 token,
+                scoped_tokens: Mutex::new(HashMap::new()),
                 started: AtomicBool::new(false),
                 next_subscriber: AtomicU64::new(1),
                 next_pending: AtomicI64::new(-1),
@@ -388,10 +414,37 @@ impl Default for PtyBroker {
     }
 }
 
+impl Default for PtyBroker {
+    fn default() -> Self {
+        // 测试便利构造；生产路径走 new() —— token 生成失败必须能向上报错拒绝启动，
+        // 而 Default 无法返回 Result。这里同样不做弱随机回退：直接 panic。
+        Self::with_token(
+            random_token().unwrap_or_else(|e| panic!("PTY broker token 生成失败（OS RNG 不可用）: {e}")),
+        )
+    }
+}
+
+/// `start` 的 panic 兜底：armed 状态下 Drop 摘掉 starting 占位（背景见 `start` 调用点注释）。
+/// 锁中毒按全仓统一策略 into_inner 恢复——占位清理是幂等收尾，中毒不该连它一起带走。
+struct StartPlaceholderGuard<'a> {
+    broker: &'a PtyBroker,
+    session_id: i64,
+    armed: bool,
+}
+
+impl Drop for StartPlaceholderGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut starting = self.broker.starting.lock().unwrap_or_else(|e| e.into_inner());
+            starting.remove(&self.session_id);
+        }
+    }
+}
+
 /// 从 ANSI 输出流里提取人能读的尾部文本：剥掉 CSI/OSC 转义与控制字符，
 /// 取非空行的最后一段，限长 `max_chars`。给「Agent 秒退」的报错信息用。
 fn readable_tail(data: &[u8], max_chars: usize) -> String {
-    // 先按字节剥转义（UTF-8 多字节原样保留，最后统一 lossy 解码——逐字节转 char 会把中文拆成乱码）。
+    // 先按字节剥转义（UTF-8 多字节原样保留，最后统一解码——逐字节转 char 会把中文拆成乱码）。
     let mut bytes: Vec<u8> = Vec::with_capacity(data.len().min(4096));
     let mut i = 0;
     while i < data.len() {
@@ -421,7 +474,9 @@ fn readable_tail(data: &[u8], max_chars: usize) -> String {
         }
         i += 1;
     }
-    let text = String::from_utf8_lossy(&bytes);
+    // GBK 三级解码（严格 UTF-8 → GBK → lossy）：中文 Windows 的 agent/工具输出常见 GBK，
+    // 无脑 lossy 会把秒退原因整屏刷成 U+FFFD。与文件查看器同一份口径（fsutil::decode_text_bytes）。
+    let text = crate::fsutil::decode_text_bytes(&bytes);
     let lines: Vec<&str> = text
         .lines()
         .map(str::trim)
@@ -680,6 +735,10 @@ fn finalize_exit(broker: &PtyBroker, app: &tauri::AppHandle, managed: &Arc<Manag
         if let Ok(mut pending) = broker.attach.pending.lock() {
             pending.retain(|_, id| *id != session_id);
         }
+        // 未认领的临时会话也签发过 scoped token，随启动失败一起吊销。
+        if let Ok(mut tokens) = broker.attach.scoped_tokens.lock() {
+            tokens.retain(|_, owner| *owner != session_id);
+        }
         // 负 id（未认领的临时会话）没有库写入，直接发退出事件。
         if let Some(window) = app.get_webview_window("chat") {
             let _ = window.emit("pty-exit", PtyExit { session_id, code });
@@ -724,6 +783,12 @@ fn finalize_exit(broker: &PtyBroker, app: &tauri::AppHandle, managed: &Arc<Manag
                 pending.retain(|_, id| !temp_ids.contains(id));
             }
         }
+        // scoped reporter token 随会话吊销：agent 已退出，凭据不再有任何合法持有者。
+        // resume/重启路径的 owner 是真实 id（session_id 本身），start_pending 路径是
+        // 上面收集的临时 id，两类一起清。
+        if let Ok(mut tokens) = broker.attach.scoped_tokens.lock() {
+            tokens.retain(|_, owner| *owner != session_id && !temp_ids.contains(owner));
+        }
         crate::watch::emit_board_changed(app, "pty-exit");
     }
 }
@@ -743,16 +808,11 @@ fn nested_claim_hijacks_reclaim(
     }
 }
 
-fn random_token() -> String {
-    let mut bytes = [0u8; 32];
-    if getrandom::fill(&mut bytes).is_err() {
-        // OS RNG 不可用属于极端退化；仍混入进程/时间，且服务只监听 loopback。
-        let seed = format!("{}-{:?}", std::process::id(), std::time::SystemTime::now());
-        for (i, byte) in seed.bytes().enumerate() {
-            bytes[i % 32] ^= byte;
-        }
-    }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+/// broker/launch token 与 remote.rs 同一口径：OS RNG 不可用即失败，拒绝弱随机回退。
+/// attach 服务虽只听 loopback，token 却是本机任意进程都能来试的唯一门闩——
+/// pid+时间戳可预测，回退等于把门闩换成摆设。
+fn random_token() -> Result<String, String> {
+    crate::remote::generate_token()
 }
 
 /// TUI 启动探测(`ESC[6n` 光标位置查询)的**唯一**应答者。
@@ -1276,7 +1336,16 @@ impl PtyBroker {
         if !self.begin_start(session_id)? {
             return Ok(());
         }
+        // panic 兜底：start_spawned 内含 portable-pty 原生调用，它一旦 panic 展开，下面的
+        // is_err 分支执行不到——占位靠 guard 的 Drop 摘掉，否则该会话到进程重启都无法再起，
+        // 且全程无报错。正常返回后 disarm，成败仍走既有分支。
+        let mut guard = StartPlaceholderGuard {
+            broker: self,
+            session_id,
+            armed: true,
+        };
         let result = self.start_spawned(app, session_id, argv, cwd, env, terminal_size, provider);
+        guard.armed = false;
         if result.is_err() {
             // 启动失败清占位，重试才进得来；completed 快照已在 begin_start 摘掉，与旧行为一致。
             self.end_start(session_id);
@@ -1363,11 +1432,29 @@ impl PtyBroker {
         }
         // 所有托管会话（新建和恢复）都必须把本机鉴权通道传给 hook 子进程；此前只有
         // start_pending 注入，导致历史会话恢复后 PermissionRequest 无法抵达 GUI。
+        // 已签发但未随成功 spawn 交付的 scoped token，失败路径必须吊销（见下方）。
+        let mut issued_scoped: Option<String> = None;
         if let Ok(endpoint) = self.attach.endpoint.lock() {
             if let Some(endpoint) = *endpoint {
+                // 凭据分级：agent 环境只拿按会话签发的 scoped reporter token（只许认领
+                // 自己/为自己会话递审批），full token 不出主进程——agent 的后代进程
+                // （MCP server、postinstall 等）天然继承环境变量，继承来的凭据必须是最小
+                // 权限。每次启动换发新 token 并吊销同会话旧 token；生成/登记失败拒绝启动
+                // （fail-closed，与 random_token 同一口径）。
+                let scoped = random_token()?;
+                {
+                    let mut tokens = self
+                        .attach
+                        .scoped_tokens
+                        .lock()
+                        .map_err(|_| LOCK_POISONED)?;
+                    tokens.retain(|_, owner| *owner != session_id);
+                    tokens.insert(scoped.clone(), session_id);
+                }
                 command.env("MEOWO_PTY_ENDPOINT", endpoint.to_string());
-                command.env("MEOWO_PTY_TOKEN", &self.attach.token);
+                command.env("MEOWO_PTY_TOKEN", &scoped);
                 command.env("MEOWO_PTY_PROTOCOL", CURRENT_PROTOCOL_VERSION.to_string());
+                issued_scoped = Some(scoped);
             }
         }
         // 终端归一化:GUI 的托管 PTY 是给人看的全彩 xterm.js 渲染面,颜色必须可用。TERM
@@ -1382,13 +1469,31 @@ impl PtyBroker {
         command.env("COLORTERM", "truecolor");
         command.env("FORCE_COLOR", "1");
 
-        let child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(|e| e.to_string())?;
+        // token 必须先于 spawn 登记（子进程一起来就可能 claim，reporter 不重试）；
+        // 因此失败路径要反向吊销，不留「已登记但从未交付」的凭据。
+        let child = match pair.slave.spawn_command(command) {
+            Ok(child) => child,
+            Err(error) => {
+                if let Some(scoped) = &issued_scoped {
+                    self.revoke_scoped_token(scoped);
+                }
+                return Err(error.to_string());
+            }
+        };
         let child_pid = child.process_id();
-        let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-        let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+        let pair_result = pair
+            .master
+            .try_clone_reader()
+            .and_then(|reader| pair.master.take_writer().map(|writer| (reader, writer)));
+        let (mut reader, mut writer) = match pair_result {
+            Ok(parts) => parts,
+            Err(error) => {
+                if let Some(scoped) = &issued_scoped {
+                    self.revoke_scoped_token(scoped);
+                }
+                return Err(error.to_string());
+            }
+        };
         drop(pair.slave);
         // 容量 128 × 单次 ≤64KB：正常按键/粘贴远用不满；持续塞满只可能是子进程长时间不读 stdin。
         let (input_tx, input_rx) = mpsc::sync_channel::<Vec<u8>>(128);
@@ -1430,6 +1535,9 @@ impl PtyBroker {
             }
             if let Ok(mut master) = managed.master.lock() {
                 drop(master.take());
+            }
+            if let Some(scoped) = &issued_scoped {
+                self.revoke_scoped_token(scoped);
             }
             return Err(error);
         }
@@ -1687,7 +1795,7 @@ impl PtyBroker {
             .lock()
             .map_err(|_| LOCK_POISONED)?
             .ok_or("attach 服务未启动")?;
-        let launch_token = random_token();
+        let launch_token = random_token()?;
         let temp_id = self.attach.next_pending.fetch_sub(1, Ordering::Relaxed);
         self.attach
             .pending
@@ -1711,9 +1819,10 @@ impl PtyBroker {
             }
         }
         let mut launch_env = env.to_vec();
+        // MEOWO_PTY_TOKEN 刻意不在这里注入：start_spawned 统一换发 scoped reporter token
+        // （凭据分级，见那里的注释），这里只补 launch 专用的认领凭据。
         launch_env.extend([
             ("MEOWO_PTY_ENDPOINT".into(), endpoint.to_string()),
-            ("MEOWO_PTY_TOKEN".into(), self.attach.token.clone()),
             ("MEOWO_PTY_LAUNCH".into(), launch_token.clone()),
             (
                 "MEOWO_PTY_PROTOCOL".into(),
@@ -1731,6 +1840,9 @@ impl PtyBroker {
         ) {
             if let Ok(mut pending) = self.attach.pending.lock() {
                 pending.remove(&launch_token);
+            }
+            if let Ok(mut tokens) = self.attach.scoped_tokens.lock() {
+                tokens.retain(|_, owner| *owner != temp_id);
             }
             if let Ok(mut map) = self.attach.pending_launch_args.lock() {
                 map.remove(&launch_token);
@@ -1768,6 +1880,23 @@ impl PtyBroker {
             Offer::Disconnected => Err("PTY 输入通道已关闭".into()),
             Offer::TimedOut => Err(INPUT_BACKLOGGED.into()),
         }
+    }
+
+    /// PTY **真正生效**的网格尺寸（`last_size` 只在 `master.resize` 成功后才更新）。
+    /// 会话不在、或还没设过尺寸时返回 (0, 0)。
+    ///
+    /// 前端拿它做可见期的网格自愈：resize 是由容器尺寸变化驱动的，一旦某次没落地
+    /// （撞上下面那把有界锁、会话正在重启），就没有「下一次」把它纠回来——TUI 按窄
+    /// 网格重绘、xterm 按宽网格显示，画面错位重叠，底部那行输入框被挤出可视区。
+    /// 快照里也带同一个值，但快照要把整个 backlog 编码重传，不能拿来轮询。
+    pub(crate) fn grid(&self, session_id: i64) -> (u16, u16) {
+        let packed = self
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| sessions.get(&session_id).cloned())
+            .map_or(0, |session| session.last_size.load(Ordering::Acquire));
+        unpack_size(packed)
     }
 
     pub(crate) fn resize(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
@@ -1957,6 +2086,11 @@ impl PtyBroker {
             .map_err(|_| LOCK_POISONED)? = Some(endpoint);
         // 外部终端没有托管 PTY 注入的环境变量。把仅监听 loopback 的端点和随机 token
         // 登记到当前用户的数据目录，让同一用户启动的 reporter 也能把审批转交 GUI。
+        // 这里登记的是 full token：attach 客户端（用户显式 `meowo attach` 打开的同步
+        // 终端）必须能读写 PTY 帧，这是该通道的用途本身。它与注入 agent 环境的 scoped
+        // token 是两级凭据（见 AttachState::scoped_tokens）——后者的泄露面是「agent
+        // 的全部后代进程」，这里的泄露面是「能读此数据目录的同用户进程」，预存风险，
+        // 由文件权限（unix 0600）与 pid 判活收敛。
         // `pid` 是这份登记的有效性凭据：正常退出时 `shutdown` 会删文件，但崩溃时删不掉，
         // 而端口可能已被无关进程回收——reporter 必须靠 pid 判活来识别陈旧文件（见 attach.rs）。
         #[cfg(not(test))]
@@ -2619,6 +2753,8 @@ impl PtyBroker {
                 BrokerRequest::Attach { .. } => unreachable!(),
             };
         };
+        // attach = PTY 完全接管权（读全部输出 + 写输入帧），只认 full token。
+        // 注入 agent 环境的 scoped reporter token 到此为止——它能递审批，不能碰终端字节流。
         if token != self.attach.token {
             return Err("attach 认证失败".into());
         }
@@ -2770,6 +2906,40 @@ impl PtyBroker {
         Ok(Some(managed))
     }
 
+    /// 解出凭据级别：full token → Full；已登记的 scoped reporter token → Scoped(绑定会话)。
+    /// 其余一律 None（调用方拒绝）。锁中毒同样归 None——鉴权路径不信任受损状态。
+    fn token_level(&self, token: &str) -> Option<TokenLevel> {
+        if token == self.attach.token {
+            return Some(TokenLevel::Full);
+        }
+        self.attach
+            .scoped_tokens
+            .lock()
+            .ok()?
+            .get(token)
+            .map(|owner| TokenLevel::Scoped(*owner))
+    }
+
+    /// scoped token（签发时绑定 `owner`）此刻是否拥有会话 `session_id`：resume/重启路径
+    /// owner 即真实 id，直接相等；start_pending 的临时负 id 经 claim 落进 bindings
+    /// （/clear 换代同步换成新 id），按当前绑定比对。锁中毒按不拥有处理（default-deny）。
+    fn scoped_owns_session(&self, owner: i64, session_id: i64) -> bool {
+        if owner == session_id {
+            return true;
+        }
+        self.attach
+            .bindings
+            .lock()
+            .is_ok_and(|bindings| bindings.get(&owner) == Some(&session_id))
+    }
+
+    /// 启动失败路径吊销单张 scoped token；正常退出由 finalize_exit 按会话批量清理。
+    fn revoke_scoped_token(&self, token: &str) {
+        if let Ok(mut tokens) = self.attach.scoped_tokens.lock() {
+            tokens.remove(token);
+        }
+    }
+
     fn handle_claim(
         &self,
         token: &str,
@@ -2777,9 +2947,10 @@ impl PtyBroker {
         real_id: i64,
         claim_pid: Option<u32>,
     ) -> Result<(), String> {
-        if token != self.attach.token {
-            return Err("PTY claim 认证失败".into());
-        }
+        let level = match self.token_level(token) {
+            Some(level) => level,
+            None => return Err("PTY claim 认证失败".into()),
+        };
         if real_id <= 0 {
             return Err("PTY claim session 无效".into());
         }
@@ -2790,6 +2961,13 @@ impl PtyBroker {
             .map_err(|_| LOCK_POISONED)?
             .get(launch_token)
             .ok_or("PTY claim token 无效或已过期")?;
+        // scoped token 只许认领签发时绑定的那次 launch——拿着 A 会话的环境变量来认领
+        // B 会话的 launch token（嵌套 agent/恶意后代）一律按认证失败拒绝。
+        if let TokenLevel::Scoped(owner) = level {
+            if owner != temp_id {
+                return Err("PTY claim 认证失败".into());
+            }
+        }
         // launch token 不消费，随 PTY 生命周期存续（退出路径清理）：agent 在同一进程里
         // /clear 换新会话时，SessionStart 会带着继承的同一 token 再次认领。历次认领的
         // 语义由 bindings 区分——无绑定 = 启动首次认领；同 id 重放（compact 后补发等）
@@ -2957,11 +3135,19 @@ impl PtyBroker {
         request: ApprovalRequest,
         mut stream: TcpStream,
     ) -> Result<(), String> {
-        if token != self.attach.token {
-            return Err("审批通道认证失败".into());
-        }
+        let level = match self.token_level(token) {
+            Some(level) => level,
+            None => return Err("审批通道认证失败".into()),
+        };
         if request.session_id <= 0 || request.request_id.len() < 8 {
             return Err("审批请求无效".into());
+        }
+        // scoped token 只许为签发时绑定的会话提交审批：跨会话提交（恶意后代往别的项目
+        // 的审批通道里塞请求）按认证失败拒绝，reporter 侧回落 agent 自己的 TUI。
+        if let TokenLevel::Scoped(owner) = level {
+            if !self.scoped_owns_session(owner, request.session_id) {
+                return Err("审批通道认证失败".into());
+            }
         }
         // 外部终端跑的会话（不是本 broker 托管的 PTY）：审批与提问一律留在终端处理。
         // 用户就坐在那个终端前，TUI 的权限框/提问表单当场可答；GUI 这边弹卡、召唤
@@ -3334,6 +3520,9 @@ mod tests {
         // 中文按 UTF-8 完整解码，不得拆成乱码字节。
         let zh = readable_tail("错误：会话被占用\n".as_bytes(), 240);
         assert_eq!(zh, "错误：会话被占用");
+        // GBK 输出（中文 Windows 常见）也要解得出，不是整屏 U+FFFD（"错误"的 GBK 字节）。
+        let gbk = readable_tail(&[0xB4, 0xED, 0xCE, 0xF3], 240);
+        assert_eq!(gbk, "错误");
         // 限长截断加省略号。
         let long = readable_tail(&[b'a'; 500], 10);
         assert_eq!(long, "aaaaaaaaaa…");
@@ -3345,6 +3534,41 @@ mod tests {
         assert_eq!((tiny.cols, tiny.rows), (2, 2));
         let huge = size(u16::MAX, u16::MAX);
         assert_eq!((huge.cols, huge.rows), (500, 500));
+    }
+
+    /// panic 展开时 guard 必须摘掉 starting 占位——否则该会话到进程重启都无法再起，
+    /// 且静默（start 的 is_err 分支在展开路径上执行不到）。
+    #[test]
+    fn start_guard_clears_placeholder_on_unwind() {
+        let broker = PtyBroker::default();
+        broker.begin_start(4242).unwrap();
+        let cloned = broker.clone();
+        let handle = std::thread::spawn(move || {
+            let _guard = StartPlaceholderGuard {
+                broker: &cloned,
+                session_id: 4242,
+                armed: true,
+            };
+            panic!("模拟 start_spawned 里的原生调用崩溃");
+        });
+        assert!(handle.join().is_err());
+        assert!(broker.starting.lock().unwrap().is_empty());
+    }
+
+    /// disarm（成功路径）后 Drop 不得误清占位——占位由登记入表后的 end_start 负责。
+    #[test]
+    fn disarmed_guard_leaves_placeholder_alone() {
+        let broker = PtyBroker::default();
+        broker.begin_start(4243).unwrap();
+        {
+            let mut guard = StartPlaceholderGuard {
+                broker: &broker,
+                session_id: 4243,
+                armed: true,
+            };
+            guard.armed = false;
+        }
+        assert!(broker.starting.lock().unwrap().contains(&4243));
     }
 
     #[test]
@@ -4568,6 +4792,138 @@ mod tests {
         assert!(!nested_claim_hijacks_reclaim(62732, None, |_| {
             panic!("没有旧 pid 不该判活")
         }));
+    }
+
+    /// 凭据分级：注入 agent 环境的 scoped reporter token 只许认领自己那次 launch、
+    /// 只许为自己（签发时绑定的）会话递审批；attach（PTY 帧读写）、跨会话 claim/审批
+    /// 一律拒绝。full token 行为不变（由既有测试覆盖）。未登记 token default-deny。
+    #[test]
+    fn token_level_resolution_is_default_deny() {
+        let broker = PtyBroker::default();
+        let full = broker.attach.token.clone();
+        assert_eq!(broker.token_level(&full), Some(TokenLevel::Full));
+        broker
+            .attach
+            .scoped_tokens
+            .lock()
+            .unwrap()
+            .insert("scoped-a".into(), -7);
+        assert_eq!(broker.token_level("scoped-a"), Some(TokenLevel::Scoped(-7)));
+        assert_eq!(broker.token_level("unknown"), None);
+
+        // 归属判定：resume/重启路径 owner 即真实 id 直接相等；start_pending 的临时负 id
+        // 按当前 bindings 比对（claim 落绑、/clear 换代换绑）。
+        broker.attach.bindings.lock().unwrap().insert(-7, 9);
+        assert!(broker.scoped_owns_session(-7, 9));
+        assert!(broker.scoped_owns_session(9, 9));
+        assert!(!broker.scoped_owns_session(-7, 10));
+        assert!(!broker.scoped_owns_session(-8, 9));
+    }
+
+    /// scoped token 的 claim 会话绑定：只能认领签发时绑定的那次 launch。
+    /// 拿 A 会话的环境变量认领 B 会话的 launch token（嵌套 agent/恶意后代）按认证失败拒绝。
+    #[test]
+    fn scoped_claim_is_bound_to_its_own_launch() {
+        let broker = PtyBroker::default();
+        {
+            let mut pending = broker.attach.pending.lock().unwrap();
+            pending.insert("launch-a".into(), -7);
+            pending.insert("launch-b".into(), -8);
+        }
+        {
+            let mut tokens = broker.attach.scoped_tokens.lock().unwrap();
+            tokens.insert("scoped-a".into(), -7);
+            tokens.insert("scoped-b".into(), -8);
+        }
+        // 同 id 重放分支（bindings 已有 -7→9）不触 DB，给出干净的 Ok 路径。
+        broker.attach.bindings.lock().unwrap().insert(-7, 9);
+        assert!(broker.handle_claim("scoped-a", "launch-a", 9, None).is_ok());
+        // 跨 launch 认领与未登记 token：一律认证失败。
+        assert_eq!(
+            broker.handle_claim("scoped-a", "launch-b", 9, None),
+            Err("PTY claim 认证失败".to_string())
+        );
+        assert_eq!(
+            broker.handle_claim("scoped-b", "launch-a", 9, None),
+            Err("PTY claim 认证失败".to_string())
+        );
+        assert_eq!(
+            broker.handle_claim("wrong", "launch-a", 9, None),
+            Err("PTY claim 认证失败".to_string())
+        );
+        // full token 不受 launch 绑定限制（既有语义不变）。
+        let full = broker.attach.token.clone();
+        broker.attach.bindings.lock().unwrap().insert(-8, 11);
+        assert!(broker.handle_claim(&full, "launch-b", 11, None).is_ok());
+    }
+
+    /// scoped token 的审批会话绑定：只许为自己会话提交；跨会话提交与未登记 token
+    /// 按认证失败拒绝（reporter 侧拿不到决策 → 回落 agent 自己的 TUI，不静默放行）。
+    #[test]
+    fn scoped_approval_is_bound_to_its_own_session() {
+        let broker = PtyBroker::default();
+        broker
+            .attach
+            .scoped_tokens
+            .lock()
+            .unwrap()
+            .insert("scoped-a".into(), -7);
+        broker.attach.bindings.lock().unwrap().insert(-7, 9);
+
+        // 会话不在 sessions（外部会话语义）→ 自动 pass，一条 round-trip 即返回，
+        // 足够区分「认证已过」与「认证被拒」。
+        let try_approval = |token: &str, session_id: i64| {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_side, _) = listener.accept().unwrap();
+            let result =
+                broker.handle_approval(token, approval_request(session_id, "Bash"), server_side);
+            drop(client);
+            result
+        };
+        // 自己的会话（经 bindings 归属）：放行。
+        assert!(try_approval("scoped-a", 9).is_ok());
+        // 别的会话：跨会话提交，拒绝。
+        assert_eq!(
+            try_approval("scoped-a", 10),
+            Err("审批通道认证失败".to_string())
+        );
+        // 未登记 token：default-deny。
+        assert_eq!(
+            try_approval("wrong", 9),
+            Err("审批通道认证失败".to_string())
+        );
+        // 吊销后（PTY 退出清理的语义）同一张 token 立即失效。
+        broker.revoke_scoped_token("scoped-a");
+        assert_eq!(
+            try_approval("scoped-a", 9),
+            Err("审批通道认证失败".to_string())
+        );
+    }
+
+    /// scoped token 不得通过 attach 认证：attach = PTY 帧读写（完全接管权），只认 full token。
+    #[test]
+    fn scoped_token_cannot_attach() {
+        let broker = PtyBroker::default();
+        broker
+            .attach
+            .scoped_tokens
+            .lock()
+            .unwrap()
+            .insert("scoped-a".into(), -7);
+        broker.start_attach_server().unwrap();
+        let endpoint = broker.attach.endpoint.lock().unwrap().unwrap();
+        let mut stream = TcpStream::connect(endpoint).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        writeln!(stream, "MEOWO1 scoped-a 1 80 24 nonce1234").unwrap();
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            stream.read(&mut byte).unwrap(),
+            0,
+            "scoped token 不得通过 attach 认证"
+        );
     }
 
     #[test]

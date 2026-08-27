@@ -7,7 +7,7 @@
 
 use meowo_agent::plugins::claude::transcript::CLAUDE_TRANSCRIPT;
 use meowo_agent::plugins::kimi::telemetry::KIMI_TRANSCRIPT;
-use meowo_agent::transcript::read_subagent_chat;
+use meowo_agent::transcript::{probe_subagent_state, read_subagent_chat};
 use std::path::{Path, PathBuf};
 
 /// 枚举本机所有 kimi 会话的主 wire。
@@ -75,6 +75,120 @@ fn subagent_calls(wire: &Path) -> Vec<(String, bool)> {
         }
     }
     calls
+}
+
+/// 把一份真实 kimi 会话重演到「第 `cut` 行之前」：主 wire 截断后另写一份，侧车原样带上
+/// （能硬链就不复制——单条侧车可达数 MB）。返回重演出的主 wire 路径。
+fn replay_before(main: &Path, cut: usize, tag: &str) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(main).ok()?;
+    let agents_src = main.parent()?.parent()?;
+    let root = std::env::temp_dir().join(format!("kimi_replay_{}_{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let agents = root.join("agents");
+    std::fs::create_dir_all(agents.join("main")).ok()?;
+    let head = text.lines().take(cut).collect::<Vec<_>>().join("\n");
+    let replayed = agents.join("main").join("wire.jsonl");
+    std::fs::write(&replayed, head + "\n").ok()?;
+    for entry in std::fs::read_dir(agents_src).ok()?.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !name.starts_with("agent-") {
+            continue;
+        }
+        let src = entry.path().join("wire.jsonl");
+        if !src.is_file() || std::fs::create_dir_all(agents.join(&name)).is_err() {
+            continue;
+        }
+        let dst = agents.join(&name).join("wire.jsonl");
+        if std::fs::hard_link(&src, &dst).is_err() {
+            let _ = std::fs::copy(&src, &dst);
+        }
+    }
+    Some(replayed)
+}
+
+/// 主 wire 里某条委派的 `tool.result` 落在第几行（0 起）。
+fn receipt_line(main: &Path, call_id: &str) -> Option<usize> {
+    let text = std::fs::read_to_string(main).ok()?;
+    text.lines().position(|line| {
+        if !line.contains(call_id) {
+            return false;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
+        let Some(event) = value.get("event") else {
+            return false;
+        };
+        event.get("type").and_then(|v| v.as_str()) == Some("tool.result")
+            && event
+                .get("toolCallId")
+                .or_else(|| event.get("callId"))
+                .and_then(|v| v.as_str())
+                == Some(call_id)
+    })
+}
+
+/// 「回执还没落盘」那一刻的状态实测（kimi）。
+///
+/// 并行委派的 `tool.result` 要等同一步里的工具**全部**跑完才一起写盘：整批跑完之前，
+/// 先收工的子任务在主链上毫无痕迹，进度面板只能一律显示「在跑」——2026-08-27 实拍，
+/// 4 个 explore 里 1 个已 Completed 了 3 分钟，面板仍是 0/4，四行耗时全按「委派时刻→
+/// 现在」算。补救靠读侧车尾部的 `step.end`，而那是 kimi 的落盘约定、随版本演化，合成
+/// 用例只能证明「按我以为的格式解析是对的」。
+///
+/// 这里从本机真实会话重演那一刻：把主 wire 截到回执之前，断言**实测**结论与后来真正
+/// 落盘的**权威**结局一致。两者一旦分叉，说明 `step.end` 判据已经跟不上真实格式。
+#[test]
+fn probes_real_kimi_subagent_state_before_the_receipt_lands() {
+    /// 一次跑几个样本就够验判据；每个都要读一遍主 wire，不必把本机所有会话翻完。
+    const SAMPLES: usize = 5;
+    let mut checked = 0;
+    for wire in kimi_main_wires() {
+        for (call, settled) in subagent_calls(&wire) {
+            if !settled || checked >= SAMPLES {
+                continue;
+            }
+            // 权威结局：回执已经落盘，走的是「结果里写着的状态」那条路。
+            let Some(landed) = probe_subagent_state(&KIMI_TRANSCRIPT, &wire, &call) else {
+                continue;
+            };
+            if landed.status == "running" {
+                continue;
+            }
+            let Some(cut) = receipt_line(&wire, &call) else {
+                continue;
+            };
+            let Some(replayed) = replay_before(&wire, cut, &format!("{checked}")) else {
+                continue;
+            };
+            let probed = probe_subagent_state(&KIMI_TRANSCRIPT, &replayed, &call);
+            eprintln!(
+                "  {} 权威={} 实测={:?}",
+                &call[..12.min(call.len())],
+                landed.status,
+                probed.as_ref().map(|p| p.status.as_str()),
+            );
+            assert_eq!(
+                probed.as_ref().map(|p| p.status.as_str()),
+                Some(landed.status.as_str()),
+                "{call}：回执落盘前的实测结论与最终结局不一致——step.end 判据跟不上真实格式了"
+            );
+            // 结束时刻是面板算真实执行时长的原料，缺了就还是「委派→现在」的假耗时。
+            assert!(
+                probed.and_then(|p| p.finished_at).is_some(),
+                "{call}：实测判定已结束却没带结束时刻"
+            );
+            let _ = std::fs::remove_dir_all(
+                std::env::temp_dir().join(format!("kimi_replay_{}_{checked}", std::process::id())),
+            );
+            checked += 1;
+        }
+    }
+    if checked == 0 {
+        eprintln!("跳过：本机没有已结束的 kimi 子任务委派");
+    }
 }
 
 /// 本机所有**含 forked skill** 的 claude 会话主 transcript。
