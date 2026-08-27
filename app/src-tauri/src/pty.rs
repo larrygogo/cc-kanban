@@ -1882,6 +1882,23 @@ impl PtyBroker {
         }
     }
 
+    /// PTY **真正生效**的网格尺寸（`last_size` 只在 `master.resize` 成功后才更新）。
+    /// 会话不在、或还没设过尺寸时返回 (0, 0)。
+    ///
+    /// 前端拿它做可见期的网格自愈：resize 是由容器尺寸变化驱动的，一旦某次没落地
+    /// （撞上下面那把有界锁、会话正在重启），就没有「下一次」把它纠回来——TUI 按窄
+    /// 网格重绘、xterm 按宽网格显示，画面错位重叠，底部那行输入框被挤出可视区。
+    /// 快照里也带同一个值，但快照要把整个 backlog 编码重传，不能拿来轮询。
+    pub(crate) fn grid(&self, session_id: i64) -> (u16, u16) {
+        let packed = self
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| sessions.get(&session_id).cloned())
+            .map_or(0, |session| session.last_size.load(Ordering::Acquire));
+        unpack_size(packed)
+    }
+
     pub(crate) fn resize(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
         let session = self
             .sessions

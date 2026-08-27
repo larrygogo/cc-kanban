@@ -101,9 +101,55 @@ vi.mock("@xterm/addon-unicode-graphemes", () => ({ UnicodeGraphemesAddon: class 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ confirm: vi.fn(), open: vi.fn() }));
 const confirmAnswer = vi.hoisted(() => ({ ok: true }));
 
-import { findFakeCaret, isCtrlLeftClickReport, isMouseMotionReport, ManagedTerminal, STREAM_STALL_MS, stripTerminalReplies, terminalStreamStalled } from "./ManagedTerminal";
+import { findFakeCaret, gridResyncTarget, isCtrlLeftClickReport, isMouseMotionReport, ManagedTerminal, STREAM_STALL_MS, stripTerminalReplies, terminalStreamStalled } from "./ManagedTerminal";
 
 const noPty = { sessionId: 163, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null, cols: 0, rows: 0, modes: [] as number[] };
+
+/**
+ * 可见期的网格自愈判定。resize 平时只由容器尺寸变化驱动：某次没落地（撞上后端那把有界
+ * 锁——ResizePseudoConsole 在 conhost 僵死时永不返回，后来者快速失败；或会话正在重启），
+ * 就没有「下一次」把它纠回来——用户不再动窗口，错位固化。TUI 按窄网格重绘、xterm 按宽
+ * 网格显示，行右侧露出上一屏残字、同一块区域重画成好几份，而 TUI 画在最底下的那行输入框
+ * 被挤出可视区（实拍反馈：「有时候会看不到终端的输入框」）。
+ */
+describe("gridResyncTarget", () => {
+  const local = { cols: 213, rows: 44 };
+
+  it("PTY 尺寸与本地网格不符时给出目标(以本地为准——可见期 fit 才是尺寸权威)", () => {
+    expect(gridResyncTarget(local, { cols: 80, rows: 24 }, null, 1_000)).toEqual({ cols: 213, rows: 44 });
+  });
+
+  it("两边一致时不发:不平白给 TUI 一发 SIGWINCH 整屏重排", () => {
+    expect(gridResyncTarget(local, { cols: 213, rows: 44 }, null, 1_000)).toBeNull();
+  });
+
+  it("PTY 尺寸未知(0/1)时不发:「不知道」不等于「不一致」", () => {
+    expect(gridResyncTarget(local, { cols: 0, rows: 0 }, null, 1_000)).toBeNull();
+    expect(gridResyncTarget(local, { cols: 213, rows: 1 }, null, 1_000)).toBeNull();
+  });
+
+  it("本地网格还没量出来(≤1)时不发", () => {
+    expect(gridResyncTarget({ cols: 1, rows: 44 }, { cols: 80, rows: 24 }, null, 1_000)).toBeNull();
+  });
+
+  it("目标按 PTY 网格上限收:不收的话超限那一侧永远比不相等,每轮都在重发", () => {
+    // 后端 pty::size 把两维都 clamp 到 500，PTY 停在 500 就已经是它能给的最大值了。
+    expect(gridResyncTarget({ cols: 900, rows: 44 }, { cols: 500, rows: 44 }, null, 1_000)).toBeNull();
+    expect(gridResyncTarget({ cols: 900, rows: 44 }, { cols: 480, rows: 44 }, null, 1_000))
+      .toEqual({ cols: 500, rows: 44 });
+  });
+
+  it("同一目标刚试过就先不重发,过了重试间隔再试(失败是暂时的,要重试)", () => {
+    const last = { cols: 213, rows: 44, at: 1_000 };
+    expect(gridResyncTarget(local, { cols: 80, rows: 24 }, last, 3_000)).toBeNull();
+    expect(gridResyncTarget(local, { cols: 80, rows: 24 }, last, 9_000)).toEqual({ cols: 213, rows: 44 });
+  });
+
+  it("目标换了就立刻发,不受上一次的重试间隔挡着(窗口刚改过大小)", () => {
+    const last = { cols: 100, rows: 30, at: 1_000 };
+    expect(gridResyncTarget(local, { cols: 80, rows: 24 }, last, 1_100)).toEqual({ cols: 213, rows: 44 });
+  });
+});
 
 describe("ManagedTerminal", () => {
   afterEach(cleanup);

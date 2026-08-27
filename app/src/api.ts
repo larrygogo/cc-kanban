@@ -351,6 +351,16 @@ export function writeManagedTerminal(sessionId: number, data: string): Promise<v
 export function resizeManagedTerminal(sessionId: number, cols: number, rows: number): Promise<void> {
   return invoke("resize_managed_terminal", { sessionId, cols, rows });
 }
+
+/**
+ * 取 PTY 当前**生效**的网格尺寸 `[cols, rows]`；未知（会话不在/后台旁路/尚未设过）为 `[0, 0]`。
+ *
+ * 终端页可见时每隔几秒查一次，与本地 fit 出的网格比对——不等就说明某次 resize 没落地，
+ * 补发一次把 PTY 拉齐。刻意不复用快照：那个要把整个 backlog（可达 1 MiB）编码重传。
+ */
+export function managedTerminalGrid(sessionId: number): Promise<[number, number]> {
+  return invoke("managed_terminal_grid", { sessionId });
+}
 export function stopManagedTerminal(sessionId: number): Promise<void> {
   return invoke("stop_managed_terminal", { sessionId });
 }

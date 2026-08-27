@@ -62,7 +62,8 @@ use install::{
 };
 use managed_terminal::{
     awaiting_interaction_sessions, dismiss_interactive_question, managed_terminal_binding,
-    managed_terminal_snapshot, attach_background_session, open_attached_terminal,
+    managed_terminal_grid, managed_terminal_snapshot, attach_background_session,
+    open_attached_terminal,
     pending_interaction, register_approval_consumer, register_terminal_viewer,
     resize_managed_terminal, screen_detect_explain, screen_detect_explain_text,
     send_background_prompt,
@@ -1082,6 +1083,7 @@ pub fn run() {
             session_launch_selections,
             set_session_launch_selection,
             managed_terminal_snapshot,
+            managed_terminal_grid,
             managed_terminal_binding,
             write_managed_terminal,
             resize_managed_terminal, send_background_prompt,

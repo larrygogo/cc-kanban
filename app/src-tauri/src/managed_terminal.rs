@@ -279,6 +279,25 @@ pub(crate) async fn write_managed_terminal(
     .map_err(|e| e.to_string())?
 }
 
+/// 取 PTY 当前生效的网格尺寸，`[cols, rows]`；未知（会话不在/后台旁路/尚未设过）为 `[0, 0]`。
+///
+/// 前端可见期每隔几秒查一次，与本地 fit 出的网格比对：不等就说明某次 resize 没落地
+/// （撞上 PTY 那把有界锁、会话正在重启），补发一次把 PTY 拉齐。刻意不复用快照——
+/// 那个要把整个 backlog（可达 1 MiB）编码重传一遍，不能拿来轮询。
+#[tauri::command]
+pub(crate) async fn managed_terminal_grid(
+    state: State<'_, super::AppState>,
+    session_id: i64,
+) -> Result<[u16; 2], String> {
+    let ptys = state.ptys.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (cols, rows) = ptys.grid(session_id);
+        Ok([cols, rows])
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub(crate) async fn resize_managed_terminal(
     state: State<'_, super::AppState>,
