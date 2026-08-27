@@ -10,6 +10,14 @@ export async function detectHostOs(): Promise<void> {
   }
 }
 
+/** 远程（手机浏览器）入口专用：显式把宿主平台钉为 "other"。
+ *  hostOs 语义是「宿主桌面 OS」。远程桥虽能经 /rpc/host_os 拿到真实值，
+ *  但 isMac()/isWindows() 门控的都是桌面窗口形态（红绿灯顶栏、窗口控制组），
+ *  远程端一律走非 Mac/非 Windows 路径——置真值反而会让手机端渲染桌面 Mac 布局。 */
+export function setHostOsUnknown(): void {
+  hostOs = "other";
+}
+
 export function isMac(): boolean {
   return hostOs === "macos";
 }
