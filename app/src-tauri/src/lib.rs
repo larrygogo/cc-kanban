@@ -47,8 +47,8 @@ mod window;
 // run() 的 generate_handler 以裸标识符登记这些命令，须在 crate 根作用域可见。
 use chat::{
     clipboard_restore, clipboard_set_image, clipboard_text, get_chat_history,
-    get_subagent_transcript, refresh_session_model, refresh_session_todos, save_pasted_attachment,
-    search_chat_transcripts,
+    get_subagent_transcript, probe_subagent_states, refresh_session_model, refresh_session_todos,
+    save_pasted_attachment, search_chat_transcripts,
 };
 use handoff::{get_session_lineage, switch_session_provider};
 use fsutil::{
@@ -1066,6 +1066,7 @@ pub fn run() {
             confirm::confirm_dialog_payload,
             confirm::confirm_dialog_result,
             get_subagent_transcript,
+            probe_subagent_states,
             refresh_session_model,
             refresh_session_todos,
             save_pasted_attachment,

@@ -3,7 +3,9 @@
 //! command 只负责调度 blocking 工作。DB 读取、transcript 路径解析、文件增量解析、
 //! 分页与 mtime 并发控制都住在这里——crate 根不再持有第二台对话状态机。
 
-use meowo_protocol::ipc::{AgentModeDto, ChatHistoryDto as ChatHistory, PendingReviewKind};
+use meowo_protocol::ipc::{
+    AgentModeDto, ChatHistoryDto as ChatHistory, PendingReviewKind, SubagentProbeDto,
+};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -310,6 +312,52 @@ fn load_subagent_transcript(
     Ok(runs)
 }
 
+/// 实测若干条**未结**委派此刻的状态（用户展开进度面板时按需调用）。
+///
+/// 折叠状态下的进度只能来自主链回执，而并行委派的回执要等同一步里的工具全部跑完才
+/// 一起写盘——整批跑完之前，先收工的子任务在主链上毫无痕迹，面板只能一律显示「在跑」
+/// （实拍：4 个 explore 里 1 个已完成，面板仍是 0/4，四行耗时全按委派时刻起算）。
+/// 侧车流自己带着终结标记，这里逐条读它的尾部补齐。
+///
+/// 与 [`load_subagent_transcript`] 同样**不进** 650ms 的历史轮询热路径：只在面板展开
+/// 且确有在跑的委派时调用，读的也只是各侧车的尾部窗口。
+///
+/// 定位不到侧车、或该 provider 不留状态信号时，这条 id 直接缺席返回值——调用方维持
+/// 原判即可，「读不到」不等于「已结束」。整个会话读不出来也返回空表而不是错误：这条
+/// 路径每秒都会走一次，不该在界面上刷错误。
+fn probe_subagents(
+    db_path: &Path,
+    session_id: i64,
+    tool_use_ids: &[String],
+) -> Result<std::collections::HashMap<String, SubagentProbeDto>, String> {
+    let mut probes = std::collections::HashMap::new();
+    if tool_use_ids.is_empty() {
+        return Ok(probes);
+    }
+    let store = super::open_store(db_path)?;
+    let header = store
+        .session_header(session_id)
+        .map_err(|e| e.to_string())?;
+    let Some(spec) = meowo_agent::by_id(&header.provider)
+        .and_then(|agent| agent.telemetry())
+        .and_then(|telemetry| telemetry.transcript())
+    else {
+        return Ok(probes);
+    };
+    let Some(path) =
+        spec.resolve_transcript_path(None, header.cwd.as_deref(), &header.cc_session_id)
+    else {
+        return Ok(probes);
+    };
+    for tool_use_id in tool_use_ids {
+        if let Some(probe) = meowo_agent::transcript::probe_subagent_state(spec, &path, tool_use_id)
+        {
+            probes.insert(tool_use_id.clone(), probe);
+        }
+    }
+    Ok(probes)
+}
+
 /// 重读该会话当前的模型并落库。
 ///
 /// 模型平时由 Stop hook 写入，但 `/model` 切换本身不产生 Stop——不发下一条消息就永远不刷新，
@@ -418,6 +466,20 @@ pub(crate) async fn get_subagent_transcript(
     let db_path = state.db_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         load_subagent_transcript(&db_path, session_id, &tool_use_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn probe_subagent_states(
+    state: State<'_, super::AppState>,
+    session_id: i64,
+    tool_use_ids: Vec<String>,
+) -> Result<std::collections::HashMap<String, SubagentProbeDto>, String> {
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        probe_subagents(&db_path, session_id, &tool_use_ids)
     })
     .await
     .map_err(|e| e.to_string())?

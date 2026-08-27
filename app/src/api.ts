@@ -18,6 +18,7 @@ import type { RelayUi } from "./generated/contracts/RelayUi";
 import type { SlashCommand } from "./generated/contracts/SlashCommand";
 import type { ChatItem as GeneratedChatItem } from "./generated/contracts/ChatItem";
 import type { SubagentRun as GeneratedSubagentRun } from "./generated/contracts/SubagentRun";
+import type { SubagentProbeDto } from "./generated/contracts/SubagentProbeDto";
 import type { ManagedTerminalSnapshotDto } from "./generated/contracts/ManagedTerminalSnapshotDto";
 import type { LineageEntryDto } from "./generated/contracts/LineageEntryDto";
 import type { PendingApprovalDto } from "./generated/contracts/PendingApprovalDto";
@@ -159,6 +160,8 @@ export type ChatItem = GeneratedChatItem;
 export type ChatHistory = ChatHistoryDto;
 /** 一次委派可能派出多个子任务（kimi 的 AgentSwarm），故按分支返回。 */
 export type SubagentRun = GeneratedSubagentRun;
+/** 一次未结委派的侧车实测状态，见 {@link probeSubagentStates}。 */
+export type SubagentProbe = SubagentProbeDto;
 
 export type PendingApproval = PendingApprovalDto;
 
@@ -179,6 +182,23 @@ export function getChatHistory(sessionId: number, offset: number, full?: boolean
  */
 export function getSubagentTranscript(sessionId: number, toolUseId: string): Promise<SubagentRun[]> {
   return invoke("get_subagent_transcript", { sessionId, toolUseId });
+}
+
+/**
+ * 实测若干条**未结**委派此刻的状态（进度面板展开时才调用）。
+ *
+ * 折叠状态下的进度只能来自主链回执，而并行委派的回执要等同一步里的工具全部跑完才一起
+ * 写盘——整批跑完之前，先收工的子任务在主链上毫无痕迹，面板只能一律显示「在跑」。侧车流
+ * 自己带着终结标记，这条按需 I/O 逐条读它的尾部补齐；同 {@link getSubagentTranscript}，
+ * 刻意不并进 650ms 的历史轮询。
+ *
+ * 返回值按 tool_use_id 索引，读不出状态的 id 直接缺席——「读不到」不等于「已结束」。
+ */
+export function probeSubagentStates(
+  sessionId: number,
+  toolUseIds: string[],
+): Promise<Record<string, SubagentProbe>> {
+  return invoke("probe_subagent_states", { sessionId, toolUseIds });
 }
 
 /**

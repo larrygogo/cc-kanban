@@ -8,7 +8,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { pathKey } from "../paths";
 import { appConfirm } from "../confirm";
-import { pickAndAddExtraDir, removeSessionExtraDir, agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardRestore, clipboardSetImage, confirmStopSession, dismissInteractiveQuestion, getChatHistory, getGitDiffSummary, getLiveSessionsPage, getSessionLineage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, refreshSessionModel, refreshSessionTodos, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, switchSessionProvider, takeoverManagedTerminal, writeManagedTerminal, type AgentId, type ChatHistory, type ChatItem, type ChatUi, type GitDiffSummaryDto, type LiveSession, type ModelPreset, type ModeScreenMarker } from "../api";
+import { pickAndAddExtraDir, removeSessionExtraDir, agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardRestore, clipboardSetImage, confirmStopSession, dismissInteractiveQuestion, getChatHistory, getGitDiffSummary, getLiveSessionsPage, getSessionLineage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, probeSubagentStates, refreshSessionModel, refreshSessionTodos, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, switchSessionProvider, takeoverManagedTerminal, writeManagedTerminal, type AgentId, type ChatHistory, type ChatItem, type ChatUi, type GitDiffSummaryDto, type LiveSession, type ModelPreset, type ModeScreenMarker, type SubagentProbe } from "../api";
 import { hasEscLayers, pushEscLayer } from "../escLayers";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useT } from "../i18n";
@@ -44,6 +44,10 @@ import { Dropdown, useMenuPopup } from "./menu";
 import { listAgents, type AgentDescriptor } from "../api";
 // 「切换引擎」分组的目标 agent 图标（前端资产表，未知 id 走中性兜底）。
 import { agentAssets, tintStyle } from "../providers";
+
+/** 进度面板展开期间,未结委派的侧车探测间隔。行尾耗时本就是逐秒走的,状态跟到秒级
+ *  即可;这是文件尾部读,不必更密。 */
+const SUBAGENT_PROBE_MS = 2_000;
 
 /** 远程刷新后回到上次看的会话(桌面开窗恒带 ?sessionId,不落到这条)。 */
 const REMOTE_LAST_SESSION_KEY = "meowo-remote-last-session";
@@ -671,7 +675,7 @@ export function ChatWindow() {
   const todos = history?.todos?.length ? history.todos : transcriptTodos;
   // 面板的「子任务」小节:从时间线聚合 Agent 委派(与 Transcript 的关联逻辑同源)。
   // 状态口径:回执统计里还有在跑的算进行中、有失败算失败、否则完成;没回执 = 还没回来 = 在跑。
-  const panelSubagents = useMemo(() => {
+  const panelSubagentsRaw = useMemo(() => {
     // 回执关联(含 TaskOutput 拉取的结局按 task_id 归回原委派)收敛在
     // collectSubagentReceipts——与 Transcript 的折叠徽标同一份规则。
     const { outcomes, settledAt, finishedTs } = collectSubagentReceipts(items);
@@ -693,6 +697,7 @@ export function ChatWindow() {
       const count = item.subagent?.count ?? 1;
       const label = item.subagent?.description || item.summary || "";
       rows.push({
+        id: item.id,
         content: count > 1 ? `${label} ×${count}` : label,
         status,
         // 行尾执行时长的原料:在跑=委派时刻起算,结束=委派到最终回执。
@@ -702,6 +707,52 @@ export function ChatWindow() {
     }
     return rows;
   }, [items, lastUserIdx]);
+  // 上面那套只认主链回执,而**并行**委派的回执要等同一步里的工具全部跑完才一起写盘
+  // ——整批跑完之前,先收工的子任务在主链上毫无痕迹,面板只能一律显示「在跑」(实拍:
+  // 4 个 explore 里 1 个已完成,面板仍是 0/4,四行耗时全按委派时刻起算)。侧车流自己
+  // 带着终结标记,展开面板时逐条读它的尾部补齐。
+  //
+  // 只在**面板开着**且确有在跑的委派时探测:这是按需 I/O,不该并进 650ms 的历史轮询
+  // (同 get_subagent_transcript 的取舍)。面板收起即停。
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [subagentProbes, setSubagentProbes] = useState<Record<string, SubagentProbe>>({});
+  useEffect(() => { setSubagentProbes({}); }, [sessionId]);
+  // 依赖写成拼串而不是数组:每帧新建的数组身份都不同,会让探测循环每次重建。
+  const pendingSubagentIds = panelSubagentsRaw
+    .filter((row) => row.status === "in_progress" && row.id)
+    .map((row) => row.id as string)
+    .join(",");
+  useEffect(() => {
+    if (!panelOpen || !pendingSubagentIds) return;
+    let alive = true;
+    const ids = pendingSubagentIds.split(",");
+    const probe = () => {
+      probeSubagentStates(sessionId, ids)
+        .then((next) => {
+          // 只并入、不整份替换:探测的是「当前还在跑的」,上一轮判完成的那些不在本次
+          // 名单里,整份替换会让它们弹回运行中。
+          if (alive) setSubagentProbes((prev) => ({ ...prev, ...next }));
+        })
+        .catch(() => {});
+    };
+    probe();
+    const timer = window.setInterval(probe, SUBAGENT_PROBE_MS);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [panelOpen, pendingSubagentIds, sessionId]);
+  const panelSubagents = useMemo(
+    () =>
+      panelSubagentsRaw.map((row) => {
+        const probe = row.id ? subagentProbes[row.id] : undefined;
+        // 主链回执一旦到了就以它为准(权威结局),探测只补它到达之前的空窗。
+        if (row.status !== "in_progress" || !probe || probe.status === "running") return row;
+        return {
+          ...row,
+          status: probe.status === "failed" ? "failed" : "completed",
+          finishedAt: probe.finished_at ?? row.finishedAt ?? null,
+        };
+      }),
+    [panelSubagentsRaw, subagentProbes],
+  );
   // 后台会话的 transcript 可能**永远是空的**:claude 以 fork/resume 起的后台 worker 存在
   // 不落盘的老毛病(实测 2.1.220:新会话文件里只有 ai-title / agent-name 两行元数据,正文
   // 既不在自己名下、也不在 fork 源里,只活在进程内存)。对这类会话,对话页给不出任何东西,
@@ -2895,7 +2946,7 @@ export function ChatWindow() {
         {/* 标题栏刻意不放运行状态徽标（实拍反馈嫌吵）：运行态已有多处冗余信号——
             窗口标题的 ▶ 标记、对话区底部的脉冲指示条、侧栏状态点。 */}
         {/* 任务进度入口:常驻图标,点开浮出「进度」面板(无任务时是骨架占位空态)。 */}
-        <ChatTodoMenu todos={todos} subagents={panelSubagents} t={t} />
+        <ChatTodoMenu todos={todos} subagents={panelSubagents} onOpenChange={setPanelOpen} t={t} />
         {/* 文件/改动面板入口:有 cwd 即显示(非仓库会话只有「文件」页签),徽标数 = 变更文件数。
             远程 v1 砍掉改动面板(GitDiffView),入口一并隐藏。 */}
         {!remoteUi() && cwd && (

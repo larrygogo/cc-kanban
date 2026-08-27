@@ -527,7 +527,72 @@ fn read_head(path: &Path, limit: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// 侧车尾部的读取窗口。一条 `llm.request` 行会把整份工具表写进去（实测单行近 46 KiB），
+/// 窗口必须远大于它，才能保证越过末尾那几条大行看到最后一次 `step.end`。
+const TAIL_LIMIT: u64 = 512 * 1024;
+
 impl KimiSubagents {
+    /// 从侧车尾部实测一条子任务流此刻的状态——主链回执还没落盘时的唯一来源。
+    ///
+    /// kimi 每一步收尾都写 `step.end`：`finishReason` 为 `tool_use` 说明它接着还要调工具
+    /// （还在跑），其余（`end_turn` 等）就是这一轮结束。读不到任何 `step.end` 时返回 None，
+    /// 交由调用方按「还在跑」处理——**不能**反过来把「没读到」当成已结束。
+    ///
+    /// 返回 (状态, 最后一次 `step.end` 的时刻)。
+    fn tail_state(path: &Path) -> (Option<String>, Option<String>) {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return (None, None);
+        };
+        let Ok(len) = file.metadata().map(|meta| meta.len()) else {
+            return (None, None);
+        };
+        let truncated = len > TAIL_LIMIT;
+        if truncated && file.seek(SeekFrom::Start(len - TAIL_LIMIT)).is_err() {
+            return (None, None);
+        }
+        let mut bytes = Vec::new();
+        if file.read_to_end(&mut bytes).is_err() {
+            return (None, None);
+        }
+        // JSONL 行可能含非法 UTF-8（截断的多字节），lossy 读避免整份作废（同 read_stream）。
+        let text = String::from_utf8_lossy(&bytes);
+        let mut lines = text.lines();
+        // 超限时从中间切入，首行多半是半条 JSON，丢掉。
+        if truncated {
+            lines.next();
+        }
+        let mut state = (None, None);
+        for line in lines {
+            // 先按子串筛掉绝大多数行，只为真正的 step.end 付整行 JSON 解析的钱。
+            if !line.contains("step.end") {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let Some(event) = value.get("event") else {
+                continue;
+            };
+            if event.get("type").and_then(|v| v.as_str()) != Some("step.end") {
+                continue;
+            }
+            let reason = event
+                .get("finishReason")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let status = match reason {
+                "tool_use" => "running",
+                // 未知词按「这一轮结束了」算：finishReason 本就是收尾理由，把没见过的值
+                // 当成还在跑，会让已经收工的子任务永远挂着转圈。异常收场另行认领。
+                r if r.contains("error") || r.contains("abort") || r.contains("cancel") => "failed",
+                _ => "completed",
+            };
+            state = (Some(status.to_string()), line_timestamp(&value));
+        }
+        state
+    }
+
     /// 子任务还在跑时结果尚未写入，`agent_id` 无处可取——而这恰恰是用户最想看进度的时刻。
     /// 好在派发内容会原样出现在对应子 agent 的开场 prompt 里（fan-out 的每个 `item` 经
     /// `prompt_template` 渲染，单发 `Agent` 则是整段 `prompt`），据此反查目录。
@@ -565,10 +630,13 @@ impl KimiSubagents {
                     .iter()
                     .find(|(name, _, head)| !used.contains(name) && head.contains(needle))?;
                 used.insert(name.clone());
+                // 走到这条路径只说明**结果**还没落盘——那是整批并行委派一起写的，不代表
+                // 这一条还在跑。真状态去侧车尾部实测；读不出终结标记才算还在跑。
+                let (status, finished_at) = Self::tail_state(path);
                 Some(SubagentStream {
                     label: Some(name.clone()),
-                    // 走到这条路径就说明结果还没落盘，即还在跑。
-                    status: Some("running".to_string()),
+                    status: Some(status.unwrap_or_else(|| "running".to_string())),
+                    finished_at,
                     path: path.clone(),
                 })
             })
@@ -715,11 +783,17 @@ impl SubagentSpec for KimiSubagents {
         }
         merged
             .into_iter()
-            .map(|(id, status)| SubagentStream {
-                path: agents_dir.join(&id).join("wire.jsonl"),
-                // 一批子任务必须能分辨谁是谁；单发时也显示，kimi 的 id 本身就是可读的。
-                label: Some(id),
-                status,
+            .map(|(id, status)| {
+                let path = agents_dir.join(&id).join("wire.jsonl");
+                let (tail, finished_at) = Self::tail_state(&path);
+                SubagentStream {
+                    // 结果里写着的结局是权威的；结果没写状态时退回侧车尾部实测。
+                    status: status.or(tail),
+                    finished_at,
+                    // 一批子任务必须能分辨谁是谁；单发时也显示，kimi 的 id 本身就是可读的。
+                    label: Some(id),
+                    path,
+                }
             })
             .filter(|stream| stream.path.is_file())
             .collect()
@@ -1233,6 +1307,114 @@ impl crate::caps::TelemetryCap for KimiTelemetry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 造一份 kimi 会话骨架：`agents/main/wire.jsonl` + 若干子 agent 侧车，返回主流路径。
+    fn kimi_session(tag: &str, main_lines: &str, sidecars: &[(&str, String)]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("kimi_probe_{}_{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let agents = root.join("agents");
+        std::fs::create_dir_all(agents.join("main")).unwrap();
+        let main = agents.join("main").join("wire.jsonl");
+        std::fs::write(&main, main_lines).unwrap();
+        for (name, body) in sidecars {
+            std::fs::create_dir_all(agents.join(name)).unwrap();
+            std::fs::write(agents.join(name).join("wire.jsonl"), body).unwrap();
+        }
+        main
+    }
+
+    fn agent_call(id: &str, prompt: &str) -> String {
+        format!(
+            r#"{{"type":"context.append_loop_event","event":{{"type":"tool.call","toolCallId":"{id}","name":"Agent","args":{{"subagent_type":"explore","description":"审查","prompt":"{prompt}"}}}},"time":1787811843000}}"#
+        )
+    }
+
+    fn sidecar(prompt: &str, finish_reason: &str, time: i64) -> String {
+        format!(
+            concat!(
+                r#"{{"type":"turn.prompt","input":[{{"type":"text","text":"{}"}}],"time":1787811843683}}"#,
+                "\n",
+                r#"{{"type":"context.append_loop_event","event":{{"type":"step.end","step":13,"finishReason":"{}"}},"time":{}}}"#,
+                "\n",
+            ),
+            prompt, finish_reason, time
+        )
+    }
+
+    const PROMPT_DONE: &str = "审查配置构建与依赖问题：CI 工作流与发布产物";
+    const PROMPT_BUSY: &str = "审查 Rust 后端安全问题：命令注入与路径穿越";
+
+    /// 并行委派的回执要等同一步里的工具**全部**跑完才一起写盘，先收工的子任务在主链上
+    /// 毫无痕迹——实拍：4 个 explore 里 1 个已 Completed，进度面板仍是 0/4，四行耗时一律
+    /// 按「委派时刻→现在」算。结局只能从侧车尾部的 `step.end` 实测。
+    #[test]
+    fn finished_parallel_subagent_reads_completed_from_sidecar_tail() {
+        let main = kimi_session(
+            "parallel",
+            &format!(
+                "{}\n{}\n",
+                agent_call("tool_done", PROMPT_DONE),
+                agent_call("tool_busy", PROMPT_BUSY)
+            ),
+            &[
+                ("agent-0", sidecar(PROMPT_DONE, "end_turn", 1787812194269)),
+                ("agent-1", sidecar(PROMPT_BUSY, "tool_use", 1787812037362)),
+            ],
+        );
+        let done = crate::transcript::probe_subagent_state(&KIMI_TRANSCRIPT, &main, "tool_done");
+        // `tool_use` = 这一步之后它还要接着调工具，也就是还在跑。
+        let busy = crate::transcript::probe_subagent_state(&KIMI_TRANSCRIPT, &main, "tool_busy");
+        assert_eq!(done.as_ref().map(|p| p.status.as_str()), Some("completed"));
+        assert_eq!(busy.as_ref().map(|p| p.status.as_str()), Some("running"));
+        // 结束时刻取自侧车最后一次 step.end：面板据此把耗时纠正成真实执行时长。
+        assert_eq!(
+            done.and_then(|p| p.finished_at).as_deref(),
+            Some("2026-08-27T06:29:54.269Z")
+        );
+        // 还在跑的没有「结束时刻」可言——侧车尾部的时间只是最近一次落盘。
+        assert_eq!(busy.and_then(|p| p.finished_at), None);
+    }
+
+    /// 主链回执一旦落盘就是权威结局：侧车尾部写着 `end_turn`（正常收尾），但结果里
+    /// 标着 `failed`，实测不得把它翻回「完成」。
+    #[test]
+    fn landed_receipt_outcome_outranks_sidecar_tail() {
+        let result = concat!(
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.result","#,
+            r#""toolCallId":"tool_done","output":"<subagent agent_id=\"agent-0\" outcome=\"failed\">x</subagent>"}}"#
+        );
+        let main = kimi_session(
+            "landed",
+            &format!("{}\n{}\n", agent_call("tool_done", PROMPT_DONE), result),
+            &[("agent-0", sidecar(PROMPT_DONE, "end_turn", 1787812194269))],
+        );
+        assert_eq!(
+            crate::transcript::probe_subagent_state(&KIMI_TRANSCRIPT, &main, "tool_done")
+                .map(|p| p.status),
+            Some("failed".to_string())
+        );
+    }
+
+    /// 读不出任何 `step.end` 时按「还在跑」处理——「没读到」不等于「已结束」，
+    /// 反过来判会让刚派出去的子任务瞬间显示完成。
+    #[test]
+    fn sidecar_without_step_end_stays_running() {
+        let main = kimi_session(
+            "nostepend",
+            &format!("{}\n", agent_call("tool_new", PROMPT_DONE)),
+            &[(
+                "agent-0",
+                format!(
+                    r#"{{"type":"turn.prompt","input":[{{"type":"text","text":"{PROMPT_DONE}"}}],"time":1787811843683}}"#
+                ) + "\n",
+            )],
+        );
+        assert_eq!(
+            crate::transcript::probe_subagent_state(&KIMI_TRANSCRIPT, &main, "tool_new")
+                .map(|p| p.status),
+            Some("running".to_string())
+        );
+    }
 
     #[test]
     fn extracts_independent_permission_and_work_modes() {

@@ -77,7 +77,14 @@ const TODO_PANEL_COLLAPSED_MAX = 4;
 
 /** 面板行的统一形态:任务清单与子任务都归一到「文字 + 状态」再渲染。
  *  时间戳仅子任务行携带(委派时刻/最终回执时刻),行尾据此显示执行时长。 */
-export type TodoPanelRow = { content: string; status: string; startedAt?: string | null; finishedAt?: string | null };
+export type TodoPanelRow = {
+  content: string;
+  status: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  /** 子任务行携带委派的 tool_use id，中途结局的侧车探测按它索引。任务清单行没有。 */
+  id?: string;
+};
 
 /** 行尾的执行时长:在跑 = 从委派时刻到现在(面板开着时逐秒刷新),结束 = 总用时。
  *  没有时间戳(任务清单行/部分 provider)不显示。 */
@@ -113,10 +120,13 @@ function TodoPanelList({ rows, t }: { rows: TodoPanelRow[]; t: ReturnType<typeof
   );
 }
 
-export function ChatTodoMenu({ todos, subagents, t }: {
+export function ChatTodoMenu({ todos, subagents, onOpenChange, t }: {
   todos: TodoPanelRow[];
   /** 从时间线聚合的子任务(Agent 委派),与任务清单分节显示——用户反馈「子任务没在这里」。 */
   subagents: TodoPanelRow[];
+  /** 面板开合。并行委派的中途结局要读侧车才知道(主链回执要等整批跑完才写),那是按需
+   *  I/O——只在用户真看着面板时探测,收起即停。 */
+  onOpenChange?: (open: boolean) => void;
   t: ReturnType<typeof useT>;
 }) {
   const { open, pos, ref, btnRef, menuRef, toggle, onKeyDown } = useMenuPopup();
@@ -133,6 +143,9 @@ export function ChatTodoMenu({ todos, subagents, t }: {
     const timer = window.setInterval(() => setTick((n) => n + 1), 1_000);
     return () => window.clearInterval(timer);
   }, [ticking]);
+  useEffect(() => {
+    onOpenChange?.(open);
+  }, [open, onOpenChange]);
   // 长清单默认折叠只露前几条,底部「展开 N 个 / 收起」切换(参考形态,用户指定)。
   // 每次重开面板回到折叠态——上次翻开的状态对这次没意义。
   const [expanded, setExpanded] = useState(false);

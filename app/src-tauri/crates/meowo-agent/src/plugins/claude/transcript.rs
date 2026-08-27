@@ -1233,6 +1233,7 @@ impl SubagentSpec for ClaudeSubagents {
                     label: None,
                     // claude 的 meta.json 只记身份不记结局，没有可靠的状态信号。
                     status: None,
+                    finished_at: None,
                     path,
                 }]
             })
