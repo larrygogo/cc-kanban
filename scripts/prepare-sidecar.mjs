@@ -29,6 +29,13 @@ const triple = process.argv.includes("--universal")
   ? "universal-apple-darwin"
   : process.env.TAURI_ENV_TARGET_TRIPLE || hostTriple();
 
+// triple 会插值进 execSync 的 shell 字符串，先钉死字符集（rustc triple 只含
+// 字母/数字/_/-，universal-apple-darwin 同），杜绝环境变量注入。
+if (!/^[\w-]+$/.test(triple)) {
+  console.error(`非法 target triple: ${JSON.stringify(triple)}`);
+  process.exit(1);
+}
+
 if (triple === "universal-apple-darwin") {
   const arches = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
   for (const t of arches) {
