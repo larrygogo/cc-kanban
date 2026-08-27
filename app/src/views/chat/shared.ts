@@ -27,6 +27,20 @@ export function isSubagentDelegation(
   return !!item.subagent || (item.name === "Skill" && outcomes.has(item.id));
 }
 
+/// 后台 Bash(`run_in_background`)的调用:本体是条普通 Bash,只有启动回执
+/// (`Command running in background with ID: …`)带 running 结局统计——判据同 forked skill,
+/// 靠回执反认。
+///
+/// 它**不算**子任务委派:没有侧车流可展开,对话流里按普通工具块渲染就够(命令与输出都在
+/// 那儿),做成空壳子任务块是退步。只有标题栏进度面板收它——主回合停了它还在跑,那正是
+/// 最该盯着的东西(2026-08-27 实拍:`gh run watch` 在后台跑,面板却一片空白)。
+export function isBackgroundShell(
+  item: ToolUseItem,
+  outcomes: Map<string, unknown>,
+): boolean {
+  return item.name === "Bash" && outcomes.has(item.id);
+}
+
 /// 子任务执行时长的短格式:秒级起报,超一小时丢掉秒(读的是量级,不是秒表)。
 /// 对话流的子任务块与标题栏进度面板共用。
 export function durationText(ms: number, t: Dict): string {

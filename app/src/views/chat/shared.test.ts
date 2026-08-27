@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatItem } from "../../api";
-import { isSubagentDelegation, type ToolUseItem } from "./shared";
+import { isBackgroundShell, isSubagentDelegation, type ToolUseItem } from "./shared";
 
 const toolUse = (id: string, name: string, subagent?: ToolUseItem["subagent"]): ToolUseItem => ({
   type: "tool_use",
@@ -36,6 +36,23 @@ describe("isSubagentDelegation", () => {
 
   it("普通 Skill 调用(未 fork,无回执结局)不算委派", () => {
     expect(isSubagentDelegation(toolUse("toolu_inline", "Skill"), new Map())).toBe(false);
+  });
+});
+
+describe("isBackgroundShell", () => {
+  it("认后台 Bash:启动回执带 running 结局统计,靠它反认", () => {
+    const item = toolUse("toolu_bash", "Bash");
+    expect(isBackgroundShell(item, new Map())).toBe(false);
+    expect(isBackgroundShell(item, new Map([["toolu_bash", outcome]]))).toBe(true);
+  });
+
+  it("不算子任务委派:对话流仍按普通工具块渲染,不给空壳子任务块", () => {
+    const item = toolUse("toolu_bash", "Bash");
+    expect(isSubagentDelegation(item, new Map([["toolu_bash", outcome]]))).toBe(false);
+  });
+
+  it("普通 Bash(前台,无结局统计)不收", () => {
+    expect(isBackgroundShell(toolUse("toolu_fg", "Bash"), new Map())).toBe(false);
   });
 });
 

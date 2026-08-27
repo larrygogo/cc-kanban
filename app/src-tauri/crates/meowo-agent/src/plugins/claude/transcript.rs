@@ -560,7 +560,8 @@ struct ParseState {
     ai: Option<String>,
     last_text: Option<(String, bool)>, // (正文, model 是否 <synthetic>)
     last_usage: Option<u64>,           // 最近一条 assistant 的上下文已用 token
-    /// 已发启动回执、尚无结局信号的后台任务 id（启动回执的 agentId）。结局信号有三形:
+    /// 已发启动回执、尚无结局信号的后台任务 id（Agent 委派的 agentId / 后台 Bash 的
+    /// shell id）。结局信号有三形:
     /// user 行的 task-notification、排队送入的通知(queue-operation/attachment)、
     /// TaskOutput 拉取回执。主回合结束后这里非空 = 后台还有活儿在跑。
     running_tasks: std::collections::HashSet<String>,
@@ -574,6 +575,7 @@ impl ParseState {
         // 后台任务的启动/结局信号:行形态各异(user 回执、排队通知、TaskOutput 回执),
         // 先做廉价子串门卫,命中才付 JSON 解析。
         let has_task_signal = line.contains("Async agent launched")
+            || line.contains(BACKGROUND_SHELL_PREFIX)
             || line.contains("<task-notification>")
             || line.contains("<retrieval_status>");
         if !has_title && !has_assistant && !has_task_signal {
@@ -647,7 +649,8 @@ impl ParseState {
 
     /// 折叠后台任务的启动/结局信号，维护 running_tasks 集。
     ///
-    /// 启动:user 行里 `Async agent launched…agentId: xxx` 的工具回执。
+    /// 启动:user 行里的启动回执——`Async agent launched…agentId: xxx`(Agent 委派)
+    /// 与 `Command running in background with ID: xxx`(后台 Bash),见 [`is_launch_receipt`]。
     /// 结局(移除):
     /// - user 行的 `<task-notification>`(内容字符串或 text 块);
     /// - **排队形态**的通知——主 agent 正忙时通知不落 user 行,记成 queue-operation
@@ -1240,9 +1243,10 @@ impl SubagentSpec for ClaudeSubagents {
         parse_events(line, true)
     }
 
-    /// 后台委派的**启动回执**:`Agent` 现版本默认异步,立即回一句
-    /// `Async agent launched successfully. …`,此时子任务才刚开跑。没有这个信号,
-    /// 前端「已回执=已完成」的兜底会把在跑的后台子任务标成完成(实拍反馈)。
+    /// 后台任务的**启动回执**:`Agent` 现版本默认异步,立即回一句
+    /// `Async agent launched successfully. …`;后台 Bash(`run_in_background`)同理回
+    /// `Command running in background with ID: …`。两者此时都才刚开跑。没有这个信号,
+    /// 前端「已回执=已完成」的兜底会把在跑的后台任务标成完成(实拍反馈)。
     ///
     /// 真结局有两条到达路径,必须都认:
     /// 1. `<task-notification>` 合成回执(见 [`task_notification_result`]),自带 tool-use-id;
@@ -1287,14 +1291,30 @@ impl SubagentSpec for ClaudeSubagents {
     }
 }
 
-/// 这段工具回执是不是后台委派的**启动回执**。必须**行首锚定**而不是 contains——
-/// 与 settle_from_notification 对 `<task-notification>` 的纪律同源:讨论/排查这套机制的
-/// 会话里,Read/Grep 源码或别的 transcript 的工具结果会**引用**这句话(连同注释里的
-/// `agentId: xxx` 示例),contains 会据此记入幽灵任务,而幽灵永远等不到结局信号——
-/// 会话从此恒挂「运行中」(2026-08-18 实拍:本仓 dogfooding 会话查完子任务链路后自己
-/// 被钉死在运行中)。真回执的正文以这句话开头,行首锚定天然免疫行号/注释前缀的引用。
+/// 后台 Bash(`run_in_background`)启动回执的固定开头,后面紧跟任务 id。
+/// 真机取证:`Command running in background with ID: b78nfkj1v. Output is being written to: …`。
+const BACKGROUND_SHELL_PREFIX: &str = "Command running in background with ID: ";
+
+/// 这段工具回执是不是后台任务的**启动回执**。两种形态都认(CC 2.1.246 实拍):
+///
+/// ```text
+/// Async agent launched successfully. …agentId: a9b726e3a088bafea …   ← Agent 委派
+/// Command running in background with ID: b78nfkj1v. Output is …      ← 后台 Bash
+/// ```
+///
+/// 后台 Bash 与 Agent 委派共用同一条结局通道(`<task-notification>` 的 `<task-id>` 即
+/// 这里的 shell id),漏认启动侧的后果是**只减不加**:主回合停了、后台命令还在跑,
+/// 会话却报「等你输入」,子任务面板也一片空白(2026-08-27 实拍)。
+///
+/// 必须**行首锚定**而不是 contains——与 settle_from_notification 对 `<task-notification>`
+/// 的纪律同源:讨论/排查这套机制的会话里,Read/Grep 源码或别的 transcript 的工具结果会
+/// **引用**这两句话(连同注释里的 `agentId: xxx` 示例),contains 会据此记入幽灵任务,
+/// 而幽灵永远等不到结局信号——会话从此恒挂「运行中」(2026-08-18 实拍:本仓 dogfooding
+/// 会话查完子任务链路后自己被钉死在运行中)。真回执的正文以这句话开头,行首锚定天然
+/// 免疫行号/注释前缀的引用。
 fn is_launch_receipt(text: &str) -> bool {
-    text.trim_start().starts_with("Async agent launched")
+    let head = text.trim_start();
+    head.starts_with("Async agent launched") || head.starts_with(BACKGROUND_SHELL_PREFIX)
 }
 
 /// forked skill 的回执 → 结局统计。实测三种首行(CC 2.1.246):
@@ -1338,10 +1358,18 @@ fn forked_skill_outcome(output: &str) -> Option<SubagentOutcome> {
     })
 }
 
-/// 从启动回执正文抠任务 id:`agentId: a9b726e3a088bafea (internal ID …)`。
-/// 手写扫描,取 `agentId: ` 后的连续字母数字;形态变了返回 None,徽标退回纯 running。
+/// 从启动回执正文抠任务 id:Agent 委派取 `agentId: a9b726e3a088bafea (internal ID …)`,
+/// 后台 Bash 取行首 `Command running in background with ID: b78nfkj1v.` 里的那串。
+/// 手写扫描,取到第一个非字母数字为止;形态变了返回 None,徽标退回纯 running。
+///
+/// 后台 Bash 这一路**行首锚定**(strip_prefix 而非 find):这句话被引用时不能记成幽灵任务,
+/// 理由同 [`is_launch_receipt`]。
 fn launch_agent_id(output: &str) -> Option<String> {
-    let rest = &output[output.find("agentId: ")? + "agentId: ".len()..];
+    let head = output.trim_start();
+    let rest = match head.strip_prefix(BACKGROUND_SHELL_PREFIX) {
+        Some(rest) => rest,
+        None => &output[output.find("agentId: ")? + "agentId: ".len()..],
+    };
     let id: String = rest
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric())
@@ -2647,6 +2675,46 @@ mod tests {
         std::fs::write(&p, &content).unwrap();
         assert_eq!(analyze_transcript(p.to_str().unwrap()).busy_subagents, 0);
         std::fs::remove_file(&p).ok();
+    }
+
+    /// 后台 Bash(`run_in_background`)与 Agent 委派共用同一条后台任务通道:启动回执入集、
+    /// `<task-notification>` 出集。2026-08-27 实拍的漏判——主回合停了、`gh run watch` 还在
+    /// 后台跑,会话却报「等你输入」、子任务面板空白——根因就是启动侧只认 Agent 那一句。
+    #[test]
+    fn analyzer_tracks_background_shell() {
+        // 真机回执原文(id 后紧跟句点,不是空格)。
+        let mut content = String::from(
+            r#"{"type":"user","uuid":"l1","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b78nfkj1v. Output is being written to: C:\tmp\tasks\b78nfkj1v.output. You will be notified when it completes."}]}}"#,
+        );
+        content.push('\n');
+        // 噪声:Read/Grep 源码时**引用**这句话(行首是行号),行首锚定必须挡住——
+        // 记成幽灵任务的话它永远等不到结局,会话恒挂「运行中」。
+        content.push_str(r#"{"type":"user","uuid":"srcread","message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":"1296  /// Command running in background with ID: ghost1. …"}]}}"#);
+        content.push('\n');
+        let p = write_tmp("busy_bg_shell", &content);
+        assert_eq!(analyze_transcript(p.to_str().unwrap()).busy_subagents, 1);
+
+        // 完成通知的 <task-id> 就是 shell id——结局侧无需改动即可了结。
+        content.push_str(r#"{"type":"user","uuid":"n1","message":{"content":"<task-notification>\n<task-id>b78nfkj1v</task-id>\n<tool-use-id>t1</tool-use-id>\n<status>completed</status>\n<summary>Background command \"gh run watch\" completed (exit code 0)</summary>\n</task-notification>"}}"#);
+        content.push('\n');
+        std::fs::write(&p, &content).unwrap();
+        assert_eq!(analyze_transcript(p.to_str().unwrap()).busy_subagents, 0);
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// 后台 Bash 的启动回执 → running 结局统计 + 任务 id(前端据此把这条 Bash 调用
+    /// 显示成「后台运行中」,并让完成通知归回它)。
+    #[test]
+    fn background_shell_launch_receipt_is_running() {
+        let outcome = CLAUDE_SUBAGENTS
+            .detect_result("Command running in background with ID: bw3x4fnve. Output is being written to: /tmp/bw3x4fnve.output.")
+            .expect("后台 Bash 启动回执应识别为在跑");
+        assert_eq!(outcome.running, 1);
+        assert_eq!(outcome.task_id.as_deref(), Some("bw3x4fnve"));
+        // 引用(非行首)不认。
+        assert!(CLAUDE_SUBAGENTS
+            .detect_result("注释里写着 Command running in background with ID: ghost1.")
+            .is_none());
     }
 
     /// forked skill 的回执识别。真机取证(CC 2.1.246,`/code-review` 后台审查):

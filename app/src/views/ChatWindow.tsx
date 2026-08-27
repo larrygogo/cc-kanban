@@ -28,7 +28,7 @@ import { TodoPanel } from "./chat/TodoPanel";
 import { QuestionPanels } from "./chat/QuestionPanels";
 import { ChatTitleMenu, ChatTodoMenu, type TodoPanelRow } from "./chat/TitleMenus";
 import { QuickSwitcher, RenameModal, ShortcutSheet } from "./chat/WindowModals";
-import { isSubagentDelegation } from "./chat/shared";
+import { isBackgroundShell, isSubagentDelegation } from "./chat/shared";
 import { Transcript } from "./chat/Transcript";
 import { ChatSidebar } from "./ChatSidebar";
 import { ChevronDownIcon } from "./sticker/icons";
@@ -679,7 +679,10 @@ export function ChatWindow() {
     for (const item of items) {
       // 委派判据与对话流的子任务块同源(isSubagentDelegation):除解析时认出的 Agent 委派,
       // 还含 forked skill——它的委派本体是条 Skill 调用,subagent 为空。
-      if (item.type !== "tool_use" || !isSubagentDelegation(item, outcomes)) continue;
+      // 后台 Bash 多收一类(isBackgroundShell):对话流不给它子任务块(没侧车流可展开),
+      // 但它跟 Agent 委派一样是「主回合停了还在跑」的活儿,面板必须看得见。
+      if (item.type !== "tool_use") continue;
+      if (!isSubagentDelegation(item, outcomes) && !isBackgroundShell(item, outcomes)) continue;
       const outcome = outcomes.get(item.id);
       const status = outcome
         ? outcome.running > 0 ? "in_progress" : outcome.failed > 0 ? "failed" : "completed"

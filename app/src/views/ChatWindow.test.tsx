@@ -2726,6 +2726,38 @@ describe("ChatWindow", () => {
   });
 
   /**
+   * 后台 Bash(`run_in_background`)也是「主回合停了还在跑」的活儿,面板必须看得见
+   * (2026-08-27 实拍:`gh run watch` 在后台跑,会话报「等你输入」、面板一片空白)。
+   * 委派证据只有启动回执 `Command running in background with ID: …`——后端据此给出
+   * running 结局统计,前端靠它反认(isBackgroundShell)。
+   */
+  it("面板收下在跑的后台 Bash,对话流里它仍是普通工具块", async () => {
+    window.history.replaceState({}, "", "/?sessionId=96");
+    respondWithHistory({
+      sessionId: 96, title: "后台命令", status: "waiting", provider: "claude", cwd: "C:/repo",
+      supported: true, offset: 0, reset: false, pendingReview: null, connected: true,
+      items: [
+        { type: "tool_use", id: "bg1", timestamp: "2026-08-27T02:00:00.000Z", name: "Bash", summary: "gh run watch 33033677918" },
+        {
+          type: "tool_result", id: "br1", timestamp: "2026-08-27T02:00:01.000Z", tool_use_id: "bg1",
+          text: "Command running in background with ID: b78nfkj1v.", is_error: false,
+          subagent: { running: 1, completed: 0, failed: 0, task_id: "b78nfkj1v" },
+        },
+      ],
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("后台命令")).toBeTruthy());
+    // 有活儿在跑 → 入口挂脉冲小点。
+    expect(document.querySelector(".chat-todo-btn .chat-todo-live")).toBeTruthy();
+    fireEvent.click(document.querySelector(".chat-todo-btn")!);
+    const panel = document.querySelector(".chat-todo-panel")!;
+    expect(panel.textContent).toContain("gh run watch 33033677918");
+    expect(panel.querySelector(".chat-todo-panel-list li")!.className).toContain("is-in_progress");
+    // 但对话流不给它子任务块:没侧车流可展开,命令与输出本来就在工具块里。
+    expect(document.querySelector(".chat-subagent")).toBeNull();
+  });
+
+  /**
    * claude 新版任务列表(TaskCreate/TaskUpdate)不触发 hook,DB 恒空——面板必须能从
    * 时间线的工具调用/回执里累积重建:编号从回执文本抠,状态由 TaskUpdate 摘要 JSON 驱动。
    */
