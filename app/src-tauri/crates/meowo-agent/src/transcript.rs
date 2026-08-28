@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 /// GUI 对话窗口消费的 provider 无关消息单元。终端 ANSI 只负责还原终端，结构化对话始终来自
 /// agent 自己的 transcript，避免把光标移动、spinner 和重绘误当正文。
 pub use meowo_protocol::ipc::{
-    ChatItem, SubagentOutcome, SubagentProbeDto, SubagentRef, SubagentRun,
+    ChatItem, SubagentBranchProbeDto, SubagentOutcome, SubagentProbeDto, SubagentRef, SubagentRun,
 };
 
 /// 一条待读取的子任务侧车流。
@@ -501,6 +501,7 @@ pub fn probe_subagent_state(
     let mut failed = false;
     let mut known = false;
     let mut finished_at: Option<String> = None;
+    let mut branches: Vec<SubagentBranchProbeDto> = Vec::with_capacity(streams.len());
     for stream in &streams {
         match stream.status.as_deref() {
             Some("running") => {
@@ -521,6 +522,23 @@ pub fn probe_subagent_state(
                 finished_at = Some(ts.clone());
             }
         }
+        // 逐分支状态与上面的聚合同一份判据：有信号的照归一值下发；无信号的分支标
+        // `running`（而非跳过）——面板分支行按序号取 branches[i]，跳过会让序号错位、
+        // 把后一条流的状态贴到前一行上；标 running 则维持「不能断言结束」的原语义。
+        let (branch_running, branch_status) = match stream.status.as_deref() {
+            Some("running") => (true, "running"),
+            Some("failed") => (false, "failed"),
+            Some("completed") => (false, "completed"),
+            _ => (true, "running"),
+        };
+        branches.push(SubagentBranchProbeDto {
+            label: stream.label.clone(),
+            status: branch_status.to_string(),
+            finished_at: stream
+                .finished_at
+                .clone()
+                .filter(|_| !branch_running),
+        });
     }
     if !known {
         return None;
@@ -536,6 +554,7 @@ pub fn probe_subagent_state(
         status: status.to_string(),
         // 还在跑就没有「结束时刻」可言：侧车尾部的时间只是最近一次落盘。
         finished_at: finished_at.filter(|_| !running),
+        branches,
     })
 }
 
@@ -546,6 +565,20 @@ pub fn read_chat_delta(
     path: &Path,
     offset: u64,
     prev_mtime: Option<std::time::SystemTime>,
+) -> ChatDelta {
+    read_chat_delta_paged(spec, path, offset, prev_mtime, 0)
+}
+
+/// [`read_chat_delta`] 的分页版：`page_size > 0` 且本次是整读（base==0）时，把结果裁成
+/// 最后一屏——只留末尾 `page_size` 条消息，裁剪按整行进行（边界行不腰斩，宁可多留），
+/// `start` 随之指向保留窗口的首行字节。`start > 0` 即「前面还有更早历史」，把它作为
+/// [`read_chat_window`] 的 `end` 就能向上翻页，不必再整文件重读。
+pub fn read_chat_delta_paged(
+    spec: &dyn TranscriptSpec,
+    path: &Path,
+    offset: u64,
+    prev_mtime: Option<std::time::SystemTime>,
+    page_size: usize,
 ) -> ChatDelta {
     // 文件 IO 与失效判据复用 read_transcript_delta（与看板分析同一份）。
     // NoChange 不早退：空文件首读（offset=0）也要走到下方 base==0 分支下发默认模式。
@@ -565,14 +598,79 @@ pub fn read_chat_delta(
     };
     let base = if reset { 0 } else { offset };
     let consumed = buf.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-    let text = String::from_utf8_lossy(&buf[..consumed]);
-    let mut items = Vec::new();
+    let (mut lines, agent_modes) = parse_chat_region(spec, path, base, &buf[..consumed]);
+    // 只有整读（首屏/reset 重读）才裁首屏：增量赶上来的大批次裁了会丢消息。
+    let start = if base == 0 {
+        tail_window_start(&mut lines, base, page_size)
+    } else {
+        base
+    };
+    let items = lines.into_iter().flat_map(|(_, items)| items).collect();
+    ChatDelta {
+        items,
+        agent_modes,
+        start,
+        offset: base + consumed as u64,
+        reset,
+        mtime,
+    }
+}
+
+/// 一次向上翻页的结果，见 [`read_chat_window`]。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatWindow {
+    pub items: Vec<ChatItem>,
+    /// 本屏首行的字节偏移：>0 时前面还有更早历史，可作为下一屏的 `end` 继续上翻。
+    pub start: u64,
+    pub has_more: bool,
+}
+
+/// 「加载更早」的向上翻页：读 `[0, end)` 区间的最后一屏（`page_size` 条，整行裁剪）。
+/// `end` 来自上一屏的 `ChatDelta::start` / `ChatWindow::start`——当前已加载窗口的首行字节，
+/// 故每屏只需解析「还没展示过的那段」，长会话反复上翻不再是 O(整文件) × 页数。
+/// 文件读不到返回 None（前端保留「加载更早」入口供重试）。
+pub fn read_chat_window(
+    spec: &dyn TranscriptSpec,
+    path: &Path,
+    end: u64,
+    page_size: usize,
+) -> Option<ChatWindow> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    file.take(end).read_to_end(&mut buf).ok()?;
+    let consumed = buf.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let (mut lines, _) = parse_chat_region(spec, path, 0, &buf[..consumed]);
+    let start = tail_window_start(&mut lines, 0, page_size);
+    let items = lines.into_iter().flat_map(|(_, items)| items).collect();
+    Some(ChatWindow {
+        items,
+        start,
+        has_more: start > 0,
+    })
+}
+
+/// 解析一段完整 JSONL 字节（`base` = 该段在文件中的起始字节），逐行产出
+/// （行起始字节， 该行消息）并顺手折叠本段的模式记录。行界在**原始字节**上切：
+/// `from_utf8_lossy` 的替换字符会改变字节数，拿它算偏移会对不上文件。
+fn parse_chat_region(
+    spec: &dyn TranscriptSpec,
+    path: &Path,
+    base: u64,
+    buf: &[u8],
+) -> (Vec<(u64, Vec<ChatItem>)>, Vec<AgentMode>) {
+    let mut lines = Vec::new();
     let mut agent_modes = if base == 0 {
         spec.default_agent_modes()
     } else {
         Vec::new()
     };
-    for line in text.lines() {
+    let mut pos = base;
+    for chunk in buf.split_inclusive(|b| *b == b'\n') {
+        let start = pos;
+        pos += chunk.len() as u64;
+        let line = String::from_utf8_lossy(chunk);
+        let line = line.trim_end_matches(['\r', '\n']);
         for mode in spec.agent_modes_from_line(line) {
             if let Some(previous) = agent_modes
                 .iter_mut()
@@ -583,20 +681,36 @@ pub fn read_chat_delta(
                 agent_modes.push(mode);
             }
         }
-        items.extend(
-            spec.parse_transcript_line_in(path, line)
-                .into_iter()
-                .map(ChatItem::from),
-        );
+        let items = spec
+            .parse_transcript_line_in(path, line)
+            .into_iter()
+            .map(ChatItem::from)
+            .collect();
+        lines.push((start, items));
     }
-    ChatDelta {
-        items,
-        agent_modes,
-        start: base,
-        offset: base + consumed as u64,
-        reset,
-        mtime,
+    (lines, agent_modes)
+}
+
+/// 尾部裁剪：只留最后 `page_size` 条消息，整行为单位（边界行的消息要么全留要么全走，
+/// 半行裁断会让同一行的 items 永远翻不出来）。返回保留窗口的首行字节；未触发裁剪返回 base。
+/// `page_size == 0` 表示不裁剪（整段保留，start = base）。
+fn tail_window_start(lines: &mut Vec<(u64, Vec<ChatItem>)>, base: u64, page_size: usize) -> u64 {
+    if page_size == 0 {
+        return base;
     }
+    let total: usize = lines.iter().map(|(_, items)| items.len()).sum();
+    if total <= page_size {
+        return base;
+    }
+    let mut keep = 0;
+    let mut index = lines.len();
+    while index > 0 && keep < page_size {
+        index -= 1;
+        keep += lines[index].1.len();
+    }
+    let start = lines[index].0;
+    lines.drain(..index);
+    start
 }
 
 /// 无 transcript 规格的 agent（codex/kimi）以及 `TranscriptSpec::resolve_cwd` 默认实现共用：
@@ -839,6 +953,217 @@ mod tests {
             std::env::temp_dir().join(format!("meowo_cache_{}_{}.jsonl", std::process::id(), name));
         std::fs::write(&p, content).unwrap();
         p
+    }
+
+    /// 测试用最小 spec：行格式 `m<N>:<tag>` 产出 N 条 Meta 消息（id 为 `<tag>-<i>`），
+    /// 用来造「一行多条」的边界行，不依赖任何真实 provider 的解析细节。
+    struct StubSpec;
+
+    impl TranscriptSpec for StubSpec {
+        fn new_parser(&self) -> Box<dyn TranscriptParser> {
+            Box::new(ChatOnlyParser)
+        }
+        fn resolve_transcript_path(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &str,
+        ) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn resolve_title(&self, _: Option<&str>, _: Option<&str>, _: &str) -> Option<String> {
+            None
+        }
+        fn parse_transcript_line(&self, line: &str) -> Vec<TranscriptEvent> {
+            let Some((n, tag)) = line
+                .strip_prefix('m')
+                .and_then(|rest| rest.split_once(':'))
+            else {
+                return Vec::new();
+            };
+            let n: usize = n.parse().unwrap_or(0);
+            (0..n)
+                .map(|i| TranscriptEvent::Metadata {
+                    id: format!("{tag}-{i}"),
+                    timestamp: None,
+                    kind: "stub".into(),
+                })
+                .collect()
+        }
+    }
+
+    /// 每个元素是一条行：(该行的消息数, tag)。
+    fn stub_lines(lines: &[(usize, &str)]) -> String {
+        lines
+            .iter()
+            .map(|(n, tag)| format!("m{n}:{tag}\n"))
+            .collect()
+    }
+
+    /// 多发委派（kimi `AgentSwarm`）探测用最小 subagent spec：`locate_streams` 返回预制
+    /// 分支流，与真实 provider 的落盘布局解耦——这里只验分支级状态的归一与下发口径，
+    /// 定位环节由 subagent_live.rs 的真机测试负责。
+    struct StubSubagents;
+
+    impl SubagentSpec for StubSubagents {
+        fn detect_call(&self, _: &str, _: Option<&serde_json::Value>) -> Option<SubagentRef> {
+            None
+        }
+        fn locate_streams(&self, _: &Path, _: &str) -> Vec<SubagentStream> {
+            vec![
+                SubagentStream {
+                    label: Some("agent-1".into()),
+                    status: Some("completed".into()),
+                    finished_at: Some("2026-08-28T08:00:00Z".into()),
+                    path: PathBuf::new(),
+                },
+                SubagentStream {
+                    label: Some("agent-2".into()),
+                    status: Some("running".into()),
+                    finished_at: None,
+                    path: PathBuf::new(),
+                },
+                SubagentStream {
+                    label: Some("agent-3".into()),
+                    status: None,
+                    finished_at: Some("2026-08-28T08:05:00Z".into()),
+                    path: PathBuf::new(),
+                },
+            ]
+        }
+        fn parse_stream_line(&self, _: &str) -> Vec<TranscriptEvent> {
+            Vec::new()
+        }
+    }
+
+    static STUB_SUBAGENTS: StubSubagents = StubSubagents;
+
+    struct SwarmSpec;
+
+    impl TranscriptSpec for SwarmSpec {
+        fn new_parser(&self) -> Box<dyn TranscriptParser> {
+            Box::new(ChatOnlyParser)
+        }
+        fn resolve_transcript_path(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &str,
+        ) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn resolve_title(&self, _: Option<&str>, _: Option<&str>, _: &str) -> Option<String> {
+            None
+        }
+        fn subagents(&self) -> Option<&'static dyn SubagentSpec> {
+            Some(&STUB_SUBAGENTS)
+        }
+    }
+
+    /// 多发委派的实测要逐分支下发：面板把 `×N` 展开成一行一分支后，每行的状态只认
+    /// 自己那条侧车流；聚合 `status`/`finished_at` 的行为保持不变。
+    #[test]
+    fn probe_reports_per_branch_state_for_swarm_delegations() {
+        let p = write_tmp("probe_branches", "m1:x\n");
+        let probe = probe_subagent_state(&SwarmSpec, &p, "call-1")
+            .expect("有分支留下了状态信号，聚合应给出结论");
+        // 聚合口径不变：还有分支在跑 → running，且没有整体「结束时刻」。
+        assert_eq!(probe.status, "running");
+        assert!(probe.finished_at.is_none());
+        // 逐分支：顺序与 locate_streams 的定位一致（面板按序号对应分支行）；
+        // completed 带结束时刻，running 不带。
+        assert_eq!(probe.branches.len(), 3);
+        assert_eq!(probe.branches[0].label.as_deref(), Some("agent-1"));
+        assert_eq!(probe.branches[0].status, "completed");
+        assert_eq!(
+            probe.branches[0].finished_at.as_deref(),
+            Some("2026-08-28T08:00:00Z")
+        );
+        assert_eq!(probe.branches[1].label.as_deref(), Some("agent-2"));
+        assert_eq!(probe.branches[1].status, "running");
+        assert!(probe.branches[1].finished_at.is_none());
+        // 无信号的流不能断言结束：分支侧与聚合同一条规则——标 running，结束时刻扣下。
+        assert_eq!(probe.branches[2].status, "running");
+        assert!(probe.branches[2].finished_at.is_none());
+        std::fs::remove_file(&p).ok();
+    }
+
+    fn meta_ids(items: &[ChatItem]) -> Vec<&str> {
+        items
+            .iter()
+            .map(|item| match item {
+                ChatItem::Meta { id, .. } => id.as_str(),
+                other => panic!("stub 只产 Meta，拿到 {other:?}"),
+            })
+            .collect()
+    }
+
+    /// 首屏只留尾部一屏，start 指向保留窗口的首行字节（=「加载更早」的上界）。
+    #[test]
+    fn chat_first_page_trims_to_tail_and_reports_window_start() {
+        let content = stub_lines(&[(1, "a"), (1, "b"), (1, "c"), (1, "d"), (1, "e")]);
+        let p = write_tmp("chat_page_tail", &content);
+        let page = read_chat_delta_paged(&StubSpec, &p, 0, None, 2);
+        assert_eq!(meta_ids(&page.items), ["d-0", "e-0"], "只留尾部 2 条");
+        assert_eq!(
+            page.start as usize,
+            "m1:a\nm1:b\nm1:c\n".len(),
+            "start 必须对准保留窗口的首行"
+        );
+        assert_eq!(page.offset, content.len() as u64, "尾部记账不受首屏裁剪影响");
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// 裁剪按整行进行：边界行产出多条消息时全留（腰斩的那部分会永远翻不出来——
+    /// 上一屏的上界是行首），宁可一屏多于 page_size。
+    #[test]
+    fn chat_first_page_trim_never_splits_a_line() {
+        let content = stub_lines(&[(1, "a"), (3, "b")]);
+        let p = write_tmp("chat_line_grain", &content);
+        let page = read_chat_delta_paged(&StubSpec, &p, 0, None, 1);
+        assert_eq!(meta_ids(&page.items), ["b-0", "b-1", "b-2"]);
+        assert_eq!(page.start as usize, "m1:a\n".len());
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// 增量不裁剪：窗口关闭期间积压的大批次一次赶上来可能超过 page_size，
+    /// 按首屏规则裁掉就永久丢消息。
+    #[test]
+    fn chat_delta_paged_never_trims_incremental_reads() {
+        let p = write_tmp("chat_page_inc", &stub_lines(&[(1, "a"), (1, "b")]));
+        let first = read_chat_delta_paged(&StubSpec, &p, 0, None, 10);
+        assert_eq!(first.items.len(), 2);
+        std::fs::write(
+            &p,
+            stub_lines(&[(1, "a"), (1, "b"), (1, "c"), (1, "d"), (1, "e"), (1, "f")]),
+        )
+        .unwrap();
+        let delta = read_chat_delta_paged(&StubSpec, &p, first.offset, first.mtime, 2);
+        assert!(!delta.reset);
+        assert_eq!(delta.items.len(), 4, "增量批次不裁");
+        assert_eq!(delta.start, first.offset);
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// 向上翻页：逐屏翻到文件头，各屏拼接与整读无重无漏（含多消息边界行）。
+    #[test]
+    fn chat_window_paginates_back_to_head_without_gaps() {
+        let lines = [(1, "a"), (2, "b"), (1, "c"), (1, "d"), (3, "e"), (1, "f"), (1, "g")];
+        let p = write_tmp("chat_page_walk", &stub_lines(&lines));
+        let first = read_chat_delta_paged(&StubSpec, &p, 0, None, 4);
+        assert!(first.start > 0, "10 条裁到一屏 4 条，前面必须还有");
+        let mut pages = vec![first.items];
+        let mut end = first.start;
+        while end > 0 {
+            let window = read_chat_window(&StubSpec, &p, end, 4).unwrap();
+            assert_eq!(window.has_more, window.start > 0, "has_more 与 start 同口径");
+            end = window.start;
+            pages.push(window.items);
+        }
+        let walked: Vec<_> = pages.into_iter().rev().flatten().collect();
+        let full = read_chat_delta(&StubSpec, &p, 0, None);
+        assert_eq!(walked, full.items, "逐屏上翻拼接必须与整读一致");
+        std::fs::remove_file(&p).ok();
     }
 
     #[test]

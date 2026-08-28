@@ -101,16 +101,34 @@ export function useAtFileCompletion({ cwd, prompt, setPrompt, promptInputRef }: 
   return { atQuery, setAtQuery, atFiles, setAtFiles, atActive, setAtIndex, pickAtFile };
 }
 
-/** "/xx" 且尚未输入空格时给补全候选；一旦带参数或是普通句子就收起。
+/** 斜杠补全候选：prompt 是单个 `/token`（无空白）时给子串匹配（大小写不敏感），
+ *  前缀命中排在一般子串命中前面；已完整敲出的命令不再占位。 */
+export function slashMatchesFor<C extends { name: string }>(commands: C[] | undefined, prompt: string): C[] {
+  if (!prompt.startsWith("/") || /\s/.test(prompt)) return [];
+  const query = prompt.slice(1).toLowerCase();
+  const rank = (command: C) => (command.name.slice(1).toLowerCase().startsWith(query) ? 0 : 1);
+  return (commands ?? [])
+    .filter((command) => command.name !== prompt && command.name.slice(1).toLowerCase().includes(query))
+    .sort((a, b) => rank(a) - rank(b));
+}
+
+/** 参数提示：prompt 已是 `/cmd 参数…` 形态且 `/cmd` 精确命中时返回该命令。
+ *  带参数后补全菜单收起（没有候选可选），改用一行提示告诉用户正在给哪条命令填参数。 */
+export function slashArgCommand<C extends { name: string }>(commands: C[] | undefined, prompt: string): C | null {
+  const match = /^(\/\S+)\s/.exec(prompt);
+  if (!match) return null;
+  return (commands ?? []).find((command) => command.name === match[1]) ?? null;
+}
+
+/** "/xx" 且尚未输入空格时给补全候选；带上参数后收成一行参数提示（slashArgHint）。
  *  键盘交互：默认高亮第一项，↑↓ 移动，Enter/Tab 选中写入（不是发送），Esc 收起本次
  *  （dismissed 期间不再弹出，继续输入即恢复）。高亮随每次输入重置回第一项。 */
 export function useSlashCompletion<C extends { name: string }>(prompt: string, commands: C[] | undefined) {
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const slashMenuRef = useRef<HTMLDivElement>(null);
-  const slashMatches = prompt.startsWith("/") && !prompt.includes(" ") && !slashDismissed
-    ? (commands ?? []).filter((c) => c.name.startsWith(prompt) && c.name !== prompt)
-    : [];
+  const slashMatches = slashDismissed ? [] : slashMatchesFor(commands, prompt);
+  const slashArgHint = slashDismissed ? null : slashArgCommand(commands, prompt);
   // 候选变少时高亮可能越界（如退格删字后），钳回最后一项；无候选时无高亮。
   const slashActive = slashMatches.length ? Math.min(slashIndex, slashMatches.length - 1) : -1;
   // 补全菜单开着 = 一个 Esc 消费层（textarea 的 onKeyDown 会用 Esc 收起它）。
@@ -124,5 +142,5 @@ export function useSlashCompletion<C extends { name: string }>(prompt: string, c
     const selected = slashMenuRef.current?.querySelector('[aria-selected="true"]');
     if (typeof selected?.scrollIntoView === "function") selected.scrollIntoView({ block: "nearest" });
   }, [slashActive]);
-  return { slashIndex, setSlashIndex, slashDismissed, setSlashDismissed, slashMenuRef, slashMatches, slashActive };
+  return { slashIndex, setSlashIndex, slashDismissed, setSlashDismissed, slashMenuRef, slashMatches, slashActive, slashArgHint };
 }

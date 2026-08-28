@@ -18,8 +18,8 @@ const STOP_STRAGGLER_GRACE_MS: i64 = 5_000;
 /// 永远显示运行中（实拍：回合结束、last_ai_text 已是终稿，状态却卡 running）。
 ///
 /// 关键：被判为迟到尾巴的那支（waiting 且窗内）**连 last_event_at 也不推进**——
-/// 「等待你回复」通知的去重指纹正是 last_event_at（watch.rs waiting_fingerprint），
-/// 尾巴若推进它，同一回合会弹两次；且每条尾巴都推进窗口锚点，窗口被越拖越长。
+/// 每条尾巴都推进窗口锚点的话，窗口会被越拖越长；且 last_event_at 是 waiting tab
+/// 「等最久优先」的排序键与 watch 层多处展示口径，迟到尾巴不该把它刷成新时刻。
 /// 两个 CASE 都读**更新前**的行值（SQLite 语义），判定一致。
 const ACTIVITY_TOUCH_SQL: &str = "UPDATE sessions
          SET status = CASE WHEN status = 'waiting' AND ?1 - last_event_at > ?3 THEN 'running'

@@ -32,9 +32,13 @@ pub(crate) fn show_after_grace(window: &tauri::WebviewWindow, focus: bool) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(2000));
         if !w.is_visible().unwrap_or(true) {
-            let _ = w.show();
             if focus {
+                let _ = w.show();
                 let _ = w.set_focus();
+            } else {
+                // focus:false 的窗口（贴纸主窗口）显示也不能激活——普通 show 在
+                // Windows 上会抢焦点（W-7），走 SW_SHOWNOACTIVATE 路径。
+                show_window_no_activate(&w);
             }
         }
     });
@@ -149,7 +153,11 @@ pub(crate) fn open_settings_window(app: &tauri::AppHandle) {
         .title(tr(ui_lang(&load_settings()), "window.settings"))
         .inner_size(620.0, 460.0)
         .min_inner_size(620.0, 460.0)
-        .resizable(false)
+        // 只放开纵向缩放（S-2）：620 宽按设置页双列布局定死；归档列表等长内容需要更多
+        // 纵向空间时，不再被困在 460 高的嵌套滚动里。max 高度给个远超屏幕的值，实际由
+        // 系统钳到工作区高度。
+        .max_inner_size(620.0, 100_000.0)
+        .resizable(true)
         // 隐藏创建，前端首帧后自行显示（见 show_after_grace 注释），消除白框闪烁。
         .visible(false)
         .center();
@@ -517,6 +525,96 @@ fn show_window_no_activate(window: &tauri::WebviewWindow) {
     let _ = window.show();
 }
 
+/// 贴纸主窗口的首帧显示（前端 useShowWhenReady 在 focus:false 时调用，W-7）：
+/// 普通 show() 在 Windows 上会激活并抢焦点——贴纸配置 focus:false（开机自启不得抢焦点），
+/// 首显同样必须无声显形，走 SW_SHOWNOACTIVATE 路径。只接受 main 标签，防误用于其它窗口。
+#[tauri::command]
+pub(crate) fn show_sticker(window: tauri::WebviewWindow) {
+    if window.label() == "main" {
+        show_window_no_activate(&window);
+    }
+}
+
+/// 点击穿透（W-8）：开启后贴纸不接收任何鼠标事件——opacity 可低至 25%，几乎看不见的
+/// 置顶窗若照常吃掉鼠标就是桌面地雷。按住 Alt 临时恢复交互：穿透窗收不到键鼠，
+/// 修饰键状态只能全局拿——WH_KEYBOARD_LL 钩子方案更重，这里 50ms 轮询
+/// GetAsyncKeyState（与 snap.rs pointer_left_down 同一原语）。仅 Windows 实装：
+/// macOS 面板失焦自隐、无此问题，设置项也只对 Windows 显示。
+#[cfg(target_os = "windows")]
+static CLICK_THROUGH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 当前实际套用到窗口的 ignore 状态：轮询线程据此做变化检测，不重复调窗口 API。
+#[cfg(target_os = "windows")]
+static IGNORE_APPLIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 期望的 ignore 状态：穿透开启且未按 Alt。纯函数便于单测。
+#[cfg(target_os = "windows")]
+fn desired_ignore(click_through: bool, alt_down: bool) -> bool {
+    click_through && !alt_down
+}
+
+#[cfg(target_os = "windows")]
+fn set_ignore(app: &tauri::AppHandle, ignore: bool) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_ignore_cursor_events(ignore);
+    }
+    IGNORE_APPLIED.store(ignore, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 设置项「点击穿透」的生效口：开机（lib.rs setup）与 set_settings 各调一次。
+/// 非 Windows 为 no-op（见上，功能本身只实装 Windows）。
+pub(crate) fn apply_click_through(app: &tauri::AppHandle, enabled: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::sync::atomic::Ordering;
+        CLICK_THROUGH.store(enabled, Ordering::Relaxed);
+        // 立即套用一个确定状态；若此刻正按着 Alt，轮询线程下一拍（≤50ms）会再翻回来。
+        let desired = desired_ignore(enabled, false);
+        if desired != IGNORE_APPLIED.load(Ordering::Relaxed) {
+            set_ignore(app, desired);
+        }
+        start_click_through_watch(app);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, enabled);
+    }
+}
+
+/// Alt 轮询线程（全进程只起一次）：穿透开启期间按住 Alt → 临时恢复交互，松开即回穿透。
+#[cfg(target_os = "windows")]
+fn start_click_through_watch(app: &tauri::AppHandle) {
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        let app = app.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            use std::sync::atomic::Ordering;
+            let desired = desired_ignore(CLICK_THROUGH.load(Ordering::Relaxed), alt_down());
+            if desired != IGNORE_APPLIED.load(Ordering::Relaxed) {
+                set_ignore(&app, desired);
+            }
+        });
+    });
+}
+
+/// 左右 Alt 任一是否按下（VK_MENU = 0x12；返回值高位置 1 即 i16 为负表示当前按下）。
+#[cfg(target_os = "windows")]
+fn alt_down() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    unsafe { GetAsyncKeyState(0x12) < 0 }
+}
+
+/// macOS 面板的「保持打开」（W-12）：前端贴纸 pin 按钮在面板模式下切换失焦自动收起。
+/// 跨平台注册（处理器表不做 cfg 分支），非 macOS 为空操作——贴纸 pin 在那边另有语义
+/// （always-on-top），不会调到这条命令。
+#[tauri::command]
+pub(crate) fn set_panel_keep_open(open: bool) {
+    #[cfg(target_os = "macos")]
+    crate::macos::panel::set_keep_open(open);
+    #[cfg(not(target_os = "macos"))]
+    let _ = open;
+}
+
 /// 把窗口可靠带到前台。普通 set_focus 在 Windows 上受前台锁限制：托盘点击授予的
 /// SetForegroundWindow 权限只在点击后的极短窗口内有效，稍有延迟（查库、WebView 首帧）
 /// 就被拒——窗口显示了却垫在当前前台窗口身后，用户看到的就是「点了没反应」
@@ -534,7 +632,7 @@ fn raise_window(window: &tauri::WebviewWindow) {
 /// 托盘点击入口：打开最近活跃会话的对话窗口。托盘没有「当前会话」上下文，
 /// 取 last_event_at 最新的未归档会话最贴近「看看现在在跑什么」。
 /// 一条会话都没有（新装/全归档）时回落到设置窗口，避免点了毫无反应。
-/// 入口：非 macOS 托盘左键；macOS 托盘菜单「打开对话窗口」；贴纸底栏按钮（open_latest_chat）。
+/// 入口：两平台托盘菜单「打开对话窗口」；贴纸底栏按钮（open_latest_chat）。
 pub(crate) fn open_latest_chat_window(app: &tauri::AppHandle) {
     let app = app.clone();
     // 查库放子线程：与 open_settings_window 同理由，主线程同步 IO 会阻塞消息泵。
@@ -640,6 +738,9 @@ pub(crate) fn open_chat_window_impl(
             // 的新鲜租约与桌面窗生命周期无关，不被连坐——手机上正等着批的卡不能
             // 因为桌面关了个窗就被悄悄 pass 掉。
             ptys.release_desktop_consumers();
+            // 同属关窗兜底：本窗的「正在看」注册随窗失效，清掉让 pty-output emitter
+            // 跳过已无消费者的 base64 + emit（app 级 emit 后 emit 侧查不到窗口存在性）。
+            ptys.reset_viewer();
             #[cfg(target_os = "macos")]
             crate::macos::menubar::settings_window_did_close(&app_handle, "chat");
         }
@@ -663,10 +764,12 @@ pub(crate) fn open_chat_window_impl(
     Ok(())
 }
 
-/// 「找回贴纸」：把主窗口按当前尺寸居中到主显示器工作区，并显示/取消最小化/置顶/聚焦。
+/// 「找回贴纸」：把主窗口按当前尺寸居中到主显示器工作区，并显示/取消最小化/聚焦。
 /// 折叠态的「展开 + 还原正常尺寸」由前端在调用本命令前完成（snap_restore），故这里只按当前尺寸居中。
+/// 置顶是**临时**的（W-6）：先置顶确保浮到所有窗口（含其它置顶窗口）之上，聚焦后按调用方给的
+/// 用户 pin 偏好还原——「找回」只把窗口带到眼前，不替用户改写置顶偏好。
 #[tauri::command]
-pub(crate) fn recall_center(window: tauri::WebviewWindow) -> Result<(), String> {
+pub(crate) fn recall_center(window: tauri::WebviewWindow, pinned: bool) -> Result<(), String> {
     let _ = window.unminimize();
     let _ = window.show();
     // 优先主显示器（找回的「家」最可预期）；取不到回退当前屏。
@@ -686,6 +789,10 @@ pub(crate) fn recall_center(window: tauri::WebviewWindow) -> Result<(), String> 
     }
     window.set_always_on_top(true).map_err(|e| e.to_string())?;
     let _ = window.set_focus();
+    if !pinned {
+        // 聚焦完成后撤掉临时置顶：z-order 已抬到最前，窗口保持可见但不长期压住其它窗口。
+        window.set_always_on_top(false).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -710,36 +817,46 @@ pub(crate) fn recall_sticker(app: &tauri::AppHandle) {
                 ));
             }
         }
-        let _ = recall_center(w.clone());
+        // 原生救援路径读不到前端的 pin 偏好（localStorage 在 webview 里，可能已崩）——
+        // 传 false：只做临时置顶带到眼前，不假设用户偏好；前端活着时随后会按真实偏好还原。
+        let _ = recall_center(w.clone(), false);
         let _ = w.emit("recall-sticker", ());
     }
 }
 
-/// 托盘右键菜单（找回贴纸 / 设置 / 官网 / 退出），按语言构建；切语言时由 rebuild_tray_menu 重建。
+/// 托盘右键菜单（打开对话窗口 / 找回贴纸 / 设置 / 官网 / 退出），按语言构建；切语言时由 rebuild_tray_menu 重建。
+/// 菜单构成与 macOS（menubar::build_tray_menu）对齐：同一组项、同一顺序，`chat_enabled`
+/// 为 false（轻量模式）时不放「打开对话窗口」项——入口都不该出现，而不是点了被拦。
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn build_tray_menu(
     app: &tauri::AppHandle,
     lang: &str,
+    chat_enabled: bool,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let chat = if chat_enabled {
+        Some(MenuItemBuilder::with_id("chat", tr(lang, "tray.chat")).build(app)?)
+    } else {
+        None
+    };
     let recall = MenuItemBuilder::with_id("recall", tr(lang, "tray.recall")).build(app)?;
     let guide = MenuItemBuilder::with_id("guide", tr(lang, "tray.guide")).build(app)?;
     let settings = MenuItemBuilder::with_id("settings", tr(lang, "tray.settings")).build(app)?;
     let website = MenuItemBuilder::with_id("website", tr(lang, "tray.website")).build(app)?;
     let quit = MenuItemBuilder::with_id("quit", tr(lang, "tray.quit")).build(app)?;
-    MenuBuilder::new(app)
-        .items(&[&recall, &guide, &settings, &website, &quit])
-        .build()
+    let mut builder = MenuBuilder::new(app);
+    if let Some(chat) = &chat {
+        builder = builder.item(chat);
+    }
+    builder.items(&[&recall, &guide, &settings, &website, &quit]).build()
 }
 
 /// 切语言/改设置后让已存在的系统 UI 跟上：重建托盘菜单、改已开设置窗口的标题。
-/// `chat_enabled` 决定 macOS 托盘菜单是否包含「打开对话窗口」项（主线程不读设置文件，
+/// `chat_enabled` 决定两平台托盘菜单是否包含「打开对话窗口」项（主线程不读设置文件，
 /// 由调用方从已持有的 Settings 传入——线程纪律）。
 pub(crate) fn apply_language(app: &tauri::AppHandle, lang: &str, chat_enabled: bool) {
-    #[cfg(not(target_os = "macos"))]
-    let _ = chat_enabled; // Windows 托盘菜单无 chat 项，左键入口在事件回调里自行判断。
     if let Some(tray) = app.tray_by_id("meowo-tray") {
         #[cfg(not(target_os = "macos"))]
-        if let Ok(menu) = build_tray_menu(app, lang) {
+        if let Ok(menu) = build_tray_menu(app, lang, chat_enabled) {
             let _ = tray.set_menu(Some(menu));
         }
         #[cfg(target_os = "macos")]
@@ -760,6 +877,7 @@ pub(crate) fn apply_language(app: &tauri::AppHandle, lang: &str, chat_enabled: b
 /// dev 构建的托盘角标：右下角叠一枚琥珀圆点，带深色描边与抗锯齿边缘——托盘图标
 /// 只有 16~32px，无描边的硬边色块糊成一团锯齿。像素级绘制而非另备图标资源：
 /// 角标只存在于 debug 构建，不值得为它维护一套打包文件。
+/// （待交互角标/数字徽章两轮迭代都被实拍否掉、已撤；dev 角标是用户点名要保留的。）
 #[cfg(not(target_os = "macos"))]
 fn dev_badge_icon(icon: &tauri::image::Image<'_>) -> tauri::image::Image<'static> {
     /// 按覆盖率把颜色混进像素（普通 alpha over），cov ∈ [0,1]。
@@ -797,15 +915,28 @@ fn dev_badge_icon(icon: &tauri::image::Image<'_>) -> tauri::image::Image<'static
     tauri::image::Image::new_owned(rgba, w, h)
 }
 
-/// 构建系统托盘：左键点击直接打开设置；右键菜单提供设置 / 退出。
+/// 单击/双击消抖世代：双击抬起前必然先到来一次单击抬起，单击动作延迟一个双击窗口期，
+/// 世代变了（双击到达）就作废——否则双击会先把贴纸开合一遍再开对话窗。
+#[cfg(not(target_os = "macos"))]
+static TRAY_CLICK_GEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// 构建系统托盘：单击左键开合主界面（贴纸窗，与 macOS 左键开合面板同语义）、双击左键
+/// 打开对话窗口（W-11 前的左键语义，老用户肌肉记忆）；右键菜单提供打开对话窗口 /
+/// 找回贴纸 / 使用引导 / 设置 / 官网 / 退出。
 /// macOS 走 `macos::menubar::setup_tray`（面板模式），故此实现仅用于非 macOS 平台。
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-    let menu = build_tray_menu(app.handle(), ui_lang(&load_settings()))?;
+    let boot_settings = load_settings();
+    let menu = build_tray_menu(
+        app.handle(),
+        ui_lang(&boot_settings),
+        boot_settings.chat_enabled,
+    )?;
 
     let mut builder = TrayIconBuilder::with_id("meowo-tray");
     // 图标恒由打包提供，但缺失时不该 unwrap panic 把启动打挂——没图标就建无图标托盘。
-    // dev 构建叠橙色角标：共库后 dev 与安装版托盘并排且内容全同，只能靠图标分辨实例。
+    // dev 构建叠琥珀角标：共库后 dev 与安装版托盘并排且内容全同，只能靠图标分辨实例
+    // （tooltip 的 "(dev)" 也在，但鼠标不悬停看不见）。
     if let Some(icon) = app.default_window_icon() {
         if cfg!(debug_assertions) {
             builder = builder.icon(dev_badge_icon(icon));
@@ -816,13 +947,15 @@ pub(crate) fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     builder
         .tooltip(if cfg!(debug_assertions) { "Meowo (dev)" } else { "Meowo" })
         .menu(&menu)
-        // 左键留给「打开对话窗口」，菜单仅在右键弹出（设置仍在右键菜单里）。
+        // 左键留给「开合主界面」，菜单仅在右键弹出（打开对话窗口/设置都在右键菜单里）。
         .show_menu_on_left_click(false)
         // 托盘菜单事件在**主线程**派发(与下面的左键回调同源)。开窗口必须丢子线程:
         // 直接 build() 会占住消息泵,而 WebView2 初始化依赖泵运转 → 卡在初始化 → 白屏
         // (理由与 open_settings 命令版同源,见本文件顶部)。此前这两项是裸调,右键
         // 「设置」/「使用引导」会把贴纸与对话窗一起卡住。
         .on_menu_event(|app, event| match event.id().as_ref() {
+            // open_latest_chat_window 内部自带子线程查库，主线程直调不阻塞泵。
+            "chat" => open_latest_chat_window(app),
             "recall" => recall_sticker(app),
             "guide" => {
                 let app = app.clone();
@@ -839,27 +972,68 @@ pub(crate) fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            // 仅左键「抬起」时触发，避免按下+抬起各触发一次。
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                // 对话功能关闭（轻量模式）时左键改为找回贴纸——轻量用户的主界面就是贴纸。
-                // load_settings 是文件 IO，托盘回调在主线程，放子线程读（线程纪律）。
-                let app = tray.app_handle().clone();
-                std::thread::spawn(move || {
-                    if crate::settings::load_settings().chat_enabled {
-                        open_latest_chat_window(&app);
-                    } else {
-                        recall_sticker(&app);
-                    }
-                });
+            use std::sync::atomic::Ordering;
+            match event {
+                // 仅左键「抬起」时触发，避免按下+抬起各触发一次。
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => {
+                    // 单击 = 开合主界面（贴纸窗），与 macOS 左键开合面板同语义；窗口 API
+                    // 只投递消息不读文件，主线程直调（同 macOS panel::toggle_panel）。
+                    // 延迟一个双击窗口期：紧随其后是双击则这次开合作废（见 TRAY_CLICK_GEN）。
+                    let gen = TRAY_CLICK_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+                    let app = tray.app_handle().clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        if TRAY_CLICK_GEN.load(Ordering::SeqCst) == gen {
+                            toggle_main_window(&app);
+                        }
+                    });
+                }
+                // 双击 = 打开对话窗（老用户肌肉记忆，W-11 前的左键语义）；对话功能关闭
+                // （轻量模式）时找回贴纸——轻量用户的主界面就是贴纸。load_settings 是文件
+                // IO，托盘回调在主线程，放子线程读（线程纪律）。
+                TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    TRAY_CLICK_GEN.fetch_add(1, Ordering::SeqCst);
+                    let app = tray.app_handle().clone();
+                    std::thread::spawn(move || {
+                        if crate::settings::load_settings().chat_enabled {
+                            open_latest_chat_window(&app);
+                        } else {
+                            recall_sticker(&app);
+                        }
+                    });
+                }
+                _ => {}
             }
         })
         .build(app)?;
     Ok(())
+}
+
+/// 托盘左键开合主界面（贴纸窗）：可见且聚焦 → 隐藏；可见未聚焦 → 聚焦（用户在找它）；
+/// 隐藏/最小化 → 显示并聚焦。贴纸 skipTaskbar，藏起来后任务栏没有入口，左键必须可逆，
+/// 不能像旧行为（左键只开对话窗）那样把「找回贴纸」只留在右键菜单深处。
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn toggle_main_window(app: &tauri::AppHandle) {
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    let visible = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
+    if !visible {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    } else if w.is_focused().unwrap_or(false) {
+        let _ = w.hide();
+    } else {
+        let _ = w.set_focus();
+    }
 }
 
 /// Windows：把待交互/运行中会话数摘要写进托盘悬浮提示，鼠标移到托盘一眼可见，
@@ -907,3 +1081,19 @@ pub(crate) fn tray_tooltip_text(lang: &str, running: usize, waiting: usize) -> S
     }
     format!("Meowo · {}", parts.join(" · "))
 }
+
+#[cfg(all(test, target_os = "windows"))]
+mod click_through_tests {
+    use super::desired_ignore;
+
+    /// 穿透的期望 ignore 状态：仅「开关开 且 未按 Alt」时穿透；按住 Alt 临时恢复交互，
+    /// 开关关闭时无论 Alt 如何都不穿透。
+    #[test]
+    fn desired_ignore_combines_switch_and_alt() {
+        assert!(desired_ignore(true, false));
+        assert!(!desired_ignore(true, true), "按住 Alt 临时恢复交互");
+        assert!(!desired_ignore(false, false));
+        assert!(!desired_ignore(false, true));
+    }
+}
+

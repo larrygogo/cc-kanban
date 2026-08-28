@@ -3,18 +3,23 @@
 /// 吸边判定阈值（**逻辑**像素）：窗口边缘距工作区边缘不超过此值即认为贴边。
 /// 调用方（lib.rs 的 Moved 处理）按显示器 scale_factor 换算成物理像素后再比较——
 /// 与 STRIP_W_LOGICAL 同口径，保证不同缩放的屏幕上吸附手感一致。
-#[cfg(not(target_os = "macos"))]
+/// 吸边整体仅 Windows（W-18：Linux 的 cursor/pointer 原语恒返回假值，半坏不如不做）。
+#[cfg(target_os = "windows")]
 pub(crate) const SNAP_THRESHOLD: i32 = 20;
 /// 竖条逻辑宽度（实际物理宽度 = 该值 * 显示器 scale_factor）。
 /// 28 给 10px 圆点 + 内发光/描边留出足够边距，避免被 8px 圆角裁掉上下/左右。
 const STRIP_W_LOGICAL: f64 = 28.0;
 
-/// 贴纸正常态最小逻辑尺寸。**必须与 tauri.conf.json 的 minWidth/minHeight、App.tsx 的
-/// SIZE_MIN_W/H 三处一致**（折叠时会临时放开，这里是恢复时设回的值）。
+/// 贴纸正常态最小逻辑尺寸。**必须与 tauri.conf.json 的 minWidth/minHeight、windowState.ts 的
+/// SIZE_MIN_W/H 三处一致**。W-17 起该值全程恒定（折叠不再放开它，改禁 resizable——
+/// 放开 min_size 曾让拖角把吸附态窗口缩成细条，毒化「正常尺寸」基准）。
 /// 高度按「至少完整显示两张会话卡」定：窗框+拖拽区+tab+底栏合计约 132px，
 /// 标准密度单卡约 84px + 6px 间距，两张约 174px；330 在宽松密度(112%)下也够。
 pub(crate) const STICKER_MIN_W: f64 = 360.0;
 pub(crate) const STICKER_MIN_H: f64 = 330.0;
+/// 逻辑尺寸上界：snap_* 命令与 settings 的贴纸几何（W-17）共用，防 f64→i32 回绕/异常大值
+/// （settings.json 被手改坏）经 set_size 设出极端窗口。与前端 windowState.ts 的 SIZE_MAX 一致。
+pub(crate) const SIZE_MAX_LOGICAL: f64 = 20000.0;
 
 /// 矩形（物理像素），用于吸边判定的纯计算。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -62,6 +67,35 @@ pub fn intersection_area(a: Rect, b: Rect) -> i64 {
         0
     } else {
         w as i64 * h as i64
+    }
+}
+
+/// 各显示器工作区的并集包围盒（物理像素）；空列表返回 None。纯函数，便于单测。
+pub fn union_bbox(works: &[Rect]) -> Option<Rect> {
+    let mut it = works.iter();
+    let mut acc = *it.next()?;
+    for w in it {
+        let x1 = acc.x.min(w.x);
+        let y1 = acc.y.min(w.y);
+        let x2 = (acc.x + acc.w).max(w.x + w.w);
+        let y2 = (acc.y + acc.h).max(w.y + w.h);
+        acc = Rect {
+            x: x1,
+            y: y1,
+            w: x2 - x1,
+            h: y2 - y1,
+        };
+    }
+    Some(acc)
+}
+
+/// 拖拽钳位的目标工作区（W-16）：取与窗口**相交面积最大**的显示器工作区——并集包围盒
+/// 在非矩形排布下留有「死区」，往包围盒钳会把窗口留在死区里整块消失。与所有屏均无交集
+/// （拖拽连续移动不可能到达，分辨率瞬变的兜底）时退回并集包围盒。纯函数，便于单测。
+pub fn clamp_target_for_drag(win: Rect, works: &[Rect]) -> Option<Rect> {
+    match works.iter().max_by_key(|w| intersection_area(win, **w)) {
+        Some(best) if intersection_area(win, *best) > 0 => Some(*best),
+        _ => union_bbox(works),
     }
 }
 
@@ -142,7 +176,7 @@ pub(crate) fn pull_on_screen(window: &tauri::WebviewWindow, force: bool) {
 }
 
 /// snap-changed 事件负载：当前检测到的吸附边（None 表示不贴边）。
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct SnapPayload {
     pub edge: Option<Edge>,
@@ -242,6 +276,12 @@ pub(crate) fn center_on(
     )
 }
 
+/// 缩略条主轴物理长度钳制：至少 1px，至多工作区主轴长度（W-5：超出部分会被屏幕裁掉，
+/// 前端的「+N」徽章是主防线，这里是后端安全网）。纯函数，便于单测。
+pub(crate) fn clamp_strip_extent(ext: i32, work_axis: i32) -> i32 {
+    ext.clamp(1, work_axis.max(1))
+}
+
 /// 折叠成缩略条：贴到指定边，左/右为竖条、顶为横条。交叉轴以原窗口中心对齐
 /// （吸顶=水平居中，吸左/右=垂直居中）。`extent` 是沿条主轴的逻辑长度，由前端按内容给出。
 #[tauri::command]
@@ -250,7 +290,7 @@ pub(crate) fn snap_collapse(
     edge: Edge,
     extent: f64,
 ) -> Result<(), String> {
-    let extent = extent.clamp(1.0, 20000.0); // 钳上界，防 *scale 后 f64→i32 回绕
+    let extent = extent.clamp(1.0, SIZE_MAX_LOGICAL); // 钳上界，防 *scale 后 f64→i32 回绕
     let m = window_monitor(&window)?;
     let wa = m.work_area();
     let scale = m.scale_factor();
@@ -260,11 +300,14 @@ pub(crate) fn snap_collapse(
     let sz = window.outer_size().map_err(|e| e.to_string())?;
     let (cur_w, cur_h) = (sz.width as i32, sz.height as i32);
     let (ww, wh) = (wa.size.width as i32, wa.size.height as i32);
-    // (min_w, min_h, w, h, x, y)
-    let (min_w, min_h, w, h, x, y) = match edge {
+    // W-5：主轴长度钳到工作区内，超出部分会被屏幕无声裁掉（前端另有 +N 徽章提示溢出）。
+    let ext = clamp_strip_extent(ext, match edge {
+        Edge::Left | Edge::Right => wh,
+        Edge::Top => ww,
+    });
+    // (w, h, x, y)
+    let (w, h, x, y) = match edge {
         Edge::Left => (
-            strip,
-            0,
             strip,
             ext,
             wa.position.x,
@@ -272,25 +315,22 @@ pub(crate) fn snap_collapse(
         ),
         Edge::Right => (
             strip,
-            0,
-            strip,
             ext,
             wa.position.x + ww - strip,
             center_on(pos.y, cur_h, ext, wa.position.y, wh),
         ),
         Edge::Top => (
-            0,
-            strip,
             ext,
             strip,
             center_on(pos.x, cur_w, ext, wa.position.x, ww),
             wa.position.y,
         ),
     };
-    // 放开最小宽高限制（tauri.conf 配了 minWidth=360/minHeight=240），否则缩不到缩略条尺寸。
-    window
-        .set_min_size(Some(tauri::PhysicalSize::new(min_w as u32, min_h as u32)))
-        .map_err(|e| e.to_string())?;
+    // W-17：折叠态禁缩放（而非放开 min_size）。min_size 恒为正常态最小值——放开它，拖角能把
+    // 吸附态窗口缩成细条，该尺寸一旦被记为「正常尺寸」即毒化启动还原基准（实测 {80,240}/{136,20}）。
+    // 程序内 set_size 走 SetWindowPos，不受 WM_GETMINMAXINFO 的 min tracking 约束（那只管
+    // 用户交互缩放），细条尺寸照常设得进去。
+    window.set_resizable(false).map_err(|e| e.to_string())?;
     window
         .set_size(tauri::PhysicalSize::new(w as u32, h as u32))
         .map_err(|e| e.to_string())?;
@@ -310,7 +350,10 @@ pub(crate) fn snap_expand(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    let (width, height) = (width.clamp(1.0, 20000.0), height.clamp(1.0, 20000.0)); // 钳上界防回绕
+    let (width, height) = (
+        width.clamp(1.0, SIZE_MAX_LOGICAL),
+        height.clamp(1.0, SIZE_MAX_LOGICAL),
+    ); // 钳上界防回绕
     let m = window_monitor(&window)?;
     let wa = m.work_area();
     let scale = m.scale_factor();
@@ -335,7 +378,8 @@ pub(crate) fn snap_expand(
             wa.position.y,
         ),
     };
-    // 恢复正常最小尺寸（与 tauri.conf minWidth/minHeight 一致）再展开，就地放大到贴边位置。
+    // 恢复缩放能力与正常最小尺寸（与 tauri.conf minWidth/minHeight 一致）再展开，就地放大到贴边位置。
+    window.set_resizable(true).map_err(|e| e.to_string())?;
     window
         .set_min_size(Some(tauri::LogicalSize::new(STICKER_MIN_W, STICKER_MIN_H)))
         .map_err(|e| e.to_string())?;
@@ -357,9 +401,13 @@ pub(crate) fn snap_restore(
     height: f64,
     pinned: bool,
 ) -> Result<(), String> {
-    // 与 snap_collapse/snap_expand 一致地钳制上界，防异常大值(localStorage 被改坏)经 set_size 设出极端窗口。
-    let (width, height) = (width.clamp(1.0, 20000.0), height.clamp(1.0, 20000.0));
-    // 恢复正常最小尺寸限制，再设回记住的宽高，置顶还原为用户的 pin 偏好。
+    // 与 snap_collapse/snap_expand 一致地钳制上界，防异常大值(settings.json 被改坏)经 set_size 设出极端窗口。
+    let (width, height) = (
+        width.clamp(1.0, SIZE_MAX_LOGICAL),
+        height.clamp(1.0, SIZE_MAX_LOGICAL),
+    );
+    // 恢复缩放能力与正常最小尺寸限制，再设回记住的宽高，置顶还原为用户的 pin 偏好。
+    window.set_resizable(true).map_err(|e| e.to_string())?;
     window
         .set_min_size(Some(tauri::LogicalSize::new(STICKER_MIN_W, STICKER_MIN_H)))
         .map_err(|e| e.to_string())?;
@@ -374,10 +422,11 @@ pub(crate) fn snap_restore(
     Ok(())
 }
 
-/// 拖角缩放触发的「解除吸附」：保留用户当前拖出的尺寸/位置，只复位最小尺寸与置顶（按 pin 偏好）。
+/// 拖角缩放触发的「解除吸附」：保留用户当前拖出的尺寸/位置，只复位缩放能力/最小尺寸与置顶（按 pin 偏好）。
 /// 解除后窗口即普通浮动窗口，再拖到屏幕边缘仍会被吸附逻辑重新吸附。
 #[tauri::command]
 pub(crate) fn unsnap(window: tauri::WebviewWindow, pinned: bool) -> Result<(), String> {
+    window.set_resizable(true).map_err(|e| e.to_string())?;
     window
         .set_min_size(Some(tauri::LogicalSize::new(STICKER_MIN_W, STICKER_MIN_H)))
         .map_err(|e| e.to_string())?;

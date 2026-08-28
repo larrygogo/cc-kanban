@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { installAgent, type AgentId, type InstallDone } from "../api";
+import { cancelInstall, installAgent, type AgentId, type InstallDone } from "../api";
 import { useTauriEvent } from "./useTauriEvent";
 
 export type InstallOperationState =
@@ -23,8 +23,17 @@ export function useInstallOperations(onDone?: (event: InstallDone) => void) {
   const installingRef = useRef<Set<AgentId>>(new Set());
 
   useTauriEvent<InstallDone>("install-done", (event) => {
-    const { provider, ok, logPath } = event.payload;
+    const { provider, ok, logPath, cancelled } = event.payload;
     installingRef.current.delete(provider);
+    // 用户主动取消：回到可重新安装的初始态，不当失败展示（S-8）。
+    if (cancelled) {
+      setStates((current) => {
+        const next = new Map(current);
+        next.delete(provider);
+        return next;
+      });
+      return;
+    }
     setStates((current) => new Map(current).set(provider, { phase: "done", ok, logPath }));
     onDone?.(event.payload);
   });
@@ -39,9 +48,25 @@ export function useInstallOperations(onDone?: (event: InstallDone) => void) {
     });
   };
 
+  /** 取消安装：后端会补发 cancelled 的 install-done 清状态；无进行中安装时后端空操作，
+   *  本地清态兜底（句柄已被收尾线程摘走的竞态），绝不让卡片卡在安装中。 */
+  const cancel = (provider: AgentId) => {
+    cancelInstall(provider)
+      .catch(() => {})
+      .finally(() => {
+        installingRef.current.delete(provider);
+        setStates((current) => {
+          const next = new Map(current);
+          next.delete(provider);
+          return next;
+        });
+      });
+  };
+
   return {
     states,
     start,
+    cancel,
     isInstalling: (provider: AgentId) => installingRef.current.has(provider),
   };
 }

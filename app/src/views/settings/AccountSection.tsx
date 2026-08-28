@@ -24,6 +24,7 @@ import {
   apiKeyLogin,
   agentPathGap,
   addAgentToUserPath,
+  openInstallLog,
   type ProviderAccountPayload,
   type ProviderUsage,
   type UsageLane,
@@ -144,7 +145,7 @@ function UsageBar({ lane, label }: { lane: UsageLane; label: string }) {
 
 // 单个 provider 卡片：安装/登录/用量三态。已装且登录 = 现有账号信息 + 用量泳道 + 刷新按钮 + 贴纸显示开关；
 // 已装未登录 = 提示语；未装 = 一键安装按钮。
-function ProviderCard({ provider, name, installed, supportsAccount, supportsApiKeyLogin, supportsProfiles, supportsContext, relay, payload, usage, err, onRefresh, installOp, onStartInstall, onLoggedIn, loginState, onStartLogin, onCancelLogin, refreshing, settings, patchSettings, onToggleQuota, usageRefreshedAt }: {
+function ProviderCard({ provider, name, installed, supportsAccount, supportsApiKeyLogin, supportsProfiles, supportsContext, relay, payload, usage, err, onRefresh, installOp, onStartInstall, onCancelInstall, onLoggedIn, loginState, onStartLogin, onCancelLogin, refreshing, settings, patchSettings, onToggleQuota, usageRefreshedAt }: {
   provider: AgentId;
   /** 展示名，来自后端 list_agents()（产品名，不翻译）。 */
   name: string;
@@ -180,6 +181,8 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
   installOp: InstallOperationState | undefined;
   /** 发起后台安装（状态机在页面级）。 */
   onStartInstall: () => void;
+  /** 取消进行中的安装（S-8：安装曾是不可中断的黑盒）。 */
+  onCancelInstall: () => void;
   /** 登录成功后重查账号（令卡片转「已登录」并显示身份/用量）。 */
   onLoggedIn: () => void;
   /** 页面级登录状态；切换 provider 导致卡片重挂载时仍会保留。 */
@@ -212,6 +215,13 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
         : "idle";
   // 安装失败时的日志落点（后端把脚本输出重定向到该文件）。只展示路径，不透传英文原文。
   const installLog = installOp?.phase === "done" ? installOp.logPath : null;
+  // 「打开安装日志」的失败就地提示（S-8：日志路径从纯文本改可点按钮）。
+  const [logOpenMsg, setLogOpenMsg] = useState<string | null>(null);
+  const openLog = () => {
+    setLogOpenMsg(null);
+    openInstallLog(provider)
+      .catch((e) => setLogOpenMsg(t.account.installLogOpenFailed(formatBackendError(e, t.locale))));
+  };
   // 后端在**跑脚本之前**就失败时的诊断（如引导脚本被 Cloudflare 人机校验拦截）。这是我们自己写的
   // 中文诊断，不是脚本的英文输出，故直接展示——此时还没有日志文件，不给这句话用户就一点线索都没有。
   const installMsg = installOp?.phase === "error" ? installOp.message : null;
@@ -225,8 +235,18 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
   const [repairingHooks, setRepairingHooks] = useState(false);
   const [repairMsg, setRepairMsg] = useState<string | null>(null);
   const loginBusy = loginState?.phase === "pending";
+  // 登录窗口开在哪个终端由后端按 settings.resume_terminal 决定（install.rs login_agent）。
+  // pending 文案必须说清「窗口在哪、最多等多久」——一句裸「等待登录…」让人干等没抓手。
+  const loginTermLabels: Record<string, string> = {
+    terminal: "Terminal", iterm: "iTerm2", ghostty: "Ghostty",
+    wt: "Windows Terminal", wezterm: "WezTerm", powershell: "PowerShell",
+    cmd: t.settings.cmdPrompt,
+  };
+  const loginTerm = settings?.resume_terminal ? loginTermLabels[settings.resume_terminal] ?? null : null;
   const loginMsg = loginState?.phase === "pending"
-    ? t.account.loggingIn
+    ? loginTerm
+      ? t.account.loginWaiting(loginTerm)
+      : t.account.loggingIn
     : loginState?.phase === "error"
       ? loginState.action === "start" ? t.account.loginFailed : t.account.loginCancelled
       : loginState?.phase === "done" && loginState.outcome !== "success"
@@ -432,9 +452,9 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
             )}
             {statusBadge && <span className={"provider-badge" + (installed === false ? " provider-badge-off" : "")}>{statusBadge}</span>}
           </div>
-          {/* 账号信息紧贴标题下方。邮箱可能很长，单行省略；title 属性兜住完整值。 */}
+          {/* 账号信息紧贴标题下方。邮箱可能很长，单行省略；data-tip 兜住完整值。 */}
           {desc && (
-            <div className="provider-card-desc" title={desc} data-testid={"agent-desc-" + provider}>
+            <div className="provider-card-desc" data-tip={desc} data-testid={"agent-desc-" + provider}>
               {desc}
             </div>
           )}
@@ -447,6 +467,16 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
               <span className="agent-install-step">
                 {installElapsed >= 5 ? t.account.installingFor(installElapsed) : t.account.installing}
               </span>
+              {/* 取消安装（S-8）：不可中断的黑盒必须给出口。后端杀脚本进程树/丢弃直下结果，
+                  cancelled 的 install-done 到达后卡片回到「安装」按钮。 */}
+              <button
+                type="button"
+                className="provider-card-action"
+                data-testid={"agent-install-cancel-" + provider}
+                onClick={onCancelInstall}
+              >
+                {t.account.cancelInstall}
+              </button>
             </div>
           ) : (
             <button
@@ -470,7 +500,7 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
             // 等待中不再是死按钮：终端可能已被关掉（用户手动关/崩溃），而后端只轮询账号文件，
             // 要 5 分钟才超时。点它即取消等待，立刻落回可点状态。
             onClick={loginBusy ? cancelLoginWait : startLogin}
-            title={loginBusy ? t.account.cancelLogin : undefined}
+            data-tip={loginBusy ? t.account.cancelLogin : undefined}
           >
             {loginBusy ? t.account.cancelLogin : t.account.login}
           </button>
@@ -508,6 +538,8 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
             data-testid={"agent-repair-hooks-" + provider}
             onClick={repairHooks}
             disabled={repairingHooks}
+            // S-8：按钮凭空出现零解释——tooltip 说清它做什么、何时需要点。
+            data-tip={t.newSession.repairHooksTip}
           >
             {repairingHooks ? t.newSession.repairingHooks : t.newSession.repairHooks}
           </button>
@@ -577,7 +609,17 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
           {installMsg ?? t.account.installFailed}
           {installLog && (
             <div className="agent-install-log" data-testid={"agent-install-log-" + provider}>
-              {t.account.installLogHint(installLog)}
+              {/* 可点按钮打开日志（S-8：纯文本路径没法点）；完整路径进 tooltip。 */}
+              <button
+                type="button"
+                className="agent-path-gap-btn"
+                data-testid={"agent-open-log-" + provider}
+                data-tip={installLog}
+                onClick={openLog}
+              >
+                {t.account.installLogOpen}
+              </button>
+              {logOpenMsg && <span className="agent-path-gap-text">{logOpenMsg}</span>}
             </div>
           )}
         </div>
@@ -590,7 +632,7 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
         <div
           className="provider-card-body agent-path-gap"
           data-testid={"agent-path-gap-" + provider}
-          title={t.account.pathGapDetail(pathGapDir)}
+          data-tip={t.account.pathGapDetail(pathGapDir)}
         >
           <span className="agent-path-gap-text">{t.account.pathGap}</span>
           <button
@@ -773,6 +815,8 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
     const yes = await appConfirm(t.account.deleteProfileConfirm(label), {
       title: t.account.deleteProfile,
       danger: true,
+      // 主按钮说清后果（S-14）：不可逆操作不给通用「确定」。
+      confirmLabel: t.account.deleteProfile,
     });
     if (!yes) return;
     run(() => deleteProfile(provider, p.id!));
@@ -790,6 +834,7 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
     const yes = await appConfirm(t.account.mergeProfileConfirm(label), {
       title: t.account.mergeProfile,
       danger: true,
+      confirmLabel: t.account.mergeProfile,
     });
     if (!yes) return;
     run(() => mergeProfileIntoDefault(provider, p.id!));
@@ -874,7 +919,7 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
             <button
               type="button"
               className="profile-row-main"
-              title={t.account.switchProfile}
+              data-tip={t.account.switchProfile}
               disabled={busy || p.active}
               onClick={() => run(() => setActiveProfile(provider, p.id))}
             >
@@ -886,7 +931,7 @@ function ProfileList({ provider, onChanged, loginState, onStartLogin, onCancelLo
                   <span className="profile-badge profile-badge-plan">{p.account.plan}</span>
                 )}
               </span>
-              <span className="profile-desc" title={desc}>
+              <span className="profile-desc" data-tip={desc}>
                 {desc}
               </span>
             </button>
@@ -1220,6 +1265,7 @@ export function AccountSection() {
         onRefresh={() => doRefresh(cur.id)}
         installOp={installOperations.states.get(cur.id)}
         onStartInstall={() => installOperations.start(cur.id)}
+        onCancelInstall={() => installOperations.cancel(cur.id)}
         onLoggedIn={loadAccounts}
         loginState={loginOperations.states.get(cur.id)}
         onStartLogin={(profile) => loginOperations.start(cur.id, { profile })}

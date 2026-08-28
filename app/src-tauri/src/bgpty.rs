@@ -419,11 +419,15 @@ impl BgPtyRegistry {
             end_offset: end,
             exited: closed,
             exit_code,
+            // 旁路不解析流,失败尾部不可得(后台会话的退出原因走 daemon 通道,不在此)。
+            exit_tail: None,
             // 旁路不追踪对面 PTY 的尺寸,0 = 未知:前端不做隐藏态网格对齐。
             cols: 0,
             rows: 0,
             // 旁路不解析流,模式未知:前端不补基线。
             modes: Vec::new(),
+            // 旁路是 daemon 画面的单向镜子,不存在 Meowo 的外部 attach 视图。
+            external_viewers: false,
         })
     }
 

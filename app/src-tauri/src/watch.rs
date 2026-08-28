@@ -12,7 +12,7 @@ use crate::{agent_transcript, now_ms};
 use meowo_store::Store;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -231,6 +231,220 @@ pub(crate) fn run_db_watch_loop(
     }
 }
 
+// ── transcript 文件监听（C-14：对话页事件驱动刷新）──────────────────────────
+
+/// 对话页 transcript 推送事件名，负载是 [`meowo_protocol::ipc::ChatTranscriptEvent`]。
+pub(crate) const CHAT_TRANSCRIPT_EVENT: &str = "chat-transcript";
+
+/// 监听集合的重扫间隔：live 会话生灭后至迟这么久跟上（新会话 transcript 的首写也靠
+/// 重扫落入监听；间隙内的内容仍由对话页兜底轮询拿到）。对齐 liveness 的 5s。
+const TRANSCRIPT_RESCAN: Duration = Duration::from_secs(5);
+/// 事件去抖：agent 流式写盘是字节雨，trailing 静默 300ms 收一批；持续高频写入时
+/// 1s 总上限防事件饥饿（与 run_db_watch_loop 同一套论证）。
+const TRANSCRIPT_DEBOUNCE: Duration = Duration::from_millis(300);
+const TRANSCRIPT_MAX_WAIT: Duration = Duration::from_millis(1000);
+
+/// 当前应监听的 transcript 文件集合：目录 → (文件名 → 会话 id)。按目录聚合是因为
+/// notify 以目录为监听单位；同目录的多个会话文件共享一次 watch。
+fn desired_transcript_watches(
+    store: &Store,
+) -> std::collections::HashMap<PathBuf, std::collections::HashMap<String, i64>> {
+    let mut desired: std::collections::HashMap<PathBuf, std::collections::HashMap<String, i64>> =
+        std::collections::HashMap::new();
+    for row in store
+        .live_sessions(Some("all"), None, None, None, 1000)
+        .unwrap_or_default()
+    {
+        // 已结束的会话 transcript 不再写入；恢复会把 status 顶回 running，下轮重扫接管。
+        if row.session.status == "ended" {
+            continue;
+        }
+        let Some(spec) =
+            crate::agent_transcript(&row.provider).filter(|spec| spec.supports_chat())
+        else {
+            continue;
+        };
+        let Some(path) =
+            spec.resolve_transcript_path(None, row.cwd.as_deref(), &row.session.cc_session_id)
+        else {
+            continue;
+        };
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
+        else {
+            continue;
+        };
+        desired
+            .entry(dir.to_path_buf())
+            .or_default()
+            .insert(name.to_string(), row.session.id);
+    }
+    desired
+}
+
+/// 监听集合的增量 diff：返回（要卸载的目录，要新挂的目录）。纯函数，便于单测；
+/// 存活目录的文件映射由调用方整体替换（同目录内的文件增删不需要 re-watch）。
+fn plan_watch_diff(
+    current: &std::collections::HashMap<PathBuf, std::collections::HashMap<String, i64>>,
+    desired: &std::collections::HashMap<PathBuf, std::collections::HashMap<String, i64>>,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let unwatch = current
+        .keys()
+        .filter(|dir| !desired.contains_key(*dir))
+        .cloned()
+        .collect();
+    let watch = desired
+        .keys()
+        .filter(|dir| !current.contains_key(*dir))
+        .cloned()
+        .collect();
+    (unwatch, watch)
+}
+
+/// 把一条 notify 事件映射到受影响的会话 id。纯函数，便于单测。
+fn collect_transcript_hits(
+    ev: &notify::Event,
+    watched: &std::collections::HashMap<PathBuf, std::collections::HashMap<String, i64>>,
+    out: &mut HashSet<i64>,
+) {
+    for path in &ev.paths {
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
+        else {
+            continue;
+        };
+        if let Some(sid) = watched.get(dir).and_then(|files| files.get(name)) {
+            out.insert(*sid);
+        }
+    }
+}
+
+/// 监听所有 live 会话的 transcript 文件，写入时按会话直发 [`CHAT_TRANSCRIPT_EVENT`]
+/// （绕过 board 合流：负载按会话区分、消费方只有对话窗，不需要 board-changed 那层
+/// 合并）。这是 C-14 的真·push——外部终端会话没有 pty-output，这条是它的实时通道；
+/// 对话页的定时轮询自此降级为最终兜底。
+///
+/// 生命周期纪律与 db watcher 相同：watcher 建立失败/中途死亡都不放弃，稍后重建；
+/// 重建间隙漏掉的写入由对话页兜底轮询补回，无需补发。监听集合每 [`TRANSCRIPT_RESCAN`]
+/// 随 live 会话重算一次。
+pub(crate) fn spawn_transcript_watcher(app: tauri::AppHandle, db_path: PathBuf) {
+    std::thread::spawn(move || {
+        let mut watched: std::collections::HashMap<
+            PathBuf,
+            std::collections::HashMap<String, i64>,
+        > = std::collections::HashMap::new();
+        let mut watcher: Option<RecommendedWatcher> = None;
+        let mut rx: Option<std::sync::mpsc::Receiver<Result<notify::Event, notify::Error>>> =
+            None;
+        loop {
+            if watcher.is_none() {
+                let (tx, new_rx) = channel();
+                match notify::recommended_watcher(tx) {
+                    Ok(w) => {
+                        watcher = Some(w);
+                        rx = Some(new_rx);
+                        watched.clear(); // 旧 watcher 的监听随它一起死了，下面全量重挂
+                    }
+                    Err(_) => {
+                        std::thread::sleep(WATCH_RETRY);
+                        continue;
+                    }
+                }
+            }
+            // 重算目标集合并增量 apply（watcher 此刻必然 Some，上面刚保证）。
+            if let Ok(store) = Store::open(&db_path) {
+                let desired = desired_transcript_watches(&store);
+                if let Some(w) = watcher.as_mut() {
+                    let (to_unwatch, to_watch) = plan_watch_diff(&watched, &desired);
+                    for dir in &to_unwatch {
+                        let _ = w.unwatch(dir);
+                        watched.remove(dir);
+                    }
+                    for dir in &to_watch {
+                        // 挂不上的目录不记入 watched：下轮重扫自动重试。
+                        if w.watch(dir, RecursiveMode::NonRecursive).is_ok() {
+                            watched
+                                .insert(dir.clone(), desired.get(dir).cloned().unwrap_or_default());
+                        }
+                    }
+                    // 存活目录的文件映射整体替换（同目录内文件增删不需要 re-watch）。
+                    for (dir, files) in &desired {
+                        if watched.contains_key(dir) {
+                            watched.insert(dir.clone(), files.clone());
+                        }
+                    }
+                }
+            }
+            // 收事件直到下一个重扫点。false = 监听已死（通道断开/错误事件）→ 重建。
+            let deadline = Instant::now() + TRANSCRIPT_RESCAN;
+            let alive = match rx.as_ref() {
+                Some(rx) => pump_transcript_events(&app, rx, &watched, deadline),
+                None => {
+                    std::thread::sleep(TRANSCRIPT_RESCAN);
+                    true
+                }
+            };
+            if !alive {
+                watcher = None;
+                rx = None;
+                std::thread::sleep(WATCH_RETRY);
+            }
+        }
+    });
+}
+
+/// transcript watcher 的事件泵：收事件到 deadline（重扫点）。相关事件按会话去抖
+/// （trailing 静默 / 总上限，论证同 db watcher）后逐会话直发。返回 false = 监听已死。
+fn pump_transcript_events(
+    app: &tauri::AppHandle,
+    rx: &std::sync::mpsc::Receiver<Result<notify::Event, notify::Error>>,
+    watched: &std::collections::HashMap<PathBuf, std::collections::HashMap<String, i64>>,
+    deadline: Instant,
+) -> bool {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        let first = match rx.recv_timeout(remaining) {
+            Ok(first) => first,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return true,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+        };
+        let Ok(first) = first else { return false }; // notify 错误事件（目录被删等）→ 重建
+        let mut sids: HashSet<i64> = HashSet::new();
+        collect_transcript_hits(&first, watched, &mut sids);
+        // trailing 去抖：静默 TRANSCRIPT_DEBOUNCE 收一批，TRANSCRIPT_MAX_WAIT 封顶防饥饿。
+        let cap = Instant::now() + TRANSCRIPT_MAX_WAIT;
+        let mut broken = false;
+        loop {
+            let remaining = cap.min(deadline).saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match rx.recv_timeout(TRANSCRIPT_DEBOUNCE.min(remaining)) {
+                Ok(Ok(ev)) => collect_transcript_hits(&ev, watched, &mut sids),
+                Ok(Err(_)) => {
+                    broken = true;
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    broken = true;
+                    break;
+                }
+            }
+        }
+        for sid in sids {
+            let _ = app.emit(
+                CHAT_TRANSCRIPT_EVENT,
+                meowo_protocol::ipc::ChatTranscriptEvent { session_id: sid },
+            );
+        }
+        if broken {
+            return false;
+        }
+    }
+}
+
 /// 轮询一次：把「记录了 pid、但该进程已死」的 live 会话收尾为 ended（self-heal），
 /// 并返回仍存活的 session id（升序）与本轮收尾的数量。
 ///
@@ -279,35 +493,31 @@ pub(crate) fn should_notify(prev: Option<&str>, cur: Option<&str>) -> bool {
 }
 
 /// 待交互通知指纹:errored 或 has_pending 时不发(None,让位错误/待审批);
-/// status==waiting 且无错无 pending 时用 last_event_at 作指纹;其它状态 None。纯函数。
+/// status==waiting 且无错无 pending 时指纹恒为 "waiting";其它状态 None。纯函数。
 ///
-/// 该指纹能当去重键的前提是 store 层的不变量:Stop 置 waiting 后,迟到窗内的活动尾巴
-/// **不推进** last_event_at(见 store 的 ACTIVITY_TOUCH_SQL)——否则同一回合的
-/// 「等待你回复」会因指纹漂移弹两次。
-pub(crate) fn waiting_fingerprint(
-    errored: bool,
-    has_pending: bool,
-    status: &str,
-    last_event_at: i64,
-) -> Option<String> {
+/// 指纹只用状态本身,**不掺 last_event_at**(与 blocked 同一论证,见
+/// screen_blocked_fingerprint):waiting 期间任何事件时间戳的跳动(迟到的活动尾巴、
+/// 跨 provider 接替等)都会让掺了时间戳的指纹漂移,同一次等待反复弹通知。同一次等待
+/// 只发一条,status 离开 waiting 后条目被清掉,下一回合再等待才重新通知。
+pub(crate) fn waiting_fingerprint(errored: bool, has_pending: bool, status: &str) -> Option<String> {
     if errored || has_pending || status != "waiting" {
         None
     } else {
-        Some(last_event_at.to_string())
+        Some("waiting".to_string())
     }
 }
 
-/// 待审批通知指纹:errored 时 None(错误优先);pending 为 Some(kind) 时 "{kind}:{last_event_at}";
+/// 待审批通知指纹:errored 时 None(错误优先);pending 为 Some(kind) 时指纹即 kind 本身;
 /// 否则 None。纯函数,便于单测。
-pub(crate) fn pending_fingerprint(
-    errored: bool,
-    pending_review: Option<&str>,
-    last_event_at: i64,
-) -> Option<String> {
+///
+/// 与 waiting/blocked 同理不掺 last_event_at:同一条审批挂着的期间时间戳若因别的事件
+/// 跳动,掺了它会在同一条审批上反复弹。审批消失(pending_review 变 None)条目即清,
+/// 下一条新审批照常通知。
+pub(crate) fn pending_fingerprint(errored: bool, pending_review: Option<&str>) -> Option<String> {
     if errored {
         return None;
     }
-    pending_review.map(|kind| format!("{kind}:{last_event_at}"))
+    pending_review.map(str::to_string)
 }
 
 /// 用户此刻是否正盯着这个会话：对话窗**聚焦**，且它正停在该会话上。
@@ -345,6 +555,16 @@ pub(crate) enum NotifyKind {
     Waiting,
 }
 
+/// 审批类通知（待审批/屏幕阻塞）是否要「决策版」toast：Long 时长（~25s，默认 5s 一闪而过，
+/// 用户去倒杯水回来就只剩通知中心里一条无按钮条目）+「打开会话」按钮。与
+/// suppressed_by_viewing 的非对称同一论证：这两类是要人做决定的，做完之前入口不该消失。
+/// 纯函数，便于单测。仅 Windows 实现消费它（mac-notification-sys 不支持时长/按钮），
+/// 逻辑留在 cfg 外（与 terminal.rs resume_argv_for 同一纪律），非 Windows 平台豁免 dead_code。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn decision_toast(kind: NotifyKind) -> bool {
+    matches!(kind, NotifyKind::Pending | NotifyKind::Blocked)
+}
+
 /// 屏幕检测「blocked」的通知指纹——托管会话的 agent 在屏幕上挂着审批/提问 UI 等人。
 ///
 /// 存在意义是补 hook 的盲区：DB 的 `pending_review` 由 hook 事件驱动，bash 权限弹窗、
@@ -373,7 +593,7 @@ pub(crate) fn screen_blocked_fingerprint(
 /// on_activated 回调由 OS 经 COM 激活机制投递（与消息泵无关），show() 后 Rust 端 Toast
 /// 可安全释放（OS 持有通知引用）。app 仅 Windows。
 #[cfg(target_os = "windows")]
-// 参数数量超限（9 个）是现有设计需要；重构签名风险大，暂以 allow 豁免。
+// 参数数量超限（11 个）是现有设计需要；重构签名风险大，暂以 allow 豁免。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show_session_notification(
     app: &tauri::AppHandle,
@@ -385,8 +605,10 @@ pub(crate) fn show_session_notification(
     focus_cwd: Option<String>,
     focus_token: Option<String>,
     title_based: bool,
+    kind: NotifyKind,
+    lang: String,
 ) {
-    use tauri_winrt_notification::Toast;
+    use tauri_winrt_notification::{Duration as ToastDuration, Toast};
     // 安装版用 bundle identifier（解析到开始菜单快捷方式 → 显示 Meowo+图标 + 点击可激活）；
     // dev 下 AUMID 未注册，退回 PowerShell 的 AUMID 仅保证 toast 能弹出；此时 on_activated 回调
     // 根本不会触发（OS 把激活事件投递给 PowerShell 进程而非本进程），点击跳转只在安装版生效。
@@ -398,9 +620,16 @@ pub(crate) fn show_session_notification(
     let activate_app_id = app_id.clone();
     let click_app = app.clone();
     let _ = app.run_on_main_thread(move || {
-        let _ = Toast::new(&app_id)
-            .title(&title)
-            .text1(&body)
+        let mut toast = Toast::new(&app_id).title(&title).text1(&body);
+        // 审批类（待审批/屏幕阻塞）：Long 时长 + 「打开会话」按钮——要人做决定的通知
+        // 默认 5s 一闪而过，通知中心里的残留条目又没有入口。按钮与点正文的激活参数
+        // 都汇入同一个 on_activated 回调，落点逻辑无需区分。
+        if decision_toast(kind) {
+            toast = toast
+                .duration(ToastDuration::Long)
+                .add_button(crate::settings::tr(&lang, "notify.open"), "open-session");
+        }
+        let _ = toast
             .on_activated(move |_| {
                 // 点击后 toast 不会自动从"通知中心"消失（Windows 设计如此），主动清掉本应用
                 // 的历史通知。回调线程由 OS 经 COM 投递、已初始化 WinRT，可直接调 History。
@@ -474,7 +703,7 @@ fn clear_delivered_toasts(app_id: &str) {
 }
 
 #[cfg(target_os = "macos")]
-// 参数数量超限（9 个）是现有设计需要；重构签名风险大，暂以 allow 豁免。
+// 参数数量超限（11 个）是现有设计需要；重构签名风险大，暂以 allow 豁免。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show_session_notification(
     _app: &tauri::AppHandle,
@@ -486,6 +715,10 @@ pub(crate) fn show_session_notification(
     _focus_cwd: Option<String>,
     _focus_token: Option<String>,
     _title_based: bool,
+    // macOS 通知（macos/notify.rs，UNUserNotificationCenter）只投递标题+正文、无时长/按钮，
+    // 决策版 toast 仅 Windows（macOS 点击跳转已有）。
+    _kind: NotifyKind,
+    _lang: String,
 ) {
     crate::macos::notify::post(crate::macos::notify::NotifyJob {
         title,
@@ -496,7 +729,7 @@ pub(crate) fn show_session_notification(
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-// 参数数量超限（9 个）是现有设计需要；重构签名风险大，暂以 allow 豁免。
+// 参数数量超限（11 个）是现有设计需要；重构签名风险大，暂以 allow 豁免。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show_session_notification(
     _app: &tauri::AppHandle,
@@ -508,6 +741,8 @@ pub(crate) fn show_session_notification(
     _focus_cwd: Option<String>,
     _focus_token: Option<String>,
     _title_based: bool,
+    _kind: NotifyKind,
+    _lang: String,
 ) {
 }
 
@@ -665,7 +900,7 @@ pub(crate) fn spawn_liveness_watch(
                     if error.is_some()
                         || s.session.status == "waiting"
                         || s.pending_review.is_some()
-                        || screen_states.get(&s.session.id).copied() == Some("blocked")
+                        || screen_states.get(&s.session.id).is_some_and(|sight| sight.state == "blocked")
                     {
                         tray_waiting += 1;
                     } else if s.session.status == "running" {
@@ -697,6 +932,8 @@ pub(crate) fn spawn_liveness_watch(
                                 s.cwd.clone(),
                                 tab_token.clone(),
                                 title_based,
+                                NotifyKind::Error,
+                                lang.to_string(),
                             );
                         }
                         notified.insert(sid.clone(), e.fingerprint.clone());
@@ -705,11 +942,7 @@ pub(crate) fn spawn_liveness_watch(
                     }
 
                     // 待审批通知(错误之后、待交互之前;errored 时 pending_fingerprint 返回 None 自动让位)。
-                    match pending_fingerprint(
-                        error.is_some(),
-                        s.pending_review.as_deref(),
-                        s.session.last_event_at,
-                    ) {
+                    match pending_fingerprint(error.is_some(), s.pending_review.as_deref()) {
                         Some(fp) => {
                             let prev = notified_pending.get(&sid).map(|s| s.as_str());
                             let suppressed = suppressed_by_viewing(NotifyKind::Pending, viewing);
@@ -731,6 +964,8 @@ pub(crate) fn spawn_liveness_watch(
                                     s.cwd.clone(),
                                     tab_token.clone(),
                                     title_based,
+                                    NotifyKind::Pending,
+                                    lang.to_string(),
                                 );
                             }
                             // 启动首轮（seeded=false）不播种待审批指纹：pending 指纹不随时间推进，
@@ -752,7 +987,7 @@ pub(crate) fn spawn_liveness_watch(
                     match screen_blocked_fingerprint(
                         error.is_some(),
                         s.pending_review.is_some(),
-                        screen_states.get(&s.session.id).copied(),
+                        screen_states.get(&s.session.id).map(|sight| sight.state),
                     ) {
                         Some(fp) => {
                             let prev = notified_blocked.get(&sid).map(|s| s.as_str());
@@ -770,6 +1005,8 @@ pub(crate) fn spawn_liveness_watch(
                                     s.cwd.clone(),
                                     tab_token.clone(),
                                     title_based,
+                                    NotifyKind::Blocked,
+                                    lang.to_string(),
                                 );
                             }
                             // 与待审批同理：blocked 指纹恒为 "blocked"（刻意不掺时间戳），首轮播种
@@ -788,7 +1025,6 @@ pub(crate) fn spawn_liveness_watch(
                         error.is_some(),
                         s.pending_review.is_some(),
                         &s.session.status,
-                        s.session.last_event_at,
                     ) {
                         Some(fp) => {
                             let prev = notified_waiting.get(&sid).map(|s| s.as_str());
@@ -809,6 +1045,8 @@ pub(crate) fn spawn_liveness_watch(
                                     s.cwd.clone(),
                                     tab_token.clone(),
                                     title_based,
+                                    NotifyKind::Waiting,
+                                    lang.to_string(),
                                 );
                             }
                             // 被「正在看」抑制时不写指纹：抑制的前提「他就在屏幕前」只在此刻成立。
@@ -848,6 +1086,7 @@ pub(crate) fn spawn_liveness_watch(
                     last_tray = Some((tray_running, tray_waiting));
                 }
                 // Windows：把摘要写到托盘悬浮提示，鼠标移到托盘一眼可见，不必打开窗口。
+                // 图标本身不做角标——数字徽章/圆点两轮迭代都被实拍否掉，回到发布版原样。
                 #[cfg(target_os = "windows")]
                 if last_tray != Some((tray_running, tray_waiting)) {
                     update_tray_tooltip(&app, tray_running, tray_waiting, lang);
@@ -889,6 +1128,127 @@ pub(crate) fn spawn_first_import(app: tauri::AppHandle, db_path: PathBuf) {
             }
         }
     });
+}
+
+/// 首启历史导入的一次性提示（S-12）：导入结果存在、条数 > 0、且尚未提示过时返回条数，
+/// 并落 `import-noticed.json` 标记——只提示一次。noticed 标记写失败也照常返回：
+/// 最坏是下次启动多提示一次，比「该提示却没提示」好。
+pub(crate) fn take_first_import_notice(dir: &Path) -> Option<u32> {
+    let noticed = dir.join("import-noticed.json");
+    if noticed.exists() {
+        return None;
+    }
+    let body = std::fs::read_to_string(dir.join("imported.json")).ok()?;
+    let count = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()?
+        .get("imported")?
+        .as_u64()?;
+    if count == 0 {
+        return None;
+    }
+    let _ = std::fs::write(&noticed, &body);
+    Some(count as u32)
+}
+
+#[cfg(test)]
+mod first_import_notice_tests {
+    use super::take_first_import_notice;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("meowo-import-notice-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 有导入结果 → 恰好提示一次（取走后落 noticed 标记，再取为 None）。
+    #[test]
+    fn notice_is_returned_exactly_once() {
+        let dir = temp_dir("once");
+        std::fs::write(dir.join("imported.json"), r#"{"imported":3,"at":1}"#).unwrap();
+        assert_eq!(take_first_import_notice(&dir), Some(3));
+        assert_eq!(take_first_import_notice(&dir), None, "第二次必须不再提示");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 导入 0 条 / 没有导入结果文件 → 不提示（没什么好说的）。
+    #[test]
+    fn zero_or_missing_import_is_silent() {
+        let dir = temp_dir("zero");
+        assert_eq!(take_first_import_notice(&dir), None);
+        std::fs::write(dir.join("imported.json"), r#"{"imported":0,"at":1}"#).unwrap();
+        assert_eq!(take_first_import_notice(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod decision_toast_tests {
+    use super::{decision_toast, NotifyKind};
+
+    /// 仅审批类（待审批/屏幕阻塞）用决策版 toast（Long 时长 + 「打开会话」按钮）；
+    /// 错误/等待维持默认短时长——错误有卡片红态常驻，等待是完成信号不需要决策入口。
+    #[test]
+    fn only_approval_kinds_get_decision_toast() {
+        assert!(decision_toast(NotifyKind::Pending));
+        assert!(decision_toast(NotifyKind::Blocked));
+        assert!(!decision_toast(NotifyKind::Error));
+        assert!(!decision_toast(NotifyKind::Waiting));
+    }
+}
+
+#[cfg(test)]
+mod transcript_watch_tests {
+    use super::{collect_transcript_hits, plan_watch_diff};
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
+
+    fn watched(entries: &[(&str, &str, i64)]) -> HashMap<PathBuf, HashMap<String, i64>> {
+        let mut map: HashMap<PathBuf, HashMap<String, i64>> = HashMap::new();
+        for (dir, name, sid) in entries {
+            map.entry(PathBuf::from(dir))
+                .or_default()
+                .insert(name.to_string(), *sid);
+        }
+        map
+    }
+
+    /// diff 只产出目录级增删：消失的目录卸载、新来的目录挂上，存活目录不在其中
+    /// （它的文件映射由调用方整体替换，无需 re-watch）。
+    #[test]
+    fn watch_diff_is_dir_level_add_and_remove_only() {
+        let current = watched(&[("/a", "s1.jsonl", 1), ("/b", "s2.jsonl", 2)]);
+        let desired = watched(&[("/b", "s2.jsonl", 2), ("/c", "s3.jsonl", 3)]);
+        let (unwatch, watch) = plan_watch_diff(&current, &desired);
+        assert_eq!(unwatch, vec![PathBuf::from("/a")]);
+        assert_eq!(watch, vec![PathBuf::from("/c")]);
+    }
+
+    /// 同目录文件映射变化（会话生灭但目录不变）不产生目录级 diff。
+    #[test]
+    fn same_dir_file_changes_need_no_rewatch() {
+        let current = watched(&[("/a", "s1.jsonl", 1)]);
+        let desired = watched(&[("/a", "s2.jsonl", 2)]);
+        let (unwatch, watch) = plan_watch_diff(&current, &desired);
+        assert!(unwatch.is_empty() && watch.is_empty());
+    }
+
+    /// 事件按（目录, 文件名）精确映射到会话：无关文件、同目录其他文件、
+    /// 无父目录的路径都不命中；一条事件可命中多个会话文件。
+    #[test]
+    fn event_maps_to_exact_session_files() {
+        let watched = watched(&[("/a", "s1.jsonl", 1), ("/a", "s2.jsonl", 2)]);
+        let ev = notify::Event::new(notify::event::EventKind::Modify(
+            notify::event::ModifyKind::Data(notify::event::DataChange::Content),
+        ))
+        .add_path(PathBuf::from("/a/s1.jsonl"))
+        .add_path(PathBuf::from("/a/s2.jsonl"))
+        .add_path(PathBuf::from("/a/other.jsonl"))
+        .add_path(PathBuf::from("/elsewhere/s1.jsonl"));
+        let mut out: HashSet<i64> = HashSet::new();
+        collect_transcript_hits(&ev, &watched, &mut out);
+        assert_eq!(out, [1, 2].into_iter().collect());
+    }
 }
 
 #[cfg(test)]

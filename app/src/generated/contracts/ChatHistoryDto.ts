@@ -48,6 +48,12 @@ archived: boolean,
  */
 todos: Array<TodoDto>, hasMore: boolean, 
 /**
+ * 当前已加载窗口首行在 transcript 里的字节偏移：「加载更早」向上翻页的上界
+ * （作为 get_chat_history 的 before 参数带回）。只在整读（首读/reset）与翻页
+ * 响应里有意义，增量轮询响应恒为 0，前端不采信。
+ */
+earliest: number, 
+/**
  * hook 驱动的最近往来（UserPromptSubmit / Stop 落库），与 transcript 解析无关。
  * items 为空（transcript 未落盘/未定位）或该 agent 不提供结构化 transcript 时，
  * 前端用它们渲染临时时间线——「会话已在工作」不该显示成一片空白。

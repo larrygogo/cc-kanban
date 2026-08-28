@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 import { Updater } from "./Updater";
 import { zh } from "../i18n/zh";
 
@@ -7,6 +7,7 @@ import { zh } from "../i18n/zh";
 const mocks = vi.hoisted(() => ({
   checkImpl: undefined as undefined | (() => Promise<unknown>),
   downloadImpl: async (): Promise<"downloading" | "ready"> => "ready",
+  cancelImpl: vi.fn(async () => {}),
   installImpl: async () => {},
   listeners: {} as Record<string, ((e: { payload: unknown }) => void) | undefined>,
 }));
@@ -14,6 +15,7 @@ vi.mock("../api", async (original) => ({
   ...(await original<typeof import("../api")>()),
   checkUpdate: () => mocks.checkImpl?.(),
   downloadUpdate: () => mocks.downloadImpl(),
+  cancelUpdateDownload: () => mocks.cancelImpl(),
   installDownloadedUpdate: () => mocks.installImpl(),
 }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -28,6 +30,7 @@ afterEach(() => {
   cleanup();
   mocks.checkImpl = undefined;
   mocks.downloadImpl = async () => "ready";
+  mocks.cancelImpl.mockReset();
   mocks.installImpl = async () => {};
   mocks.listeners = {};
 });
@@ -98,6 +101,19 @@ describe("Updater", () => {
     fireEvent.click(await screen.findByText(zh.updater.download));
     expect(await screen.findByText(zh.updater.downloading)).toBeTruthy();
     expect(container.querySelector(".up-prog-indet")).toBeTruthy();
+  });
+
+  it("下载中可取消：调后端取消，收到取消事件后回到可重新下载状态（S-13）", async () => {
+    mocks.checkImpl = async () => mkUpdate();
+    mocks.downloadImpl = async () => await new Promise<"downloading" | "ready">(() => {}); // 停在下载态
+    render(<Updater />);
+    fireEvent.click(await screen.findByText(zh.updater.download));
+    const cancel = await screen.findByText(zh.updater.cancelDownload);
+    fireEvent.click(cancel);
+    await waitFor(() => expect(mocks.cancelImpl).toHaveBeenCalledTimes(1));
+    // 后端广播取消事件 → 回到「发现新版本」，可重新下载
+    act(() => mocks.listeners["update-download-cancelled"]?.({ payload: null }));
+    expect(await screen.findByText(zh.updater.download)).toBeTruthy();
   });
 
   it("后台下载完成后显示重启更新按钮", async () => {

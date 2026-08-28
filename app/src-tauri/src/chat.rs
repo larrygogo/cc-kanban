@@ -98,14 +98,6 @@ impl ChatMtimes {
 /// Far more than one screen, while keeping first-open IPC and DOM work bounded.
 const FIRST_PAGE_ITEMS: usize = 200;
 
-fn trim_first_page<T>(items: &mut Vec<T>, full: bool, full_read: bool) -> bool {
-    if full || !full_read || items.len() <= FIRST_PAGE_ITEMS {
-        return false;
-    }
-    items.drain(..items.len() - FIRST_PAGE_ITEMS);
-    true
-}
-
 /// 存活信号,带进 [`load_chat_history`]:进程表快照(TTL 缓存,与看板共享)加该会话的
 /// 托管 PTY 活性——hook 未认领 pid / 事件宽限过期时的存活兜底,与看板同口径。
 /// owned:采样发生在 spawn_blocking 闭包内,持有权直接随值走,不做生命周期穿针。
@@ -121,9 +113,18 @@ struct LiveSignals {
 }
 
 /// errored 的重采样间隔:transcript 分析走共享 mtime 缓存,但 agent 流式输出期间文件
-/// 每轮都在变,650ms 全采样等于对同一批新增字节做两遍解析(分析器 + 聊天增量各一遍),
-/// 且解析在与侧栏共享的缓存锁内。错误徽标容忍 ~5s 延迟,换掉 8 倍的重复解析。
+/// 每轮都在变,每轮全采样等于对同一批新增字节做两遍解析(分析器 + 聊天增量各一遍),
+/// 且解析在与侧栏共享的缓存锁内。错误徽标容忍 ~5s 延迟,换掉数倍的重复解析。
 const ERRORED_SAMPLE_MS: i64 = 5_000;
+
+/// get_chat_history 的读取请求：尾部增量记账（offset）、整段读取（full，仅接续段历史等
+/// 静态内容用）、向上翻页的上界（before = 当前已加载窗口首行的字节偏移）。
+#[derive(Default, Clone, Copy)]
+struct ChatRead {
+    offset: u64,
+    full: bool,
+    before: Option<u64>,
+}
 
 fn load_chat_history(
     db_path: &Path,
@@ -131,9 +132,9 @@ fn load_chat_history(
     tx_cache: &Mutex<meowo_agent::TranscriptCache>,
     live: LiveSignals,
     session_id: i64,
-    offset: u64,
-    full: bool,
+    read: ChatRead,
 ) -> Result<ChatHistory, String> {
+    let ChatRead { offset, full, before } = read;
     let prev = chat_mtimes
         .lock()
         .ok()
@@ -197,6 +198,7 @@ fn load_chat_history(
             })
             .unwrap_or_default(),
         has_more: false,
+        earliest: 0,
         errored: false,
         pty_managed: live.pty_live,
         // 托管 PTY 在跑的会话绝不算后台：resume 后 claude 的新旧运行时索引会短暂并存
@@ -215,7 +217,7 @@ fn load_chat_history(
         superseded_by: header.superseded_by,
     };
     // errored 与侧栏/贴纸走同一入口(session_query::analyze_transcript,同口径由代码保证)。
-    // 5s 节流:agent 流式输出期间 transcript 每轮都在变,650ms 全采样会对同一批新增字节
+    // 5s 节流:agent 流式输出期间 transcript 每轮都在变,每轮全采样会对同一批新增字节
     // 做两遍解析(分析器 + 下面的聊天增量各一遍)且解析持共享缓存锁;错误徽标容忍 ~5s 延迟。
     {
         let now_ms = super::now_ms();
@@ -254,6 +256,17 @@ fn load_chat_history(
         history.reset = offset > 0;
         return Ok(history);
     };
+    // 「加载更早」向上翻页：before = 当前已加载窗口的首行字节（首读/上一屏响应里的
+    // earliest）。只解析 [0, before) 这一段并取其尾部一屏，长会话反复上翻不再是
+    // 整文件重读 × 页数。尾部增量的记账（offset/mtime）不在这条路径上动，轮询不受影响。
+    if let Some(end) = before {
+        if let Some(window) = meowo_agent::read_chat_window(spec, &path, end, FIRST_PAGE_ITEMS) {
+            history.items = window.items;
+            history.has_more = window.has_more;
+            history.earliest = window.start;
+        }
+        return Ok(history);
+    }
     // 路径切换(跨 profile 恢复后解析到另一个数据目录里的延续文件):前端的字节偏移
     // 是对旧文件的记账,对新文件无意义——从头重读并向前端标记 reset,清空重灌。
     let path_changed = prev.as_ref().is_some_and(|entry| entry.path != path);
@@ -262,7 +275,13 @@ fn load_chat_history(
     } else {
         (offset, prev_mtime)
     };
-    let mut delta = meowo_agent::read_chat_delta(spec, &path, base_offset, base_mtime);
+    let mut delta = meowo_agent::read_chat_delta_paged(
+        spec,
+        &path,
+        base_offset,
+        base_mtime,
+        if full { 0 } else { FIRST_PAGE_ITEMS },
+    );
     if path_changed && offset > 0 {
         delta.reset = true;
     }
@@ -279,8 +298,13 @@ fn load_chat_history(
             value: mode.value,
         })
         .collect();
-    let mut items = delta.items;
-    history.has_more = trim_first_page(&mut items, full, offset == 0 || delta.reset);
+    let items = delta.items;
+    // hasMore/earliest 只在整读（首读或 reset 重读）里有意义：首屏被裁成尾部一屏时，
+    // start 指向保留窗口的首行字节（>0 = 前面还有更早历史），它就是向上翻页的上界。
+    // 增量响应里这两字段前端不采信（earliest 恒置 0 防误用）。
+    let full_read = offset == 0 || delta.reset;
+    history.has_more = full_read && delta.start > 0;
+    history.earliest = if full_read { delta.start } else { 0 };
     history.items = items;
     Ok(history)
 }
@@ -288,7 +312,7 @@ fn load_chat_history(
 /// 读取一次子任务委派的完整时间线（用户在对话页展开时按需调用）。
 ///
 /// 不走 [`load_chat_history`] 的增量路径：侧车流是已经写完的独立文件，整读一次即可，
-/// 也不该让 650ms 的历史轮询顺带承担它的成本。
+/// 也不该让历史轮询顺带承担它的成本。
 fn load_subagent_transcript(
     db_path: &Path,
     session_id: i64,
@@ -319,7 +343,7 @@ fn load_subagent_transcript(
 /// （实拍：4 个 explore 里 1 个已完成，面板仍是 0/4，四行耗时全按委派时刻起算）。
 /// 侧车流自己带着终结标记，这里逐条读它的尾部补齐。
 ///
-/// 与 [`load_subagent_transcript`] 同样**不进** 650ms 的历史轮询热路径：只在面板展开
+/// 与 [`load_subagent_transcript`] 同样**不进**历史轮询热路径：只在面板展开
 /// 且确有在跑的委派时调用，读的也只是各侧车的尾部窗口。
 ///
 /// 定位不到侧车、或该 provider 不留状态信号时，这条 id 直接缺席返回值——调用方维持
@@ -410,7 +434,7 @@ pub(crate) async fn refresh_session_model(
 /// - hook 曾漏接或写库失败；
 /// - 早先的解析有误（如状态别名不认识，已完成项被降级成待办）。
 ///
-/// 一次有界读 + 整份覆盖，不进 650ms 的历史轮询热路径；由前端在切换会话时调一次。
+/// 一次有界读 + 整份覆盖，不进历史轮询热路径；由前端在切换会话时调一次。
 fn refresh_todos(db_path: &Path, session_id: i64) -> Result<usize, String> {
     let store = super::open_store(db_path)?;
     let header = store
@@ -491,6 +515,7 @@ pub(crate) async fn get_chat_history(
     session_id: i64,
     offset: u64,
     full: Option<bool>,
+    before: Option<u64>,
 ) -> Result<ChatHistory, String> {
     let db_path = state.db_path.clone();
     let chat_mtimes: Arc<Mutex<ChatMtimes>> = state.chat_mtimes.clone();
@@ -513,8 +538,11 @@ pub(crate) async fn get_chat_history(
                 broker_approval,
             },
             session_id,
-            offset,
-            full.unwrap_or(false),
+            ChatRead {
+                offset,
+                full: full.unwrap_or(false),
+                before,
+            },
         )
     })
     .await
@@ -1056,17 +1084,5 @@ mod tests {
             cache.get(7).map(|entry| entry.path),
             Some(std::path::PathBuf::from("new.jsonl"))
         );
-    }
-
-    #[test]
-    fn first_page_keeps_the_latest_items_only() {
-        let mut items: Vec<_> = (0..FIRST_PAGE_ITEMS + 3).collect();
-        assert!(trim_first_page(&mut items, false, true));
-        assert_eq!(items.len(), FIRST_PAGE_ITEMS);
-        assert_eq!(items[0], 3);
-
-        let mut incremental: Vec<_> = (0..FIRST_PAGE_ITEMS + 3).collect();
-        assert!(!trim_first_page(&mut incremental, false, false));
-        assert_eq!(incremental.len(), FIRST_PAGE_ITEMS + 3);
     }
 }

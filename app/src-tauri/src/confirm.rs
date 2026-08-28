@@ -17,6 +17,8 @@ pub(crate) struct ConfirmPayload {
     title: String,
     message: String,
     danger: bool,
+    /// 主按钮文案（「删除」「合并」——说清后果，不用通用「确定」）；None 时前端回退通用确定。
+    confirm_label: Option<String>,
 }
 
 type ResultSender = tauri::async_runtime::Sender<bool>;
@@ -96,6 +98,7 @@ pub(crate) async fn confirm_dialog(
     title: String,
     message: String,
     danger: Option<bool>,
+    confirm_label: Option<String>,
 ) -> Result<bool, String> {
     let confirms = state.confirms.clone();
     let id = confirms.next_id.fetch_add(1, Ordering::Relaxed);
@@ -113,6 +116,7 @@ pub(crate) async fn confirm_dialog(
                     title,
                     message,
                     danger: danger.unwrap_or(false),
+                    confirm_label,
                 },
                 Some(tx),
             ),

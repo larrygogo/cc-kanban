@@ -7,7 +7,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
 import { useT } from "../i18n";
 
-type Payload = { title: string; message: string; danger: boolean };
+type Payload = { title: string; message: string; danger: boolean; confirm_label: string | null };
 
 /// 后端固定 208 高开窗(给两行消息留量);实际内容常常只有一行,正文与按钮之间会剩一大片
 /// 空白。收拢的下限护住「标题+一行+按钮」的最小形态,上限之外交给正文滚动区。
@@ -115,7 +115,8 @@ export function ConfirmWindow() {
       <div className="app-confirm-actions">
         <button type="button" autoFocus onClick={() => decide(false)}>{t.dialog.cancel}</button>
         <button type="button" className={payload.danger ? "is-danger" : "is-primary"} onClick={() => decide(true)}>
-          {t.dialog.ok}
+          {/* 主按钮说清后果（「删除」「合并」），未指定才回退通用「确定」。 */}
+          {payload.confirm_label ?? t.dialog.ok}
         </button>
       </div>
     </div>

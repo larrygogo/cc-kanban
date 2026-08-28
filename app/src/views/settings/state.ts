@@ -19,8 +19,10 @@ export const SETTINGS_DEFAULTS: Settings = {
   chat_enabled: true,
   card_menu_mode: "button",
   preview_enabled: true,
+  click_through_enabled: false,
   terminal_font_size: 12,
   terminal_line_height: "normal",
+  terminal_scrollback: 5000,
   // 占位与真实默认（appearance.ts / 后端 settings.rs）保持一致：flat / neutral。
   sticker_style: "flat",
   sticker_color: "neutral",

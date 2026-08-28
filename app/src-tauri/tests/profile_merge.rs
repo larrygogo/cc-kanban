@@ -71,7 +71,12 @@ fn merge_profile_into_default_end_to_end() {
 
     // ── 阶段 1：该账号还有进行中的会话 → 必须拒绝合并，且 settings/DB/文件都不动 ──
     let err = meowo_app_lib::profile::merge_into_default("claude", "work").unwrap_err();
-    assert!(err.contains("进行中的会话"), "拒绝理由应对用户可读：{err}");
+    // S-9：错误是结构化 reason 码（前端 i18n/errors.ts 按当前语言映射成用户文案），
+    // 这里钉住前后端约定的码，防漂移。
+    assert!(
+        err.contains("profile/has-live-sessions"),
+        "拒绝理由应是前后端约定的 reason 码：{err}"
+    );
     assert_eq!(
         std::fs::read_to_string(claude_dir.join(".credentials.json")).unwrap(),
         "default-creds"

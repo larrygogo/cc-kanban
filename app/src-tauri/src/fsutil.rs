@@ -472,27 +472,33 @@ pub(crate) async fn open_path_with(cwd: String, rel: String, opener: String) -> 
         .map_err(|e| e.to_string())?
 }
 
+/// 用系统默认关联打开目标（explorer / open / xdg-open）。open_path_with 的 "default"
+/// 分支与 install.rs 的「打开安装日志」共用。spawn 后不等退出（fire-and-forget）。
+pub(crate) fn open_with_default_app(target: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // explorer 对正斜杠路径会打开默认目录而非目标（同 open_project_dir 的教训）。
+        std::process::Command::new("explorer")
+            .arg(display_path(target))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        spawn_detached(std::process::Command::new("open").arg(target))?;
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        // Linux 同属 Unix：xdg-open 也要 wait 回收，见 spawn_detached。
+        spawn_detached(std::process::Command::new("xdg-open").arg(target))?;
+    }
+    Ok(())
+}
+
 fn open_path_with_blocking(cwd: &str, rel: &str, opener: &str) -> Result<(), String> {
     let target = resolve_inside(cwd, rel)?;
     if opener == "default" {
-        #[cfg(target_os = "windows")]
-        {
-            // explorer 对正斜杠路径会打开默认目录而非目标（同 open_project_dir 的教训）。
-            std::process::Command::new("explorer")
-                .arg(display_path(&target))
-                .spawn()
-                .map_err(|e| e.to_string())?;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            spawn_detached(std::process::Command::new("open").arg(&target))?;
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        {
-            // Linux 同属 Unix：xdg-open 也要 wait 回收，见 spawn_detached。
-            spawn_detached(std::process::Command::new("xdg-open").arg(&target))?;
-        }
-        return Ok(());
+        return open_with_default_app(&target);
     }
     // Windows：opener 是系统「打开方式」处理器的标识，交回 openwith 在系统清单里
     // 挑选并 Invoke（UWP 等非 exe 形态也能正确拉起）；其余平台仍走编辑器探测表。

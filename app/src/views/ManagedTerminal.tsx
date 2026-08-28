@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MutableRefObject, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MutableRefObject, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { appConfirm } from "../confirm";
 import { Terminal } from "@xterm/xterm";
@@ -15,12 +15,14 @@ import {
   confirmStopSession,
   getSettings,
   isExternallyHeld,
+  managedTerminalBinding,
   managedTerminalSnapshot,
   openAttachedTerminal,
   openLink,
   registerTerminalViewer,
   managedTerminalGrid,
   resizeManagedTerminal,
+  revealPathInFileManager,
   startManagedTerminal,
   takeoverManagedTerminal,
   unregisterTerminalViewer,
@@ -30,6 +32,7 @@ import {
 import { useT } from "../i18n";
 import { formatBackendError } from "../i18n/errors";
 import { pushEscLayer } from "../escLayers";
+import { useDismissable } from "../hooks/useDismissable";
 import type { PtyExitEvent as ExitEvent } from "../generated/contracts/PtyExitEvent";
 import type { PtyOutputEvent as OutputEvent } from "../generated/contracts/PtyOutputEvent";
 import { terminalAttention, visibleTerminalText, type AttentionGrammar, type TerminalAttention } from "../terminalAttention";
@@ -107,6 +110,33 @@ export const STREAM_STALL_MS = 30_000;
 /// 假光标）时同样豁免，因为 status 管线在 kimi 这类 TUI 上会滞后/漏翻成 waiting。
 export function terminalStreamStalled(args: { active: boolean; background: boolean; status: string | undefined; reviewPending: boolean; lastByteAt: number; now: number }): boolean {
   return args.active && !args.background && args.status === "running" && !args.reviewPending && args.now - args.lastByteAt > STREAM_STALL_MS;
+}
+
+/// 在一行终端文本里找出**像文件路径**的片段（文件路径 link provider 用，纯函数便于单测）。
+/// 文件路径是终端里最高频的可点内容，此前一律不可点（只有 URL 走 WebLinksAddon）。
+/// 口径刻意保守——误链一个普通单词的代价只是 Ctrl+悬停多出一条下划线：
+/// - 带显式锚头的（盘符 `C:\` / `~` / `./` `../` / 以 `/` 开头）直接收；
+/// - 裸相对路径要求至少一段含「.」（`src/main.ts` 收，`and/or` 这类连词不收）；
+/// - 前一个字符是路径/URL 字符的命中跳过——那是更长串（URL、更长路径）的中段，
+///   URL 归 WebLinksAddon；
+/// - 尾部的 `.,:;!?)]}"'` 视作句读剥掉；行号（`file.ts:12`）的冒号不在段字符集内，
+///   本来就不进命中。
+/// 返回的 end 是**开区间**字符串下标。
+export function scanLineForFilePaths(line: string): { text: string; start: number; end: number }[] {
+  // 段字符不含括号/逗号/冒号:`(src/main.ts)`、`file.ts:12`、`a/b, b/c` 的句读都不会进命中。
+  const SEG = "[\\w.@+~-]";
+  const re = new RegExp(`(?:[A-Za-z]:[\\\\/]|~[\\\\/]|\\.{1,2}[\\\\/]|\\/)${SEG}*(?:[\\\\/]${SEG}+)*|${SEG}+(?:[\\\\/]${SEG}+)+`, "g");
+  const hits: { text: string; start: number; end: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(line))) {
+    if (m.index > 0 && /[\w.:/\\@-]/.test(line[m.index - 1])) continue;
+    const text = m[0].replace(/[.,:;!?)\]}"']+$/, "");
+    if (!text) continue;
+    const anchored = /^([A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\/)/.test(text);
+    if (!anchored && !text.includes(".")) continue;
+    hits.push({ text, start: m.index, end: m.index + text.length });
+  }
+  return hits;
 }
 
 /// 行高预设 → xterm lineHeight。normal 即历史硬编码的 1.22（改它会让老用户画面变样）。
@@ -251,14 +281,23 @@ type ManagedTerminalProps = {
   /// 供父组件在自己重启 PTY 后触发偏移复位（对话页发送/切模式也会重启 PTY，
   /// 不止组件内部的 start/takeover 按钮）。
   rearmRef?: MutableRefObject<(() => void) | null>;
+  /// 供父组件读当前 xterm 网格（对话页恢复/接管以其为 PTY 初始尺寸：硬编码占位会让
+  /// CLI 先按错误宽度排版，fit 落地后再 resize 整屏重排一遍）。
+  gridRef?: MutableRefObject<(() => { cols: number; rows: number } | null) | null>;
   /// 恢复/接管时对启动选项的改选（option id → choice id），随 start/takeover 下发；
   /// 省略 = 沿用会话存的选择。状态归 ChatWindow（与对话页的接管入口共用同一份）。
   resumeOptions?: Record<string, string>;
   /// 渲染在 start/takeover 按钮旁的附加控件（权限改选下拉，由 ChatWindow 构造）。
   takeoverExtra?: ReactNode;
+  /// 会话的工作目录：文件路径 link provider 点击时作 reveal 的根（见 scanLineForFilePaths）。
+  /// null/缺席 = 根未知，路径链接整组不注册（点了也只会报「目录不存在」）。
+  cwd?: string | null;
+  /// 外部同步终端（attach 客户端）在线状态变化时上报（T-14）：初值来自快照的
+  /// externalViewers；对话页据此提示「两边同时输入会交错」。
+  onExternalViewers?: (online: boolean) => void;
 };
 
-export function ManagedTerminal({ sessionId, status, reviewPending = false, background = false, onBackgroundInput, visible = true, onUserSubmit, attentionMarkers = [], interactivePrompt = false, expectMenu = false, grammar, newlineInput = null, onAttention, rearmRef: externalRearmRef, resumeOptions, takeoverExtra }: ManagedTerminalProps) {
+export function ManagedTerminal({ sessionId, status, reviewPending = false, background = false, onBackgroundInput, visible = true, onUserSubmit, attentionMarkers = [], interactivePrompt = false, expectMenu = false, grammar, newlineInput = null, onAttention, rearmRef: externalRearmRef, gridRef: externalGridRef, resumeOptions, takeoverExtra, cwd = null, onExternalViewers }: ManagedTerminalProps) {
   const t = useT();
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -269,6 +308,8 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
   const [exitCode, setExitCode] = useState<number | null | undefined>(undefined);
+  // 强制收尾（后端升级链末档）：UI 摘除了会话但进程可能仍在（zombie）——退出文案要区分。
+  const [exitForced, setExitForced] = useState(false);
   // state 供渲染 / ref 供同步判定：onData 闭包里要同步判「进程是否已退出」。
   const exitedRef = useRef(false);
   exitedRef.current = exitCode !== undefined;
@@ -290,12 +331,32 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       .catch((e) => setError(formatBackendError(e, t.locale)))
       .finally(() => setStopping(false));
   };
+  // 假死横幅的「结束并恢复」:结束与重启两步合一(此前只有「结束会话」,重启入口在退出
+  // 封面上,用户得自己找——而文案里写的就是「点结束会话再重启」)。确认取消(false)即不动;
+  // 重启失败由 start() 自己的错误通道呈现。start 在下方声明,点击时早已就绪。
+  const restartFromBanner = () => {
+    if (stopping) return;
+    setStopping(true);
+    void confirmStopSession(sessionId, { title: t.chat.endSession, message: t.chat.endSessionConfirm })
+      .then((stopped) => (stopped ? start() : undefined))
+      .catch((e) => setError(formatBackendError(e, t.locale)))
+      .finally(() => setStopping(false));
+  };
+  // 悬停在可点内容上(URL/文件路径)的操作提示:Ctrl+点击这条终端惯例此前没有任何
+  // 界面表达,用户只能碰运气。非 null 时右下角挂一条固定提示,离开链接即收。
+  const [linkHint, setLinkHint] = useState<string | null>(null);
   const lastByteAtRef = useRef(Date.now());
   // 终端内搜索(Ctrl+F,addon-search):搜索条状态归组件,addon 实例归挂载 effect。
   // findNext 会选中命中并滚动到位——不用 decorations(它在部分 xterm 版本走
   // proposed API,选区高亮已足够表达「当前命中在哪」)。
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  // 右键菜单（U0-11：复制/粘贴/全选/搜索）：生产构建的 WebView 默认菜单被
+  // devtools-guard 整个封死，应用内必须补一份。canCopy/canPaste 在打开那一刻定格
+  //（选区在菜单开着期间被键盘清掉也不追——动作落空是无害 no-op）。
+  const [termMenu, setTermMenu] = useState<{ x: number; y: number; canCopy: boolean; canPaste: boolean } | null>(null);
+  // 复制逻辑长在挂载 effect 里（拿得到 terminal 实例）；菜单在组件 JSX 层，经 ref 调用。
+  const copySelectionRef = useRef<(() => void) | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMiss, setSearchMiss] = useState(false);
   const runSearch = (query: string, direction: "next" | "prev", incremental = false) => {
@@ -334,7 +395,13 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   const fittedRef = useRef(false);
   // 上一次网格自愈下发的目标尺寸与时刻（见 GRID_RESYNC_RETRY_MS）。
   const gridResyncRef = useRef<{ cols: number; rows: number; at: number } | null>(null);
+  // 窗口焦点镜像（T-14 resize 仲裁）：对话窗与外部同步终端 attach 同一 PTY 时两边都会
+  // 下发尺寸，尺寸不同 TUI 就被来回重排。约定**聚焦视图是尺寸主控**——本窗口失焦期间
+  // 不下发任何 resize（含网格自愈），外部终端的尺寸得以稳定生效；重新聚焦时补一次
+  // fit+resize 把主控权拿回来（监听器在挂载 effect 里）。
+  const focusedRef = useRef(true);
   const resizeIfChanged = (sid: number, cols: number, rows: number) => {
+    if (!focusedRef.current) return; // 非聚焦视图不下发 resize（T-14，见 focusedRef）
     const last = lastSentSizeRef.current;
     if (last && last.cols === cols && last.rows === rows) return;
     lastSentSizeRef.current = { cols, rows };
@@ -358,7 +425,9 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   const resyncGridIfDrifted = (sid: number, ptyCols: number, ptyRows: number) => {
     const terminal = terminalRef.current;
     // fit 没跑过时 terminal.cols/rows 还是 xterm 默认的 80×24，不是这个容器该有的网格。
-    if (!terminal || !visibleRef.current || !fittedRef.current) return;
+    // 失焦期同样不纠（T-14）：此刻的尺寸差很可能就是外部同步终端生效的尺寸，拉回来
+    // 正是「两个视图反复重排」的源头。
+    if (!terminal || !visibleRef.current || !fittedRef.current || !focusedRef.current) return;
     const target = gridResyncTarget(terminal, { cols: ptyCols, rows: ptyRows }, gridResyncRef.current, Date.now());
     if (!target) return;
     gridResyncRef.current = { ...target, at: Date.now() };
@@ -382,7 +451,16 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   const grammarRef = useRef(grammar);
   const newlineInputRef = useRef(newlineInput);
   const onAttentionRef = useRef(onAttention);
+  const onExternalViewersRef = useRef(onExternalViewers);
   const visibleRef = useRef(visible);
+  const cwdRef = useRef(cwd);
+  // 会话 id 的活镜像：挂载 effect 不再以 sessionId 为键（换会话/重绑不重建 xterm），
+  // 闭包里的「哪个会话」一律读它。刻意**不**在渲染期镜像——sessionId 变更 effect 要靠
+  // 它拿旧值做变更检测与重绑判定，由那个 effect 推进。
+  const sessionIdRef = useRef(sessionId);
+  // 挂载后的会话 id 变更处理（临时 id→真实 id 的平滑重绑 / 换会话复位），挂载 effect
+  // 内部赋值，组件级的 sessionId effect 调用。见挂载 effect 里的实现注释。
+  const sessionChangedRef = useRef<((prevSessionId: number) => void) | null>(null);
   const attentionTailRef = useRef("");
   const attentionReportedRef = useRef<string | null>(null);
   const lastScreenRef = useRef("");
@@ -399,7 +477,9 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   grammarRef.current = grammar;
   newlineInputRef.current = newlineInput;
   onAttentionRef.current = onAttention;
+  onExternalViewersRef.current = onExternalViewers;
   visibleRef.current = visible;
+  cwdRef.current = cwd;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -413,7 +493,12 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     };
     const terminal = new Terminal({
       // OSC 8 超链接（TUI 显式声明的链接）由这里接住；纯文本 URL 的识别在 WebLinksAddon。
-      linkHandler: { activate: openTerminalLink },
+      // hover/leave 挂操作提示：Ctrl+点击这条终端惯例此前没有任何界面表达（T-4）。
+      linkHandler: {
+        activate: openTerminalLink,
+        hover: () => setLinkHint(t.chat.terminalLinkHint),
+        leave: () => setLinkHint(null),
+      },
       cursorBlink: true,
       convertEol: false,
       // "JetBrains Mono" 由 styles.css 的 @font-face 打包提供（不依赖本机安装），管拉丁+符号；
@@ -423,6 +508,8 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif',
       fontSize: 12,
       lineHeight: 1.22,
+      // 占位默认值,真实值由设置(terminal_scrollback)经 applyTermStyle 下发——挂载时读一次,
+      // settings-changed 热应用。
       scrollback: 5000,
       // 绿色只留给光标这一格宽的点缀；选区是成片色块，用低饱和灰绿保持清爽。
       theme: { background: "#151617", foreground: "#e7e9e8", cursor: "#55d6ae", selectionBackground: "#31403a" },
@@ -430,8 +517,38 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     // 纯文本 URL 的链接化。不装它 xterm 根本不识别正文里的 URL——「Ctrl+点击打不开链接」
-    // 的第一层原因就是链接从未存在过。
-    terminal.loadAddon(new WebLinksAddon(openTerminalLink));
+    // 的第一层原因就是链接从未存在过。hover/leave 同 linkHandler,挂操作提示。
+    terminal.loadAddon(new WebLinksAddon(openTerminalLink, {
+      hover: () => setLinkHint(t.chat.terminalLinkHint),
+      leave: () => setLinkHint(null),
+    }));
+    // 文件路径 link provider:终端里最高频的可点内容,此前一律不可点(T-4)。识别口径见
+    // scanLineForFilePaths(保守:至少要一个路径分隔符)。Ctrl+点击在系统文件管理器中
+    // 定位(reveal_path_in_file_manager,与「文件」页同一通道,根 = 会话 cwd;路径越出
+    // cwd 或不存在时后端报错,经 setError 可见)。cwd 晚到/缺席时点击报「目录不存在」,
+    // 故 cwd 未知干脆不注册。远程模式该命令不在桥白名单(宿主执行类),整条通道不装。
+    if (!remoteUi()) {
+      terminal.registerLinkProvider({
+        provideLinks: (y, callback) => {
+          const cwd = cwdRef.current;
+          const lineText = terminal.buffer?.active?.getLine(y - 1)?.translateToString(true) ?? "";
+          const hits = cwd ? scanLineForFilePaths(lineText) : [];
+          if (!cwd || hits.length === 0) { callback(undefined); return; }
+          callback(hits.map((hit) => ({
+            // 字符串下标 1:1 当单元格用:前面有宽字符时范围会偏,xterm 官方 addon 也是
+            // 先按字符映射再校正,这里取最简。end 为开区间,与 WebLinksAddon 口径一致。
+            range: { start: { x: hit.start + 1, y }, end: { x: hit.end, y } },
+            text: hit.text,
+            activate: (event: MouseEvent, linkText: string) => {
+              if (!event.ctrlKey && !event.metaKey) return;
+              void revealPathInFileManager(cwd, linkText).catch((e) => setError(formatBackendError(e, t.locale)));
+            },
+            hover: () => setLinkHint(t.chat.terminalPathHint),
+            leave: () => setLinkHint(null),
+          })));
+        },
+      });
+    }
     // Unicode grapheme 宽表:emoji 与新式符号按正确列宽排。用 graphemes 版而不是
     // Unicode11Addon——后者只更新裸码点宽表,不认 VS16 变体选择符,「⬆️」这类
     // 基础字符+VS16 的 emoji 仍算 1 列,字形按 2 列画、被 WebGL 按单元格裁掉一半
@@ -490,6 +607,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
         fallback();
       }
     };
+    copySelectionRef.current = copyTerminalSelection;
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
       // 应用级导航键（Ctrl/Cmd+K 切换器、B 收侧栏、1/2 切视图、N 新建）放行给窗口监听：
@@ -526,7 +644,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
         if (backgroundRef.current) {
           onBackgroundInputRef.current?.();
         } else if (!exitedRef.current) {
-          void writeManagedTerminal(sessionId, newlineSeq).catch((e) => setError(formatBackendError(e, t.locale)));
+          void writeManagedTerminal(sessionIdRef.current, newlineSeq).catch((e) => setError(formatBackendError(e, t.locale)));
         }
         return false;
       }
@@ -569,22 +687,21 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       const hasImage = Array.from(data.files).some((file) => file.type.startsWith("image/"));
       if (!hasImage && data.getData("text")) return;
       event.preventDefault();
-      void writeManagedTerminal(sessionId, "\x16").catch((e) => setError(formatBackendError(e, t.locale)));
+      void writeManagedTerminal(sessionIdRef.current, "\x16").catch((e) => setError(formatBackendError(e, t.locale)));
     };
     host.addEventListener("paste", pasteImageFallback);
-    // 右键 = Windows 终端惯例:有选区复制(并清选区),无选区粘贴。WebView 默认菜单在
-    // 生产构建被 devtools-guard 封死(window 捕获段 preventDefault),封死之后右键此前
-    // **没有任何替代行为**——「右键复制没生效」的实拍反馈即源于此。guard 只拦默认菜单
-    // 不拦传播,这里照常收到事件。粘贴读后端剪贴板(readText 在 WebView2 要权限弹窗,
-    // arboard 零打扰),经 terminal.paste 走 bracketed paste 与 onData 既有下发通路。
+    // 右键 = 应用内菜单（U0-11：复制/粘贴/全选/搜索，复用上面的选区剪贴板逻辑与
+    // addon-search）。生产构建的 WebView 默认菜单被 devtools-guard 封死（window 捕获段
+    // preventDefault），不补一份右键就是死动作；此前的即时动作版（有选区直接复制、
+    // 无选区直接粘贴）让全选/搜索对鼠标用户零入口。粘贴只在**无选区**时给（Windows
+    // 终端惯例：有选区的右键是复制语义，此时粘贴一项置灰）。
     // TUI 开了鼠标上报(claude 2.1.238 全屏渲染器:?1000-1006h)时,xterm 把每次按键原样
     // 转发给它、自己不再处理——右键也在其中,而 claude 收到右键就**自己粘贴剪贴板**
-    // (pywinpty 实测:发一个 SGR 右键事件,剪贴板内容直接进输入框)。此时 Meowo 再按
-    // Windows 惯例粘贴一次就是双份;更糟的是「有选区右键=复制」的路径:Meowo 复制的同时
-    // claude 已经把(旧)剪贴板粘进去了——实拍「右键复制,同时就粘贴到输入框」。
-    // 约定:鼠标归 TUI 时,无选区的右键完全让给它(它有自己的右键语义);有选区的右键
-    // 仍是复制,但要在 mousedown 捕获段把这次按键拦在 xterm 之外,TUI 不知道有过右键,
-    // 就不会顺手粘贴。对应的 mouseup 一并拦掉,否则 xterm 会发一个没有按下的抬起事件。
+    // (pywinpty 实测:发一个 SGR 右键事件,剪贴板内容直接进输入框)。此时 Meowo 再叠
+    // 任何动作都是双份。约定:鼠标归 TUI 且无选区时,右键完全让给它(它有自己的右键
+    // 语义);有选区的右键仍归 Meowo(弹复制菜单),但要在 mousedown 捕获段把这次按键
+    // 拦在 xterm 之外,TUI 不知道有过右键,就不会顺手粘贴。对应的 mouseup 一并拦掉,
+    // 否则 xterm 会发一个没有按下的抬起事件。
     const mouseOwnedByApp = () => (terminal.modes?.mouseTrackingMode ?? "none") !== "none";
     let swallowRightUp = false;
     const onMouseDown = (event: MouseEvent) => {
@@ -599,25 +716,23 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     };
     host.addEventListener("mousedown", onMouseDown, { capture: true });
     host.addEventListener("mouseup", onMouseUp, { capture: true });
-    const onContextMenu = () => {
-      // 右键=复制/粘贴,全平台生效。macOS 终端右键本是菜单语义,但生产构建的默认菜单
-      // 已被 devtools-guard 整个封死——「有行为」好过「右键点下去毫无反应的黑洞」。
-      if (exitedRef.current) return;
-      if (terminal.hasSelection()) {
-        copyTerminalSelection();
-        terminal.clearSelection();
-        return;
-      }
-      // 鼠标归 TUI:右键已由 xterm 转发给它,粘不粘由它决定(claude 会粘),Meowo 不叠加。
-      if (mouseOwnedByApp()) return;
-      // 后台会话只读:粘贴无接收方,交给宿主把用户领到对话页(与打字同一动线)。
-      if (backgroundRef.current) {
+    const onContextMenu = (event: MouseEvent) => {
+      // 鼠标归 TUI 且无选区:右键已由 xterm 转发给它,粘不粘由它决定(claude 会粘),
+      // Meowo 不叠菜单。
+      if (mouseOwnedByApp() && !terminal.hasSelection()) return;
+      event.preventDefault();
+      // 后台会话只读且无选区:粘贴无接收方,维持旧动线——交给宿主把用户领到对话页。
+      if (backgroundRef.current && !terminal.hasSelection()) {
         onBackgroundInputRef.current?.();
         return;
       }
-      void clipboardText().then((text) => {
-        if (text) terminal.paste(text);
-      }).catch(() => {});
+      setTermMenu({
+        x: event.clientX,
+        y: event.clientY,
+        canCopy: terminal.hasSelection(),
+        // 已退出(进程没了,粘贴无人接收)/有选区(右键=复制语义)时粘贴置灰。
+        canPaste: !exitedRef.current && !backgroundRef.current && !terminal.hasSelection(),
+      });
     };
     host.addEventListener("contextmenu", onContextMenu);
     // ── IME 锚点校正 ──
@@ -656,6 +771,14 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     }
     terminalRef.current = terminal;
     fitRef.current = fit;
+    // 当前网格的读取口（对话页恢复/接管以其为 PTY 初始尺寸，见 gridRef prop）。
+    if (externalGridRef) {
+      externalGridRef.current = () => {
+        const term = terminalRef.current;
+        if (!term || term.cols <= 1 || term.rows <= 1) return null;
+        return { cols: term.cols, rows: term.rows };
+      };
+    }
     // 隐藏态挂载（后台屏幕识别 / 切会话时停在对话页）不 fit：宿主是屏外停靠盒
     // （.is-background 固定 1000×700），按它 fit 出的网格与 PTY 尺寸脱节，隐藏期
     // 到达的帧会按错误宽度换行、错行叠画——切回终端页看到的就是花屏，而且若
@@ -666,7 +789,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // 写失败必须可见：典型场景是整段粘贴超过后端单次输入上限被拒——
     // 静默吞掉的话，粘贴无声消失，终端画面纹丝不动。
     const sendInput = (data: string) => {
-      void writeManagedTerminal(sessionId, data).catch((e) => setError(formatBackendError(e, t.locale)));
+      void writeManagedTerminal(sessionIdRef.current, data).catch((e) => setError(formatBackendError(e, t.locale)));
     };
     let pendingMotion: string | null = null;
     let motionTimer: number | null = null;
@@ -718,17 +841,17 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // 不再白付 base64 与 IPC(N 会话齐跑时那正是压垮前端的部分)。失败静默——快照轮询
     // 兜底,最多退化为无实时帧;卸载时注销走后端 CAS,重挂竞态下不会误清新实例的注册。
     // 远程收不到 pty-output 推送(走快照轮询),且该命令不在 /rpc 白名单——短路省 404。
-    if (!remoteUi()) void registerTerminalViewer(sessionId).catch(() => {});
+    if (!remoteUi()) void registerTerminalViewer(sessionIdRef.current).catch(() => {});
     // 输出流停滞检测节拍(判据见 terminalStreamStalled):挂载即重置水位——上一个
     // 会话/进程的旧水位不作数。
     lastByteAtRef.current = Date.now();
     // 换会话重挂即重开通用启动提示的识别窗口(attach 回放的当前屏若真停在登录页,
     // 首轮扫描就落在窗口内)。
     startupPromptsUntilRef.current = Date.now() + GENERIC_STARTUP_WINDOW_MS;
-    // 识别态也随会话作废（本 effect 以 sessionId 为键,同一实例服务不同会话）:这三个
-    // ref 原先只在就地重启的 rearm 里清,换会话不清 → 上个会话的残屏会被晚到补扫读去,
-    // 对新会话弹一张不属于它的 attention 卡；attentionReportedRef 残留同签名还会反向
-    // 抑制,让新会话首张同文案的卡片发不出来。与 rearm 同款一并归零。
+    // 识别态也随会话作废（换会话由 sessionChangedRef 走 rearm 归零,这里是首挂载的
+    // 初始化）:这三个 ref 原先只在就地重启的 rearm 里清,换会话不清 → 上个会话的
+    // 残屏会被晚到补扫读去,对新会话弹一张不属于它的 attention 卡；attentionReportedRef
+    // 残留同签名还会反向抑制,让新会话首张同文案的卡片发不出来。与 rearm 同款一并归零。
     attentionReportedRef.current = null;
     attentionTailRef.current = "";
     lastScreenRef.current = "";
@@ -780,8 +903,9 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
         fit.fit();
         fittedRef.current = true;
         // 重测可能改变行列数，PTY 侧要跟着调，否则 TUI 按旧尺寸画、连输入框的位置都是错的。
+        // resizeIfChanged 内含失焦门（T-14）：失焦期不下发，聚焦时统一补。
         if (terminal.cols > 1 && terminal.rows > 1) {
-          void resizeManagedTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {});
+          resizeIfChanged(sessionIdRef.current, terminal.cols, terminal.rows);
         }
       }
     }).catch(() => {});
@@ -791,15 +915,19 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     const applyTermStyle = (s: Settings) => {
       const size = Math.min(24, Math.max(8, s.terminal_font_size ?? 12));
       const line = LINE_HEIGHTS[s.terminal_line_height] ?? LINE_HEIGHTS.normal;
-      if (terminal.options.fontSize === size && terminal.options.lineHeight === line) return;
+      // 回滚缓冲进设置（此前硬编码 5000，见构造处）。改小会裁掉最老的行——用户主动
+      // 调小换内存正是这个语义；xterm 运行时改 options.scrollback 即时生效。
+      const back = Math.min(50_000, Math.max(500, s.terminal_scrollback ?? 5000));
+      if (terminal.options.fontSize === size && terminal.options.lineHeight === line && terminal.options.scrollback === back) return;
       terminal.options.fontSize = size;
       terminal.options.lineHeight = line;
+      terminal.options.scrollback = back;
       // 隐藏时跳过 fit（理由见 ResizeObserver 处）：切回时的 visible effect 会补。
       if (visibleRef.current) {
         fit.fit();
         fittedRef.current = true;
         if (terminal.cols > 1 && terminal.rows > 1) {
-          void resizeManagedTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {});
+          resizeIfChanged(sessionIdRef.current, terminal.cols, terminal.rows);
         }
       }
     };
@@ -947,6 +1075,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       // 进程没了就没有下一帧可等：必须离开初始化态，把退出结果交给遮罩。
       setInitialized(true);
       setExitCode(payload.code);
+      setExitForced(payload.forced === true);
       // 退出画面保留可翻看,但鼠标上报模式若还开着(全屏 TUI 崩溃/被终止时来不及收),
       // xterm 会继续把滚轮/点击转发给早已不存在的进程——滚轮被吞、选区被禁,画面像
       // 「卡死」一样完全不可滚动(实拍「偶尔无法滚动」的主案)。本地收回全部鼠标模式
@@ -969,11 +1098,16 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     const MOUSE_MODES_OFF = "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1005l\x1b[?1015l";
     // 首帧传 0 拿全量（要完整回放历史），补查轮询带 nextOffset 只取增量。
     // writeOutput 本来就按 startOffset 做区间裁剪，增量返回天然兼容。
-    const inspectSnapshot = () => managedTerminalSnapshot(sessionId, hasWrittenOutput ? nextOffset : 0).then((snapshot) => {
+    const inspectSnapshot = () => managedTerminalSnapshot(sessionIdRef.current, hasWrittenOutput ? nextOffset : 0).then((snapshot) => {
       if (cancelled) return;
       setSnapshotReady(true);
       setActive(snapshot.active);
       setExitCode(snapshot.exited ? snapshot.exitCode : undefined);
+      // 外部视图在线初值（T-14）：实时增删走 pty-external-viewers 事件，这里是
+      // 重开窗口/重对齐时的对齐点。同值 setState 上游会 bail out，不去重。
+      onExternalViewersRef.current?.(snapshot.externalViewers === true);
+      // 快照不带 forced（重开窗口补齐历史画面）：按正常退出呈现。
+      setExitForced(false);
       // 隐藏态网格对齐：网格必须与 PTY 尺寸一致，隐藏期的帧才排得对（fit 的对象是
       // 屏外停靠盒，不可用——见挂载处注释）。快照带的 cols/rows 是 PTY 当前生效尺寸
       // （0 = 未知，如后台旁路，跳过）。挂载与每次重对齐都会走到这里，隐藏期 PTY
@@ -985,7 +1119,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       // 可见期反过来:以本地 fit 出的网格为准,把 PTY 拉齐(见 resyncGridIfDrifted)。
       // 快照顺路带着 PTY 的生效尺寸,走到这里就一并对一次;常态下的自愈靠那条心跳,
       // 快照不能拿来轮询——它要把整个 backlog 编码重传一遍。
-      resyncGridIfDrifted(sessionId, snapshot.cols, snapshot.rows);
+      resyncGridIfDrifted(sessionIdRef.current, snapshot.cols, snapshot.rows);
       // 重对齐终局:请求的缺口段已被后端 1MiB backlog 淘汰(前端整体落后太多),
       // 字节永久丢失,重试无意义。reset 后按现存 backlog 全量重画(远超一屏,足以
       // 还原可见画面);回放的是历史,里面的查询都答过,拦 xterm 的重复应答。
@@ -1035,7 +1169,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
           });
         } else {
           writeOutput({
-            sessionId,
+            sessionId: sessionIdRef.current,
             offset: Number.isFinite(snapshot.startOffset) ? snapshot.startOffset : 0,
             data: snapshot.data,
           });
@@ -1064,7 +1198,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       // 尚未注册完成时漏掉极早的一段输出，最终永远停在黑屏或加载态。
       // 补查只为等**第一批**字节：拿到就停，之后的帧走 pty-output 事件——每次快照都会
       // 把整个 backlog（可达 1MB）编码重传一遍，不能拿它轮询到界面画出来为止。
-      if ((snapshot.active || sessionId < 0) && !hasWrittenOutput && !snapshot.exited) {
+      if ((snapshot.active || sessionIdRef.current < 0) && !hasWrittenOutput && !snapshot.exited) {
         snapshotTimer = window.setTimeout(() => void inspectSnapshot(), 120);
       }
     }).catch(() => {
@@ -1135,15 +1269,48 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       terminal.reset();
       setInitialized(false);
       setExitCode(undefined);
+      setExitForced(false);
       void inspectSnapshot();
+    };
+    // 挂载后的会话 id 变更（此前靠 ChatWindow 的 key={sessionId} 整只重挂：xterm 重建、
+    // 首屏清空重画）。分两种：
+    //  - 临时 id → 真实 id 的 claim 重绑：后端 try_claim_rebind 只换映射键，同一个 PTY、
+    //    输出偏移连续。用 managedTerminalBinding 权威确认（负→正也可能是用户在临时 id
+    //    期间切去了别的会话，不能只看符号）后只补一次增量快照——画面不动、不闪遮罩；
+    //  - 其余（切到无关会话、provider 切换换出的新临时 id）：按换会话整体复位，状态
+    //    清理与 key 重挂等价（rearm 归零偏移/识别态 + 各 useState 归位），但复用 xterm。
+    sessionChangedRef.current = (prevSessionId: number) => {
+      if (cancelled) return;
+      const resetForSessionSwitch = () => {
+        setActive(false);
+        setSnapshotReady(false);
+        setError("");
+        setInitTimedOut(false);
+        rearmRef.current?.();
+      };
+      if (!(prevSessionId < 0 && sessionIdRef.current > 0)) {
+        resetForSessionSwitch();
+        return;
+      }
+      void managedTerminalBinding(prevSessionId).then((bound) => {
+        if (cancelled) return;
+        if (bound === sessionIdRef.current) {
+          // 同一 PTY 只换了名字：换 id 窗口里漏推的帧由增量快照补齐（inspectSnapshot
+          // 带当前 nextOffset），偏移连续性由后端保证，无需 reset。
+          void inspectSnapshot();
+        } else {
+          resetForSessionSwitch();
+        }
+      }).catch(resetForSessionSwitch);
     };
     if (externalRearmRef) externalRearmRef.current = () => rearmRef.current?.();
     const outputListener = listen<OutputEvent>("pty-output", ({ payload }) => {
-      if (payload.sessionId === sessionId) {
+      if (payload.sessionId === sessionIdRef.current) {
         window.clearTimeout(snapshotTimer);
         setActive(true);
         setSnapshotReady(true);
         setExitCode(undefined);
+        setExitForced(false);
         if (!snapshotApplied) {
           bufferedOutput.push(payload);
         } else if (hasWrittenOutput && Number.isFinite(payload.offset) && payload.offset > nextOffset) {
@@ -1159,7 +1326,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       }
     });
     const exitListener = listen<ExitEvent>("pty-exit", ({ payload }) => {
-      if (payload.sessionId === sessionId) {
+      if (payload.sessionId === sessionIdRef.current) {
         if (snapshotApplied) applyExit(payload);
         else bufferedExit = payload;
       }
@@ -1191,11 +1358,30 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
         fit.fit();
         fittedRef.current = true;
         if (terminal.cols > 1 && terminal.rows > 1) {
-          resizeIfChanged(sessionId, terminal.cols, terminal.rows);
+          resizeIfChanged(sessionIdRef.current, terminal.cols, terminal.rows);
         }
       }, 80);
     });
     observer.observe(host);
+
+    // T-14 resize 仲裁的聚焦半边：失焦期间本视图不是尺寸主控、一律不下发 resize
+    //（门在 resizeIfChanged / resyncGridIfDrifted 里）；重新聚焦时 fit 一次再比对
+    // PTY 生效尺寸——只有真的漂移（失焦期间被外部终端改过）才补发 resize 夺回主控；
+    // 无外部终端的常态下 PTY 与本地一致，一轮 focus/blur 不多发任何 SIGWINCH。
+    focusedRef.current = document.hasFocus();
+    const onWindowFocus = () => {
+      focusedRef.current = true;
+      if (!visibleRef.current || !fittedRef.current) return;
+      fit.fit();
+      if (terminal.cols > 1 && terminal.rows > 1) {
+        void managedTerminalGrid(sessionIdRef.current)
+          .then(([cols, rows]) => resyncGridIfDrifted(sessionIdRef.current, cols, rows))
+          .catch(() => {});
+      }
+    };
+    const onWindowBlur = () => { focusedRef.current = false; };
+    window.addEventListener("focus", onWindowFocus);
+    window.addEventListener("blur", onWindowBlur);
 
     // 远程模式:pty-output 事件在手机端永远不触发(无 Tauri 事件桥),用定时补查驱动同一条
     // 增量快照通道。inspectSnapshot 带 nextOffset 只取增量,每拍仅拉自上次以来的新字节。
@@ -1209,7 +1395,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
 
     return () => {
       cancelled = true;
-      if (!remoteUi()) void unregisterTerminalViewer(sessionId).catch(() => {});
+      if (!remoteUi()) void unregisterTerminalViewer(sessionIdRef.current).catch(() => {});
       window.clearInterval(remotePollTimer);
       window.clearInterval(stallTimer);
       window.clearTimeout(snapshotTimer);
@@ -1219,6 +1405,8 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       window.clearTimeout(attentionScanTimer);
       observer.disconnect();
       imeObserver.disconnect();
+      window.removeEventListener("focus", onWindowFocus);
+      window.removeEventListener("blur", onWindowBlur);
       host.removeEventListener("paste", pasteImageFallback);
       host.removeEventListener("contextmenu", onContextMenu);
       host.removeEventListener("mousedown", onMouseDown, { capture: true });
@@ -1235,13 +1423,31 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       // webgl 先于 terminal dispose(xterm 惯例:renderer addon 依赖 core 的 DOM 还在)。
       try { webgl?.dispose(); } catch { /* 上下文丢失时已自释放 */ }
       searchAddonRef.current = null;
+      copySelectionRef.current = null;
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;
       rearmRef.current = null;
+      sessionChangedRef.current = null;
       if (externalRearmRef) externalRearmRef.current = null;
+      if (externalGridRef) externalGridRef.current = null;
     };
-  }, [sessionId, externalRearmRef]);
+    // 会话 id 变更不再重挂本 effect（xterm 重建、首屏清空重画）：临时 id→真实 id 的
+    // 重绑与换会话都走 sessionChangedRef（见其实现注释），effect 只随宿主 ref 变化重建。
+  }, [externalRearmRef, externalGridRef]);
+
+  // 会话 id 变更（挂载后）：不重挂终端，只换「认哪个 id」。viewer 注册跟着 id 走——
+  // emitter 只对 viewed_session 推实时帧，重绑后不重新注册就只剩快照兜底（画面退回
+  // 每 80ms 一跳）。旧的注册不必注销：set_viewer 是单槽覆盖写，卸载时 cleanup 按 CAS
+  // 清当前 id。重绑平滑续接 / 换会话复位的分派在 sessionChangedRef。
+  useEffect(() => {
+    const prev = sessionIdRef.current;
+    if (prev === sessionId) return;
+    sessionIdRef.current = sessionId;
+    if (!remoteUi()) void registerTerminalViewer(sessionId).catch(() => {});
+    sessionChangedRef.current?.(prev);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- sessionIdRef/sessionChangedRef 是稳定 ref
+  }, [sessionId]);
 
   // capability 查询可能比 PTY 首屏稍晚返回。提示文字先到、markers 后到时也要立刻补判，
   // 不能等一个可能永远不会来的后续输出 chunk。
@@ -1351,6 +1557,8 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     const yes = await appConfirm(t.chat.terminalTakeoverConfirm, {
       title: t.chat.terminalTakeover,
       danger: true,
+      // 主按钮说后果（S-14），与 ChatWindow 的接管入口同款纪律。
+      confirmLabel: t.chat.terminalTakeover,
     });
     if (!yes) return;
     setStarting(true);
@@ -1418,6 +1626,36 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
           <button type="button" className="term-search-btn is-close" aria-label={t.chat.close} onClick={closeSearch}>×</button>
         </div>
       )}
+      {termMenu && (
+        <TerminalContextMenu
+          x={termMenu.x}
+          y={termMenu.y}
+          canCopy={termMenu.canCopy}
+          canPaste={termMenu.canPaste}
+          onCopy={() => {
+            copySelectionRef.current?.();
+            // 与旧「右键=复制」行为一致：复制完清选区、焦点还给终端。
+            terminalRef.current?.clearSelection();
+            terminalRef.current?.focus();
+          }}
+          onPaste={() => {
+            // 读后端剪贴板（readText 在 WebView2 要权限弹窗，arboard 零打扰），
+            // 经 terminal.paste 走 bracketed paste 与 onData 既有下发通路。
+            const terminal = terminalRef.current;
+            if (!terminal) return;
+            void clipboardText().then((text) => {
+              if (text) terminal.paste(text);
+              terminal.focus();
+            }).catch(() => {});
+          }}
+          onSelectAll={() => {
+            terminalRef.current?.selectAll();
+            terminalRef.current?.focus();
+          }}
+          onSearch={() => setSearchOpen(true)}
+          onClose={() => setTermMenu(null)}
+        />
+      )}
       {initializing && (
         <div className="managed-terminal-cover is-initializing" role="status">
           <i className="managed-terminal-spinner" />
@@ -1437,7 +1675,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
               （worker 真的退了）才说结束，否则说「没接上」并给一次重接。 */}
           <div className="managed-terminal-cover-msg">{error || (background
             ? (exitCode !== undefined ? t.chat.terminalBackgroundGone : t.chat.terminalBackgroundLost)
-            : exitCode !== undefined ? t.chat.terminalExited(exitCode) : externalRunning ? t.chat.terminalExternal : t.chat.terminalReady)}</div>
+            : exitCode !== undefined ? (exitForced ? t.chat.terminalExitedForced(exitCode) : t.chat.terminalExited(exitCode)) : externalRunning ? t.chat.terminalExternal : t.chat.terminalReady)}</div>
           {/* 后台会话不给接管/启动按钮：那两条路对它必然失败（见 background 的说明）；
               还没拿到退出码时给「重新接入」——唯一对它有效的动作。 */}
           {background
@@ -1474,12 +1712,21 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
           <button type="button" aria-label={t.chat.close} onClick={() => setError("")}>×</button>
         </div>
       )}
+      {linkHint && (
+        // 悬停可点内容(URL/文件路径)时的操作提示:Ctrl+点击这条终端惯例此前没有任何
+        // 界面表达。固定在右下角、pointer-events:none,不挡画面不占交互。
+        <div className="managed-terminal-link-hint">{linkHint}</div>
+      )}
       {active && stalled && !stalledDismissed && !error && (
         // 输出流停滞(ConPTY 管道疑似内核僵死,判据见 terminalStreamStalled):用户态无法
-        // 自愈。文案说「点结束会话再重启」,那个按钮就得在横幅里,不能让用户自己去别处找;
-        // 误报也要能手动收掉(×),不是只能干等新字节。新字节抵达仍自动收起(误报自愈)。
+        // 自愈。「结束并恢复」把文案里的两步合一(此前只有「结束会话」,重启入口在退出
+        // 封面上,用户得自己找);误报也要能手动收掉(×),不是只能干等新字节。新字节
+        // 抵达仍自动收起(误报自愈)。
         <div className="managed-terminal-error is-stalled" role="alert">
           <span>{t.chat.terminalStreamStalled}</span>
+          <button type="button" disabled={stopping} onClick={restartFromBanner}>
+            {stopping ? t.chat.terminalStopping : t.chat.endAndResume}
+          </button>
           <button type="button" disabled={stopping} onClick={stopFromBanner}>
             {stopping ? t.chat.terminalStopping : t.chat.endSession}
           </button>
@@ -1497,6 +1744,100 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
           <button type="button" aria-label={t.chat.close} onClick={() => setInitTimedOut(false)}>×</button>
         </div>
       )}
+    </div>
+  );
+}
+
+/// 托管终端的右键菜单（U0-11）：复制/粘贴/全选/搜索。生产构建的 WebView 默认右键
+/// 菜单被 devtools-guard 整个封死——不补应用内菜单，这四件事对鼠标用户就是黑洞。
+/// 复用贴纸卡片菜单的 .ctx-menu 外观与关闭纪律（useDismissable，G-1：点外/Esc/
+/// 失焦/滚动关闭，Esc 层已登记、窗口级「Esc=拒绝审批」让位）。
+function TerminalContextMenu({
+  x,
+  y,
+  canCopy,
+  canPaste,
+  onCopy,
+  onPaste,
+  onSelectAll,
+  onSearch,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  /// 有选区 = 复制可用（无选区时复制必落空，置灰而不是藏——菜单位置稳定，肌肉记忆不被打乱）。
+  canCopy: boolean;
+  /// 无选区且会话可写 = 粘贴可用（Windows 终端惯例：有选区的右键是复制语义）。
+  canPaste: boolean;
+  onCopy: () => void;
+  onPaste: () => void;
+  onSelectAll: () => void;
+  onSearch: () => void;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const ref = useRef<HTMLDivElement>(null);
+  // fixed 定位 + 钳位：贴边打开时向内收，不被窗口边缘裁掉（与 CardContextMenu 同款）。
+  const [pos, setPos] = useState({ left: x, top: y });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const pad = 4;
+    setPos({
+      left: Math.max(pad, Math.min(x, window.innerWidth - el.offsetWidth - pad)),
+      top: Math.max(pad, Math.min(y, window.innerHeight - el.offsetHeight - pad)),
+    });
+  }, [x, y]);
+  useDismissable(ref, {
+    onClose,
+    outsideEvent: "click",
+    interceptOutsideClick: true,
+    closeOnContextMenu: true,
+    closeOnBlur: true,
+    closeOnScroll: true,
+  });
+  // 键盘可达：挂载即把焦点搬进首个可用项；↑↓/Home/End 搬焦点，Enter/Space 激活
+  //（与 CardContextMenu 同款 roving；禁用项不在停靠序列里）。
+  useEffect(() => {
+    ref.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
+  }, []);
+  const onMenuKeyDown = (e: ReactKeyboardEvent) => {
+    const items = Array.from(ref.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? []);
+    if (items.length === 0) return;
+    const cur = items.indexOf(document.activeElement as HTMLElement);
+    let next: number;
+    if (e.key === "ArrowDown") next = cur >= 0 ? (cur + 1) % items.length : 0;
+    else if (e.key === "ArrowUp") next = cur >= 0 ? (cur - 1 + items.length) % items.length : items.length - 1;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = items.length - 1;
+    else if ((e.key === "Enter" || e.key === " ") && cur >= 0) {
+      // 显式激活：jsdom 不合成按钮的 Enter/Space 点击；preventDefault 挡住原生那次，只触发一回。
+      e.preventDefault();
+      (document.activeElement as HTMLElement).click();
+      return;
+    } else return;
+    e.preventDefault();
+    items[next]?.focus();
+  };
+  const act = (fn: () => void) => () => {
+    fn();
+    onClose();
+  };
+  return (
+    <div ref={ref} className="ctx-menu" role="menu" style={pos} onClick={(e) => e.stopPropagation()} onKeyDown={onMenuKeyDown}>
+      <button type="button" role="menuitem" className="ctx-item" disabled={!canCopy} onClick={act(onCopy)}>
+        {t.chat.terminalMenuCopy}
+      </button>
+      <button type="button" role="menuitem" className="ctx-item" disabled={!canPaste} onClick={act(onPaste)}>
+        {t.chat.terminalMenuPaste}
+      </button>
+      <div className="ctx-sep" role="separator" />
+      <button type="button" role="menuitem" className="ctx-item" onClick={act(onSelectAll)}>
+        {t.chat.terminalMenuSelectAll}
+      </button>
+      <button type="button" role="menuitem" className="ctx-item" onClick={act(onSearch)}>
+        {t.chat.terminalMenuSearch}
+      </button>
     </div>
   );
 }

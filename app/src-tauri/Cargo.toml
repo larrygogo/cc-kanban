@@ -139,10 +139,21 @@ webview2-com = "0.38"
 [target.'cfg(target_os = "macos")'.dependencies]
 # 钉 rev 不跟踪分支：lock 重建 / cargo update 不会静默拉到上游新提交（与 Cargo.lock 锁定提交一致）。
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "18ffb9a201fbf6fedfaa382fd4b92315ea30ab1a" }
-mac-notification-sys = "0.6"
-# 点击通知后从"通知中心"移除本应用的已投递通知（mac-notification-sys 不暴露移除接口）。
-# objc2 与 tauri 生态现有 0.6 对齐（替换 2022 年后停维护的 objc 0.2）。
+# macOS 通知走 UNUserNotificationCenter（替代 mac-notification-sys：它串行阻塞等待用户交互、
+# 内部用的还是已废弃的 NSUserNotificationCenter）。objc2 系与 tauri 生态现有 0.6 对齐。
 objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSError", "NSObject", "NSString"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+  "UNUserNotificationCenter",
+  "UNNotification",
+  "UNNotificationContent",
+  "UNNotificationRequest",
+  "UNNotificationResponse",
+  "UNNotificationSound",
+  "UNNotificationTrigger",
+  "block2",
+] }
+block2 = { version = "0.6", features = ["alloc"] }
 
 [lints.rust]
 # tauri-nspanel 的 panel_delegate! 宏展开含 #[cfg(feature = "cargo-clippy")]，新 rustc 下触发

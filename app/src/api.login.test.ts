@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const invokeMock = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invokeMock(...a) }));
 
-import { getRelaySecrets, loginAgent, logoutAgent, installAgent, isLoggedIn, listRelayModels, type ProviderAccountPayload } from "./api";
+import { getRelaySecrets, loginAgent, logoutAgent, installAgent, cancelInstall, isLoggedIn, listRelayModels, type ProviderAccountPayload } from "./api";
 
 beforeEach(() => invokeMock.mockReset());
 
@@ -65,6 +65,12 @@ describe("login api", () => {
     invokeMock.mockResolvedValue(undefined);
     installAgent("codex");
     expect(invokeMock).toHaveBeenCalledWith("install_agent", { provider: "codex" });
+  });
+
+  it("cancelInstall 调用 cancel_install（S-8 取消安装）", () => {
+    invokeMock.mockResolvedValue(undefined);
+    cancelInstall("codex");
+    expect(invokeMock).toHaveBeenCalledWith("cancel_install", { provider: "codex" });
   });
 
   it("logoutAgent 调用 logout_agent（省略 profile = 当前活跃账号）", () => {

@@ -58,12 +58,29 @@ pub struct SubagentRun {
     pub items: Vec<ChatItem>,
 }
 
+/// 一次委派里**单条分支**的侧车实测状态（kimi `AgentSwarm` 的 `agent-N`）。
+/// 面板把多发委派展开成逐分支一行后，每行的状态从各自的侧车流读，不再共用聚合结论。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+pub struct SubagentBranchProbeDto {
+    /// 分支标签（kimi 的 `agent-3`）。单发委派没有可显示的分支名时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// 归一化状态：`running` / `completed` / `failed`。该分支没留下状态信号时保持
+    /// `running`——不能反过来断言它已结束（与聚合口径同一条规则）。
+    pub status: String,
+    /// 该分支侧车最后一次落盘的时刻（ISO-8601）；仅已结束的分支携带。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+}
+
 /// 一次**未结**委派的侧车实测状态。折叠状态下的结局统计只来自主链回执，而并行委派的
 /// 回执必须等同一步里的工具**全部**跑完才一起写盘——整批跑完之前，先收工的子任务在
 /// 主链上毫无痕迹（实拍：4 个 explore 里 1 个已完成，进度面板仍是 0/4，四行耗时一律
 /// 按「委派时刻→现在」算）。而侧车流自己带着终结标记，这里据此实测补齐。
 ///
-/// 按需读取（用户展开进度面板时），不进 650ms 的历史轮询热路径——同 `SubagentRun`。
+/// 按需读取（用户展开进度面板时），不进历史轮询热路径——同 `SubagentRun`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
@@ -74,6 +91,10 @@ pub struct SubagentProbeDto {
     /// 真实执行时长；还在跑时为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
+    /// 逐分支实测状态，与侧车流的定位顺序一致（与面板展开的分支行按序号对应）。
+    /// 旧前端没有此字段时按 `#[serde(default)]` 拿到空列表，退回聚合 `status` 的口径。
+    #[serde(default)]
+    pub branches: Vec<SubagentBranchProbeDto>,
 }
 
 /// Provider 日志经插件解析后交给聊天归一化层的稳定消息单元。
@@ -246,6 +267,11 @@ pub struct ChatHistoryDto {
     /// 或该 agent 的待办是增量事件而非快照（当前版本的 Claude Code 即如此）。
     pub todos: Vec<TodoDto>,
     pub has_more: bool,
+    /// 当前已加载窗口首行在 transcript 里的字节偏移：「加载更早」向上翻页的上界
+    /// （作为 get_chat_history 的 before 参数带回）。只在整读（首读/reset）与翻页
+    /// 响应里有意义，增量轮询响应恒为 0，前端不采信。
+    #[cfg_attr(test, ts(type = "number"))]
+    pub earliest: u64,
     /// hook 驱动的最近往来（UserPromptSubmit / Stop 落库），与 transcript 解析无关。
     /// items 为空（transcript 未落盘/未定位）或该 agent 不提供结构化 transcript 时，
     /// 前端用它们渲染临时时间线——「会话已在工作」不该显示成一片空白。
@@ -344,6 +370,11 @@ pub struct PtyExitEvent {
     #[cfg_attr(test, ts(type = "number"))]
     pub session_id: i64,
     pub code: Option<u32>,
+    /// true = 升级链末档的强制收尾：kill 对卡死的进程静默无效、等不到真实退出，
+    /// UI 先把会话摘除，进程本身可能仍躺在系统里（zombie）。前端据此区分文案，
+    /// 不把「可能还活着」说成「已结束」。serde(default) 兼容旧事件源。
+    #[serde(default)]
+    pub forced: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,6 +396,11 @@ pub struct ManagedTerminalSnapshotDto {
     pub end_offset: u64,
     pub exited: bool,
     pub exit_code: Option<u32>,
+    /// 已退出会话的输出尾部可读文本：CLI 拒绝启动时（resume 冲突、认证失败…）原因只
+    /// 打在 PTY 输出里。秒退探测只盖启动后第 1 秒，那之后退出的失败靠它把原因带给
+    /// 对话页（否则只有一句「退出码 X」，用户得自己去终端页翻）。仅 exited 时有值。
+    #[serde(default)]
+    pub exit_tail: Option<String>,
     /// PTY 当前生效的行列数（0 = 未知：无活跃 PTY / 尚未设置尺寸）。前端在终端视图
     /// **隐藏**时用它把 xterm 网格钉到 PTY 真实尺寸——隐藏态宿主是屏外停靠盒，按盒子
     /// fit 出来的网格与 PTY 脱节，隐藏期到达的帧会按错误宽度换行/错行叠画（实拍花屏）。
@@ -378,6 +414,51 @@ pub struct ManagedTerminalSnapshotDto {
     /// 空 = 无活跃 PTY / 旁路快照 / 已退出定格。
     #[serde(default)]
     pub modes: Vec<u16>,
+    /// 此刻有外部同步终端（attach 客户端）在线。双视图同写同一 PTY 时对话页据此提示
+    /// 「输入可能交错」（T-14）；实时增删另有 `pty-external-viewers` 事件推送，这里
+    /// 承担的是重开窗口/重对齐时的初始值。
+    #[serde(default)]
+    pub external_viewers: bool,
+}
+
+/// 外部同步终端（attach 客户端）在线状态变化事件（`pty-external-viewers`）。
+/// 对话窗订阅它即时刷新「输入可能交错」提示——快照轮询在桌面端不是常开通道，
+/// 订阅表增删的那一刻必须主动推（pty.rs handle_attach 的两处订阅表写点）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalViewersEvent {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub session_id: i64,
+    pub online: bool,
+}
+
+/// screen_state「运行中 → 空闲/阻塞」降级转变的直达事件（`board-urgent`，T-15 高优通道）。
+/// 「agent 停下来等人」是看板角标最该即时反映的转变，而后端合流（300ms）+ 前端节流
+/// （400ms）叠在检测节拍与防抖之后，最坏拖到 ~1.7s。后端检测到降级时绕过 board-changed
+/// 合流直发本事件，前端看板随之绕过刷新节流立即重拉。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct BoardUrgentEvent {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub session_id: i64,
+    /// 转变后的发布状态（`idle` / `blocked`）。
+    pub state: String,
+}
+
+/// 对话页 transcript 变更推送（`chat-transcript`，C-14）。后端 watch 到该会话的
+/// transcript 文件写入时直发（不走 board 合流），对话窗据此提前拉增量——外部终端
+/// 会话没有 pty-output，这条是它的实时通道；定时轮询降级为最终兜底。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(rename_all = "camelCase")]
+pub struct ChatTranscriptEvent {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub session_id: i64,
 }
 
 /// 工作区里有改动的一个文件（git status --porcelain 的一行归一化结果）。
@@ -552,9 +633,11 @@ mod tests {
             end_offset: 13,
             exited: false,
             exit_code: None,
+            exit_tail: None,
             cols: 120,
             rows: 40,
             modes: vec![1049, 1006],
+            external_viewers: false,
         })
         .unwrap();
         assert_eq!(value["sessionId"], 7);

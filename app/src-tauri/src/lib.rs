@@ -57,8 +57,9 @@ use fsutil::{
 };
 use git::{git_diff_summary, git_file_diff};
 use install::{
-    add_agent_to_user_path, agent_path_gap, api_key_login, cancel_login, check_provider_hooks,
-    install_agent, login_agent, logout_agent, repair_provider_hooks,
+    add_agent_to_user_path, agent_path_gap, api_key_login, cancel_install, cancel_login,
+    check_provider_hooks, install_agent, login_agent, logout_agent, open_install_log,
+    repair_provider_hooks,
 };
 use managed_terminal::{
     awaiting_interaction_sessions, dismiss_interactive_question, managed_terminal_binding,
@@ -86,16 +87,19 @@ use session_query::{
 };
 use session_command::{session_launch_selections, set_session_launch_selection};
 use terminal::{
-    focus_session, new_session, open_project_dir, restart_session_supported, resume_session,
-    takeover_managed_terminal,
+    focus_session, new_session, open_automation_settings, open_project_dir,
+    restart_session_supported, resume_session, takeover_managed_terminal,
 };
 use window::{
     open_chat_window, open_latest_chat, open_new_session_window, open_onboarding, open_settings,
-    open_update_window, recall_center,
+    open_update_window, recall_center, set_panel_keep_open, show_sticker,
 };
 // 连接判定的进程事实源统一走 proc::agent_pids_snapshot（按平台分流），
 // 由 session_query 缓存成一份跨命令共享的快照；lib 这一层不再直接碰进程表。
-use watch::{spawn_board_notifier, spawn_db_watcher, spawn_first_import, spawn_liveness_watch};
+use watch::{
+    spawn_board_notifier, spawn_db_watcher, spawn_first_import, spawn_liveness_watch,
+    spawn_transcript_watcher,
+};
 #[cfg(not(target_os = "macos"))]
 use window::setup_tray;
 // settings::set_settings 切语言后调用（全平台）。
@@ -120,17 +124,22 @@ pub(crate) use window::open_latest_chat_window;
 
 use relay::{get_relay_secret_status, get_relay_secrets, list_relay_models, set_relay_secret};
 use settings::{
-    get_autostart, get_effective_proxy, get_settings, mark_onboarding_seen, open_link, open_url,
-    set_autostart, set_settings,
+    get_autostart, get_effective_proxy, get_settings, get_sticker_window_state,
+    mark_onboarding_seen, open_link, open_url, set_autostart, set_settings,
+    set_sticker_window_state,
 };
 use snap::{
     cursor_over_window, pointer_left_down, snap_collapse, snap_expand, snap_restore, unsnap,
 };
-// 出屏约束/吸边检测（run 的窗口事件闭包）只在非 macOS 用这些几何符号。
+// 出屏约束/吸边检测（run 的窗口事件闭包）只在 Windows 用这些几何符号
+// （W-18：吸边整体门控 Windows；macOS 面板模式本无吸边，Linux 原语恒假值半坏）。
 #[cfg(target_os = "windows")]
 use snap::pull_on_screen;
-#[cfg(not(target_os = "macos"))]
-use snap::{clamp_xy_to_work, edge_for_rect, Rect, SnapPayload, SNAP_THRESHOLD};
+#[cfg(target_os = "windows")]
+use snap::{
+    clamp_target_for_drag, clamp_xy_to_work, edge_for_rect, union_bbox, Edge, Rect, SnapPayload,
+    SNAP_THRESHOLD,
+};
 
 use meowo_store::Store;
 use std::path::PathBuf;
@@ -170,6 +179,9 @@ struct AppState {
     downloaded_update: Mutex<Option<DownloadedUpdate>>,
     /// 防止主窗自动下载与更新窗口手动下载并发执行。
     update_downloading: AtomicBool,
+    /// 下载取消信号（S-13：插件的 download 无取消 API，用 select! 丢未来实现）。
+    /// false→true 即请求取消；每次开始下载前重置回 false。
+    update_download_cancel: tokio::sync::watch::Sender<bool>,
     /// 由 Meowo 持有的交互式 PTY。对话窗口与后续 attach 客户端共享同一 broker。
     ptys: pty::PtyBroker,
     /// 搭在 agent 自己托管的后台会话上的旁路连接（claude FleetView）。与 ptys 平行:
@@ -296,8 +308,13 @@ async fn download_update(
     }
 
     let mut downloaded = 0u64;
-    let result = update
-        .download(
+    // 每次下载前重置取消信号（上次取消/残留状态不能误杀本次下载）。
+    let _ = state.update_download_cancel.send(false);
+    let mut cancel_rx = state.update_download_cancel.subscribe();
+    // tauri-plugin-updater（2.x）的 download 没有取消 API：用 select! 赛跑取消信号，
+    // 取消即丢弃下载 future——reqwest 流随 future drop 中止，字节全在内存、无半成品文件要清。
+    let result = tokio::select! {
+        result = update.download(
             |chunk, total| {
                 downloaded = downloaded.saturating_add(chunk as u64);
                 let _ = app.emit(
@@ -309,8 +326,13 @@ async fn download_update(
                 );
             },
             || {},
-        )
-        .await;
+        ) => result,
+        _ = cancel_rx.changed() => {
+            state.update_downloading.store(false, Ordering::Release);
+            let _ = app.emit("update-download-cancelled", ());
+            return Ok("available".to_string());
+        }
+    };
     state.update_downloading.store(false, Ordering::Release);
 
     match result {
@@ -333,6 +355,25 @@ async fn download_update(
             Err(message)
         }
     }
+}
+
+#[tauri::command]
+async fn cancel_update_download(state: State<'_, AppState>) -> Result<(), String> {
+    // 没在下载时按 no-op 处理（更新窗关着、下载已完成等竞态）。
+    if state.update_downloading.load(Ordering::Acquire) {
+        let _ = state.update_download_cancel.send(true);
+    }
+    Ok(())
+}
+
+/// 首启历史导入完成的一次性提示（S-12）：贴纸挂载时拉取，取到即落「已提示」标记，只弹一次。
+/// 同步命令：只读一个几十字节的 marker JSON（与 get_settings 同类的小文件现读）。
+#[tauri::command]
+fn first_import_notice(state: State<'_, AppState>) -> Option<u32> {
+    state
+        .db_path
+        .parent()
+        .and_then(watch::take_first_import_notice)
 }
 
 #[tauri::command]
@@ -772,8 +813,9 @@ async fn agent_chat_ui(
 }
 
 /// 用 Win32 窗口子类化在「移动生效前」硬约束贴纸位置，彻底拖不出屏幕（零抖动，
-/// 优于事后 set_position 拉回）。拦截 WM_WINDOWPOSCHANGING，把目标坐标钳进所有显示器
-/// 工作区的并集包围盒。
+/// 优于事后 set_position 拉回）。拦截 WM_WINDOWPOSCHANGING，把目标坐标钳进与窗口
+/// 相交面积最大的显示器工作区（W-16：并集包围盒在非矩形排布下留「死区」，窗口可被
+/// 拖进死区整块消失）。
 #[cfg(target_os = "windows")]
 mod win_constrain {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -782,8 +824,8 @@ mod win_constrain {
     };
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowRect, SWP_NOMOVE, SWP_NOSIZE, WINDOWPOS, WM_EXITSIZEMOVE, WM_SIZING,
-        WM_WINDOWPOSCHANGING,
+        GetWindowRect, SWP_NOMOVE, SWP_NOSIZE, WINDOWPOS, WM_DISPLAYCHANGE, WM_EXITSIZEMOVE,
+        WM_SETTINGCHANGE, WM_SIZING, WM_WINDOWPOSCHANGING,
     };
 
     const SUBCLASS_ID: usize = 0x00CC_4A0B;
@@ -793,19 +835,24 @@ mod win_constrain {
     /// 本次缩放手势是否已通知过（一次拖拽只发一次 user-resized）。
     static RESIZE_EMITTED: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
+    /// 显示器拓扑世代：WM_DISPLAYCHANGE / WM_SETTINGCHANGE(工作区变化) 到达即 +1（W-9）。
+    /// lib.rs 的 Moved 处理按世代缓存各显示器工作区，只有世代变化才重新枚举，
+    /// 拖拽期间不再逐 Moved 全量枚举。
+    static DISPLAY_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     /// 注入 AppHandle（在装子类时一并调用）。
     pub fn set_app(app: tauri::AppHandle) {
         let _ = APP.set(app);
     }
 
-    /// 累积所有显示器工作区(rcWork)的并集包围盒。
-    struct Bbox {
-        has: bool,
-        l: i32,
-        t: i32,
-        r: i32,
-        b: i32,
+    /// 当前显示器拓扑世代（见 DISPLAY_GENERATION）。
+    pub fn display_generation() -> u64 {
+        DISPLAY_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 收集所有显示器工作区(rcWork)。
+    struct WorkAreas {
+        list: Vec<RECT>,
     }
 
     unsafe extern "system" fn enum_proc(
@@ -814,40 +861,37 @@ mod win_constrain {
         _rc: *mut RECT,
         data: LPARAM,
     ) -> i32 {
-        let bb = &mut *(data as *mut Bbox);
+        let areas = &mut *(data as *mut WorkAreas);
         let mut mi: MONITORINFO = std::mem::zeroed();
         mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
         if GetMonitorInfoW(hmon, &mut mi) != 0 {
-            let w = mi.rcWork;
-            if !bb.has {
-                (bb.l, bb.t, bb.r, bb.b, bb.has) = (w.left, w.top, w.right, w.bottom, true);
-            } else {
-                bb.l = bb.l.min(w.left);
-                bb.t = bb.t.min(w.top);
-                bb.r = bb.r.max(w.right);
-                bb.b = bb.b.max(w.bottom);
-            }
+            areas.list.push(mi.rcWork);
         }
         1 // TRUE：继续枚举
     }
 
-    fn virtual_work_bbox() -> Option<(i32, i32, i32, i32)> {
-        let mut bb = Bbox {
-            has: false,
-            l: 0,
-            t: 0,
-            r: 0,
-            b: 0,
-        };
+    fn virtual_work_areas() -> Vec<RECT> {
+        let mut areas = WorkAreas { list: Vec::new() };
         unsafe {
             EnumDisplayMonitors(
                 std::ptr::null_mut(),
                 std::ptr::null(),
                 Some(enum_proc),
-                &mut bb as *mut Bbox as LPARAM,
+                &mut areas as *mut WorkAreas as LPARAM,
             );
         }
-        bb.has.then_some((bb.l, bb.t, bb.r, bb.b))
+        areas.list
+    }
+
+    /// 两个 RECT 的相交面积（无重叠为 0）。
+    fn rect_intersection(a: &RECT, b: &RECT) -> i64 {
+        let w = (a.right.min(b.right) - a.left.max(b.left)) as i64;
+        let h = (a.bottom.min(b.bottom) - a.top.max(b.top)) as i64;
+        if w <= 0 || h <= 0 {
+            0
+        } else {
+            w * h
+        }
     }
 
     unsafe extern "system" fn subclass_proc(
@@ -875,15 +919,43 @@ mod win_constrain {
                     (wp.cx, wp.cy)
                 };
                 if w > 0 && h > 0 {
-                    if let Some((l, t, r, b)) = virtual_work_bbox() {
-                        // 钳进包围盒；窗口比包围盒还大时左上对齐。
-                        let max_x = (r - w).max(l);
-                        let max_y = (b - h).max(t);
-                        wp.x = wp.x.clamp(l, max_x);
-                        wp.y = wp.y.clamp(t, max_y);
+                    let areas = virtual_work_areas();
+                    if !areas.is_empty() {
+                        let proposed = RECT {
+                            left: wp.x,
+                            top: wp.y,
+                            right: wp.x + w,
+                            bottom: wp.y + h,
+                        };
+                        // W-16：钳进「相交面积最大的显示器」工作区；与所有屏都无交集
+                        // （拖拽连续移动不可能到达）时退回并集包围盒兜底。
+                        let target = areas
+                            .iter()
+                            .max_by_key(|a| rect_intersection(&proposed, a))
+                            .filter(|a| rect_intersection(&proposed, a) > 0)
+                            .copied()
+                            .unwrap_or_else(|| {
+                                areas.iter().fold(areas[0], |mut acc, a| {
+                                    acc.left = acc.left.min(a.left);
+                                    acc.top = acc.top.min(a.top);
+                                    acc.right = acc.right.max(a.right);
+                                    acc.bottom = acc.bottom.max(a.bottom);
+                                    acc
+                                })
+                            });
+                        // 钳进目标工作区；窗口比它还大时左上对齐。
+                        let max_x = (target.right - w).max(target.left);
+                        let max_y = (target.bottom - h).max(target.top);
+                        wp.x = wp.x.clamp(target.left, max_x);
+                        wp.y = wp.y.clamp(target.top, max_y);
                     }
                 }
             }
+        } else if msg == WM_DISPLAYCHANGE || msg == WM_SETTINGCHANGE {
+            // 显示器拔插/分辨率变化（WM_DISPLAYCHANGE）、任务栏自动隐藏等工作区变化
+            // （WM_SETTINGCHANGE，SPI_SETWORKAREA）：递增世代，让 Moved 处理的显示器
+            // 缓存失效（W-9）。世代只是失效信号，多 bump 无害。
+            DISPLAY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         } else if msg == WM_SIZING {
             // WM_SIZING 仅在用户拖边框缩放时发（程序 set_size 不发）→ 通知前端解除吸附。
             // 一次拖拽手势只发一次，避免刷屏。
@@ -916,6 +988,18 @@ mod win_constrain {
     }
 }
 
+/// 贴纸 Moved 处理的共享缓存（W-9）。显示器工作区列表按「显示器世代」缓存——世代由
+/// win_constrain 子类在 WM_DISPLAYCHANGE 时递增，世代不变就直接复用，拖拽期间不再每个
+/// Moved 全量枚举显示器；snap-changed 也只在吸附边**变化**时 emit，不再逐 Moved 重发。
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+struct MovedSnapCache {
+    /// (上次枚举时的显示器世代, 各显示器工作区)。
+    monitors: Option<(u64, Vec<Rect>)>,
+    /// 上次 emit 的吸附边；None = 尚未 emit 过（首帧必须发一次，让前端拿到初始态）。
+    last_edge: Option<Option<Edge>>,
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// 把 DLL 搜索路径收紧到「应用目录 + System32」，进程一起来就做（任何 LoadLibrary 之前）。
 ///
@@ -941,6 +1025,56 @@ fn harden_dll_search_path() {
             );
         }
     }
+}
+
+/// W-17：main 窗口位置改由 settings.json 的 sticker_window 持有（window-state 插件对 main 已
+/// denylist）。settings 尚无位置时，一次性继承插件旧文件（.window-state.json）里的 main 坐标
+/// 并落盘——升级用户的窗口不跳位。恢复/迁移失败都只打日志：位置只是摆放偏好，丢了由 OS 默认
+/// 摆放 + pull_on_screen 兜底可见性。macOS 面板位置归 menubar/positioner 管，不走这里。
+#[cfg(not(target_os = "macos"))]
+fn restore_sticker_window_position(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let saved = crate::settings::load_settings().sticker_window;
+    let pos = match (saved.x, saved.y) {
+        (Some(x), Some(y)) => Some((x, y)),
+        _ => legacy_window_state_position(app).inspect(|&(x, y)| {
+            if let Err(e) = crate::settings::update_settings(|s| {
+                s.sticker_window.x = Some(x);
+                s.sticker_window.y = Some(y);
+                Ok(())
+            }) {
+                eprintln!("[window-state] 迁移旧位置到 settings 失败（下次启动重试）: {e}");
+            }
+        }),
+    };
+    if let Some((x, y)) = pos {
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+}
+
+/// 读 window-state 插件旧文件里 main 的上次位置（物理像素）。
+#[cfg(not(target_os = "macos"))]
+fn legacy_window_state_position(app: &tauri::AppHandle) -> Option<(i32, i32)> {
+    let path = app
+        .path()
+        .app_config_dir()
+        .ok()?
+        .join(tauri_plugin_window_state::DEFAULT_FILENAME);
+    let raw = std::fs::read_to_string(path).ok()?;
+    parse_legacy_main_position(&raw)
+}
+
+/// 解析 .window-state.json 的 main 条目（插件 WindowState 的 x/y 即物理像素坐标）。
+/// 文件损坏/无 main 条目/坐标非整数都返回 None（= 没有可继承的旧位置）。纯函数便于单测。
+#[cfg(not(target_os = "macos"))]
+fn parse_legacy_main_position(raw: &str) -> Option<(i32, i32)> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let m = v.get("main")?;
+    let x = i32::try_from(m.get("x")?.as_i64()?).ok()?;
+    let y = i32::try_from(m.get("y")?.as_i64()?).ok()?;
+    Some((x, y))
 }
 
 pub fn run() {
@@ -992,6 +1126,9 @@ pub fn run() {
         eprintln!("启动 PTY attach 服务失败: {error}");
     }
     let builder = tauri::Builder::default();
+    // 贴纸 Moved 处理的缓存（W-9，见 MovedSnapCache）：随 on_window_event 闭包共享。
+    #[cfg(target_os = "windows")]
+    let moved_snap_cache = Arc::new(Mutex::new(MovedSnapCache::default()));
     // single-instance 必须最先注册（官方要求，越早越能拦住二次启动）。仅 release：
     // debug 构建豁免——本机开发的常态是「安装版自启 + dev 版并行」，同 identifier 的
     // single-instance 会把 dev 实例当二次启动当场掐死，开发流程整个断掉；双开的已知
@@ -1020,10 +1157,14 @@ pub fn run() {
         // 生产构建关掉 WebView2 浏览器加速键（打印/刷新/另存/原生查找等整族，详见函数注释）。
         // on_page_load 是覆盖全部窗口（含后建的对话/确认窗）的唯一集中挂点。
         .on_page_load(|webview, _payload| window::disable_browser_accelerators(webview))
-        // window-state 只持久化/恢复「位置」等，不恢复「尺寸」：main 窗口尺寸改由前端 localStorage
-        // (SIZE_KEY) 单独持有。否则吸附态退出会把「细条几何」存进 window-state，与 localStorage 的吸附态
-        // (SNAP_KEY) 两套持久化不同步——重启读不到 SNAP_KEY 却被还原成细条尺寸，渲染完整贴纸而没真正吸附。
-        // about 设置窗口固定尺寸(resizable=false)，不受影响；折叠/正常尺寸均由前端 snap 逻辑权威设定。
+        // W-17：main（贴纸）窗口的几何整体移出本插件——位置/尺寸/吸附边/置顶统一由 settings.json
+        // 的 sticker_window 原子持有（settings.rs；位置在 setup 里 restore_sticker_window_position
+        // 恢复，尺寸/吸附由前端 snap 逻辑权威设定）。此前「位置靠插件、尺寸/吸附边/置顶靠三套
+        // localStorage 键」四处分写无原子性，清空 WebView 存储即半吊子状态；且吸附态退出会把
+        // 「细条几何」存进插件文件，与 localStorage 的吸附态不同步——重启读不到吸附边却被还原成
+        // 细条尺寸，渲染完整贴纸而没真正吸附。denylist 后插件只管其余窗口（位置），且：
+        // SIZE 不恢复：main 已不在插件管辖内，对其余窗口维持既有行为（尺寸不自管恢复），
+        // 不为本轮改动引入未验证的变化。
         // VISIBLE 也不恢复：设置/对话窗口以 visible:false 创建、前端首帧后才显示（消除白框闪烁），
         // 插件若按上次退出时的「可见」在创建当口就 show，隐藏创建被当场抵消，白框闪烁复发。
         // 可见性完全由代码显式控制（main 由 tauri.conf 的 visible:true，其余窗口自管）。
@@ -1037,6 +1178,7 @@ pub fn run() {
                         | tauri_plugin_window_state::StateFlags::VISIBLE
                         | tauri_plugin_window_state::StateFlags::DECORATIONS,
                 ))
+                .with_denylist(&["main"])
                 .build(),
         )
         .plugin(tauri_plugin_autostart::init(
@@ -1058,6 +1200,7 @@ pub fn run() {
             update: Mutex::new(None),
             downloaded_update: Mutex::new(None),
             update_downloading: AtomicBool::new(false),
+            update_download_cancel: tokio::sync::watch::channel(false).0,
             ptys,
         })
         .invoke_handler(tauri::generate_handler![
@@ -1104,6 +1247,7 @@ pub fn run() {
             resume_session,
             restart_session_supported,
             open_project_dir,
+            open_automation_settings,
             git_diff_summary,
             git_file_diff,
             list_dir_entries,
@@ -1122,6 +1266,8 @@ pub fn run() {
             set_autostart,
             get_settings,
             set_settings,
+            get_sticker_window_state,
+            set_sticker_window_state,
             remote::remote_access_info,
             remote::regenerate_remote_token,
             mark_onboarding_seen,
@@ -1132,11 +1278,15 @@ pub fn run() {
             set_relay_secret,
             check_update,
             download_update,
+            cancel_update_download,
             install_downloaded_update,
+            first_import_notice,
             open_settings,
             open_onboarding,
             open_update_window,
             recall_center,
+            set_panel_keep_open,
+            show_sticker,
             open_link,
             open_url,
             snap_collapse,
@@ -1162,6 +1312,7 @@ pub fn run() {
             switch_session_provider,
             get_session_lineage,
             install_agent,
+            cancel_install,
             agent_path_gap,
             add_agent_to_user_path,
             login_agent,
@@ -1170,15 +1321,18 @@ pub fn run() {
             cancel_login,
             check_provider_hooks,
             repair_provider_hooks,
+            open_install_log,
             recent_cwds,
             open_new_session_window,
             open_latest_chat
         ])
-        .on_window_event(|window, event| {
+        .on_window_event(move |window, event| {
             // macOS：面板模式，无出屏约束/吸边；不处理 Moved（避免与 positioner 抢位置、误发 snap-changed）。
-            #[cfg(target_os = "macos")]
+            // Linux：吸边整体不做（W-18——cursor_over_window/pointer_left_down 两原语在非 Windows
+            // 恒返回假值，吸边「看起来支持实则坏掉」；半坏不如不做），出屏约束也无对应子类实现。
+            #[cfg(not(target_os = "windows"))]
             let _ = (window, event);
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
             if let tauri::WindowEvent::Moved(pos) = event {
                 // 出屏约束与吸附只作用于贴纸主窗口；设置等其它窗口不受限制。
                 if window.label() != "main" {
@@ -1194,56 +1348,65 @@ pub fn run() {
                     h: size.height as i32,
                 };
 
-                // 限制贴纸不被拖出屏幕：把窗口钳进「所有显示器工作区的并集包围盒」。
-                // 越界就立刻拉回，拖到边缘即停（吸边仍在界内，不受影响）。多显示器下可在并集内自由移动。
-                let vwork = window.available_monitors().ok().and_then(|ms| {
-                    let mut it = ms.iter().map(|m| {
-                        let wa = m.work_area();
-                        (
-                            wa.position.x,
-                            wa.position.y,
-                            wa.position.x + wa.size.width as i32,
-                            wa.position.y + wa.size.height as i32,
-                        )
-                    });
-                    let (mut ax, mut ay, mut bx, mut by) = it.next()?;
-                    for (x0, y0, x1, y1) in it {
-                        ax = ax.min(x0);
-                        ay = ay.min(y0);
-                        bx = bx.max(x1);
-                        by = by.max(y1);
+                // 各显示器工作区（W-9）：按显示器世代缓存，仅 WM_DISPLAYCHANGE（世代+1）后
+                // 重新枚举；拖拽期间每个 Moved 全量枚举显示器 ×2 的开销由此消除。
+                let gen = win_constrain::display_generation();
+                let works: Vec<Rect> = {
+                    let mut cache = moved_snap_cache.lock().unwrap();
+                    match &cache.monitors {
+                        Some((g, ws)) if *g == gen => ws.clone(),
+                        _ => {
+                            let Ok(ms) = window.available_monitors() else {
+                                return;
+                            };
+                            let ws: Vec<Rect> = ms
+                                .iter()
+                                .map(|m| {
+                                    let wa = m.work_area();
+                                    Rect {
+                                        x: wa.position.x,
+                                        y: wa.position.y,
+                                        w: wa.size.width as i32,
+                                        h: wa.size.height as i32,
+                                    }
+                                })
+                                .collect();
+                            if ws.is_empty() {
+                                return; // 显示器尚未枚举完（开机早期）：本次不约束不检测
+                            }
+                            cache.monitors = Some((gen, ws.clone()));
+                            ws
+                        }
                     }
-                    Some(Rect {
-                        x: ax,
-                        y: ay,
-                        w: bx - ax,
-                        h: by - ay,
-                    })
-                });
-                if let Some(vwork) = vwork {
-                    let (cx, cy) = clamp_xy_to_work(win, vwork);
+                };
+
+                // 限制贴纸不被拖出屏幕（W-16）：钳进「相交面积最大的显示器」工作区——并集
+                // 包围盒在非矩形排布下留「死区」，窗口可被拖进死区整块消失。越界就立刻拉回，
+                // 拖到边缘即停（吸边仍在界内，不受影响）。
+                if let Some(target) = clamp_target_for_drag(win, &works) {
+                    let (cx, cy) = clamp_xy_to_work(win, target);
                     if (cx, cy) != (win.x, win.y) {
                         let _ = window.set_position(tauri::PhysicalPosition::new(cx, cy));
                         return; // 钳正后会再触发一次 Moved（已在界内），那次再算吸附边
                     }
                 }
 
-                // 贴边检测（用当前显示器工作区）。
-                if let Ok(Some(m)) = window.current_monitor() {
-                    let wa = m.work_area();
-                    let work = Rect {
-                        x: wa.position.x,
-                        y: wa.position.y,
-                        w: wa.size.width as i32,
-                        h: wa.size.height as i32,
-                    };
+                // 贴边检测（W-16）：只对**虚拟桌面外侧边**（并集包围盒的边）吸附——双屏
+                // 内侧边是鼠标的必经之路，内侧可吸 + 零延迟展开 = 必然误触。
+                if let Some(vwork) = union_bbox(&works) {
                     // 阈值按缩放放大：SNAP_THRESHOLD 是逻辑手感（20 逻辑像素），而这里全程
                     // 物理像素比较——不乘 scale 的话 150% 屏上等效只剩 13 逻辑像素、200% 剩
                     // 10，同一拖拽动作「有时吸得住有时吸不住」，用户会归因为随机故障
                     // （条厚度 STRIP_W_LOGICAL 早就乘了 scale，两处度量此前口径不一）。
-                    let threshold = (f64::from(SNAP_THRESHOLD) * m.scale_factor()).round() as i32;
-                    let edge = edge_for_rect(win, work, threshold);
-                    let _ = window.emit("snap-changed", SnapPayload { edge });
+                    let scale = window.scale_factor().unwrap_or(1.0);
+                    let threshold = (f64::from(SNAP_THRESHOLD) * scale).round() as i32;
+                    let edge = edge_for_rect(win, vwork, threshold);
+                    // W-9：吸附边没变就不重发——拖拽期间逐 Moved emit 是无谓的 IPC 刷屏。
+                    let mut cache = moved_snap_cache.lock().unwrap();
+                    if cache.last_edge != Some(edge) {
+                        cache.last_edge = Some(edge);
+                        let _ = window.emit("snap-changed", SnapPayload { edge });
+                    }
                 }
             }
         })
@@ -1288,7 +1451,17 @@ pub fn run() {
                     crate::window::show_after_grace(&w, false);
                 }
             }
-            // window-state 恢复后，若贴纸落在所有显示器之外（多屏拔插/分辨率变化）则救回，避免「找不到」。
+            // 点击穿透（W-8）：开机按持久化设置生效一次；之后由 set_settings 热更新。
+            // 非 Windows 为 no-op。
+            crate::window::apply_click_through(
+                app.handle(),
+                crate::settings::load_settings().click_through_enabled,
+            );
+            // W-17：main 位置从 settings 恢复（window-state 插件对 main 已 denylist）；
+            // settings 无位置时一次性继承插件旧文件里的 main 坐标。
+            #[cfg(not(target_os = "macos"))]
+            restore_sticker_window_position(app.handle());
+            // 位置恢复（settings，W-17）后，若贴纸落在所有显示器之外（多屏拔插/分辨率变化）则救回，避免「找不到」。
             #[cfg(target_os = "windows")]
             if let Some(w) = app.get_webview_window("main") {
                 pull_on_screen(&w, false);
@@ -1337,6 +1510,9 @@ pub fn run() {
             // 首批事件退化成直接 emit。
             spawn_board_notifier(app.handle().clone());
             spawn_db_watcher(app.handle().clone(), path.clone());
+            // 对话页的 transcript 文件监听（C-14 push 通道）：独立于 board 合流直发
+            // chat-transcript，对话窗据此提前拉增量，定时轮询只作最终兜底。
+            spawn_transcript_watcher(app.handle().clone(), path.clone());
             spawn_liveness_watch(app.handle().clone(), path.clone(), tx_cache.clone());
             spawn_first_import(app.handle().clone(), path.clone());
             // %TEMP%\meowo-paste / meowo-handoff 没有任何 OS 侧回收（Windows 不清 %TEMP%），
@@ -1396,6 +1572,29 @@ mod tests {
         is_viewing_session, pending_fingerprint, screen_blocked_fingerprint, should_notify,
         suppressed_by_viewing, waiting_fingerprint, NotifyKind,
     };
+
+    /// W-17：window-state 插件旧文件里 main 坐标的解析——正常文件取值（含多屏负坐标）；
+    /// 损坏/无 main 条目/坐标非整数一律 None（按「没有可继承的旧位置」处理）。
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn legacy_window_state_main_position_parsing() {
+        let raw = r#"{"main":{"width":360,"height":440,"x":-1280,"y":300,"prev_x":0,"prev_y":0,
+                       "maximized":false,"visible":true,"decorated":false,"fullscreen":false},
+                       "chat":{"x":10,"y":20}}"#;
+        assert_eq!(super::parse_legacy_main_position(raw), Some((-1280, 300)));
+
+        assert_eq!(super::parse_legacy_main_position("{broken"), None);
+        assert_eq!(super::parse_legacy_main_position(r#"{"chat":{"x":1,"y":2}}"#), None);
+        assert_eq!(
+            super::parse_legacy_main_position(r#"{"main":{"x":"left","y":2}}"#),
+            None
+        );
+        assert_eq!(
+            super::parse_legacy_main_position(r#"{"main":{"x":1}}"#),
+            None,
+            "只有一个坐标不成对，不继承"
+        );
+    }
 
     /// 通知抑制的非对称：用户正看着某会话时不弹它的「等待你回复」（他就在屏幕前），
     /// 但要人做决定的通知（错误/待审批/屏幕阻塞）**永不抑制**——抑制它等于把需要
@@ -1775,7 +1974,7 @@ mod tests {
         assert!(!resume_argv_for(None, Some("SID")).is_empty());
     }
     use crate::settings::Settings;
-    use crate::snap::{center_on, clamp_xy_to_work, edge_for_rect, intersection_area, Edge, Rect};
+    use crate::snap::{center_on, clamp_strip_extent, clamp_target_for_drag, clamp_xy_to_work, edge_for_rect, intersection_area, union_bbox, Edge, Rect};
 
     const WORK1: Rect = Rect {
         x: 0,
@@ -2128,6 +2327,17 @@ mod tests {
     }
 
     #[test]
+    fn clamp_strip_extent_caps_to_work_axis() {
+        // 工作区内：原样保留。
+        assert_eq!(clamp_strip_extent(500, 1040), 500);
+        // 超出工作区主轴：钳到工作区长度（W-5：60 会话的条超出 1080p 工作区会被屏幕裁掉）。
+        assert_eq!(clamp_strip_extent(1046, 1040), 1040);
+        // 下限 1px；工作区异常为 0/负 时也不设出 0 尺寸的窗。
+        assert_eq!(clamp_strip_extent(0, 1040), 1);
+        assert_eq!(clamp_strip_extent(500, 0), 1);
+    }
+
+    #[test]
     fn safe_id_accepts_uuid_and_kimi() {
         // claude 的 UUID 与 kimi 的 session_<uuid> 都应通过（focus/resume/rename/note 共用此校验）。
         assert!(is_safe_id("a1b2c3d4-e5f6-7890-abcd-ef1234567890"));
@@ -2328,6 +2538,133 @@ mod tests {
         assert_eq!(edge_for_rect(win, work, 20), Some(Edge::Left));
     }
 
+    // W-16：双屏（左右并排）钳位目标 = 相交面积最大的显示器工作区。
+    const MON_L: Rect = Rect {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1040,
+    };
+    const MON_R: Rect = Rect {
+        x: 1920,
+        y: 0,
+        w: 1920,
+        h: 1040,
+    };
+
+    #[test]
+    fn union_bbox_of_side_by_side() {
+        assert_eq!(
+            union_bbox(&[MON_L, MON_R]),
+            Some(Rect {
+                x: 0,
+                y: 0,
+                w: 3840,
+                h: 1040,
+            })
+        );
+        assert_eq!(union_bbox(&[]), None);
+        assert_eq!(union_bbox(&[MON_L]), Some(MON_L));
+    }
+
+    #[test]
+    fn clamp_target_picks_max_intersection_monitor() {
+        // 窗口跨在双屏分界上，偏右屏（相交面积更大）→ 目标是右屏。
+        let straddle_right = Rect {
+            x: 1800,
+            y: 300,
+            w: 360,
+            h: 330,
+        };
+        assert_eq!(
+            clamp_target_for_drag(straddle_right, &[MON_L, MON_R]),
+            Some(MON_R)
+        );
+        // 偏左屏 → 目标是左屏。
+        let straddle_left = Rect {
+            x: 1700,
+            y: 300,
+            w: 360,
+            h: 330,
+        };
+        assert_eq!(
+            clamp_target_for_drag(straddle_left, &[MON_L, MON_R]),
+            Some(MON_L)
+        );
+        // 完全落在左屏内 → 左屏。
+        let inside_left = Rect {
+            x: 100,
+            y: 100,
+            w: 360,
+            h: 330,
+        };
+        assert_eq!(
+            clamp_target_for_drag(inside_left, &[MON_L, MON_R]),
+            Some(MON_L)
+        );
+    }
+
+    #[test]
+    fn clamp_target_falls_back_to_bbox_when_off_all_monitors() {
+        // 与所有屏都无交集（拖拽连续移动不可能到达，分辨率瞬变兜底）→ 退回并集包围盒。
+        let off = Rect {
+            x: -2000,
+            y: -2000,
+            w: 360,
+            h: 330,
+        };
+        assert_eq!(
+            clamp_target_for_drag(off, &[MON_L, MON_R]),
+            union_bbox(&[MON_L, MON_R])
+        );
+        assert_eq!(clamp_target_for_drag(off, &[]), None);
+    }
+
+    #[test]
+    fn staggered_layout_dead_zone_not_snap_edge() {
+        // 非矩形排布：右屏下移 200px。包围盒顶 y=0 之下、右屏顶 y=200 之上有 1920×200
+        // 死区。钳位目标取相交最大屏后窗口恒完整落在某屏内，贴边检测用包围盒——
+        // 右屏内的窗口顶边（y=200）距包围盒顶 200 > 阈值，不吸顶（外侧边才不吸错）。
+        let mon_r_low = Rect {
+            x: 1920,
+            y: 200,
+            w: 1920,
+            h: 1040,
+        };
+        let works = [MON_L, mon_r_low];
+        let win_right_top = Rect {
+            x: 2200,
+            y: 200,
+            w: 360,
+            h: 330,
+        };
+        let target = clamp_target_for_drag(win_right_top, &works).unwrap();
+        let (cx, cy) = clamp_xy_to_work(win_right_top, target);
+        let clamped = Rect {
+            x: cx,
+            y: cy,
+            ..win_right_top
+        };
+        let bbox = union_bbox(&works).unwrap();
+        assert_eq!(edge_for_rect(clamped, bbox, 20), None);
+        // 左屏顶（包围盒外侧边）仍正常吸顶。
+        let win_left_top = Rect {
+            x: 300,
+            y: 0,
+            w: 360,
+            h: 330,
+        };
+        assert_eq!(edge_for_rect(win_left_top, bbox, 20), Some(Edge::Top));
+        // 双屏内侧边（左屏右缘 x=1920）不是包围盒的边 → 不吸（W-16 防误触）。
+        let win_inner = Rect {
+            x: 1920 - 360,
+            y: 300,
+            w: 360,
+            h: 330,
+        };
+        assert_eq!(edge_for_rect(win_inner, bbox, 20), None);
+    }
+
     #[test]
     fn should_notify_only_on_new_error() {
         assert!(!should_notify(None, None)); // 无错 → 不弹
@@ -2340,34 +2677,36 @@ mod tests {
     #[test]
     fn pending_fingerprint_rules() {
         // errored 优先 → None(让位错误)。
-        assert_eq!(pending_fingerprint(true, Some("approval"), 100), None);
-        // pending 为 Some 且未出错 → Some("{kind}:{last_event_at}")。
+        assert_eq!(pending_fingerprint(true, Some("approval")), None);
+        // pending 为 Some 且未出错 → 指纹即 kind 本身(不掺 last_event_at,
+        // 同一条审批挂着期间时间戳跳动不会重复弹,见 watch.rs 注释)。
         assert_eq!(
-            pending_fingerprint(false, Some("question"), 100).as_deref(),
-            Some("question:100")
+            pending_fingerprint(false, Some("question")).as_deref(),
+            Some("question")
         );
         // 无 pending → None。
-        assert_eq!(pending_fingerprint(false, None, 100), None);
-        // 指纹随 last_event_at 变化(新回合新指纹)。
+        assert_eq!(pending_fingerprint(false, None), None);
+        // kind 变化 = 新审批 → 新指纹。
         assert_ne!(
-            pending_fingerprint(false, Some("approval"), 100),
-            pending_fingerprint(false, Some("approval"), 200)
+            pending_fingerprint(false, Some("approval")),
+            pending_fingerprint(false, Some("question"))
         );
     }
 
     #[test]
     fn waiting_fingerprint_rules() {
         // 错误优先:无指纹。
-        assert_eq!(waiting_fingerprint(true, false, "waiting", 100), None);
+        assert_eq!(waiting_fingerprint(true, false, "waiting"), None);
         // pending 优先:无 waiting 指纹(让位 pending)。
-        assert_eq!(waiting_fingerprint(false, true, "waiting", 100), None);
-        // 纯 waiting:用 last_event_at 作指纹。
+        assert_eq!(waiting_fingerprint(false, true, "waiting"), None);
+        // 纯 waiting:指纹恒为 "waiting"(不掺时间戳,同一次等待只弹一次;
+        // status 离开 waiting 后条目被清,下一回合重新通知)。
         assert_eq!(
-            waiting_fingerprint(false, false, "waiting", 100).as_deref(),
-            Some("100")
+            waiting_fingerprint(false, false, "waiting").as_deref(),
+            Some("waiting")
         );
         // 非 waiting 状态:None。
-        assert_eq!(waiting_fingerprint(false, false, "running", 100), None);
+        assert_eq!(waiting_fingerprint(false, false, "running"), None);
     }
 
     #[test]

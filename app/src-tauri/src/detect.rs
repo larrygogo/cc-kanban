@@ -379,11 +379,19 @@ pub(crate) struct ScreenDebounce {
     published: Option<ScreenState>,
     /// (首次观察到待确认 idle 的时刻, 已确认次数)。
     pending_idle: Option<(Instant, u8)>,
+    /// 当前发布值是否来自无规则命中的回退（[`FALLBACK_RULE_ID`]）。回退 idle 是
+    /// 「什么都没认出来」而非「确认空闲」，前端据此把角标降级为中性点（T-15）。
+    fallback: bool,
 }
 
 impl ScreenDebounce {
     pub(crate) fn published(&self) -> Option<ScreenState> {
         self.published
+    }
+
+    /// 当前发布值是否来自回退规则（仅 published() 为 Some 时有意义）。
+    pub(crate) fn published_is_fallback(&self) -> bool {
+        self.fallback
     }
 
     /// 是否有待确认的降级——ticker 据此在内容序号未变时也继续扫描（确认的正是「屏幕
@@ -399,6 +407,9 @@ impl ScreenDebounce {
         };
         if self.published == Some(det.state) {
             self.pending_idle = None;
+            // 同值再发布（如回退 idle → 带可见证据的 idle）不改变状态，但证据强度
+            // 变了——角标的自信度跟着最新一次判定走。
+            self.fallback = det.rule_id == FALLBACK_RULE_ID;
             return None;
         }
         if det.state == ScreenState::Idle
@@ -412,6 +423,7 @@ impl ScreenDebounce {
             }
         }
         self.pending_idle = None;
+        self.fallback = det.rule_id == FALLBACK_RULE_ID;
         self.published = Some(det.state);
         Some(det.state)
     }
@@ -796,6 +808,25 @@ mod tests {
     }
 
     #[test]
+    fn kimi_current_tui_status_lines_are_working() {
+        // 当前版 TUI 的两种工作指示（2026-08 实拍回归：整块活跃工作屏被判 idle →
+        // 看板误报「待交互」）：盲文 spinner + `<Agent> Running (…)`，月相提示行。
+        let agent = snap(&[
+            "  output",
+            " \u{2834} Explore Agent Running (\u{2026}) \u{00B7} 72 tools \u{00B7} 30m 38s",
+        ]);
+        assert_eq!(
+            state_of(evaluate("kimi", &agent)),
+            Some((ScreenState::Working, "agent_running_status_working"))
+        );
+        let tip = snap(&["  output", " \u{1F318} \u{00B7} Tip: ! to run a shell command"]);
+        assert_eq!(
+            state_of(evaluate("kimi", &tip)),
+            Some((ScreenState::Working, "moon_tip_status_working"))
+        );
+    }
+
+    #[test]
     fn kimi_falls_back_to_idle() {
         let s = snap(&["  plain output", "  nothing pending"]);
         assert_eq!(
@@ -1126,5 +1157,29 @@ mod tests {
             rule_id: "live_blocked_form",
         });
         assert_eq!(debounce.observe(&blocked, t0), Some(ScreenState::Blocked));
+    }
+
+    /// T-15：发布值的 fallback 来源随状态一起被记住——回退 idle（什么都没认出来）
+    /// 与带可见证据的 idle（确认空闲）对角标是两种自信度。
+    #[test]
+    fn fallback_origin_is_tracked_with_the_published_state() {
+        let mut debounce = ScreenDebounce::default();
+        let t0 = Instant::now();
+        assert!(!debounce.published_is_fallback()); // 未发布时不算
+        debounce.observe(&working_det(), t0);
+        assert!(!debounce.published_is_fallback());
+        // 回退 idle 发布（确认凑齐后）→ 标 fallback。
+        assert_eq!(debounce.observe(&plain_idle(), t0), None);
+        assert_eq!(
+            debounce.observe(&plain_idle(), t0 + Duration::from_millis(701)),
+            Some(ScreenState::Idle)
+        );
+        assert!(debounce.published_is_fallback());
+        // 同为 idle 但换成带可见证据的判定：状态不变（返回 None），自信度跟着升级。
+        assert_eq!(debounce.observe(&visible_idle(), t0), None);
+        assert!(!debounce.published_is_fallback());
+        // 回到 working 当然也不是 fallback。
+        assert_eq!(debounce.observe(&working_det(), t0), Some(ScreenState::Working));
+        assert!(!debounce.published_is_fallback());
     }
 }

@@ -15,6 +15,7 @@ import {
 
   TerminalOpenMode,
   confirmStopSession,
+  firstImportNotice,
   getAccounts,
   openNewSessionWindow,
   openProjectDir,
@@ -25,11 +26,11 @@ import {
   type CardMenuMode,
   type FocusSessionResult,
   type ProviderUsage,
+  type SessionOpenIn,
 } from "../api";
 import { isMacPanel } from "../platform";
 import { appConfirm } from "../confirm";
 import { DevBadge } from "./DevBadge";
-import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
 import { useAgents } from "../useAgents";
@@ -55,18 +56,19 @@ import { CardContextMenu } from "./sticker/CardContextMenu";
 import { EmptyState } from "./sticker/EmptyState";
 import { UsageScreen } from "./sticker/UsageScreen";
 
-type FocusNoticeKind = FocusSessionResult | "connecting" | "failed" | "background" | "archived" | "resuming" | "foreign";
+type FocusNoticeKind = FocusSessionResult | "connecting" | "failed" | "background" | "archived" | "resuming" | "foreign" | "opened";
 
 /** 便签字符上限：与后端 session_command.rs 的 `chars().take(500)` 截断阈值对齐。
  *  前端不设限时超长便签被后端静默截断，用户丢字无感。 */
 const NOTE_MAX_CHARS = 500;
 
-/** 卡片就地编辑框（重命名/便签共用）。草稿住在本组件的局部状态：放在 Sticker 里时
+/** 卡片就地编辑框（重命名/便签共用）。草稿住在本组件的局部状态：放在 Sticker 的 state 里时
  *  每次按键 setState 都让整个看板重渲染（虚拟化把代价压到可见行，但可见行的整卡重建
- *  仍是白付；侧栏同款问题见 ChatSidebar 的 EditorInput）。提交/取消语义与侧栏对齐：
- *  Enter/✓/失焦 提交、Esc/✗ 取消。按钮的 mousedown preventDefault 保证点 ✗ 不先触发
- *  失焦提交;done 标志防 Enter 提交后卸载期的 blur 二次提交。 */
-function EditBox({ initial, placeholder, inputClass, extraClass, icon, saveLabel, cancelLabel, maxLength, onSubmit, onCancel }: {
+ *  仍是白付；侧栏同款问题见 ChatSidebar 的 EditorInput）。局部草稿经 onDraft 同步到
+ *  Sticker 的 ref（不落 state、不触发重渲染），虚拟化滚动卸载后 remount 按草稿恢复（B-9）。
+ *  提交/取消语义与侧栏对齐：Enter/✓/失焦 提交、Esc/✗ 取消。按钮的 mousedown preventDefault
+ *  保证点 ✗ 不先触发失焦提交;done 标志防 Enter 提交后卸载期的 blur 二次提交。 */
+function EditBox({ initial, placeholder, inputClass, extraClass, icon, saveLabel, cancelLabel, maxLength, onDraft, onSubmit, onCancel }: {
   initial: string;
   placeholder: string;
   inputClass: string;
@@ -77,6 +79,9 @@ function EditBox({ initial, placeholder, inputClass, extraClass, icon, saveLabel
   /** 字符上限（如便签 500，与后端截断阈值对齐——不给上限时后端静默截断，用户丢字无感）。
    *  接近上限（≥80%）时显示剩余计数。 */
   maxLength?: number;
+  /** 按键时把草稿同步给父层（ref，不触发重渲染）：虚拟列表滚出视口会卸载本组件，
+   *  局部草稿随之丢失（B-9）；父层在 remount 时用它回填 initial。 */
+  onDraft?: (value: string) => void;
   onSubmit: (value: string) => void;
   onCancel: () => void;
 }) {
@@ -94,7 +99,7 @@ function EditBox({ initial, placeholder, inputClass, extraClass, icon, saveLabel
         value={value}
         placeholder={placeholder}
         maxLength={maxLength}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={(e) => { setValue(e.target.value); onDraft?.(e.target.value); }}
         onKeyDown={editorKeyDown(() => submit(value), cancel)}
         onBlur={() => submit(value)}
       />
@@ -146,6 +151,9 @@ export function Sticker({
   loadError,
   onRetry,
   snapped,
+  switching,
+  pinned: pinnedProp,
+  onTogglePin,
 }: {
   filter: Tab;
   onFilterChange?: (f: Tab) => void;
@@ -170,6 +178,13 @@ export function Sticker({
   onRetry?: () => void;
   /** 吸附展开（偷看）态：置顶归后端 snap_* 管，此时 pin 开关只记偏好、不写窗口。 */
   snapped?: boolean;
+  /** 切 tab/搜索的首页请求在途（B-4）：保留旧列表灰化直到新数据就绪。 */
+  switching?: boolean;
+  /** 窗口置顶偏好（W-17，存 settings.json）：由 App 下发；缺席时退回旧 localStorage 自管路径
+   *  （demo/poster/直挂测试）。 */
+  pinned?: boolean;
+  /** 切换窗口置顶：由 App 落盘 settings 并回推 pinned。 */
+  onTogglePin?: () => void;
 }) {
   // hasMore 由父组件传入；未传入时退化为 data.length < total。
   // agent 展示名来自后端下发的名单；未知 id 回退成 id 本身。
@@ -210,6 +225,8 @@ export function Sticker({
   // 对话窗口功能开关（轻量模式=false）：关闭时贴纸上不渲染任何 chat 入口。
   // 首帧占位 true 与后端默认一致（default_true），避免开关用户的按钮闪现/消失。
   const [chatEnabled, setChatEnabled] = useState(true);
+  // 会话打开去处（chat/terminal）：跳转/恢复成功的 toast 要说出「在哪打开了」。
+  const [sessionOpenIn, setSessionOpenIn] = useState<SessionOpenIn>("chat");
   // 空初值：settings resolve 前不渲染配额区，好过先闪一个猜出来的 agent。默认值由后端给。
   const [quotaProviders, setQuotaProviders] = useState<string[]>([]);
   // 中转启用状态改变时重建贴纸用量请求：启用后立即隐藏官方配额，关闭后立即恢复缓存并刷新。
@@ -221,6 +238,7 @@ export function Sticker({
     setMenuMode(s.card_menu_mode ?? "button");
     setPreviewEnabled(s.preview_enabled);
     setChatEnabled(s.chat_enabled ?? true);
+    setSessionOpenIn(s.session_open_in ?? "chat");
     setQuotaProviders(s.sticker_quota_providers ?? []);
     const signature = relayEnabledSignature(s);
     if (relaySignatureRef.current !== null && relaySignatureRef.current !== signature) {
@@ -236,12 +254,20 @@ export function Sticker({
     return () => window.clearInterval(id);
   }, []);
 
-  // 置顶开关：默认不置顶，激活后才把窗口设为 alwaysOnTop，状态持久化。
-  const [pinned, setPinned] = useState<boolean>(() => localStorage.getItem(PIN_KEY) === "1");
+  // 置顶开关：默认不置顶，激活后才把窗口设为 alwaysOnTop。偏好由 App 经 props 下发
+  // （W-17：持久化在 settings.json）；未下发时（demo/poster/直挂测试）退回 localStorage 自管。
+  const [pinnedLocal, setPinnedLocal] = useState<boolean>(() => localStorage.getItem(PIN_KEY) === "1");
+  const pinned = pinnedProp ?? pinnedLocal;
   useEffect(() => {
+    // macOS 面板（W-12）：面板层级本就常驻最前（NSMainMenuWindowLevel+1），always-on-top
+    // 无意义；pin 的语义在这里是「失焦不自动收起」——推给后端 resign 监听器。
+    if (isMacPanel()) {
+      invoke("set_panel_keep_open", { open: pinned }).catch(() => {});
+      return;
+    }
     // 吸附展开（偷看）态不写：snap_expand 已强制置顶保证贴边窗口可见，这里若按 pinned=false
     // 覆盖回去，展开的看板会立刻沉到活动窗口之下（表现为「悬停后闪一下就没了」）。
-    // 置顶偏好照常落 PIN_KEY，还原普通窗口时由 snap_restore(pinned) 统一套用。
+    // 置顶偏好照常由 togglePin 落盘（settings，W-17），还原普通窗口时由 snap_restore(pinned) 统一套用。
     if (snapped) return;
     // 非 Tauri 环境（测试/浏览器）下 getCurrentWindow 会抛错，吞掉即可。
     try {
@@ -251,21 +277,42 @@ export function Sticker({
     }
   }, [pinned, snapped]);
   const togglePin = () => {
-    setPinned((p) => {
+    if (onTogglePin) {
+      onTogglePin();
+      return;
+    }
+    setPinnedLocal((p) => {
       const next = !p;
       localStorage.setItem(PIN_KEY, next ? "1" : "0");
       return next;
     });
   };
+  // macOS 面板上 pin 的语义是「保持打开（失焦不收起）」（W-12），文案随之切换。
+  const pinTip = isMacPanel()
+    ? pinned ? t.sticker.keepOpenOn : t.sticker.keepOpenOff
+    : pinned ? t.sticker.pinOn : t.sticker.pinOff;
 
-  // 托盘「找回贴纸」：窗口居中/置顶由 App + 后端负责，这里把置顶按钮 UI 同步为已置顶。
-  useTauriEvent("recall-sticker", () => setPinned(true));
+  // 托盘「找回贴纸」只做临时置顶（recall_center 聚焦后按 pin 偏好还原，W-6），不改写
+  // 持久化的 pin 偏好、不动这里的 pinned 状态——用户的置顶偏好不被「找回」顺手改掉。
 
   // 会话置顶：置顶的会话永远排到列表最前（跨重启保留）。与「置顶窗口(alwaysOnTop)」是两回事——
   // 那是窗口行为，图标也刻意分开（这里 TopIcon，窗口那边 PinIcon）。存储键沿用 meowo-starred。
   // useStarred：与对话窗侧栏/标题菜单同一份写入口，且跨窗口（storage 事件）同步——
   // 在对话窗里置顶，看板立刻跟上，反之亦然。
   const { starred, toggleStar } = useStarred();
+
+  // 星标 FLIP（B-16）：置顶切换触发「星标浮顶」重排，卡片瞬移、用户找不到刚操作的卡。
+  // 切换前量出可见卡的纵向位置（翻位置要在重排触发之前——虚拟列表下只有挂载中的卡可量），
+  // 重排落地后由下方 useLayoutEffect 反向补偿 transform 再过渡到 0，卡片平滑滑到新位置。
+  const flipPrevRef = useRef<Map<number, number> | null>(null);
+  const toggleStarFlip = (ccSessionId: string) => {
+    const map = new Map<number, number>();
+    scrollInnerRef.current?.querySelectorAll<HTMLElement>("[data-sid]").forEach((el) => {
+      map.set(Number(el.dataset.sid), el.getBoundingClientRect().top);
+    });
+    flipPrevRef.current = map;
+    toggleStar(ccSessionId);
+  };
 
   // 乐观覆盖层：重命名/便签提交后立即按新值渲染（与归档的乐观摘卡同一原则——
   // 此前 Enter 后编辑框收起、标题/便签闪回旧值，要等 board-changed（节流 400ms +
@@ -311,7 +358,11 @@ export function Sticker({
   }, [data]);
 
   // 重命名：editingId 为正在编辑的会话 id。草稿文本住在 EditBox 的局部状态里，
-  // 按键不触发看板整表重渲染。
+  // 同时经 onDraft 同步到 editDraftsRef（B-9）：编辑中滚动列表会把卡片随虚拟行卸载，
+  // 局部草稿随之静默丢失、滚回显示原文；提升到本层 ref 后 remount 时按草稿回填。
+  // 存 ref 不存 state：草稿只在 EditBox 挂载时读一次，按键不需要整板重渲染。
+  // 键含编辑类型前缀（r:=重命名 / n:=便签），同卡的两种草稿互不串。
+  const editDraftsRef = useRef<Map<string, string>>(new Map());
   const [editingId, setEditingId] = useState<number | null>(null);
   // 失焦提交后,blur 先于 click 触发:click 到达时编辑态已清,「编辑态点卡片只关编辑器、
   // 不导航」的守卫会漏。记录编辑器关闭时刻,250ms 内的卡片点击视为同一手势不导航。
@@ -319,9 +370,11 @@ export function Sticker({
   const markEditClosed = () => { editCloseAtRef.current = Date.now(); };
   const startRename = (l: Item) => {
     setNotingId(null); // 与便签编辑互斥，同卡只开一个编辑器
+    editDraftsRef.current.delete(`r:${l.session.id}`); // 新一轮编辑从原文开始，不回填旧草稿
     setEditingId(l.session.id);
   };
   const submitRename = (l: Item, draft: string) => {
+    editDraftsRef.current.delete(`r:${l.session.id}`);
     // 局部变量原名 t 与 i18n 字典 t 冲突，改名 title 以便失败提示取字典文案。
     const title = draft.trim();
     if (title && title !== l.task_title) {
@@ -346,6 +399,9 @@ export function Sticker({
 
   // 便签编辑：notingId 为正在编辑便签的会话 id。与重命名互斥（同卡只开一个）。
   const [notingId, setNotingId] = useState<number | null>(null);
+  // 长便签 3 行 clamp 后的展开态：便签块常显只给 3 行（防 500 字便签撑满窗口），
+  // 首次点击展开全文，再次点击才进编辑（短便签未被 clamp，一次点击直接编辑）。
+  const [expandedNoteId, setExpandedNoteId] = useState<number | null>(null);
   const [focusNotice, setFocusNotice] = useState<{
     kind: FocusNoticeKind;
     item: Item;
@@ -354,8 +410,9 @@ export function Sticker({
   } | null>(null);
   useEffect(() => {
     if (!focusNotice || focusNotice.busy) return;
-    // resuming 由 resume_session 的 promise settle 时清（成功清空/失败换 failed），不走定时。
-    if (["host_focused", "unsupported_terminal", "alive_but_not_found", "process_ended", "resuming"].includes(focusNotice.kind)) return;
+    // resuming 由 resume_session 的 promise settle 时换掉（成功换 opened 正反馈/失败换 failed），不走定时。
+    // permission_denied 带着「打开系统设置」动作，4s 消失会让用户来不及点——常驻到手动关。
+    if (["host_focused", "unsupported_terminal", "alive_but_not_found", "process_ended", "resuming", "permission_denied"].includes(focusNotice.kind)) return;
     const id = window.setTimeout(() => setFocusNotice(null), 4_000);
     return () => window.clearTimeout(id);
   }, [focusNotice]);
@@ -380,6 +437,20 @@ export function Sticker({
     const timers = archiveToastTimersRef.current;
     return () => timers.forEach((timer) => window.clearTimeout(timer));
   }, []);
+
+  // 首启历史导入的一次性提示（S-12）：导入曾全程零说明。后端 first_import_notice
+  // 取到即落「已提示」标记、保证只弹一次；拉取失败静默（提示而已，不能拖垮看板）。
+  const [importNotice, setImportNotice] = useState<number | null>(null);
+  useEffect(() => {
+    firstImportNotice()
+      .then((n) => { if (n) setImportNotice(n); })
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (importNotice === null) return;
+    const id = window.setTimeout(() => setImportNotice(null), 10_000);
+    return () => window.clearTimeout(id);
+  }, [importNotice]);
 
   // 窗口级快捷键：Ctrl/Cmd+F 打开搜索；Esc 按「toast → 搜索」回退（右键菜单的 Esc 由
   // CardContextMenu 自己消费并 preventDefault，先于本监听）。焦点在输入框里时 Esc 让位
@@ -420,9 +491,22 @@ export function Sticker({
     // 外库卡的便签只读:写入走本库 cc_session_id 查行,对外库会话必然落空。
     if (l.foreign) return;
     setEditingId(null);
+    editDraftsRef.current.delete(`n:${l.session.id}`); // 与 startRename 同理，新一轮从原文开始
     setNotingId(l.session.id);
   };
+  // 激活便签块（点击/Enter/Space）：长便签被 3 行 clamp 时先展开全文，再次激活才进编辑；
+  // 未被 clamp 的短便签一次激活直接进编辑（scrollHeight 读不到的环境按未 clamp 处理）。
+  const activateNote = (el: HTMLElement, l: Item) => {
+    const txt = el.querySelector(".stk-note-txt");
+    const clamped = txt ? txt.scrollHeight > txt.clientHeight + 1 : false;
+    if (clamped && expandedNoteId !== l.session.id) {
+      setExpandedNoteId(l.session.id);
+      return;
+    }
+    startNote(l);
+  };
   const submitNote = (l: Item, noteDraft: string) => {
+    editDraftsRef.current.delete(`n:${l.session.id}`);
     if (noteDraft !== (l.note ?? "")) {
       // 乐观：立即按新便签渲染；失败回滚 + focusNotice 提示（与重命名同通道）。
       patchOptimistic(l.session.id, { note: noteDraft });
@@ -455,6 +539,14 @@ export function Sticker({
     openBusyRef.current.delete(id);
     setOpenBusyIds(new Set(openBusyRef.current));
   };
+  // 跳转/恢复成功后的落点文案（T-6 正反馈）：与后端 prefers_external_terminal 同口径——
+  // terminal 偏好或轻量模式（对话关闭）时托管会话开在外部终端，否则开对话窗口。
+  // managed 由调用方给：跳转按会话当前持有方（非托管=用户自己的终端，永远跳外部终端）；
+  // 恢复传 true——恢复回来的会话必归托管 PTY（外部偏好时直接落外部终端，由设置判定覆盖）。
+  const openTargetText = (managed: boolean) =>
+    managed && sessionOpenIn !== "terminal" && chatEnabled
+      ? t.sticker.openTargetChat
+      : t.sticker.openTargetTerminal;
   const openTerminal = (l: Item) => {
     // 外库(安装版)会话:本实例只有观察权——focus 跳不到安装版 GUI 内部的 PTY 视图,
     // resume 更危险(cc_session_id 是全局 UUID,恢复会真的 spawn 新进程把会话抢过来)。
@@ -486,7 +578,10 @@ export function Sticker({
         })
         .then((result) => {
           // demo/旧后端可能不返回值；保持原行为，不误弹失败提示。
-          if (!result || result === "focused") setFocusNotice(null);
+          if (!result) { setFocusNotice(null); return; }
+          // focused 也要给正反馈：目标窗口在别的虚拟桌面时，聚焦「成功」了用户却什么
+          // 都看不到——没有这句 toast 就是「点了没反应」，必然引来连点。
+          if (result === "focused") setFocusNotice({ kind: "opened", item: l, detail: t.sticker.openedIn(openTargetText(l.pty_managed)) });
           else setFocusNotice({ kind: result, item: l });
         })
         .catch((err) => setFocusNotice({ kind: "failed", item: l, detail: formatBackendError(err, t.locale) }))
@@ -497,10 +592,15 @@ export function Sticker({
       // 会直接被理解成设置不生效。走与 focus 相同的提示通道。
       if (!beginOpen(l.session.id)) return;
       // 恢复链路串行阻塞 1~3s（目录扫描、spawn、1s 秒退探测），卡片置灰之外再给一句
-      // 文字——「点了没反应」是重复点击的最大来源。成功即清（board-changed 会把卡片翻绿）。
+      // 文字——「点了没反应」是重复点击的最大来源。成功后换成 opened 正反馈 toast
+      //（board-changed 会把卡片翻绿，toast 4s 自收）。
       setFocusNotice({ kind: "resuming", item: l });
-      invoke("resume_session", { cwd: l.cwd, sessionId: l.session.cc_session_id, provider: l.provider })
-        .then(() => setFocusNotice((cur) => (cur?.kind === "resuming" && cur.item.session.id === l.session.id ? null : cur)))
+      invoke<boolean>("resume_session", { cwd: l.cwd, sessionId: l.session.cc_session_id, provider: l.provider })
+        // started=false = 后端判重命中（会话已在跑）：没再起一份，只聚焦了已有视图，
+        // 文案如实说「已在运行」而不是「已恢复」。
+        .then((started) => setFocusNotice(started === false
+          ? { kind: "opened", item: l, detail: t.sticker.resumeAlreadyRunning }
+          : { kind: "opened", item: l, detail: t.sticker.openedIn(openTargetText(true)) }))
         .catch((err) => setFocusNotice({ kind: "failed", item: l, detail: formatBackendError(err, t.locale) }))
         .finally(() => endOpen(l.session.id));
     }
@@ -511,8 +611,10 @@ export function Sticker({
     const l = focusNotice.item;
     if (focusNotice.kind === "process_ended") {
       setFocusNotice({ ...focusNotice, busy: true });
-      invoke("resume_session", { cwd: l.cwd, sessionId: l.session.cc_session_id, provider: l.provider })
-        .then(() => setFocusNotice(null))
+      invoke<boolean>("resume_session", { cwd: l.cwd, sessionId: l.session.cc_session_id, provider: l.provider })
+        .then((started) => setFocusNotice(started === false
+          ? { kind: "opened", item: l, detail: t.sticker.resumeAlreadyRunning }
+          : { kind: "opened", item: l, detail: t.sticker.openedIn(openTargetText(true)) }))
         .catch((err) => setFocusNotice({ ...focusNotice, busy: false, kind: "failed", detail: formatBackendError(err, t.locale) }));
       return;
     }
@@ -523,8 +625,8 @@ export function Sticker({
       return;
     }
     // 结束并重开会杀掉原进程,属破坏性操作:走全应用统一的 appConfirm 原生小窗
-    // (toast 内二次点击的旧确认范式已移除)。
-    const yes = await appConfirm(t.sticker.reopenConfirm, { title: t.sticker.reopen, danger: true });
+    // (toast 内二次点击的旧确认范式已移除)。保留 danger；主按钮说后果（S-14）。
+    const yes = await appConfirm(t.sticker.reopenConfirm, { title: t.sticker.reopen, danger: true, confirmLabel: t.sticker.reopenConfirmLabel });
     if (!yes) return;
     setFocusNotice({ ...focusNotice, busy: true });
     invoke("restart_session_supported", {
@@ -558,6 +660,8 @@ export function Sticker({
           foreign: t.sticker.focusForeign,
           archived: t.sticker.archivedNotice,
           resuming: t.sticker.resuming,
+          // 成功类文案总是带 detail（落点/已在运行），map 值只是兜底。
+          opened: "",
           focused: "",
         }[focusNotice.kind])
     : "";
@@ -567,7 +671,7 @@ export function Sticker({
   // 本组件不再做客户端搜索过滤。waiting「等最久优先」由后端 ASC 排序保证，客户端只做 starred 浮顶。
   // useMemo 缓存：编辑便签/重命名时每次按键都会重渲染，不必每次重跑 filter+sort。
   const isStarred = (l: Item) => starred.has(l.session.cc_session_id);
-  const shown = useMemo(() => {
+  const shownLive = useMemo(() => {
     return data
       .filter((l) => match(tab, l))
       .sort(
@@ -576,9 +680,19 @@ export function Sticker({
           Number(starred.has(a.session.cc_session_id))
       );
   }, [data, tab, starred]);
+  // B-4 切换期（切 tab/搜索的首页请求在途）：保留旧列表灰化直到新数据就绪。此前中间态
+  // 会把旧 data 按新 tab 过滤出一个子集先渲染（waiting 的 ASC 到达后整列表翻转），
+  // 观感像列表坏了。冻结的是切换前最后一次稳定 shown；新数据落地（switching=false）
+  // 当帧直接换整表，只跳变一次。effect 写 ref：切换那一帧 ref 里还是旧列表。
+  const frozenShownRef = useRef(shownLive);
+  useEffect(() => {
+    if (!switching) frozenShownRef.current = shownLive;
+  }, [shownLive, switching]);
+  const shown = switching ? frozenShownRef.current : shownLive;
 
   // 贴纸会话虚拟列表：只挂载可视区 + overscan 内的卡片，避免大量 DOM。
-  // estimateSize 取常见卡片高度（无便签/preview 时约 76–84px），实际高度由 measureElement 动态测量。
+  // estimateSize 分档：普通卡约 76–84px；带便签的卡多一块 3 行 clamp 的便签块（约 +60px），
+  // 统一估 82 与实测差近一倍是滚动抽搐的来源之一。实际高度由 measureElement 动态测量。
   const virtualizer = useVirtualizer({
     count: shown.length,
     getScrollElement: () => scrollRef.current,
@@ -586,7 +700,7 @@ export function Sticker({
     // 星标浮顶），按 index 会把带便签的高卡尺寸套到滑进该位置的普通卡上（高度抽搐），
     // 焦点/hover 留在「位置」而不是会话上，用户瞄准的卡在点下的瞬间可能已换成另一条会话。
     getItemKey: (i) => shown[i].session.id,
-    estimateSize: () => 82,
+    estimateSize: (i) => (shown[i].note ? 144 : 82),
     overscan: 6,
     // 贴纸窗口初始约 460×420，减去 tabs/底栏后可视区约 400×320；给 initialRect 避免首帧
     // 没拿到 ResizeObserver 前渲染 0 条。后续真实尺寸进来会立即修正。
@@ -670,6 +784,35 @@ export function Sticker({
   const [sbDrag, setSbDrag] = useState(false);
   // 滚动边缘淡出：仅当该方向确有被遮内容时才淡(滚到顶/底则对应边不淡，首/末卡保持清晰)。
   const [edge, setEdge] = useState({ top: false, bottom: false });
+
+  // 星标重排落地后做 FLIP 的 Invert+Play（捕获在 toggleStarFlip，见上）。补偿打在卡片本体上
+  // ——vitem 的 transform 归虚拟列表管，不能覆盖。只补偿有旧位置的可见卡：被虚拟化卸载、
+  // 重排后才进可视区的卡没有参照，直接出现。减少动画偏好下跳过（与 cstrip-eyes 同一约定）。
+  useLayoutEffect(() => {
+    const prev = flipPrevRef.current;
+    flipPrevRef.current = null;
+    if (!prev || prev.size === 0) return;
+    if (typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const inner = scrollInnerRef.current;
+    if (!inner) return;
+    const timers: number[] = [];
+    inner.querySelectorAll<HTMLElement>("[data-sid]").forEach((el) => {
+      const oldTop = prev.get(Number(el.dataset.sid));
+      if (oldTop === undefined) return;
+      const delta = oldTop - el.getBoundingClientRect().top;
+      if (Math.abs(delta) < 2) return; // 亚像素级抖动不做动画
+      const card = el.firstElementChild as HTMLElement | null;
+      if (!card) return;
+      card.style.transition = "none";
+      card.style.transform = `translateY(${delta}px)`;
+      void card.offsetHeight; // 强制 reflow：让「无过渡的旧位置」先生效，再开过渡回新位置
+      card.style.transition = "transform 180ms ease";
+      card.style.transform = "";
+      // 过渡结束后清掉内联 transition，不留痕迹影响后续 hover/主题过渡。
+      timers.push(window.setTimeout(() => { card.style.transition = ""; }, 200));
+    });
+    return () => timers.forEach((id) => window.clearTimeout(id));
+  }, [shown]);
 
   // 底部用量：多 provider。先从 getAccounts() 拿缓存快速预填(仅在还没有联网值时填充，
   // 避免缓存晚到覆盖更新的联网值)，再对有账号且 usage_supported 的 provider 定时刷新（5 min）。
@@ -786,12 +929,17 @@ export function Sticker({
           className="tabseg"
           role="tablist"
           ref={tabsegRef}
-          // ARIA tabs 惯例:左右方向键切换并跟随焦点(roving),不能只有鼠标一条路。
+          // ARIA tabs 惯例:左右方向键切换并跟随焦点(roving),不能只有鼠标一条路；
+          // Home/End 跳到首/末 tab（B-12）。
           onKeyDown={(e) => {
-            if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+            let next: Tab | null = null;
+            if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+              const at = TAB_KEYS.indexOf(tab);
+              next = TAB_KEYS[(at + (e.key === "ArrowRight" ? 1 : TAB_KEYS.length - 1)) % TAB_KEYS.length];
+            } else if (e.key === "Home") next = TAB_KEYS[0];
+            else if (e.key === "End") next = TAB_KEYS[TAB_KEYS.length - 1];
+            if (!next) return;
             e.preventDefault();
-            const at = TAB_KEYS.indexOf(tab);
-            const next = TAB_KEYS[(at + (e.key === "ArrowRight" ? 1 : TAB_KEYS.length - 1)) % TAB_KEYS.length];
             pick(next);
             tabsegRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[TAB_KEYS.indexOf(next)]?.focus();
           }}
@@ -807,11 +955,17 @@ export function Sticker({
                 key={k}
                 type="button"
                 role="tab"
+                id={`stk-tab-${k}`}
                 aria-selected={tab === k}
+                aria-controls="stk-tabpanel"
+                // roving tabindex：三个 tab 只占一个 Tab 停靠点，方向键在 tab 间搬焦点。
+                tabIndex={tab === k ? 0 : -1}
                 className={"stab " + (tab === k ? "stab-on" : "")}
                 onClick={() => pick(k)}
               >
-                {t.tabs[k]}
+                {/* 文字包一层 span：flex 容器的裸文本节点吃不到 text-overflow，
+                    窄窗 + 英文长词时由 .stab-label 省略号截断（G-12）。 */}
+                <span className="stab-label">{t.tabs[k]}</span>
                 {k !== "all" && <span className="stab-n">{n > 99 ? "99+" : n}</span>}
               </button>
             );
@@ -819,9 +973,14 @@ export function Sticker({
         </div>
       </div>
       <div
-        className={"stk-scroll" + (edge.top ? " fade-top" : "") + (edge.bottom ? " fade-bottom" : "")}
+        className={"stk-scroll" + (switching ? " is-switching" : "") + (edge.top ? " fade-top" : "") + (edge.bottom ? " fade-bottom" : "")}
         ref={scrollRef}
         onScroll={syncSb}
+        aria-busy={switching || undefined}
+        // 卡片列表即三个 tab 共用的 tabpanel（B-12 的 ARIA 接线）。
+        role="tabpanel"
+        id="stk-tabpanel"
+        aria-labelledby={`stk-tab-${tab}`}
       >
         {shown.length === 0 ? (
           initialLoading ? (
@@ -844,20 +1003,71 @@ export function Sticker({
             <EmptyState tab={tab} onNew={() => openNewSessionWindow().catch(() => {})} />
           )
         ) : (
-          <div
-            ref={scrollInnerRef}
-            style={{ height: totalSize, width: "100%", position: "relative" }}
-          >
+          <>
+            <div
+              ref={scrollInnerRef}
+              style={{ height: totalSize, width: "100%", position: "relative" }}
+            >
             {virtualItems.map((virtualItem) => {
               const l = shown[virtualItem.index];
+              const agentIcon = agentAssets(l.provider); // 品牌图标（视觉资产，按 id 查表）
+              const agentLabel = agentNameOf(l.provider); // 展示名（后端下发；未知 id 显示 id 本身）
+              // 「正在启动」占位卡（pending PTY，负 id，后端 session_query 合成）：纯展示——
+              // 会话行还没落库，点击/右键/菜单/编辑全是死路，一概不挂。真实会话认领出卡后
+              // 由父层对账撤下（App 的 pendingsRef，见 sticker/pending.ts）。
+              if (l.session.id < 0) {
+                return (
+                  <div
+                    key={virtualItem.key}
+                    data-index={virtualItem.index}
+                    data-sid={l.session.id}
+                    ref={virtualizer.measureElement}
+                    className="stk-vitem"
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      width: "100%",
+                      transform: `translateY(${virtualItem.start}px)`,
+                    }}
+                  >
+                    <div className="stk-card is-starting" data-testid="stk-starting-card">
+                      <div className="stk-top">
+                        <span className="stk-ind">
+                          <span className="sdot sdot-on stk-starting-dot" data-tip={t.sticker.startingTip} />
+                        </span>
+                        <div className="stk-top-body">
+                          <div className="stk-line1">
+                            <span className="stk-title">{t.sticker.startingCard}</span>
+                          </div>
+                          <div className="stk-line2">
+                            <span
+                              className="stk-agent"
+                              style={tintStyle(l.provider, true)}
+                              data-tip={agentLabel}
+                              role="img"
+                              aria-label={agentLabel}
+                            >
+                              <agentIcon.Icon />
+                            </span>
+                            {l.cwd && (
+                              <span className="stk-repo" data-tip={l.cwd}>
+                                {l.cwd.split(/[\\/]/).filter(Boolean).pop() ?? l.cwd}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
               // 乐观覆盖层优先：重命名/便签刚提交、board-changed 还没带回时按新值渲染。
               const ov = optimistic.get(l.session.id);
               const effTaskTitle = ov?.title ?? l.task_title;
               const effNote = ov?.note !== undefined ? (ov.note || null) : l.note;
               const unnamed = !effTaskTitle || effTaskTitle === UNNAMED_SESSION_SENTINEL;
               const title = unnamed ? t.sticker.waitingFirstInput : effTaskTitle;
-              const agentIcon = agentAssets(l.provider); // 品牌图标（视觉资产，按 id 查表）
-              const agentLabel = agentNameOf(l.provider); // 展示名（后端下发；未知 id 显示 id 本身）
               // AI 活动行显示「最近一条 AI 正文」(last_ai_text，回退 transcript preview)；出错优先显示错误标签；
               // previewEnabled（对话预览开关）关闭则不显示 AI 正文（仅保留错误）；用户行同受该开关门控。
               const sub = l.errored && l.error_label
@@ -868,16 +1078,30 @@ export function Sticker({
               const subTitle = l.errored ? l.error_raw ?? undefined : sub ?? undefined;
               // 状态判定统一走 cardTone（与折叠缩略条同一口径，优先级说明见 helpers.ts）。
               const tone = cardTone(l);
+              // T-15 两层「角标不自信」的区分：
+              // - 无屏幕检测的会话（外部终端里跑的、外库卡）：角标回落 DB status——hook
+              //   事件驱动的滞后快照，与托管会话的 300ms 级实时角标同呈现会让用户误以为
+              //   同样可信，弱化样式区分。
+              // - 屏幕检测走了 fallback（什么规则都没命中、回退 idle）：是「认不出来」
+              //   而不是「确认空闲」，角标从自信的「等你」降级为中性灰点。
+              const assumedBadge = l.connected && l.screen_state == null && (tone === "running" || tone === "waiting");
+              const fallbackIdle = tone === "waiting" && l.screen_state === "idle" && l.screen_assumed === true;
               const indicator = tone === "offline" ? (
                 <span className="ring-stop" data-tip={t.sticker.stopped} />
               ) : tone === "error" ? (
                 <span className="needs-error" data-tip={l.error_raw ?? t.sticker.sessionError} />
               ) : tone === "pending" ? (
                 <RunBadge pct={l.context_pct} tone="pending" />
+              ) : fallbackIdle ? (
+                <span className="sdot sdot-off" data-tip={t.sticker.assumedState} />
               ) : tone === "running" ? (
-                <RunBadge pct={l.context_pct} />
+                assumedBadge
+                  ? <span className="stk-badge-assumed"><RunBadge pct={l.context_pct} /></span>
+                  : <RunBadge pct={l.context_pct} />
               ) : tone === "waiting" ? (
-                <RunBadge pct={l.context_pct} tone="waiting" />
+                assumedBadge
+                  ? <span className="stk-badge-assumed"><RunBadge pct={l.context_pct} tone="waiting" /></span>
+                  : <RunBadge pct={l.context_pct} tone="waiting" />
               ) : (
                 <span className="sdot sdot-on" data-tip={t.sticker.online} />
               );
@@ -885,6 +1109,7 @@ export function Sticker({
                 <div
                   key={virtualItem.key}
                   data-index={virtualItem.index}
+                  data-sid={l.session.id}
                   ref={virtualizer.measureElement}
                   className="stk-vitem"
                   style={{
@@ -914,6 +1139,24 @@ export function Sticker({
                       openTerminal(l);
                     }}
                     onKeyDown={(e) => {
+                      // 卡内 roving（B-11）：整卡只占一个 Tab 停靠点，←/→ 在卡内控件
+                      // （对话/菜单/便签/打开）间搬 DOM 焦点；编辑输入框里的左右键是光标
+                      // 移动，不抢。
+                      if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+                        const active = document.activeElement as HTMLElement | null;
+                        if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) return;
+                        const items = Array.from(
+                          e.currentTarget.querySelectorAll<HTMLElement>('button, [role="button"]'),
+                        );
+                        if (items.length === 0) return;
+                        e.preventDefault();
+                        const at = active ? items.indexOf(active) : -1;
+                        const next = at < 0
+                          ? items[e.key === "ArrowRight" ? 0 : items.length - 1]
+                          : items[(at + (e.key === "ArrowRight" ? 1 : items.length - 1)) % items.length];
+                        next.focus();
+                        return;
+                      }
                       // 键盘可达：焦点在卡片本体时 Enter/Space 等效点击。内部按钮/输入框的
                       // 键盘事件(target 不是卡片)放行，由它们自己的 click 处理，避免双重触发。
                       if (e.target !== e.currentTarget) return;
@@ -947,13 +1190,17 @@ export function Sticker({
                         <div className="stk-line1">
                           {editingId === l.session.id ? (
                             <EditBox
-                              initial={unnamed ? "" : effTaskTitle}
+                              initial={editDraftsRef.current.get(`r:${l.session.id}`) ?? (unnamed ? "" : effTaskTitle)}
                               placeholder={t.sticker.renamePlaceholder}
                               inputClass="stk-edit"
                               saveLabel={t.sticker.noteSave}
                               cancelLabel={t.sticker.noteCancel}
+                              onDraft={(v) => editDraftsRef.current.set(`r:${l.session.id}`, v)}
                               onSubmit={(value) => submitRename(l, value)}
-                              onCancel={() => setEditingId(null)}
+                              onCancel={() => {
+                                editDraftsRef.current.delete(`r:${l.session.id}`);
+                                setEditingId(null);
+                              }}
                             />
                           ) : (
                             <>
@@ -981,6 +1228,8 @@ export function Sticker({
                                   className="stk-chat-btn"
                                   aria-label={t.sticker.openChat}
                                   data-tip={t.sticker.openChat}
+                                  // 卡内 roving：不进 Tab 序，由卡片的 ←/→ 到达（B-11）。
+                                  tabIndex={-1}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     invoke("open_chat_window", { sessionId: l.session.id }).catch(() => {});
@@ -988,14 +1237,18 @@ export function Sticker({
                                 ><ChatIcon /></button>
                               )}
                               {/* 置顶/便签/重命名/归档操作收进卡片菜单（CardContextMenu），标题行不再挤 hover 图标。
-                                  默认右键触发；card_menu_mode=button（触屏等不便右键）时改为此处的常显菜单按钮，
-                                  两种触发方式二选一。置顶态由卡片金角、便签由便签块表达，收起入口不丢信息。 */}
-                              {menuMode === "button" && !l.foreign && (
+                                  默认右键触发；card_menu_mode=button（触屏等不便右键）时改为此处的常显菜单按钮。
+                                  context 模式下按钮仍在但平时透明、hover 卡片才极淡浮现（stk-menu-btn-ghost）——
+                                  否则该模式下星标/便签/重命名/归档零可见入口、零提示（B-5）。
+                                  置顶态由卡片金角、便签由便签块表达，收起入口不丢信息。 */}
+                              {!l.foreign && (
                                 <button
                                   type="button"
-                                  className="stk-menu-btn"
+                                  className={"stk-menu-btn" + (menuMode === "button" ? "" : " stk-menu-btn-ghost")}
                                   aria-label={t.sticker.cardMenu}
                                   data-tip={t.sticker.cardMenu}
+                                  // 卡内 roving：不进 Tab 序，由卡片的 ←/→ 到达（B-11）。
+                                  tabIndex={-1}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     const r = e.currentTarget.getBoundingClientRect();
@@ -1063,7 +1316,7 @@ export function Sticker({
                     </div>
                     {notingId === l.session.id ? (
                       <EditBox
-                        initial={effNote ?? ""}
+                        initial={editDraftsRef.current.get(`n:${l.session.id}`) ?? (effNote ?? "")}
                         placeholder={t.sticker.notePlaceholder}
                         inputClass="stk-note-edit"
                         extraClass="stk-editbox-note"
@@ -1071,22 +1324,27 @@ export function Sticker({
                         saveLabel={t.sticker.noteSave}
                         cancelLabel={t.sticker.noteCancel}
                         maxLength={NOTE_MAX_CHARS}
+                        onDraft={(v) => editDraftsRef.current.set(`n:${l.session.id}`, v)}
                         onSubmit={(value) => submitNote(l, value)}
-                        onCancel={() => setNotingId(null)}
+                        onCancel={() => {
+                          editDraftsRef.current.delete(`n:${l.session.id}`);
+                          setNotingId(null);
+                        }}
                       />
                     ) : effNote ? (
                       <div
-                        className="stk-note"
+                        className={"stk-note" + (expandedNoteId === l.session.id ? " is-open" : "")}
                         data-tip={t.sticker.noteEdit}
                         role="button"
-                        tabIndex={0}
-                        onClick={(e) => { e.stopPropagation(); startNote(l); }}
+                        // 卡内 roving：不进 Tab 序，由卡片的 ←/→ 到达（B-11）。
+                        tabIndex={-1}
+                        onClick={(e) => { e.stopPropagation(); activateNote(e.currentTarget, l); }}
                         onKeyDown={(e) => {
                           if (e.target !== e.currentTarget) return;
                           if (e.key !== "Enter" && e.key !== " ") return;
                           e.preventDefault();
                           e.stopPropagation(); // 不冒泡给卡片，避免误开终端
-                          startNote(l);
+                          activateNote(e.currentTarget, l);
                         }}
                       >
                         <span className="stk-note-icon"><NoteIcon /></span>
@@ -1111,6 +1369,8 @@ export function Sticker({
                             className="stk-open"
                             data-tip={l.connected ? t.sticker.openSession : t.sticker.resumeSession}
                             aria-label={l.connected ? t.sticker.openSession : t.sticker.resumeSession}
+                            // 卡内 roving：不进 Tab 序，由卡片的 ←/→ 到达（B-11）。
+                            tabIndex={-1}
                             onClick={(e) => { e.stopPropagation(); openTerminal(l); }}
                           ><OpenIcon /></button>
                         )}
@@ -1120,14 +1380,17 @@ export function Sticker({
                 </div>
               );
             })}
+            </div>
+            {/* 加载更多 loader：内层容器之外的正常流兄弟节点——计入滚动高度（此前绝对定位在
+                totalSize 之外，不算滚动高度且落在底部淡出遮罩里，滚到底也看不清）。 */}
             {isLoadingMore && (
-              <div className="stk-loadmore" style={{ position: "absolute", top: totalSize, left: 0, width: "100%" }}>
+              <div className="stk-loadmore">
                 <span className="stk-loadmore-dot" />
                 <span className="stk-loadmore-dot" />
                 <span className="stk-loadmore-dot" />
               </div>
             )}
-          </div>
+          </>
         )}
       </div>
       {sb && (
@@ -1144,7 +1407,7 @@ export function Sticker({
           starred={isStarred(ctxItem)}
           hasNote={!!ctxItem.note}
           archived={ctxItem.archived}
-          onStar={() => toggleStar(ctxItem.session.cc_session_id)}
+          onStar={() => toggleStarFlip(ctxItem.session.cc_session_id)}
           onNote={() => startNote(ctxItem)}
           onRename={() => startRename(ctxItem)}
           onArchive={() => {
@@ -1192,7 +1455,8 @@ export function Sticker({
       )}
       {focusNotice && focusNotice.kind !== "focused" && (
         <div className="stk-focus-toast" role="status" onClick={(e) => e.stopPropagation()}>
-          <span className="stk-focus-mark" aria-hidden="true">!</span>
+          {/* 成功回执（opened）不带告警标记，与归档 toast 同一呈现原则。 */}
+          {focusNotice.kind !== "opened" && <span className="stk-focus-mark" aria-hidden="true">!</span>}
           <div className="stk-focus-body">
             <span className="stk-focus-text">{focusNoticeText}</span>
             <div className="stk-focus-actions">
@@ -1203,6 +1467,13 @@ export function Sticker({
                     : focusNotice.kind === "process_ended"
                     ? t.sticker.reopen
                     : t.sticker.reopenSupported}
+                </button>
+              )}
+              {/* TCC 自动化权限被拒（仅 macOS 会产生该结果）：直达系统设置对应页，
+                  不再只丢一句「请允许」让用户自己翻。 */}
+              {focusNotice.kind === "permission_denied" && (
+                <button type="button" className="stk-focus-btn" onClick={() => { invoke("open_automation_settings").catch(() => {}); }}>
+                  {t.sticker.openSystemSettings}
                 </button>
               )}
             </div>
@@ -1244,6 +1515,24 @@ export function Sticker({
               </button>
             </div>
           ))}
+        </div>
+      )}
+      {/* 首启导入提示 toast（S-12，见 importNotice）：一次性，10s 自动消失或手动关。 */}
+      {importNotice !== null && (
+        <div className="stk-archive-toasts">
+          <div className="stk-focus-toast is-archive" role="status" data-testid="stk-import-toast">
+            <div className="stk-focus-body">
+              <span className="stk-focus-text">{t.sticker.importNotice(importNotice)}</span>
+            </div>
+            <button
+              type="button"
+              className="stk-focus-close"
+              aria-label={t.sticker.dismiss}
+              onClick={() => setImportNotice(null)}
+            >
+              <XIcon />
+            </button>
+          </div>
         </div>
       )}
       {/* 底栏:用量(左) + 搜索/设置/固定(右)聚为一处;搜索激活时整条变输入框。 */}
@@ -1327,17 +1616,16 @@ export function Sticker({
               >
                 <GearIcon />
               </button>
-              {!isMacPanel() && (
-                <button
-                  type="button"
-                  className={"stk-act " + (pinned ? "stk-pin-on" : "")}
-                  data-tip={pinned ? t.sticker.pinOn : t.sticker.pinOff}
-                  aria-label={pinned ? t.sticker.pinOn : t.sticker.pinOff}
-                  onClick={togglePin}
-                >
-                  <PinIcon pinned={pinned} />
-                </button>
-              )}
+              {/* pin 在 macOS 面板也渲染（W-12）：那边语义是「保持打开」，见 pinTip。 */}
+              <button
+                type="button"
+                className={"stk-act " + (pinned ? "stk-pin-on" : "")}
+                data-tip={pinTip}
+                aria-label={pinTip}
+                onClick={togglePin}
+              >
+                <PinIcon pinned={pinned} />
+              </button>
             </div>
           </>
         )}

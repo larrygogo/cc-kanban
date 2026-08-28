@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
@@ -17,12 +17,19 @@ vi.mock("@tauri-apps/api/event", () => ({
 const keyHandler = vi.hoisted(() => ({ current: null as ((event: KeyboardEvent) => boolean) | null }));
 const linkOpen = vi.hoisted(() => ({ current: null as ((event: MouseEvent, uri: string) => void) | null }));
 const termOptions = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
+// Terminal 构造计数:会话 id 变更不应重建 xterm(T-13 平滑重绑的断言锚点)。
+const constructSpy = vi.hoisted(() => vi.fn());
 // onData 处理器与可控的 write 完成回调:回放拦截测试要在「write 已入队、回调未触发」的
 // 窗口里注入 xterm 自动应答,manual 模式把回调攒进队列由测试择机触发。
 const dataHandler = vi.hoisted(() => ({ current: null as ((data: string) => void) | null }));
 const writeCallbacks = vi.hoisted(() => ({ manual: false, queue: [] as (() => void)[] }));
 // 终端选区：复制快捷键测试用（有选区的 Ctrl+C=复制不发 ^C，无选区照旧发）。
 const selection = vi.hoisted(() => ({ text: "" }));
+// 窗口焦点镜像（T-14 resize 仲裁）：jsdom 的 document.hasFocus() 恒 false，
+// 不 mock 的话「失焦不下发 resize」的门会把所有用例的 resize 全挡掉。
+const focusState = vi.hoisted(() => ({ current: true }));
+// terminal.selectAll 的间谍（右键菜单「全选」用例）。
+const selectAllSpy = vi.hoisted(() => vi.fn());
 const terminalModes = vi.hoisted(() => ({ mouseTrackingMode: "none" as "none" | "x10" | "vt200" | "drag" | "any" }));
 // 当前 buffer 类型:备用屏(alternate)没有 scrollback,Shift+滚轮旁路必须放行给 TUI。
 const bufferType = vi.hoisted(() => ({ current: "normal" as "normal" | "alternate" }));
@@ -35,6 +42,11 @@ const wheelHandler = vi.hoisted(() => ({ current: null as ((event: WheelEvent) =
 const scrollLinesSpy = vi.hoisted(() => vi.fn());
 // terminal.resize 的间谍（隐藏态网格对齐：快照带的 PTY 尺寸要直接钉到网格上）。
 const resizeGridSpy = vi.hoisted(() => vi.fn());
+// 文件路径 link provider(T-4):捕获注册进来的 provider,测试直接驱动 provideLinks。
+const linkProvider = vi.hoisted(() => ({ current: null as { provideLinks(y: number, cb: (links: { text: string; activate(e: MouseEvent, t: string): void; hover?(): void; leave?(): void }[] | undefined) => void): void } | null }));
+// provider 读行文本用的正常屏 buffer:仅当 lineText 非 null 时暴露(缺席时组件按
+// translateToString 拿不到行,回调 undefined——与真实 xterm 空行同路)。
+const lineText = vi.hoisted(() => ({ current: null as string | null }));
 vi.mock("@xterm/addon-web-links", () => ({
   WebLinksAddon: class {
     constructor(handler: (event: MouseEvent, uri: string) => void) { linkOpen.current = handler; }
@@ -42,7 +54,7 @@ vi.mock("@xterm/addon-web-links", () => ({
 }));
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
-    constructor(options: Record<string, unknown>) { termOptions.current = options; }
+    constructor(options: Record<string, unknown>) { constructSpy(); termOptions.current = options; }
     cols = 80;
     rows = 24;
     options = { fontSize: 12 };
@@ -62,16 +74,23 @@ vi.mock("@xterm/xterm", () => ({
     scrollLines = (amount: number) => scrollLinesSpy(amount);
     // 只在备用屏用例下暴露 buffer:缺席时组件走 visibleTerminalText 兜底(与真实 xterm
     // 尚未就绪时同路),屏幕识别的那批用例依赖这条路径,给个空壳 buffer 会把它们打断。
+    // lineText 非 null 时额外暴露带 getLine 的正常屏 buffer(文件路径 link provider 用)。
     get buffer() {
-      return bufferType.current === "alternate"
-        ? { active: { type: "alternate" } }
-        : undefined;
+      if (bufferType.current === "alternate") return { active: { type: "alternate" } };
+      if (lineText.current !== null) {
+        const text = lineText.current;
+        return { active: { type: "normal", getLine: () => ({ translateToString: () => text }) } };
+      }
+      return undefined;
     }
+    // 文件路径 link provider 的注册口(T-4)。
+    registerLinkProvider = (provider: NonNullable<typeof linkProvider.current>) => { linkProvider.current = provider; };
     hasSelection = () => selection.text.length > 0;
     // TUI 的鼠标上报模式(?1000-1006h 经 xterm 解析后暴露);测试按需改成 "any"。
     modes = terminalModes;
     getSelection = () => selection.text;
     clearSelection = () => { selection.text = ""; };
+    selectAll = () => selectAllSpy();
     // UnicodeGraphemesAddon 激活时会读写 unicode.activeVersion;哑实现只要可赋值。
     unicode = { activeVersion: "6" };
     paste = (data: string) => pasteSpy(data);
@@ -101,7 +120,7 @@ vi.mock("@xterm/addon-unicode-graphemes", () => ({ UnicodeGraphemesAddon: class 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ confirm: vi.fn(), open: vi.fn() }));
 const confirmAnswer = vi.hoisted(() => ({ ok: true }));
 
-import { findFakeCaret, gridResyncTarget, isCtrlLeftClickReport, isMouseMotionReport, ManagedTerminal, STREAM_STALL_MS, stripTerminalReplies, terminalStreamStalled } from "./ManagedTerminal";
+import { findFakeCaret, gridResyncTarget, isCtrlLeftClickReport, isMouseMotionReport, ManagedTerminal, scanLineForFilePaths, STREAM_STALL_MS, stripTerminalReplies, terminalStreamStalled } from "./ManagedTerminal";
 
 const noPty = { sessionId: 163, active: false, managed: false, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null, cols: 0, rows: 0, modes: [] as number[] };
 
@@ -151,23 +170,64 @@ describe("gridResyncTarget", () => {
   });
 });
 
+/// 文件路径识别(T-4):终端里最高频的可点内容。口径保守——裸相对路径必须有一段含「.」,
+/// URL 的部分不收(归 WebLinksAddon)。
+describe("scanLineForFilePaths", () => {
+  const texts = (line: string) => scanLineForFilePaths(line).map((h) => h.text);
+
+  it("收带分隔符的相对路径与各类锚头路径", () => {
+    expect(texts("read src/main.ts please")).toEqual(["src/main.ts"]);
+    expect(texts("./a/b/c")).toEqual(["./a/b/c"]);
+    expect(texts("../up/file")).toEqual(["../up/file"]); // 无点也收:锚头即意图
+    expect(texts("~/docs/note.md")).toEqual(["~/docs/note.md"]);
+    expect(texts("/var/log/app.log")).toEqual(["/var/log/app.log"]);
+    expect(texts(String.raw`C:\Users\foo\bar.txt`)).toEqual([String.raw`C:\Users\foo\bar.txt`]);
+  });
+
+  it("连词与无点裸路径不收:误链普通单词的代价不是零", () => {
+    expect(texts("and/or this/that")).toEqual([]);
+    expect(texts("no slash here")).toEqual([]);
+  });
+
+  it("URL 的部分不收:那是 WebLinksAddon 的地盘", () => {
+    expect(texts("see https://example.com/a/b for details")).toEqual([]);
+  });
+
+  it("句读剥尾:括号/句号/行号不进命中", () => {
+    expect(texts("(src/main.ts).")).toEqual(["src/main.ts"]);
+    expect(texts("open src/main.ts:12 now")).toEqual(["src/main.ts"]);
+    expect(texts("a/b.ts, c/d.ts")).toEqual(["a/b.ts", "c/d.ts"]);
+  });
+
+  it("命中位置是开区间下标(供 link range 映射)", () => {
+    const [hit] = scanLineForFilePaths("xx src/main.ts yy");
+    expect(hit).toEqual({ text: "src/main.ts", start: 3, end: 14 });
+  });
+});
+
 describe("ManagedTerminal", () => {
   afterEach(cleanup);
   beforeEach(() => {
     invoke.mockReset();
     write.mockReset();
     resetSpy.mockReset();
+    constructSpy.mockReset();
     confirmAnswer.ok = true;
     eventHandlers.clear();
     dataHandler.current = null;
     writeCallbacks.manual = false;
     writeCallbacks.queue = [];
     selection.text = "";
+    focusState.current = true;
+    document.hasFocus = () => focusState.current;
+    selectAllSpy.mockReset();
     scrollToBottomSpy.mockReset();
     resizeGridSpy.mockReset();
     wheelHandler.current = null;
     scrollLinesSpy.mockReset();
     bufferType.current = "normal";
+    linkProvider.current = null;
+    lineText.current = null;
     searchFindNext.mockReset().mockReturnValue(true);
     searchFindPrevious.mockReset().mockReturnValue(true);
     global.ResizeObserver = class {
@@ -276,6 +336,89 @@ describe("ManagedTerminal", () => {
     expect(handler).toBeTruthy();
     handler.activate(click({ metaKey: true }), "https://example.com/b");
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_link", { url: "https://example.com/b" }));
+  });
+
+  it("悬停链接时右下角出 Ctrl+点击 提示,离开即收(T-4:此前这条终端惯例零界面表达)", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(noPty);
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(linkOpen.current).toBeTruthy());
+    const handler = termOptions.current?.linkHandler as { hover?: () => void; leave?: () => void };
+    expect(handler.hover).toBeTruthy();
+    act(() => handler.hover!());
+    expect(await screen.findByText("Ctrl+点击打开链接")).toBeTruthy();
+    act(() => handler.leave!());
+    await waitFor(() => expect(screen.queryByText("Ctrl+点击打开链接")).toBeNull());
+  });
+
+  it("文件路径 link provider:Ctrl+点击走文件管理器定位,普通点击不动;悬停有专属提示", async () => {
+    lineText.current = "read src/main.ts and https://example.com/a/b";
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(noPty);
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" cwd="/repo" />);
+    await waitFor(() => expect(linkProvider.current).toBeTruthy());
+    let links: { text: string; activate(e: MouseEvent, t: string): void; hover?(): void; leave?(): void }[] | undefined;
+    linkProvider.current!.provideLinks(1, (l) => { links = l; });
+    // URL 的部分不出链(归 WebLinksAddon),行内只有文件路径一个命中。
+    expect(links?.map((l) => l.text)).toEqual(["src/main.ts"]);
+    const click = (init: Partial<MouseEvent>) => init as MouseEvent;
+    // 普通点击留给 TUI 鼠标交互与选区(与 URL 同一纪律)。
+    links![0].activate(click({}), "src/main.ts");
+    expect(invoke).not.toHaveBeenCalledWith("reveal_path_in_file_manager", expect.anything());
+    links![0].activate(click({ ctrlKey: true }), "src/main.ts");
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("reveal_path_in_file_manager", { cwd: "/repo", rel: "src/main.ts" }));
+    // 悬停提示指向文件管理器,离开即收。
+    act(() => links![0].hover!());
+    expect(await screen.findByText("Ctrl+点击在文件管理器中显示")).toBeTruthy();
+    act(() => links![0].leave!());
+    await waitFor(() => expect(screen.queryByText("Ctrl+点击在文件管理器中显示")).toBeNull());
+  });
+
+  it("cwd 未知时文件路径 provider 不出链:点了也只会报「目录不存在」", async () => {
+    lineText.current = "read src/main.ts";
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(noPty);
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(linkProvider.current).toBeTruthy());
+    let links: unknown;
+    linkProvider.current!.provideLinks(1, (l) => { links = l; });
+    expect(links).toBeUndefined();
+  });
+
+  it("假死横幅给「结束并恢复」(T-5):确认后先 stop 再 start,一步走完此前两步", async () => {
+    // 停滞判定靠 30s 阈值 + 5s 节拍,fake timers(含 Date)把时间直接推过去。
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    try {
+      invoke.mockImplementation((command: string) => {
+        if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true });
+        if (command === "confirm_dialog") return Promise.resolve(confirmAnswer.ok);
+        return Promise.resolve();
+      });
+      render(<ManagedTerminal sessionId={163} status="running" />);
+      // 挂载 effect 与首轮快照落地(纯微任务,不等计时器):active 翻 true。
+      await act(async () => {});
+      // 推过 30s 停滞阈值,5s 节拍至少跑一轮 → 假死横幅出现。
+      await act(async () => { vi.advanceTimersByTime(36_000); });
+      const button = screen.queryByRole("button", { name: "结束并恢复" });
+      expect(button).toBeTruthy();
+      invoke.mockClear();
+      fireEvent.click(button!);
+      // confirm → stop_managed_terminal → start_managed_terminal 全链路(微任务串)。
+      await act(async () => {});
+      const calls = invoke.mock.calls.map((c) => c[0]);
+      expect(calls).toContain("confirm_dialog");
+      expect(calls).toContain("stop_managed_terminal");
+      expect(calls).toContain("start_managed_terminal");
+      expect(calls.indexOf("stop_managed_terminal")).toBeLessThan(calls.indexOf("start_managed_terminal"));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("Ctrl+左键的鼠标上报不下发 PTY：宿主已开链接，TUI 再收到点击会对同一链接开第二次", async () => {
@@ -457,6 +600,22 @@ describe("ManagedTerminal", () => {
     expect(screen.getByRole("button", { name: "恢复会话" })).toBeTruthy();
     // 遮罩层本体穿透（输出可滚可选），卡片自身可交互
     expect(container.querySelector(".managed-terminal-cover.is-exited")).toBeTruthy();
+  });
+
+  /// 强制收尾（kill 静默无效后的末档）会把会话摘除但进程可能仍在：文案必须与正常
+  /// 退出区分，不能一律说成「已退出」（zombie 残留时那是谎报）。
+  it("forced 的 pty-exit 显示强制结束文案，与正常退出区分", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve({ ...noPty, active: true, data: btoa("running"), endOffset: 7 });
+      }
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(eventHandlers.get("pty-exit")).toBeTruthy());
+    eventHandlers.get("pty-exit")!({ payload: { sessionId: 163, code: null, forced: true } });
+    expect(await screen.findByText(/已强制结束/)).toBeTruthy();
+    expect(screen.queryByText(/Agent 进程已退出/)).toBeNull();
   });
 
   /// 实拍反馈「终端没有回到底部」：进程退出时若视口停在上翻位置，退出提示行与
@@ -703,10 +862,9 @@ describe("ManagedTerminal", () => {
     await waitFor(() => expect(painted()).toBe("ABCDEFGHI"));
   });
 
-  it("右键:有选区复制并清选区,无选区读剪贴板走 paste 通路(仅 Windows 惯例)", async () => {
-    // WebView 默认右键菜单被 devtools-guard 封死,封死后右键此前没有任何替代行为
-    // (实拍反馈"右键复制没生效")。约定与 Windows 终端一致:右键=复制或粘贴;
-    // macOS 的右键是菜单语义,组件按 platform 门控——测试环境显式装成 Windows。
+  it("右键菜单(U0-11):有选区复制可用(复制并清选区),无选区粘贴可用(读剪贴板走 paste 通路)", async () => {
+    // 生产构建的 WebView 默认右键菜单被 devtools-guard 封死,应用内补一份
+    // (复制/粘贴/全选/搜索)。粘贴只在无选区时可用——有选区的右键是复制语义。
     Object.defineProperty(navigator, "platform", { value: "Win32", configurable: true });
     invoke.mockImplementation((command: string) => {
       if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2 });
@@ -718,24 +876,54 @@ describe("ManagedTerminal", () => {
     pasteSpy.mockClear();
     render(<ManagedTerminal sessionId={163} status="running" />);
     const host = document.querySelector(".managed-terminal-host")!;
-    // 有选区:复制选区、清选区,不碰剪贴板读取。
+    const menuItems = () => Array.from(document.querySelectorAll<HTMLButtonElement>(".ctx-menu .ctx-item"));
+    // 有选区:弹菜单,复制可用、粘贴置灰;点「复制」写剪贴板、清选区、菜单关闭,不碰剪贴板读取。
     selection.text = "picked";
     fireEvent.contextMenu(host);
+    expect(menuItems().length).toBe(4);
+    expect(menuItems()[0].disabled).toBe(false); // 复制
+    expect(menuItems()[1].disabled).toBe(true); // 粘贴(有选区=复制语义)
+    fireEvent.click(menuItems()[0]);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("picked"));
     expect(selection.text).toBe("");
     expect(invoke).not.toHaveBeenCalledWith("clipboard_text");
-    // 无选区:读后端剪贴板,文本进 xterm 的 paste 通路(bracketed paste + onData 下发)。
+    expect(document.querySelector(".ctx-menu")).toBeNull();
+    // 无选区:复制置灰、粘贴可用;点「粘贴」读后端剪贴板,文本进 xterm 的 paste 通路
+    // (bracketed paste + onData 下发)。
     fireEvent.contextMenu(host);
+    expect(menuItems()[0].disabled).toBe(true);
+    expect(menuItems()[1].disabled).toBe(false);
+    fireEvent.click(menuItems()[1]);
     await waitFor(() => expect(pasteSpy).toHaveBeenCalledWith("from-clipboard"));
+    expect(document.querySelector(".ctx-menu")).toBeNull();
+  });
+
+  it("右键菜单(U0-11):全选走 terminal.selectAll,搜索打开终端内搜索条", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2 });
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    const host = document.querySelector(".managed-terminal-host")!;
+    const menuItems = () => Array.from(document.querySelectorAll<HTMLButtonElement>(".ctx-menu .ctx-item"));
+    // 全选:选区由 xterm 自己管,组件只转发 selectAll。
+    fireEvent.contextMenu(host);
+    fireEvent.click(menuItems()[2]);
+    expect(selectAllSpy).toHaveBeenCalledTimes(1);
+    expect(document.querySelector(".ctx-menu")).toBeNull();
+    // 搜索:打开与 Ctrl+F 同一条搜索条。
+    fireEvent.contextMenu(host);
+    fireEvent.click(menuItems()[3]);
+    await waitFor(() => expect(document.querySelector(".term-search-input")).toBeTruthy());
   });
 
   /**
    * claude 全屏渲染器开鼠标上报后,xterm 把右键转发给它、它自己粘贴剪贴板(实测)。
-   * Meowo 的右键惯例必须让位:无选区不再叠加粘贴;有选区仍复制,但 mousedown 在
+   * Meowo 的右键必须让位:无选区不叠菜单不粘贴;有选区仍弹复制菜单,但 mousedown 在
    * 捕获段拦在 xterm 之外——TUI 不知道有过右键就不会顺手粘贴(实拍「右键复制,同时
    * 就粘贴进输入框」)。
    */
-  it("TUI 开鼠标上报时:无选区右键不粘贴,有选区右键复制且按键不进 xterm", async () => {
+  it("TUI 开鼠标上报时:无选区右键不弹菜单不粘贴,有选区弹复制菜单且按键不进 xterm", async () => {
     Object.defineProperty(navigator, "platform", { value: "Win32", configurable: true });
     invoke.mockImplementation((command: string) => {
       if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2 });
@@ -755,23 +943,29 @@ describe("ManagedTerminal", () => {
       const reachedXterm = vi.fn();
       xtermEl.addEventListener("mousedown", reachedXterm);
       xtermEl.addEventListener("mouseup", reachedXterm);
-      // 无选区:右键归 TUI,Meowo 不读剪贴板、不 paste。
+      // 无选区:右键归 TUI,Meowo 不弹菜单、不读剪贴板、不 paste。
       selection.text = "";
       fireEvent.mouseDown(xtermEl, { button: 2 });
       fireEvent.mouseUp(xtermEl, { button: 2 });
       fireEvent.contextMenu(host);
       await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(document.querySelector(".ctx-menu")).toBeNull();
       expect(pasteSpy).not.toHaveBeenCalled();
       expect(invoke).not.toHaveBeenCalledWith("clipboard_text");
       expect(reachedXterm).toHaveBeenCalledTimes(2);
       reachedXterm.mockClear();
-      // 有选区:复制,且这次按下/抬起都不到 xterm(TUI 看不见右键,不会粘贴)。
+      // 有选区:弹菜单(粘贴置灰),且这次按下/抬起都不到 xterm(TUI 看不见右键,不会粘贴)。
       selection.text = "picked";
       fireEvent.mouseDown(xtermEl, { button: 2 });
       fireEvent.mouseUp(xtermEl, { button: 2 });
       fireEvent.contextMenu(host);
-      await waitFor(() => expect(writeText).toHaveBeenCalledWith("picked"));
+      const items = Array.from(document.querySelectorAll<HTMLButtonElement>(".ctx-menu .ctx-item"));
+      expect(items.length).toBe(4);
+      expect(items[1].disabled).toBe(true); // 有选区:粘贴置灰
       expect(reachedXterm).not.toHaveBeenCalled();
+      // 点「复制」才写剪贴板并清选区。
+      fireEvent.click(items[0]);
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith("picked"));
       expect(selection.text).toBe("");
       // 左键照常放行。
       fireEvent.mouseDown(xtermEl, { button: 0 });
@@ -779,6 +973,45 @@ describe("ManagedTerminal", () => {
     } finally {
       terminalModes.mouseTrackingMode = "none";
     }
+  });
+
+  /**
+   * T-14 resize 仲裁：对话窗与外部同步终端 attach 同一 PTY 时，两边各按自己的容器
+   * 尺寸下发 resize，TUI 被来回重排。约定聚焦视图为尺寸主控——失焦期本组件一律
+   * 静默（设置热应用驱动的 refit 也不发）；重新聚焦时只有查到网格真的漂移
+   * （失焦期间被外部终端改过尺寸）才补发一次夺回主控，无漂移不多吃 SIGWINCH。
+   */
+  it("T-14 resize 仲裁:失焦期不下发 resize,重新聚焦时网格漂移才补发", async () => {
+    const snapshot = { ...noPty, active: true, cols: 80, rows: 24, data: btoa("hi"), endOffset: 2 };
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(snapshot);
+      if (command === "managed_terminal_grid") return Promise.resolve([80, 24]);
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    // 聚焦态:可见 effect 的 fit 后正常下发一次 resize(80×24)。
+    await waitFor(() => expect(invoke.mock.calls.some(([c]) => c === "resize_managed_terminal")).toBe(true));
+    invoke.mockClear();
+    // 失焦:设置热应用驱动的 refit 也不再下发(此刻外部终端可能是尺寸主控)。
+    focusState.current = false;
+    fireEvent(window, new Event("blur"));
+    eventHandlers.get("settings-changed")!({ payload: { terminal_font_size: 14 } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(invoke.mock.calls.some(([c]) => c === "resize_managed_terminal")).toBe(false);
+    // 重新聚焦但网格无漂移(PTY 仍是本地尺寸):不补发。
+    focusState.current = true;
+    fireEvent(window, new Event("focus"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(invoke.mock.calls.some(([c]) => c === "resize_managed_terminal")).toBe(false);
+    // 聚焦时查到漂移(失焦期间 PTY 被改成 100×30):补发一次本地尺寸,夺回主控。
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(snapshot);
+      if (command === "managed_terminal_grid") return Promise.resolve([100, 30]);
+      return Promise.resolve();
+    });
+    fireEvent(window, new Event("blur"));
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("resize_managed_terminal", { sessionId: 163, cols: 80, rows: 24 }));
   });
 
   it("isMouseMotionReport 只认无按键的 SGR 移动事件", () => {
@@ -1199,5 +1432,62 @@ describe("ManagedTerminal", () => {
     writeCallbacks.queue.forEach((callback) => callback());
     dataHandler.current!("\x1b[24;1R");
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 163, data: "\x1b[24;1R" }));
+  });
+
+  /**
+   * T-13：临时 id → 真实 id 的 claim 重绑不再换 key 整只重挂（xterm 重建、首屏清空重画）。
+   * 后端 try_claim_rebind 只换映射键，同一 PTY、偏移连续——组件用 managed_terminal_binding
+   * 权威确认后只补一次增量快照：不 reset、不重建 Terminal，viewer 注册换成真实 id。
+   */
+  it("临时 id → 真实 id 重绑:终端不重建不 reset,viewer 注册换成真实 id", async () => {
+    invoke.mockImplementation((command: string, args?: { sessionId?: number }) => {
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve({ ...noPty, sessionId: args?.sessionId ?? -3, active: true, managed: true });
+      }
+      if (command === "managed_terminal_binding") return Promise.resolve(163);
+      return Promise.resolve();
+    });
+    const { rerender } = render(<ManagedTerminal sessionId={-3} status="running" />);
+    await waitFor(() => expect(dataHandler.current).toBeTruthy());
+    constructSpy.mockClear();
+    resetSpy.mockClear();
+    rerender(<ManagedTerminal sessionId={163} status="running" />);
+    // viewer 注册跟着 id 走(emitter 只对 viewed_session 推实时帧)。
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("register_terminal_viewer", { sessionId: 163 }));
+    // 同一 PTY 只换名:确认绑定后补一次增量快照,画面不动。
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("managed_terminal_snapshot", expect.objectContaining({ sessionId: 163 })));
+    expect(resetSpy).not.toHaveBeenCalled();
+    expect(constructSpy).not.toHaveBeenCalled();
+  });
+
+  it("负 id 期间切去别的会话(binding 对不上):复用终端实例但按换会话复位", async () => {
+    invoke.mockImplementation((command: string, args?: { sessionId?: number }) => {
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve({ ...noPty, sessionId: args?.sessionId ?? -3, active: true, managed: true });
+      }
+      // 用户跳转目标的 163 不是这个临时 id 认领出的会话(它认出了 999)——不是重绑。
+      if (command === "managed_terminal_binding") return Promise.resolve(999);
+      return Promise.resolve();
+    });
+    const { rerender } = render(<ManagedTerminal sessionId={-3} status="running" />);
+    await waitFor(() => expect(dataHandler.current).toBeTruthy());
+    constructSpy.mockClear();
+    resetSpy.mockClear();
+    rerender(<ManagedTerminal sessionId={163} status="running" />);
+    // 异会话:rearm 归零偏移 + terminal.reset 清掉旧画面,但 xterm 实例复用。
+    await waitFor(() => expect(resetSpy).toHaveBeenCalled());
+    expect(constructSpy).not.toHaveBeenCalled();
+  });
+
+  it("gridRef 暴露当前 xterm 网格,供对话页恢复/接管作 PTY 初始尺寸(T-9)", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(noPty);
+      return Promise.resolve();
+    });
+    const gridRef = { current: null as (() => { cols: number; rows: number } | null) | null };
+    render(<ManagedTerminal sessionId={163} status="running" gridRef={gridRef} />);
+    await waitFor(() => expect(gridRef.current).toBeTruthy());
+    // 哑终端的默认网格;生产上是 fit 后(或隐藏期快照对齐后)的真实 cols/rows。
+    expect(gridRef.current!()).toEqual({ cols: 80, rows: 24 });
   });
 });

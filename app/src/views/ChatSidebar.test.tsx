@@ -108,6 +108,26 @@ describe("ChatSidebar", () => {
     });
   });
 
+  it("外部切换当前会话时把它滚回可视区", async () => {
+    // jsdom 没有 scrollIntoView，补一个桩记录被滚的元素。
+    const scrolled: Element[] = [];
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(function (this: Element) { scrolled.push(this); }),
+    });
+    invoke.mockImplementation((command: string) =>
+      Promise.resolve(command === "get_live_sessions_page"
+        ? [session(163, "在跑的", { connected: true }), session(150, "旧任务")]
+        : undefined));
+    const { rerender } = render(<ChatSidebar activeId={163} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
+    await screen.findByRole("button", { name: /旧任务/ });
+    rerender(<ChatSidebar activeId={150} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
+    await waitFor(() => {
+      expect(scrolled).toContain(screen.getByRole("button", { name: /旧任务/ }));
+    });
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
   it("macOS：侧栏内折叠钮上报 collapse 给父级", async () => {
     isMacMock.mockReturnValue(true);
     invoke.mockImplementation((command: string) =>
@@ -614,5 +634,54 @@ describe("ChatSidebar", () => {
     expect(badge.textContent).toBe("+2");
     expect(badge.getAttribute("data-tip")).toContain("C:/w/api");
     expect(screen.getAllByTestId("sidebar-extradirs").length).toBe(1);
+  });
+
+  describe("可访问性:roving tabindex + 单一汇总播报(C-17/G-16)", () => {
+    const renderThree = async () => {
+      invoke.mockImplementation((command: string) => {
+        if (command === "get_live_sessions_page") {
+          return Promise.resolve([
+            session(1, "甲", { connected: true, session: { id: 1, cc_session_id: "cc-1", status: "running" } } as Partial<LiveSession>),
+            session(2, "乙", { connected: true, session: { id: 2, cc_session_id: "cc-2", status: "waiting" } } as Partial<LiveSession>),
+            session(3, "丙"),
+          ]);
+        }
+        return Promise.resolve();
+      });
+      const { container } = render(<ChatSidebar activeId={2} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
+      await screen.findByRole("button", { name: /甲/ });
+      return container;
+    };
+
+    it("列表只占一个 Tab 停靠点(选中条 0、其余 -1),↑↓/Home/End 在条目间搬焦点", async () => {
+      await renderThree();
+      const first = screen.getByRole("button", { name: /甲/ });
+      const second = screen.getByRole("button", { name: /乙/ });
+      const third = screen.getByRole("button", { name: /丙/ });
+      expect(first.getAttribute("tabindex")).toBe("-1");
+      expect(second.getAttribute("tabindex")).toBe("0"); // 当前选中的那条
+      expect(third.getAttribute("tabindex")).toBe("-1");
+      second.focus();
+      fireEvent.keyDown(second, { key: "ArrowDown" });
+      expect(document.activeElement).toBe(third);
+      fireEvent.keyDown(third, { key: "ArrowDown" }); // 到底回卷
+      expect(document.activeElement).toBe(first);
+      fireEvent.keyDown(first, { key: "ArrowUp" });
+      expect(document.activeElement).toBe(third);
+      fireEvent.keyDown(third, { key: "Home" });
+      expect(document.activeElement).toBe(first);
+      fireEvent.keyDown(first, { key: "End" });
+      expect(document.activeElement).toBe(third);
+    });
+
+    it("状态点是 role=img 而非独立 live region,全侧栏只剩一个汇总 role=status", async () => {
+      const container = await renderThree();
+      const dot = screen.getByRole("button", { name: /甲/ }).querySelector(".chat-sidebar-dot")!;
+      expect(dot.getAttribute("role")).toBe("img");
+      const liveRegions = container.querySelectorAll('[role="status"]');
+      expect(liveRegions.length).toBe(1);
+      expect(liveRegions[0].className).toContain("chat-sidebar-sronly");
+      expect(liveRegions[0].textContent).toBe("会话状态汇总：0 个待批准，1 个等你输入，0 个出错");
+    });
   });
 });

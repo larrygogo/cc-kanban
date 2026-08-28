@@ -111,6 +111,7 @@ function TodoPanelList({ rows, t }: { rows: TodoPanelRow[]; t: ReturnType<typeof
         return (
           <li key={`${index}:${row.content}`} className={"is-" + row.status}>
             <TodoBadge status={row.status} />
+            {/* 面板本身是 .dd-menu：TooltipLayer 对菜单区域静默，完整文案走原生 title。 */}
             <span className="chat-todo-panel-text" title={row.content}>{row.content}</span>
             {duration && <span className="chat-todo-panel-time">{duration}</span>}
           </li>

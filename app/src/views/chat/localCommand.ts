@@ -28,6 +28,11 @@ const PAIR = new RegExp(`<(${TAGS.join("|")})>([\\s\\S]*?)<\\/\\1>`, "g");
 // 流式写入/截断会留下没配对的半个标签。正文里留一个孤零零的 `</command-args>` 比留着
 // 整段 XML 好不到哪去，收尾时一并抹掉。
 const STRAY = new RegExp(`<\\/?(${TAGS.join("|")})>`, "g");
+// 命令的 stdout 是 CLI 原样落盘的终端输出，常带 SGR 转义（/compact 的 `ESC[2m…ESC[22m`
+// 灰度、彩色命令输出的颜色码），原样渲染就是「\uFFFD[2m」乱码。对话页不是终端，全部剥掉：
+// CSI（ESC [ … 终态字符）、OSC（ESC ] … BEL/ESC\）、单字符 ESC 序列；U+FFFD 是 ESC 字节
+// 在某段链路被有损转换后的形态，一并认。
+const ANSI = /[\x1b\uFFFD](?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
 
 export function parseUserText(raw: string): UserTextParts {
   const parts: UserTextParts = { text: "", commands: [], stdout: [], notifications: [], local: false };
@@ -51,9 +56,12 @@ export function parseUserText(raw: string): UserTextParts {
           else parts.commands.push({ name: "", args: value });
         }
         break;
-      case "local-command-stdout":
-        if (value) parts.stdout.push(value);
+      case "local-command-stdout": {
+        // 终端转义剥掉后再判空：一段纯颜色码不该收成空输出块。
+        const out = value.replace(ANSI, "").trim();
+        if (out) parts.stdout.push(out);
         break;
+      }
       case "task-notification":
         if (value) parts.notifications.push(value);
         break;

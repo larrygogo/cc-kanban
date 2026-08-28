@@ -11,13 +11,28 @@ export const editorKeyDown =
     else if (e.key === "Escape") cancel();
   };
 
+// 相对时间走 Intl.RelativeTimeFormat（G-13）：手拼「N 分钟前 / N min ago」只照顾了
+// 中英两种语序，复数规则与语序随 locale 交给 Intl（英文还顺带从 "5 min ago" 的缩写
+// 回到自然的 "5 minutes ago"，1 天前得 "yesterday"）。
+// formatter 按 locale 缓存：fmtAgo 在列表渲染里逐卡片调用，每次 new 太贵。
+const agoFormatters = new Map<string, Intl.RelativeTimeFormat>();
+function agoFormatter(locale: string): Intl.RelativeTimeFormat {
+  let rtf = agoFormatters.get(locale);
+  if (!rtf) {
+    rtf = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
+    agoFormatters.set(locale, rtf);
+  }
+  return rtf;
+}
+
 export function fmtAgo(ms: number, t: Dict): string {
   const m = Math.floor((Date.now() - ms) / 60000);
   if (m < 1) return t.time.now;
-  if (m < 60) return t.time.minAgo(m);
+  const rtf = agoFormatter(t.locale);
+  if (m < 60) return rtf.format(-m, "minute");
   const h = Math.floor(m / 60);
-  if (h < 24) return t.time.hourAgo(h);
-  return t.time.dayAgo(Math.floor(h / 24));
+  if (h < 24) return rtf.format(-h, "hour");
+  return rtf.format(-Math.floor(h / 24), "day");
 }
 
 /** waiting tab 的时长语义：「已等待 X」。它是全应用唯一倒排（等最久在前）的列表，
@@ -103,7 +118,10 @@ function activity(l: Item): "pending" | "running" | "waiting" | null {
 
 /** 卡片状态徽标的统一口径（看板卡片指示器与折叠缩略条共用的单点判定）。
  *  缩略条曾自写一套只看 status 的映射，待审批会话在条上被画成绿色运行点、
- *  「有人在等你」的信号被抹掉（评审发现）——判定必须住在这一处。 */
+ *  「有人在等你」的信号被抹掉（评审发现）——判定必须住在这一处。
+ *  注：tone 只回答「画成哪一档」，不回答「这个判定有多可信」——角标的两层不自信
+ *  区分（无 screen_state 回落 DB status 的弱化、fallback idle 降中性点，T-15）
+ *  是呈现层的事，住在 Sticker 的指示器渲染处，不进本函数（tab 归属等判定不消费它）。 */
 export type CardTone = "offline" | "error" | "pending" | "running" | "waiting" | "on";
 export function cardTone(l: Item): CardTone {
   if (!l.connected) return "offline";

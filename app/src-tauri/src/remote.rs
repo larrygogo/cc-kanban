@@ -722,6 +722,8 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
                 limit: usize,
                 #[serde(default)]
                 include_foreign: Option<bool>,
+                #[serde(default)]
+                include_pending: Option<bool>,
             }
             let a = args!(A);
             reply(
@@ -734,6 +736,7 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
                     a.before_id,
                     a.limit,
                     a.include_foreign,
+                    a.include_pending,
                 )
                 .await,
             )
@@ -821,9 +824,14 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
                 offset: u64,
                 #[serde(default)]
                 full: Option<bool>,
+                #[serde(default)]
+                before: Option<u64>,
             }
             let a = args!(A);
-            reply(crate::chat::get_chat_history(state, a.session_id, a.offset, a.full).await)
+            reply(
+                crate::chat::get_chat_history(state, a.session_id, a.offset, a.full, a.before)
+                    .await,
+            )
         }
         "get_subagent_transcript" => {
             #[derive(Deserialize)]

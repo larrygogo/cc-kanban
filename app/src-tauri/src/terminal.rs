@@ -904,6 +904,23 @@ pub(crate) async fn focus_session(
     }
 }
 
+/// macOS：直达「隐私与安全性 → 自动化」系统设置页。focus 跳转被 TCC 拒绝
+/// （FocusSessionResult::PermissionDenied）时前端给出的一键入口——此前只有一句
+/// 「请允许 Meowo 控制终端」，用户得自己翻系统设置找开关。
+#[tauri::command]
+pub(crate) fn open_automation_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::fsutil::spawn_detached(std::process::Command::new("open").arg(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation",
+        ))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("当前平台不支持".into())
+    }
+}
+
 /// 在系统文件管理器中打开会话的项目目录（卡片右键菜单用）。
 /// 目录须真实存在——DB 记录的 cwd 可能过期（项目被移动/删除），不存在时明确报错而非静默无事发生。
 /// 不经 shell 直接 spawn 文件管理器，目录路径作为独立 argv 传入，无注入面。
@@ -1896,6 +1913,8 @@ pub(crate) async fn new_session_inner(
 
 /// 恢复一个已断开的会话：由 Meowo 持有 PTY，并打开同步对话窗口。外部终端若需要，
 /// 再通过 attach 连接到同一 PTY；这样从卡片恢复的会话也能在 GUI 中直接发送消息与审批。
+/// 返回 true = 本次真的起了新进程；false = 判重命中（会话已在托管 PTY 里运行，
+/// 只聚焦了已有视图，没有再起一份）——前端据此给出「已在运行」而非「已恢复」的反馈。
 ///
 /// 恢复命令由 `provider` 决定（claude: `claude --resume <id>` / kimi: `kimi -r <id>`，见 agent::resume_args）。
 /// 安全：`session_id` 经 is_safe_id 校验（仅 `[A-Za-z0-9_-]`，无空格/元字符）；可执行名与参数来自受信的
@@ -1907,7 +1926,7 @@ pub(crate) async fn resume_session(
     cwd: Option<String>,
     session_id: String,
     provider: String,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if !is_safe_id(&session_id) {
         return Err("无效 session_id".into());
     }
@@ -1929,7 +1948,7 @@ pub(crate) async fn resume_session(
             // 不接镜像管道——否则 Meowo 一退出 PTY 随之消失，agent 连带被杀，外部窗口
             // 只剩断流残帧。跟踪照旧走 hook，想回托管随时可从终端页接管。
             if prefers_external_terminal(&load_settings()) {
-                return start_external_resume(&app, sid, cwd, session_id, provider);
+                return start_external_resume(&app, sid, cwd, session_id, provider).map(|_| true);
             }
             start_managed_resume(app, broker, sid, cwd, session_id, provider)
         })
@@ -1998,6 +2017,7 @@ pub(crate) async fn takeover_managed_terminal(
                 crate::pty::TerminalSize::new(cols, rows),
                 options,
             )
+            .map(|_| ())
         })
         .await
         .map_err(|e| e.to_string())?
@@ -2007,6 +2027,59 @@ pub(crate) async fn takeover_managed_terminal(
         let _ = (app, state, session_id, cols, rows, options);
         Err("当前平台不支持".into())
     }
+}
+
+/// 已在线的外部视图带到前台：Some = 处理完毕（Ok 聚焦成功 / Err 聚焦失败必须让用户看见，
+/// 静默成功就是「点了没反应」）；None = 没有可定位的在线视图（无视图，或 Windows 上无 pid
+/// 的旧 reporter 视图——那种无从定位，由调用方决定怎么办）。
+/// 在线判定与激活目标一次取齐（见 ExternalViewer）：拆成两问会被「关窗口同时点卡片」
+/// 的 detach 竞态穿插，把新 reporter 误判成旧 reporter、按设置激活错误应用。
+/// 从 attach_in_external_terminal 抽出：恢复判重（PTY 已在跑）时复用同一套聚焦——
+/// 只聚焦、绝不再开新镜像。
+fn focus_online_external_viewer(
+    broker: &crate::pty::PtyBroker,
+    sid: i64,
+    terminal: &str,
+) -> Option<Result<(), String>> {
+    #[cfg(target_os = "windows")]
+    match broker.external_viewer(sid) {
+        crate::pty::ExternalViewer::Pid(pid) => {
+            // attach 客户端是控制台程序，宿主（WindowsTerminal/conhost/wezterm）是它的
+            // 进程组祖先，窗口 pid 落在组内 → find_window_for_pids 可靠命中正确窗口。
+            let targets = console_group_pids(pid);
+            if let Some(hwnd) = find_window_for_pids(&targets) {
+                force_foreground(hwnd);
+                return Some(Ok(()));
+            }
+            return Some(Err("外部终端已在线，但没能带到前台，请手动切换".into()));
+        }
+        // 旧 reporter 的订阅没有 pid：无从定位。
+        crate::pty::ExternalViewer::Legacy => {}
+        // 无在线视图。
+        crate::pty::ExternalViewer::None => {}
+    }
+    #[cfg(target_os = "macos")]
+    match broker.external_viewer(sid) {
+        crate::pty::ExternalViewer::Pid(pid) => {
+            // 激活目标从订阅者 pid 反查实际宿主（精确 tab → 宿主级置前），绝不看「恢复
+            // 终端」设置——设置与视图实际所在的应用可能不一致，按设置激活会跳错应用，
+            // Ghostty 未运行时甚至凭空弹一扇空白窗。聚焦失败也不退回设置路径。
+            return Some(if crate::macos::terminal::focus_attach_viewer(pid as i64) {
+                Ok(())
+            } else {
+                Err("外部终端已在线，但没能带到前台，请手动切换".into())
+            });
+        }
+        // 旧 reporter 的订阅没有 pid，才退回应用级兜底。
+        crate::pty::ExternalViewer::Legacy => {
+            activate_resume_terminal_app(terminal);
+            return Some(Ok(()));
+        }
+        // 无在线视图。
+        crate::pty::ExternalViewer::None => {}
+    }
+    let _ = (broker, sid, terminal);
+    None
 }
 
 /// 在用户选定的外部终端里起 attach 客户端，把托管 PTY 镜像过去。
@@ -2024,47 +2097,10 @@ pub(crate) fn attach_in_external_terminal(
 ) -> Result<(), String> {
     broker.ensure_attachable(sid)?;
     let terminal = load_settings().resume_terminal;
-    #[cfg(target_os = "windows")]
-    match broker.external_viewer(sid) {
-        crate::pty::ExternalViewer::Pid(pid) => {
-            // attach 客户端是控制台程序，宿主（WindowsTerminal/conhost/wezterm）是它的
-            // 进程组祖先，窗口 pid 落在组内 → find_window_for_pids 可靠命中正确窗口。
-            // 聚焦失败必须报错让用户看见（同 macOS 分支原则）：静默成功就是「点了没反应」，
-            // 而静默新开则回到「连点冒标签」的老问题。
-            let targets = console_group_pids(pid);
-            if let Some(hwnd) = find_window_for_pids(&targets) {
-                force_foreground(hwnd);
-                return Ok(());
-            }
-            return Err("外部终端已在线，但没能带到前台，请手动切换".into());
-        }
-        // 旧 reporter 的订阅没有 pid：无从定位，维持原行为（新开一扇）。
-        crate::pty::ExternalViewer::Legacy => {}
-        // 无在线视图 → 落到下方正常新开一扇。
-        crate::pty::ExternalViewer::None => {}
-    }
-    // 在线判定与激活目标一次取齐（见 ExternalViewer）：拆成两问会被「关窗口同时点卡片」
-    // 的 detach 竞态穿插，把新 reporter 误判成旧 reporter、按设置激活错误应用。
-    #[cfg(target_os = "macos")]
-    match broker.external_viewer(sid) {
-        crate::pty::ExternalViewer::Pid(pid) => {
-            // 激活目标从订阅者 pid 反查实际宿主（精确 tab → 宿主级置前），绝不看「恢复
-            // 终端」设置——设置与视图实际所在的应用可能不一致，按设置激活会跳错应用，
-            // Ghostty 未运行时甚至凭空弹一扇空白窗。聚焦失败也不退回设置路径，但必须
-            // 报错让用户看见（同 reveal_session 的原则）：静默返回成功就是「点了没反应」。
-            return if crate::macos::terminal::focus_attach_viewer(pid as i64) {
-                Ok(())
-            } else {
-                Err("外部终端已在线，但没能带到前台，请手动切换".into())
-            };
-        }
-        // 旧 reporter 的订阅没有 pid，才退回应用级兜底。
-        crate::pty::ExternalViewer::Legacy => {
-            activate_resume_terminal_app(&terminal);
-            return Ok(());
-        }
-        // 无在线视图 → 落到下方正常新开一扇。
-        crate::pty::ExternalViewer::None => {}
+    // 已有在线视图只聚焦（聚焦失败也直接上抛，见 helper）；Windows 上无 pid 的旧
+    // reporter 视图无从定位，落到下方维持原行为（新开一扇）。
+    if let Some(result) = focus_online_external_viewer(broker, sid, &terminal) {
+        return result;
     }
     let reporter = crate::setup::sibling_reporter().ok_or("找不到 meowo-reporter attach 客户端")?;
     // endpoint/token/protocol 不进 argv：attach 客户端自行读 discovery 文件
@@ -2206,6 +2242,7 @@ pub(crate) fn spawn_test_external_resume(app: &tauri::AppHandle) {
 
 /// 从看板卡片恢复：会话此刻还没有任何视图，故成功后按设置把用户带过去。
 /// 100x30 只是首帧占位尺寸——对话窗口/attach 客户端挂上来后会立即按真实容器发 resize。
+/// 返回 true = 本次真的起了新进程；false = 判重命中（会话已在运行，仅聚焦已有视图）。
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn start_managed_resume(
     app: tauri::AppHandle,
@@ -2214,8 +2251,8 @@ fn start_managed_resume(
     cwd: Option<String>,
     session_id: String,
     provider: String,
-) -> Result<(), String> {
-    start_managed_resume_sized(
+) -> Result<bool, String> {
+    let started = start_managed_resume_sized(
         app.clone(),
         broker.clone(),
         sid,
@@ -2225,7 +2262,38 @@ fn start_managed_resume(
         crate::pty::TerminalSize::new(100, 30),
         None,
     )?;
-    reveal_session(&app, &broker, sid)
+    if started {
+        reveal_session(&app, &broker, sid)?;
+    } else {
+        // 判重命中（PTY 已在跑，多半是上一次恢复刚起、卡片还没翻绿时又点了一次）：
+        // 视图已经由第一次恢复建立/正在建立，只聚焦已有视图——reveal 再跑一遍会在
+        // attach 客户端完成订阅前的窗口期里再开一个镜像标签。
+        focus_existing_session_view(&app, &broker, sid)?;
+    }
+    Ok(started)
+}
+
+/// 恢复判重命中后的视图聚焦：绝不新开门窗。对话窗是单例（open_chat_window_impl 自去重），
+/// 直接 reveal 安全；外部终端的 attach 客户端从 spawn 到订阅在线有秒级延迟（杀软扫描），
+/// 轮询等它出现再聚焦——不等的话第一次恢复刚拉起的镜像还查不到，又会多开一扇。
+/// 超时仍无在线视图才退化为正常 reveal（视图可能压根没开成，新开好过「点了没反应」）。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn focus_existing_session_view(
+    app: &tauri::AppHandle,
+    broker: &crate::pty::PtyBroker,
+    sid: i64,
+) -> Result<(), String> {
+    let settings = load_settings();
+    if !prefers_external_terminal(&settings) {
+        return reveal_session(app, broker, sid);
+    }
+    for _ in 0..50 {
+        if let Some(result) = focus_online_external_viewer(broker, sid, &settings.resume_terminal) {
+            return result;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    reveal_session(app, broker, sid)
 }
 
 /// 一次恢复启动的全部前置产物：托管（broker.start）与外部终端（spawn_in_terminal）两条
@@ -2305,6 +2373,7 @@ fn prepare_resume_launch(
 /// 恢复会话到托管 PTY 的**唯一**实现。刻意不开窗：从对话窗口内发起的恢复
 /// （start_managed_terminal / takeover）窗口已经在了，再调 open_chat_window 会触发
 /// chat-session-changed，把用户正在编辑的输入连同 history 一起重置。
+/// 返回 true = 本次真的启动了新进程；false = 判重收敛（PTY 已在跑，什么都没起）。
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start_managed_resume_sized(
@@ -2316,7 +2385,7 @@ pub(crate) fn start_managed_resume_sized(
     provider: String,
     terminal_size: crate::pty::TerminalSize,
     option_overrides: Option<std::collections::HashMap<String, String>>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let ResumeLaunch {
         argv: resume,
         cwd: resolved,
@@ -2331,7 +2400,7 @@ pub(crate) fn start_managed_resume_sized(
         &provider,
         option_overrides.as_ref(),
     )?;
-    if let Err(error) = broker.start(
+    let started = match broker.start(
         app.clone(),
         sid,
         &resume,
@@ -2340,11 +2409,20 @@ pub(crate) fn start_managed_resume_sized(
         terminal_size,
         &provider,
     ) {
-        if let Some(id) = revived {
-            rollback_failed_resume(id);
+        Err(error) => {
+            if let Some(id) = revived {
+                rollback_failed_resume(id);
+            }
+            emit_board_changed(&app, "resume-failed");
+            return Err(error);
         }
-        emit_board_changed(&app, "resume-failed");
-        return Err(error);
+        Ok(started) => started,
+    };
+    if !started {
+        // 判重收敛：PTY 已在跑，本次没起新进程——不跑秒退探测（它会拿既有输出/上一代
+        // 退出快照当本次启动的结果误判），把判重事实冒泡给调用方：恢复入口据此只聚焦
+        // 已有视图，而不是把 reveal 再跑一遍又开一个镜像标签。
+        return Ok(false);
     }
     // 托管 PTY 已接管：摘掉 bg 旁路条目。不摘的话快照分发仍能查到旁路的定格画面
     // （endOffset 是大数），会顶掉新 PTY 从 0 起的输出——前端把新输出全判成「已写过」
@@ -2381,10 +2459,10 @@ pub(crate) fn start_managed_resume_sized(
         }
         // 有输出 = 进程活着并已开始工作，没必要再守着看它会不会秒退。
         if broker.output_len(sid) > 0 {
-            return Ok(());
+            return Ok(true);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// 会话的 agent 进程此刻是否真的还活着。

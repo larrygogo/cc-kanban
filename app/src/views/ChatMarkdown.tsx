@@ -185,7 +185,7 @@ const components: Components = {
     return (
       <a
         href={href}
-        title={href}
+        data-tip={href}
         onClick={(event) => {
           event.preventDefault();
           void openLink(href).catch(() => {});

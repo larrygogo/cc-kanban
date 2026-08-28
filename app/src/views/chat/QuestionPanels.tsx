@@ -6,16 +6,17 @@ import type { QuestionAnswerDraft, StructuredQuestion } from "./askUserQuestion"
  *  把输入框挤出可视区（用户实拍反馈）；单问题不渲染 tab 条。
  *
  *  两种形态：
- *  - display：纯展示或点选排队（旧路径，屏幕识别落键）。可点选排队只存在于单问题
- *    单选（约束见调用处注释），多问题恒为纯展示，tab 不与点选状态相互作用。
+ *  - display：纯展示或点选排队（旧路径，屏幕识别落键）。点选按问题 keyed 排队
+ *    （queuedAnswers 的键是问题下标）：落键时只写**屏幕识别确认在屏**的那题
+ *    （聚焦题判定见 matchFocusedQuestion），其余题的排队留着等轮到它。
  *  - answer：真正的作答面（broker 挂起代答）。每题独立草稿（单选点即换、多选勾选、
  *    自定义输入），tab 上带已答 ✓，提交按钮在卡片层。 */
 export type QuestionPanelsProps = { items: StructuredQuestion[] } & (
   | {
       mode?: "display";
       interactive: boolean;
-      queuedAnswer: string | null;
-      onToggle: (label: string) => void;
+      queuedAnswers: ReadonlyMap<number, readonly string[]>;
+      onToggle: (questionIndex: number, label: string) => void;
     }
   | {
       mode: "answer";
@@ -37,9 +38,12 @@ export function QuestionPanels(props: QuestionPanelsProps) {
   const item = items[index];
   if (!item) return null;
   const answered = (question: number) => {
-    if (props.mode !== "answer") return false;
-    const draft = props.answers.get(question) ?? EMPTY_DRAFT;
-    return draft.selected.length > 0 || draft.custom.trim().length > 0;
+    if (props.mode === "answer") {
+      const draft = props.answers.get(question) ?? EMPTY_DRAFT;
+      return draft.selected.length > 0 || draft.custom.trim().length > 0;
+    }
+    // display 形态的「已答」= 该题已有排队答案（未落键前也是用户的明确意图）。
+    return (props.queuedAnswers.get(question)?.length ?? 0) > 0;
   };
   const draft = props.mode === "answer" ? (props.answers.get(index) ?? EMPTY_DRAFT) : EMPTY_DRAFT;
   return (
@@ -94,9 +98,9 @@ export function QuestionPanels(props: QuestionPanelsProps) {
             {item.options.map((option, optionIndex) => (
               <button
                 type="button"
-                className={props.queuedAnswer === option.label ? "is-selected" : ""}
+                className={props.queuedAnswers.get(index)?.includes(option.label) ? "is-selected" : ""}
                 key={`${optionIndex}:${option.label}`}
-                onClick={() => props.onToggle(option.label)}
+                onClick={() => props.onToggle(index, option.label)}
               >
                 <span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>
               </button>

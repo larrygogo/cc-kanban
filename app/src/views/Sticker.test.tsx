@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act, within } from "@testing-library/react";
 
 const events = vi.hoisted(() => ({
   settingsChanged: null as null | ((event: { payload: any }) => void),
@@ -68,10 +68,13 @@ vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(func
     };
   }
   if (this.classList.contains("stk-vitem")) {
+    // top 跟随虚拟列表的 translateY 定位：星标重排的 FLIP 测试要靠它看到位置变化。
+    const m = /translateY\((-?[\d.]+)px\)/.exec(this.style.transform);
+    const top = m ? Number(m[1]) : 0;
     return {
       ...defaultRect,
-      right: 400, width: 400, height: 82,
-      toJSON: () => ({ ...defaultRect, right: 400, width: 400, height: 82 }),
+      top, bottom: top + 82, right: 400, width: 400, height: 82,
+      toJSON: () => ({ ...defaultRect, top, bottom: top + 82, right: 400, width: 400, height: 82 }),
     };
   }
   return defaultRect;
@@ -187,6 +190,32 @@ describe("tab 归属与卡片状态环同源", () => {
   });
 });
 
+describe("T-15 角标的可信度区分", () => {
+  it("无 screen_state 的会话角标回落 DB status：弱化样式，与实时角标区分", () => {
+    // 外部终端里跑的会话没有屏幕检测，角标只是 DB 记录推断（滞后快照）——弱化呈现。
+    const { container } = render(<Sticker filter="all" data={[mk({ connected: true })]} />);
+    expect(container.querySelector(".stk-badge-assumed .run-badge")).not.toBeNull();
+  });
+
+  it("有 screen_state 的托管会话角标不弱化", () => {
+    const { container } = render(<Sticker filter="all" data={[mk({ connected: true, screen_state: "working" })]} />);
+    expect(container.querySelector(".stk-badge-assumed")).toBeNull();
+    expect(container.querySelector(".run-badge")).not.toBeNull();
+  });
+
+  it("fallback idle（什么规则都没命中）降级为中性灰点，不再挂自信的「等你」环", () => {
+    const { container } = render(<Sticker filter="all" data={[mk({ connected: true, screen_state: "idle", screen_assumed: true })]} />);
+    expect(container.querySelector(".sdot-off")).not.toBeNull();
+    expect(container.querySelector(".run-badge")).toBeNull();
+  });
+
+  it("带可见证据的 idle 仍是「等你」环（screen_assumed 缺省）", () => {
+    const { container } = render(<Sticker filter="all" data={[mk({ connected: true, screen_state: "idle" })]} />);
+    expect(container.querySelector(".run-badge")).not.toBeNull();
+    expect(container.querySelector(".sdot-off")).toBeNull();
+  });
+});
+
 describe("会话卡片的所属账号徽章", () => {
   it("归属自定义账号的会话显示账号徽章", () => {
     render(<Sticker filter="all" data={[mk({ profile: "work", profile_name: "工作" })]} />);
@@ -256,6 +285,28 @@ describe("Sticker", () => {
     const btn = await screen.findByRole("button", { name: zh.sticker.openChatWindow });
     fireEvent.click(btn);
     expect(invokeMock.mock.calls.some(([cmd]) => cmd === "open_latest_chat")).toBe(true);
+  });
+
+  it("负 id 的 pending 占位行渲染为「正在启动」占位卡：纯展示，不可点、无菜单", async () => {
+    const pending = mk({
+      session: { id: -3, project_id: 0, cc_session_id: "", status: "running", started_at: Date.now(), last_event_at: Date.now(), ended_at: null },
+      task_title: "",
+      cwd: "C:\\work\\proj",
+      provider: "codex",
+      pid: null,
+    });
+    render(<Sticker filter="all" data={[pending]} />);
+    const card = await screen.findByTestId("stk-starting-card");
+    expect(card.textContent).toContain(zh.sticker.startingCard);
+    expect(card.textContent).toContain("proj"); // 工作目录末段名照常显示，便于认出是哪次启动
+    // 纯展示：卡片不是按钮、卡内无任何按钮；点击不触发 focus/resume，右键不弹菜单
+    // （会话行还没落库，一切操作都是死路）。
+    expect(card.getAttribute("role")).toBeNull();
+    expect(within(card).queryByRole("button")).toBeNull();
+    fireEvent.click(card);
+    fireEvent.contextMenu(card);
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === "focus_session" || cmd === "resume_session")).toBe(false);
+    expect(screen.queryByRole("menu")).toBeNull();
   });
 
   it("对话功能关闭（轻量模式）时贴纸上不渲染任何 chat 入口", async () => {
@@ -388,13 +439,60 @@ describe("Sticker", () => {
     expect(invokeMock.mock.calls.some(([cmd]) => cmd === "focus_session")).toBe(false);
   });
 
-  it("首帧按真实默认(button)渲染菜单按钮;注入 context 设置后按钮让位右键", async () => {
+  it("首帧按真实默认(button)渲染菜单按钮;注入 context 设置后按钮退为 hover 才浮现的 ghost 提示", async () => {
     const { container } = render(<Sticker filter="all" data={[mk()]} />);
     // 首帧占位与后端默认(button)一致：按钮直接在场，不再「settings 回来才凭空弹入」。
     expect(container.querySelector(".stk-menu-btn")).toBeTruthy();
+    expect(container.querySelector(".stk-menu-btn-ghost")).toBeNull();
     await settingsApplied();
-    // 本测试文件的 get_settings 注入 card_menu_mode=context → 套用后二选一，按钮让位。
-    expect(container.querySelector(".stk-menu-btn")).toBeNull();
+    // 本测试文件的 get_settings 注入 card_menu_mode=context：按钮退为 ghost（平时透明、
+    // hover 卡片极淡浮现），右键仍是主触发——但不再是零可见入口零提示（B-5）。
+    expect(container.querySelector(".stk-menu-btn-ghost")).toBeTruthy();
+  });
+
+  it("context 模式下 ghost 菜单按钮点击仍打开卡片菜单", async () => {
+    const { container } = render(<Sticker filter="all" data={[mk()]} />);
+    await settingsApplied();
+    fireEvent.click(container.querySelector(".stk-menu-btn-ghost")!);
+    expect(document.querySelector(".ctx-menu")).toBeTruthy();
+  });
+
+  it("长便签被 clamp 时首次点击展开全文，再次点击才进编辑（B-8）", async () => {
+    const { container } = render(<Sticker filter="all" data={[mk({ note: "很长的便签" })]} />);
+    await settingsApplied();
+    const note = container.querySelector(".stk-note")!;
+    const txt = note.querySelector(".stk-note-txt")!;
+    // jsdom 布局恒 0：手动构造「被 clamp」的几何（scrollHeight 明显大于 clientHeight）。
+    Object.defineProperty(txt, "scrollHeight", { configurable: true, value: 100 });
+    Object.defineProperty(txt, "clientHeight", { configurable: true, value: 40 });
+    fireEvent.click(note);
+    expect(container.querySelector(".stk-note.is-open")).toBeTruthy();
+    expect(container.querySelector(".stk-note-edit")).toBeNull();
+    fireEvent.click(container.querySelector(".stk-note")!);
+    expect(container.querySelector(".stk-note-edit")).toBeTruthy();
+  });
+
+  it("未被 clamp 的短便签一次点击直接进编辑（B-8 不影响原有路径）", async () => {
+    const { container } = render(<Sticker filter="all" data={[mk({ note: "短便签" })]} />);
+    await settingsApplied();
+    fireEvent.click(container.querySelector(".stk-note")!);
+    expect(container.querySelector(".stk-note-edit")).toBeTruthy();
+    expect(container.querySelector(".stk-note.is-open")).toBeNull();
+  });
+
+  it("加载更多 loader 是滚动容器的正常流子元素（计入滚动高度，B-15）", async () => {
+    const { container } = render(<Sticker filter="all" data={[mk()]} hasMore loadingMore />);
+    await settingsApplied();
+    const loader = container.querySelector<HTMLElement>(".stk-loadmore")!;
+    expect(loader).toBeTruthy();
+    expect(loader.style.position).toBe(""); // 不再绝对定位在 totalSize 之外
+    expect(loader.parentElement!.classList.contains("stk-scroll")).toBe(true);
+  });
+
+  it("tab 文字包在 .stab-label 里（窄窗英文省略号截断的挂载点，G-12）", async () => {
+    const { container } = render(<Sticker filter="all" data={[mk()]} />);
+    await settingsApplied();
+    expect(container.querySelectorAll(".stab .stab-label").length).toBe(3);
   });
 
   it("有 cwd 的会话菜单末尾多出「打开项目目录」,无 cwd 则隐藏", async () => {
@@ -456,6 +554,24 @@ describe("Sticker", () => {
     const labels = Array.from(document.querySelectorAll(".ctx-item")).map((el) => el.textContent);
     expect(labels).toEqual([zh.sticker.unstar, zh.sticker.noteEdit, zh.sticker.renameTitle, zh.sticker.archive, zh.sticker.newSession]);
     localStorage.removeItem("meowo-starred");
+  });
+
+  it("星标切换后卡片平滑移动而非瞬移（B-16 FLIP：补偿旧位置 + transform 过渡）", async () => {
+    const a = mk({ task_title: "卡A" });
+    const b = mk({ task_title: "卡B", session: { ...mk().session, id: 2, cc_session_id: "s2" } });
+    const { container } = render(<Sticker filter="all" data={[a, b]} />);
+    await settingsApplied();
+    const vitems = () => Array.from(container.querySelectorAll<HTMLElement>("[data-sid]"));
+    expect(vitems().map((el) => el.dataset.sid)).toEqual(["1", "2"]);
+    // 置顶第二张卡 → 星标浮顶，两张卡交换位置。
+    fireEvent.contextMenu(container.querySelectorAll(".stk-card")[1]);
+    fireEvent.click(screen.getByText(zh.sticker.star));
+    expect(vitems().map((el) => el.dataset.sid)).toEqual(["2", "1"]);
+    // FLIP：位置发生变化的卡被挂上 transform 过渡（补偿 transform 已写回空串，
+    // transition 存活到过渡结束由定时器清理）——有它说明走了「平滑滑动」而非瞬移。
+    const animated = Array.from(container.querySelectorAll<HTMLElement>(".stk-card"))
+      .filter((el) => el.style.transition.includes("transform"));
+    expect(animated.length).toBeGreaterThan(0);
   });
 
   it("菜单「新建会话」用当前会话的 cwd 和 provider 打开新建窗口", async () => {
@@ -596,6 +712,40 @@ describe("Sticker", () => {
     expect(container.querySelector(".stk-edit")).toBeNull();
   });
 
+  it("重命名草稿在虚拟化卸载后存活（B-9）：remount 按草稿回填而非原文", async () => {
+    const item = mk();
+    const { container, rerender } = render(<Sticker filter="all" data={[item]} />);
+    await settingsApplied();
+    fireEvent.contextMenu(container.querySelector(".stk-card")!);
+    fireEvent.click(screen.getByText(zh.sticker.renameTitle));
+    fireEvent.change(container.querySelector(".stk-edit") as HTMLInputElement, { target: { value: "写到一半的草稿" } });
+    // 模拟虚拟化把整卡（连同编辑框）卸载：切到 waiting tab，running 会话被过滤出列表。
+    rerender(<Sticker filter="waiting" data={[item]} />);
+    expect(container.querySelector(".stk-edit")).toBeNull();
+    // 切回来：编辑态仍在（editingId 在 Sticker 层），编辑框按草稿回填。
+    rerender(<Sticker filter="all" data={[item]} />);
+    const input = container.querySelector(".stk-edit") as HTMLInputElement;
+    expect(input).toBeTruthy();
+    expect(input.value).toBe("写到一半的草稿");
+  });
+
+  it("便签草稿在虚拟化卸载后存活（B-9），提交后草稿清除、重开编辑从原文开始", async () => {
+    const item = mk({ note: "旧便签" });
+    const { container, rerender } = render(<Sticker filter="all" data={[item]} />);
+    await settingsApplied();
+    // 点便签块进编辑（短便签一次点击直接编辑）。
+    fireEvent.click(container.querySelector(".stk-note")!);
+    fireEvent.change(container.querySelector(".stk-note-edit") as HTMLInputElement, { target: { value: "改到一半" } });
+    rerender(<Sticker filter="waiting" data={[item]} />);
+    expect(container.querySelector(".stk-note-edit")).toBeNull();
+    rerender(<Sticker filter="all" data={[item]} />);
+    expect((container.querySelector(".stk-note-edit") as HTMLInputElement).value).toBe("改到一半");
+    // Esc 取消丢弃草稿：再开编辑时预填原文而非上次取消的草稿。
+    fireEvent.keyDown(container.querySelector(".stk-note-edit")!, { key: "Escape" });
+    fireEvent.click(container.querySelector(".stk-note")!);
+    expect((container.querySelector(".stk-note-edit") as HTMLInputElement).value).toBe("旧便签");
+  });
+
   it("终端不受支持时提示用支持的终端重新打开，并在结束原进程前经 appConfirm 确认", async () => {
     const original = invokeMock.getMockImplementation()!;
     invokeMock.mockImplementation((cmd: string, args?: unknown) => {
@@ -641,6 +791,43 @@ describe("Sticker", () => {
       fireEvent.click(container.querySelector(".stk-card")!);
       await waitFor(() => expect(screen.getByText(zh.sticker.focusHostOnly)).toBeTruthy());
       expect(screen.getByText(zh.sticker.reopenSupported)).toBeTruthy();
+    } finally {
+      invokeMock.mockImplementation(original);
+    }
+  });
+
+  it("跳转成功给出正反馈 toast：窗口在别的虚拟桌面时聚焦「成功」也是点了没反应", async () => {
+    const original = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === "focus_session") {
+        return Promise.resolve("focused") as unknown as ReturnType<typeof original>;
+      }
+      return original(cmd, args);
+    });
+    try {
+      const { container } = render(<Sticker filter="all" data={[mk({ connected: true, pid: 1234 })]} />);
+      fireEvent.click(container.querySelector(".stk-card")!);
+      // 非托管会话（pty_managed=false）恒跳外部终端。
+      await waitFor(() => expect(screen.getByText(zh.sticker.openedIn(zh.sticker.openTargetTerminal))).toBeTruthy());
+      // 成功回执不带告警标记。
+      expect(container.querySelector(".stk-focus-mark")).toBeNull();
+    } finally {
+      invokeMock.mockImplementation(original);
+    }
+  });
+
+  it("恢复判重命中（会话已在运行）时如实提示，不说成已恢复", async () => {
+    const original = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === "resume_session") {
+        return Promise.resolve(false) as unknown as ReturnType<typeof original>;
+      }
+      return original(cmd, args);
+    });
+    try {
+      const { container } = render(<Sticker filter="all" data={[mk({ connected: false, archived: false })]} />);
+      fireEvent.click(container.querySelector(".stk-card")!);
+      await waitFor(() => expect(screen.getByText(zh.sticker.resumeAlreadyRunning)).toBeTruthy());
     } finally {
       invokeMock.mockImplementation(original);
     }
@@ -914,6 +1101,51 @@ describe("Sticker", () => {
     expect(onFilterChange).toHaveBeenCalledWith("waiting");
   });
 
+  it("tablist 补全 ARIA 接线：aria-controls/tabpanel + roving tabindex + Home/End（B-12）", () => {
+    const onFilterChange = vi.fn();
+    const { container } = render(<Sticker filter="all" data={[]} onFilterChange={onFilterChange} />);
+    const tablist = container.querySelector("[role='tablist']")!;
+    const tabs = tablist.querySelectorAll("button[role='tab']");
+    // roving tabindex：只有选中的 tab 进 Tab 序。
+    expect(tabs[0].getAttribute("tabindex")).toBe("0");
+    expect(tabs[1].getAttribute("tabindex")).toBe("-1");
+    expect(tabs[2].getAttribute("tabindex")).toBe("-1");
+    // tab ↔ tabpanel 双向接线。
+    expect(tabs[0].getAttribute("aria-controls")).toBe("stk-tabpanel");
+    const panel = container.querySelector("[role='tabpanel']")!;
+    expect(panel.id).toBe("stk-tabpanel");
+    expect(panel.getAttribute("aria-labelledby")).toBe("stk-tab-all");
+    // Home/End 跳首/末 tab 并跟随焦点（TAB_KEYS = all/waiting/running）。
+    fireEvent.keyDown(tablist, { key: "End" });
+    expect(onFilterChange).toHaveBeenCalledWith("running");
+    expect(document.activeElement).toBe(tabs[2]);
+    fireEvent.keyDown(tablist, { key: "Home" });
+    expect(onFilterChange).toHaveBeenCalledWith("all");
+    expect(document.activeElement).toBe(tabs[0]);
+  });
+
+  it("卡内控件不占 Tab 停靠点，←/→ 在卡内 roving（B-11）", () => {
+    const { container } = render(<Sticker filter="all" data={[mk({ note: "备忘" })]} />);
+    const card = container.querySelector(".stk-card") as HTMLElement;
+    const chatBtn = screen.getByLabelText(zh.sticker.openChat);
+    const menuBtn = screen.getByLabelText(zh.sticker.cardMenu);
+    const note = card.querySelector(".stk-note") as HTMLElement;
+    expect(note).toBeTruthy();
+    // 整卡一个 Tab 停靠点：卡片 tabIndex=0，卡内控件全部 -1。
+    expect(card.getAttribute("tabindex")).toBe("0");
+    for (const el of [chatBtn, menuBtn, note]) expect(el.getAttribute("tabindex")).toBe("-1");
+    // 从卡片本体出发，→ 顺序遍历卡内控件，← 反向。
+    card.focus();
+    fireEvent.keyDown(card, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(chatBtn);
+    fireEvent.keyDown(chatBtn, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(menuBtn);
+    fireEvent.keyDown(menuBtn, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(note);
+    fireEvent.keyDown(note, { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(menuBtn);
+  });
+
   it("底栏操作钮均为 button（键盘可达）", () => {
     render(<Sticker filter="all" data={[]} />);
     for (const label of [zh.newSession.newButton, zh.sticker.search, zh.sticker.openSettings, zh.sticker.pinOff]) {
@@ -951,7 +1183,8 @@ describe("Sticker", () => {
     const { container } = render(<Sticker filter="all" data={[mk({ note: "旧便签" })]} />);
     const note = container.querySelector(".stk-note") as HTMLElement;
     expect(note.getAttribute("role")).toBe("button");
-    expect(note.getAttribute("tabindex")).toBe("0");
+    // B-11 后不进 Tab 序（卡内 roving 由卡片的 ←/→ 到达），但 Enter/Space 行为不变。
+    expect(note.getAttribute("tabindex")).toBe("-1");
     fireEvent.keyDown(note, { key: "Enter" });
     expect((container.querySelector(".stk-note-edit") as HTMLInputElement).value).toBe("旧便签");
     expect(invokeMock.mock.calls.some(([cmd]) => cmd === "focus_session")).toBe(false);
@@ -1043,5 +1276,34 @@ describe("自绘滚动条 thumb 拖拽", () => {
     expect(thumb.className).not.toContain("is-drag");
     fireEvent.mouseMove(window, { clientY: 900, buttons: 1 });
     expect(scrollEl.scrollTop).toBe(0);
+  });
+});
+
+describe("切换期保留旧列表灰化（B-4）", () => {
+  // 切 tab/搜索的首页请求在途时：旧列表原样保留并灰化（aria-busy + is-switching），
+  // 不再先渲染「旧数据按新条件过滤出的子集」——那曾让 waiting 的 ASC 到达后整列表翻转。
+  it("switching 期间冻结旧列表，新数据就绪后整表替换", async () => {
+    const running = mk({ task_title: "跑着的事" });
+    const waiting = mk({
+      task_title: "等着的事",
+      screen_state: "idle",
+      session: { ...mk().session, id: 2, cc_session_id: "s2" },
+    });
+    const { container, rerender } = render(<Sticker filter="all" data={[running, waiting]} switching={false} />);
+    await screen.findByText("跑着的事");
+    expect(screen.getByText("等着的事")).toBeTruthy();
+
+    // 切到 waiting tab、首页请求在途：不按 waiting 滤出子集，两张卡都还在，列表灰化。
+    rerender(<Sticker filter="waiting" data={[running, waiting]} switching={true} />);
+    expect(container.querySelector(".stk-scroll.is-switching")).not.toBeNull();
+    expect(container.querySelector(".stk-scroll")?.getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByText("跑着的事")).toBeTruthy();
+    expect(screen.getByText("等着的事")).toBeTruthy();
+
+    // 新数据（waiting 的 ASC 页）就绪：一次整表替换，只剩 waiting 的卡。
+    rerender(<Sticker filter="waiting" data={[waiting]} switching={false} />);
+    expect(container.querySelector(".stk-scroll.is-switching")).toBeNull();
+    expect(screen.queryByText("跑着的事")).toBeNull();
+    expect(screen.getByText("等着的事")).toBeTruthy();
   });
 });

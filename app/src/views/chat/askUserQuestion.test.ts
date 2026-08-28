@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   composeAnswerBody,
+  matchFocusedQuestion,
   matchOptionByLabel,
   observeTranscriptForDismiss,
   parseAskUserQuestions,
+  planQueuedChoiceWrites,
   type QuestionAnswerDraft,
   type QuestionDismissTracker,
   type StructuredQuestion,
@@ -47,6 +49,36 @@ describe("composeAnswerBody", () => {
     expect(composeAnswerBody(questions, new Map([[0, draft([], "没有了")]]))).toBe(
       "还有什么要补充？ → 没有了",
     );
+  });
+});
+
+describe("planQueuedChoiceWrites", () => {
+  const choice = (label: string, position: number, focused = false) => ({ label, position, focused });
+
+  it("按焦点逐项推进生成「方向键 + 回车」勾选序列", () => {
+    const choices = [choice("A", 0, true), choice("B", 1), choice("C", 2), choice("D", 3)];
+    // 勾 D 再勾 B：先到 D(↓×3)，再回 B(↑×2)。
+    expect(planQueuedChoiceWrites(choices, ["D", "B"])).toEqual([
+      { option: choices[3], input: "\x1b[B".repeat(3) + "\r" },
+      { option: choices[1], input: "\x1b[A".repeat(2) + "\r" },
+    ]);
+  });
+
+  it("无焦点标记时以首项为起点；当前项勾选不带方向键", () => {
+    const choices = [choice("A", 0), choice("B", 1)];
+    expect(planQueuedChoiceWrites(choices, ["A", "B"])).toEqual([
+      { option: choices[0], input: "\r" },
+      { option: choices[1], input: "\x1b[B\r" },
+    ]);
+  });
+
+  it("重复命中去重；匹配不上的 label 跳过；全部落空返回空", () => {
+    const choices = [choice("A", 0, true), choice("B", 1)];
+    // "B" 与截断文本 "B" 同指一项（此处用相同 label 模拟同位去重）。
+    expect(planQueuedChoiceWrites(choices, ["B", "B"])).toEqual([
+      { option: choices[1], input: "\x1b[B\r" },
+    ]);
+    expect(planQueuedChoiceWrites(choices, ["不存在的选项"])).toEqual([]);
   });
 });
 
@@ -126,6 +158,53 @@ describe("matchOptionByLabel", () => {
     expect(matchOptionByLabel(options, "autopilot-")).toBeNull();
     expect(matchOptionByLabel(options, "不存在的选项")).toBeNull();
     expect(matchOptionByLabel(options, "  ")).toBeNull();
+  });
+});
+
+describe("matchFocusedQuestion", () => {
+  const questions: StructuredQuestion[] = [
+    { header: "范围", question: "重做的范围是哪些？", multiSelect: true, options: [{ label: "图标", description: null }] },
+    { header: "风格", question: "你觉得不好看的是哪个?", multiSelect: false, options: [{ label: "应用图标 (推荐)", description: null }] },
+    { header: "节奏", question: "什么时候交付？", multiSelect: false, options: [{ label: "本周", description: null }] },
+  ];
+  // 实拍形态（terminalAttention.test.ts 的多问题 fixture）：tab 条只带 header，
+  // 选项上方那行是聚焦题的完整 question。
+  const screenOf = (focused: string) => [
+    "← 范围 风格 节奏 ✓ Submit →",
+    focused,
+    "❯ 1. 应用图标 (推荐)",
+    "  2. 标题栏的琥珀色方块",
+    "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+  ].join("\r\n");
+
+  it("题面原文上屏即认出聚焦题", () => {
+    expect(matchFocusedQuestion(questions, screenOf("你觉得不好看的是哪个?"))).toBe(1);
+    expect(matchFocusedQuestion(questions, screenOf("重做的范围是哪些？"))).toBe(0);
+    expect(matchFocusedQuestion(questions, screenOf("什么时候交付？"))).toBe(2);
+  });
+
+  it("题面被窄终端折行（空白归一后）仍命中", () => {
+    const wrapped = screenOf("你觉得不好看\n的是哪个?");
+    expect(matchFocusedQuestion(questions, wrapped)).toBe(1);
+  });
+
+  it("tab 条的 header 不产生匹配（只按 question 反查）", () => {
+    // 三题的 header 全在 tab 条上，但没有任何一题的 question 上屏 → null。
+    const tabOnly = ["← 范围 风格 节奏 ✓ Submit →", "❯ 1. 某选项"].join("\r\n");
+    expect(matchFocusedQuestion(questions, tabOnly)).toBeNull();
+  });
+
+  it("歧义（两题同文）与未命中都返回 null，不跨题盲写", () => {
+    const dup: StructuredQuestion[] = [
+      { ...questions[0], question: "一样的问题？" },
+      { ...questions[1], question: "一样的问题？" },
+    ];
+    expect(matchFocusedQuestion(dup, screenOf("一样的问题？"))).toBeNull();
+    expect(matchFocusedQuestion(questions, screenOf("屏幕上是别的东西"))).toBeNull();
+    expect(matchFocusedQuestion(questions, "")).toBeNull();
+    // question 为空的题不可识别，但也不拖垮能认出的题。
+    const withEmpty: StructuredQuestion[] = [{ ...questions[0], question: "" }, questions[1]];
+    expect(matchFocusedQuestion(withEmpty, screenOf("你觉得不好看的是哪个?"))).toBe(1);
   });
 });
 

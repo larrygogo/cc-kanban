@@ -24,7 +24,7 @@ export function Updater() {
   const t = useT();
   // 窗口以 visible:false 创建（window.rs），首帧渲染后再显示，消除打开瞬间的白框闪烁。
   useShowWhenReady();
-  const { status, version, notes, progress, download, install, recheck } = useUpdate();
+  const { status, version, notes, progress, download, cancelDownload, install, recheck } = useUpdate();
   const [current, setCurrent] = useState("");
   useEffect(() => {
     getVersion().then(setCurrent).catch(() => {});
@@ -47,9 +47,11 @@ export function Updater() {
         /* 查询失败按 0 处理，不挡更新 */
       }
       if (managed > 0) {
+        // 保留 danger：重启会当场杀掉这些运行中的托管会话。主按钮说后果（S-14）。
         const ok = await appConfirm(t.updater.restartConfirm(managed), {
           title: t.updater.restart,
           danger: true,
+          confirmLabel: t.updater.restart,
         });
         if (!ok) return;
       }
@@ -153,6 +155,8 @@ export function Updater() {
                 <div className="up-status-dl">
                   {progress != null ? t.updater.downloadingPct(progress) : t.updater.downloading}
                 </div>
+                {/* 下载可取消（S-13）：取消后回到「发现新版本」，可重新下载。 */}
+                <button className="sbtn" onClick={() => void cancelDownload()}>{t.updater.cancelDownload}</button>
                 <div className="up-hint">{t.updater.restartHint}</div>
               </div>
             ) : (

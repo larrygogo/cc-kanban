@@ -39,6 +39,7 @@ pub(crate) async fn start_managed_terminal(
                 super::pty::TerminalSize::new(cols, rows),
                 options,
             )
+            .map(|_| ())
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         {
@@ -97,7 +98,7 @@ pub(crate) async fn screen_detect_explain(
         let (snapshot, provider) = ptys
             .screen_probe_snapshot(session_id)
             .ok_or("该会话没有托管 PTY 屏幕状态")?;
-        let published = ptys.screen_states().get(&session_id).copied();
+        let published = ptys.screen_states().get(&session_id).map(|sight| sight.state);
         Ok(explain_snapshot(provider, snapshot, published))
     })
     .await
@@ -352,7 +353,7 @@ pub(crate) async fn stop_managed_terminal(
         // 直接结束时，这个窗口可能从没打开过它的画面。
         //
         // 接不上就把**普通会话那条错**还回去。托管 PTY 恰好在这一刻退出是常事（结束按钮
-        // 按 650ms 轮询的 pty_managed 亮灭），那时该说「PTY 会话未运行」，而不是拿
+        // 按历史轮询的 pty_managed 亮灭），那时该说「PTY 会话未运行」，而不是拿
         //「已经不在 Agent 的花名册里了」去解释一个用户根本没碰过的功能。
         if !bg.is_active(session_id) && attach_background(&db_path, &bg, session_id).is_err() {
             return ptys.stop(session_id);

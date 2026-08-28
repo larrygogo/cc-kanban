@@ -176,10 +176,14 @@ export function Onboarding() {
   useShowWhenReady();
   const [step, setStep] = useState(0);
 
-  // 3 步:欢迎(含语言/外观两项就地设置) → 看板与卡片 → 窗口行为。
+  // 5 步:欢迎(含语言/外观两项就地设置) → 连接 AI CLI → Meowo 如何读到进度 → 看板与卡片 → 窗口行为。
   // 其余配置项全用默认值,设置页随时可改——配置型步骤与设置页重复,已删。
+  // 「连接 AI CLI」不能省：此前引导只字未提装 agent/登录，用户走完面对一块空看板。
+  // 「如何读到进度」同理（S-12）：hooks 改写 CLI 配置曾全程零告知，必须明写备份与移除方式。
   const steps: Step[] = [
     { hero: <HeroWelcome />, title: t.onboarding.welcome.title, desc: t.onboarding.welcome.desc, body: <WelcomeConfig t={t} /> },
+    { title: t.onboarding.connect.title, points: t.onboarding.connect.points },
+    { title: t.onboarding.progress.title, points: t.onboarding.progress.points },
     { hero: <HeroBoard t={t} />, title: t.onboarding.board.title, points: t.onboarding.board.points },
     // 吸边仅 Windows 有（macOS 是菜单栏面板），要点按平台拼接——不教的话用户误吸附后
     // 只会以为「窗口不见了」。
@@ -208,6 +212,8 @@ export function Onboarding() {
             {t.onboarding.skip}
           </button>
         )}
+        {/* reopen 提示贴跳过路径：页尾那句只有走完最后一步的人才看得到，跳过者只经过这里。 */}
+        {!isLast && <span className="ob-reopen ob-reopen-bar">{t.onboarding.window.reopenHint}</span>}
         <button className="winclose" data-tip={t.settings.close} aria-label={t.settings.close} onClick={dismiss}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <line x1="6" y1="6" x2="18" y2="18" />

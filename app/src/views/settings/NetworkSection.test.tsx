@@ -145,8 +145,9 @@ describe("覆盖面如实标注", () => {
 
     expect(screen.getByText(zh.proxy.coverageFull)).toBeTruthy();
     expect(screen.getAllByText(zh.proxy.coveragePartial).length).toBe(2); // codex + kimi
-    expect(screen.queryByText(zh.proxy.coverageFullWhy)).toBeNull();
-    expect(screen.queryByText(zh.proxy.coveragePartialWhy)).toBeNull();
+    // 覆盖面的「为什么」解释（.proxy-why）：claude 写进配置文件，codex/kimi 只注进程环境变量。
+    expect(screen.getByText(zh.proxy.coverageFullWhy)).toBeTruthy();
+    expect(screen.getAllByText(zh.proxy.coveragePartialWhy).length).toBe(2);
   });
 
   it("自定义模式不在输入框上方重复显示生效地址", async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { LiveSession } from "../api";
 import { useT } from "../i18n";
 import { cardTone } from "./sticker/helpers";
@@ -8,6 +8,13 @@ type Edge = "left" | "right" | "top";
 
 // 缩略条主轴最小长度：保证空状态/只有一个点时仍是一条好找好点的条，而非细缝。
 const STRIP_MIN = 48;
+
+// W-5：缩略条主轴上限。点数随会话数线性增长（60 会话 × 17px ≈ 1046px，超出 1080p
+// 工作区后溢出部分被窗口无声裁掉），按屏幕可用主轴换算可容纳点数，超出折叠成末尾「+N」徽章。
+// 点距 = 点 10px + 间距 7px，与 styles.css 的 .cstrip-dot / .cstrip-dots gap 对齐。
+const STRIP_DOT_STEP = 17;
+// 读不到屏幕尺寸（测试/非浏览器环境）时的容纳点数兜底。
+const STRIP_MAX_DOTS_FALLBACK = 24;
 
 // 缩略条的空态占位：无活跃会话时居中显示一双灰色眼睛，呼应 Meowo logo。
 function EyesMark() {
@@ -45,6 +52,18 @@ export function CollapsedStrip({
   const dotsRef = useRef<HTMLDivElement>(null);
   const horizontal = edge === "top"; // 顶部为横条，沿宽度排列
 
+  // 可容纳点数：按屏幕可用主轴（竖条看高、横条看宽）换算；60px 余量扣两端留白与「+N」徽章一格。
+  const maxDots = useMemo(() => {
+    const avail = typeof window !== "undefined" && window.screen
+      ? (horizontal ? window.screen.availWidth : window.screen.availHeight)
+      : 0;
+    const n = Math.floor((avail - 60) / STRIP_DOT_STEP);
+    return n >= 4 ? n : STRIP_MAX_DOTS_FALLBACK;
+  }, [horizontal]);
+  // 溢出时少画一个点，把那一格让给末尾的「+N」徽章。
+  const shownItems = items.length > maxDots ? items.slice(0, maxDots - 1) : items;
+  const hiddenCount = items.length - shownItems.length;
+
   // hover-intent：进入 250ms 后才展开。缩略条贴在屏幕边缘——那是鼠标的高频经过区
   // （滚动条、关闭按钮、开始菜单），零延迟展开意味着划过一下就弹出整块看板遮住工作区。
   // 离开/按下（开始拖动）都取消；键盘聚焦与 Enter/Space 仍即时展开（无误触问题）。
@@ -71,7 +90,7 @@ export function CollapsedStrip({
       const content = horizontal ? el.scrollWidth : el.scrollHeight;
       onMeasure(Math.max(Math.ceil(content) + 12, STRIP_MIN));
     }
-  }, [items.length, onMeasure, horizontal]);
+  }, [shownItems.length, hiddenCount, onMeasure, horizontal]);
 
   return (
     // 键盘可达：可聚焦，聚焦/Enter/Space 即时展开（悬停走 hover-intent 延迟）。用 group
@@ -104,7 +123,8 @@ export function CollapsedStrip({
             <EyesMark />
           </span>
         ) : (
-          items.map((l) => {
+          <>
+          {shownItems.map((l) => {
             // 状态判定与看板卡片同源（cardTone）：这里曾自写一套只看 DB status 的映射，
             // 漏掉 pending_review/screen_state，待审批会话被画成绿色运行点。
             // items 已过滤 connected，不会出现 offline。
@@ -136,7 +156,20 @@ export function CollapsedStrip({
                 data-tauri-drag-region
               />
             );
-          })
+          })}
+          {/* W-5：放不下的会话折成末尾「+N」徽章——溢出可见，而不是被窗口无声裁掉。 */}
+          {hiddenCount > 0 && (
+            <span
+              className="cstrip-more"
+              role="img"
+              aria-label={t.sticker.stripMore(hiddenCount)}
+              data-tip={t.sticker.stripMore(hiddenCount)}
+              data-tauri-drag-region
+            >
+              +{hiddenCount}
+            </span>
+          )}
+          </>
         )}
       </div>
     </div>

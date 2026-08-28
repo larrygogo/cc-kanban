@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, cleanup } from "@testing-library/react";
 import { CollapsedStrip } from "./CollapsedStrip";
 import type { LiveSession } from "../api";
@@ -88,5 +88,24 @@ describe("CollapsedStrip", () => {
       <CollapsedStrip data={[]} edge="left" onExpand={() => {}} onMeasure={(h) => (measured = h)} />
     );
     expect(measured).toBeGreaterThanOrEqual(48);
+  });
+
+  it("超出主轴上限的会话折成末尾「+N」徽章，不再被无声裁掉（W-5）", () => {
+    // 钉死屏幕可用主轴 300px：容纳上限 floor((300-60)/17)=14 点，其中一格让给徽章。
+    vi.stubGlobal("screen", { availWidth: 300, availHeight: 300 });
+    const data: Item[] = Array.from({ length: 30 }, (_, i) =>
+      mk({ session: { id: i + 1, project_id: 1, cc_session_id: `s${i}`, status: "running", started_at: 0, last_event_at: 0, ended_at: null } })
+    );
+    const { container } = render(<CollapsedStrip data={data} edge="left" onExpand={() => {}} />);
+    expect(container.querySelectorAll(".cstrip-dot").length).toBe(13);
+    const badge = container.querySelector(".cstrip-more");
+    expect(badge?.textContent).toBe("+17");
+    vi.unstubAllGlobals();
+  });
+
+  it("会话数没超上限时不渲染「+N」徽章（W-5）", () => {
+    const { container } = render(<CollapsedStrip data={[mk(), mk({ session: { id: 2, project_id: 1, cc_session_id: "b", status: "running", started_at: 0, last_event_at: 0, ended_at: null } })]} edge="left" onExpand={() => {}} />);
+    expect(container.querySelector(".cstrip-more")).toBeNull();
+    expect(container.querySelectorAll(".cstrip-dot").length).toBe(2);
   });
 });

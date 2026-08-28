@@ -68,6 +68,10 @@ fn default_terminal_font_size() -> u32 {
 fn default_terminal_line_height() -> String {
     "normal".to_string()
 }
+/// 终端回滚缓冲行数（xterm scrollback）。缺省 5000，与前端 xterm 的历史硬编码一致。
+fn default_terminal_scrollback() -> u32 {
+    5000
+}
 /// 远程访问默认端口。避开常见服务端口段，可在设置里改。
 fn default_remote_port() -> u32 {
     18620
@@ -76,6 +80,31 @@ fn default_remote_port() -> u32 {
 /// 收窄（loopback/tailscale）必须由用户显式选择。
 fn default_remote_bind() -> String {
     "all".to_string()
+}
+
+/// 贴纸主窗口几何（W-17）：正常态尺寸/吸附边/置顶/位置统一收进 settings.json 原子落盘，
+/// 取代旧版散落的三套 localStorage 键（meowo-normal-size/-snap-edge/-pinned）与 window-state
+/// 插件管的 main 位置——四套存储各写各的，清空 WebView 存储即半吊子状态（有位置没尺寸、
+/// 有吸附边没尺寸基准）。尺寸为逻辑像素、位置为物理像素（与前端 outerPosition、
+/// window-state 旧文件同口径）。
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct StickerWindowState {
+    /// 正常（非吸附）态窗口逻辑宽/高。None = 未记录过（前端按 tauri.conf 默认 360×440 处理）。
+    #[serde(default)]
+    pub(crate) normal_width: Option<f64>,
+    #[serde(default)]
+    pub(crate) normal_height: Option<f64>,
+    /// 吸附边（"left"/"right"/"top"）；None = 未吸附。
+    #[serde(default)]
+    pub(crate) snap_edge: Option<String>,
+    /// 用户置顶偏好。吸附/展开态的强制置顶是临时行为（snap_* 命令负责），不写这里。
+    #[serde(default)]
+    pub(crate) pinned: bool,
+    /// 正常态窗口左上角（物理像素）。None = 未记录过（交 OS 默认摆放）。
+    #[serde(default)]
+    pub(crate) x: Option<i32>,
+    #[serde(default)]
+    pub(crate) y: Option<i32>,
 }
 
 /// 应用设置（持久化到 ~/.meowo/settings.json）。
@@ -125,12 +154,21 @@ pub(crate) struct Settings {
     /// 是否显示卡片 hover「轻推」预览（最近一条 AI 正文）。缺省开启，兼容老 settings.json。
     #[serde(default = "default_true")]
     pub(crate) preview_enabled: bool,
+    /// 点击穿透（W-8）：贴纸不接收任何鼠标事件，点击直达下层窗口。opacity 可低至 25%，
+    /// 几乎看不见的置顶窗若照常吃掉鼠标是桌面地雷。按住 Alt 临时恢复交互（window.rs
+    /// 全局轮询修饰键——穿透窗收不到键鼠，前端 DOM 方案不可行）。仅 Windows 实装：
+    /// macOS 面板失焦自隐、无此问题。缺省关闭，兼容老 settings.json。
+    #[serde(default)]
+    pub(crate) click_through_enabled: bool,
     /// 终端（PTY 画面）字号（px）。缺省 12，兼容老 settings.json。
     #[serde(default = "default_terminal_font_size")]
     pub(crate) terminal_font_size: u32,
     /// 终端行高预设：compact / normal（默认）/ relaxed。兼容老 settings.json。
     #[serde(default = "default_terminal_line_height")]
     pub(crate) terminal_line_height: String,
+    /// 终端回滚缓冲行数。缺省 5000，兼容老 settings.json。
+    #[serde(default = "default_terminal_scrollback")]
+    pub(crate) terminal_scrollback: u32,
     /// 贴纸风格：flat = 扁平（默认），elevated = 立体感。缺省 flat，兼容老 settings.json。
     #[serde(default = "default_sticker_style")]
     pub(crate) sticker_style: String,
@@ -187,6 +225,10 @@ pub(crate) struct Settings {
     /// 窗口侧唯一的取得口是配对命令 remote_access_info（见 without_remote_token）。
     #[serde(default)]
     pub(crate) remote_access_token: String,
+    /// 贴纸主窗口几何（W-17，见 [`StickerWindowState`]）。兼容老 settings.json：缺席 →
+    /// 全 None/false，前端启动时从 localStorage 旧键（及后端从 window-state 旧文件）一次性迁移。
+    #[serde(default)]
+    pub(crate) sticker_window: StickerWindowState,
 }
 
 impl Default for Settings {
@@ -205,8 +247,10 @@ impl Default for Settings {
             chat_enabled: true,
             card_menu_mode: default_card_menu_mode(),
             preview_enabled: true,
+            click_through_enabled: false,
             terminal_font_size: default_terminal_font_size(),
             terminal_line_height: default_terminal_line_height(),
+            terminal_scrollback: default_terminal_scrollback(),
             sticker_style: default_sticker_style(),
             sticker_color: default_sticker_color(),
             sticker_quota_providers: default_sticker_quota_providers(),
@@ -222,6 +266,7 @@ impl Default for Settings {
             remote_access_port: default_remote_port(),
             remote_access_bind: default_remote_bind(),
             remote_access_token: String::new(),
+            sticker_window: StickerWindowState::default(),
         }
     }
 }
@@ -253,6 +298,7 @@ pub(crate) fn tr(lang: &str, key: &str) -> &'static str {
         ("en", "notify.pending.question") => "A session is asking you a question",
         ("en", "notify.pending.plan") => "Plan awaiting approval",
         ("en", "notify.blocked") => "Agent is waiting on you in the terminal",
+        ("en", "notify.open") => "Open session",
         ("en", "tray.chat") => "Open chat window",
         ("en", "tray.recall") => "Recall sticker",
         ("en", "tray.guide") => "Getting started",
@@ -269,6 +315,7 @@ pub(crate) fn tr(lang: &str, key: &str) -> &'static str {
         (_, "notify.pending.question") => "会话在问你问题",
         (_, "notify.pending.plan") => "计划待批准",
         (_, "notify.blocked") => "Agent 在终端里等你操作",
+        (_, "notify.open") => "打开会话",
         (_, "tray.chat") => "打开对话窗口",
         (_, "tray.recall") => "找回贴纸",
         (_, "tray.guide") => "使用引导",
@@ -525,6 +572,47 @@ pub(crate) async fn mark_onboarding_seen() -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// `set_sticker_window_state` 落盘前的兜底钳值（与前端 windowState.ts 同口径）：尺寸须落在
+/// [正常态最小值, 20000]，越界/非有限数丢弃（None → 前端回落默认，毒化值进不了盘）；
+/// 吸附边只认 left/right/top；位置钳到 ±100000，防手改 settings.json 塞天文数字。纯函数便于单测。
+fn sanitize_sticker_window(mut s: StickerWindowState) -> StickerWindowState {
+    let dim = |v: Option<f64>, min: f64| {
+        v.filter(|d| d.is_finite() && *d >= min && *d <= crate::snap::SIZE_MAX_LOGICAL)
+    };
+    s.normal_width = dim(s.normal_width, crate::snap::STICKER_MIN_W);
+    s.normal_height = dim(s.normal_height, crate::snap::STICKER_MIN_H);
+    s.snap_edge = s
+        .snap_edge
+        .filter(|e| matches!(e.as_str(), "left" | "right" | "top"));
+    s.x = s.x.map(|v| v.clamp(-100_000, 100_000));
+    s.y = s.y.map(|v| v.clamp(-100_000, 100_000));
+    s
+}
+
+/// 贴纸主窗口几何读取（W-17）。与 get_settings 分开：贴纸窗启动路径只需要这一小块，
+/// 拉整份设置还得过 token 收敛等加工，不值。
+#[tauri::command]
+pub(crate) async fn get_sticker_window_state() -> Result<StickerWindowState, String> {
+    tauri::async_runtime::spawn_blocking(|| load_settings().sticker_window)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 贴纸主窗口几何落盘（W-17）：update_settings 锁内单字段原子改写，替代旧版 localStorage
+/// 三键分写（清空 WebView 存储即丢一半状态）。前端启动时做一次性旧键迁移（windowState.ts）。
+#[tauri::command]
+pub(crate) async fn set_sticker_window_state(state: StickerWindowState) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = sanitize_sticker_window(state);
+        update_settings(|s| {
+            s.sticker_window = state;
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// `set_settings` 落盘前的字段保护：profiles 三字段由独立账号命令维护、`onboarding_seen` 由
 /// [`mark_onboarding_seen`] 单独落盘，而设置窗口回传的是打开时的整对象快照。以磁盘最新值
 /// 回填这些字段——否则窗口打开期间创建/改名/切换的账号会被旧快照覆盖，刚完成的引导标记
@@ -537,6 +625,9 @@ fn preserve_independently_managed_fields(incoming: &mut Settings, current: &Sett
     // 远程 token 由 remote_access_info 惰性生成落盘；设置窗打开期间刚生成的 token
     // 不得被旧快照的空串抹掉（enabled/port 是设置窗自己编辑的字段，仍以快照为准）。
     incoming.remote_access_token = current.remote_access_token.clone();
+    // 贴纸窗口几何（W-17）由贴纸窗经 set_sticker_window_state 独立维护；设置窗不编辑它，
+    // 一次外观保存不得把窗口打开期间的移动/吸附/pin 变更用旧快照盖掉。
+    incoming.sticker_window = current.sticker_window.clone();
 }
 
 #[tauri::command]
@@ -549,6 +640,9 @@ pub(crate) async fn set_settings(
     settings.ui_scale = settings.ui_scale.clamp(50, 200);
     // 前端滑杆范围 10–18，这里放宽到 8–24 兜底（手改 settings.json 也不至于出 0 号字）。
     settings.terminal_font_size = settings.terminal_font_size.clamp(8, 24);
+    // 回滚缓冲下限留一屏余量，上限防手改 settings.json 塞出吃内存的天文数字
+    // （scrollback 按行 × 单元格常驻内存）。
+    settings.terminal_scrollback = settings.terminal_scrollback.clamp(500, 50_000);
     // 代理地址落盘前校验。非法值一旦写进去，后台只会静默降级直连，用户对着「用量查不到」
     // 毫无线索——在这里拦下，把具体原因回给设置页。
     // 先清洗再校验：粘贴进来的地址常混入零宽字符（中转还有全角冒号的情况），肉眼看着
@@ -586,6 +680,8 @@ pub(crate) async fn set_settings(
     // 通知贴纸窗口实时套用新设置。与 get_settings 同一出口收敛:事件载荷不含远程 token
     // （前端快照写回由 preserve_independently_managed_fields 兜底,不丢 token）。
     let _ = app.emit("settings-changed", without_remote_token(settings.clone()));
+    // 点击穿透热生效（W-8；非 Windows 平台为 no-op，见 window::apply_click_through）。
+    crate::window::apply_click_through(&app, settings.click_through_enabled);
     // 远程访问开关/端口热生效（fire-and-forget，内部自行读最新 settings 并比对差异）。
     crate::remote::apply(&app);
     Ok(())
@@ -793,6 +889,14 @@ mod tests {
     }
 
     #[test]
+    fn old_settings_json_without_terminal_scrollback_defaults_to_5000() {
+        // 老 settings.json 无此字段：serde default 落到历史硬编码的 5000，不 panic。
+        let v: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(v.terminal_scrollback, 5000);
+        assert_eq!(Settings::default().terminal_scrollback, 5000);
+    }
+
+    #[test]
     fn session_open_in_round_trips_through_json() {
         let v: Settings = serde_json::from_str(r#"{"session_open_in":"chat"}"#).unwrap();
         assert_eq!(v.session_open_in, "chat");
@@ -808,6 +912,14 @@ mod tests {
         assert!(old.auto_update_enabled);
         let disabled: Settings = serde_json::from_str(r#"{"auto_update_enabled":false}"#).unwrap();
         assert!(!disabled.auto_update_enabled);
+    }
+
+    #[test]
+    fn old_settings_json_without_click_through_defaults_off() {
+        // 老 settings.json 无此字段：必须落关闭——升级后贴纸突然不吃鼠标是不可接受的静默变化。
+        let v: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!v.click_through_enabled);
+        assert!(!Settings::default().click_through_enabled);
     }
 
     #[test]
@@ -913,6 +1025,15 @@ mod tests {
         current
             .default_profile_names
             .insert("claude".into(), "公司号".into());
+        // 窗口打开期间贴纸被移动/吸附/置顶（W-17：sticker_window 由贴纸窗独立命令维护）。
+        current.sticker_window = StickerWindowState {
+            normal_width: Some(420.0),
+            normal_height: Some(500.0),
+            snap_edge: Some("left".into()),
+            pinned: true,
+            x: Some(100),
+            y: Some(200),
+        };
 
         preserve_independently_managed_fields(&mut incoming, &current);
 
@@ -932,5 +1053,71 @@ mod tests {
         );
         // 其余字段仍以用户提交的快照为准——那才是这次保存的内容。
         assert_eq!(incoming.opacity, 60);
+        assert_eq!(
+            incoming.sticker_window,
+            StickerWindowState {
+                normal_width: Some(420.0),
+                normal_height: Some(500.0),
+                snap_edge: Some("left".into()),
+                pinned: true,
+                x: Some(100),
+                y: Some(200),
+            },
+            "贴纸几何不得被设置窗旧快照盖掉（W-17）"
+        );
+    }
+
+    /// W-17：老 settings.json 没有 sticker_window 字段——serde default 给全 None/false（前端据此
+    /// 触发 localStorage 旧键一次性迁移），不 panic。
+    #[test]
+    fn old_settings_json_without_sticker_window_defaults() {
+        let v: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(v.sticker_window, StickerWindowState::default());
+        assert!(!v.sticker_window.pinned);
+    }
+
+    /// W-17 落盘钳值：尺寸越界/非有限数/毒化细条尺寸丢弃（None → 前端回落默认）；
+    /// 吸附边只认三值；位置钳到 ±100000；合法值原样保留。
+    #[test]
+    fn sticker_window_sanitize_rules() {
+        let s = sanitize_sticker_window(StickerWindowState {
+            normal_width: Some(80.0),            // 细条毒化尺寸（< 最小宽）
+            normal_height: Some(f64::NAN),       // 非有限数
+            snap_edge: Some("bottom".into()),    // 非法边
+            pinned: true,
+            x: Some(9_999_999),
+            y: Some(-9_999_999),
+        });
+        assert_eq!(s.normal_width, None);
+        assert_eq!(s.normal_height, None);
+        assert_eq!(s.snap_edge, None);
+        assert!(s.pinned, "pinned 是布尔，无值可钳");
+        assert_eq!(s.x, Some(100_000));
+        assert_eq!(s.y, Some(-100_000));
+
+        let ok = StickerWindowState {
+            normal_width: Some(480.0),
+            normal_height: Some(330.0),
+            snap_edge: Some("top".into()),
+            pinned: false,
+            x: Some(-1600), // 多屏负坐标是合法位置
+            y: Some(0),
+        };
+        assert_eq!(sanitize_sticker_window(ok.clone()), ok);
+    }
+
+    /// W-17：sticker_window 随 settings.json 整份序列化往返，字段名与前端 windowState.ts 对齐。
+    #[test]
+    fn sticker_window_round_trips_through_json() {
+        let src = r#"{"sticker_window":{"normal_width":400.0,"normal_height":460.0,
+                     "snap_edge":"right","pinned":true,"x":120,"y":-40}}"#;
+        let v: Settings = serde_json::from_str(src).unwrap();
+        assert_eq!(v.sticker_window.normal_width, Some(400.0));
+        assert_eq!(v.sticker_window.snap_edge.as_deref(), Some("right"));
+        assert!(v.sticker_window.pinned);
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains(r#""snap_edge":"right""#));
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sticker_window, v.sticker_window);
     }
 }

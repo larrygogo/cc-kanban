@@ -16,7 +16,7 @@ export type StructuredQuestion = {
 /// 被终端宽度截断（尾部省略号），按「精确 → 前缀互含（≥4 字符）」两级匹配；
 /// 命中多个即歧义 → null，宁可留给用户手点，也不自动答错题。
 export function matchOptionByLabel<T extends { label: string }>(
-  options: T[],
+  options: readonly T[],
   label: string,
 ): T | null {
   const strip = (s: string) => s.trim().replace(/…+$/, "");
@@ -33,6 +33,65 @@ export function matchOptionByLabel<T extends { label: string }>(
     );
   });
   return prefixed.length === 1 ? prefixed[0] : null;
+}
+
+/// 多问题表单「当前聚焦第几题」的识别。实拍形态（terminalAttention.test.ts 的 fixture）：
+/// tab 条 `← 头1 头2 ✓ Submit →` 只带各题 header，选项上方那行才是**聚焦题**的完整
+/// question——屏幕文本里唯一能把第几题区分开的信号。故用结构化题面反查，两级匹配：
+/// 1. 题面全文是屏幕文本的子串（双方**剥掉全部空白**再比：窄终端折行——含英文按字符
+///    折断的 "consid er"——缩进、换行全归一，折成几行都照中）；
+/// 2. 兜底：某条 ≥8 字符的屏幕行（去尾部截断省略号）是题面子串——题面被截断时仍有锚。
+/// 命中零条或多条 → null：跨题写错答案比不答糟得多，歧义宁可保留排队等下一帧。
+/// 刻意只匹配 question、不匹配 header：tab 条把**所有**题的 header 摆在一行，按 header
+/// 匹配会题题都中——那正是要排除的伪信号。
+export function matchFocusedQuestion(
+  questions: readonly StructuredQuestion[],
+  screenText: string,
+): number | null {
+  const collapse = (s: string) => s.replace(/\s+/g, "");
+  const screen = collapse(screenText);
+  if (!screen) return null;
+  const lines = screenText
+    .split("\n")
+    .map((line) => collapse(line).replace(/…+$/, ""))
+    .filter((line) => line.length >= 8);
+  const matches: number[] = [];
+  for (const [index, question] of questions.entries()) {
+    const text = collapse(question.question);
+    if (!text) continue;
+    if (screen.includes(text) || lines.some((line) => text.includes(line))) {
+      matches.push(index);
+    }
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/// 排队多选的落键规划：把一组排队 label 翻译成「方向键定位 + 回车勾选」的按键串序列。
+/// 多选表单里每次勾选都是相对当前焦点项的移动——序列按焦点逐项推进计算，命中的重复项
+/// 去重（同一项勾两次等于没勾）。匹配不上的 label 跳过（单条歧义不拖垮整组）；全部落空
+/// 返回空数组，调用方保留排队状态，留给用户手点，绝不猜。
+/// 提交不归这里：多选表单有独立 submit 项，勾完由用户在交互卡上按「提交选择」。
+export function planQueuedChoiceWrites<T extends { label: string; position?: number; focused?: boolean }>(
+  choices: readonly T[],
+  labels: readonly string[],
+): { option: T; input: string }[] {
+  const writes: { option: T; input: string }[] = [];
+  let focus = choices.find((option) => option.focused)?.position ?? choices[0]?.position ?? 0;
+  const done = new Set<number>();
+  for (const label of labels) {
+    const match = matchOptionByLabel(choices, label);
+    if (!match) continue;
+    const target = match.position ?? 0;
+    if (done.has(target)) continue;
+    const delta = target - focus;
+    writes.push({
+      option: match,
+      input: (delta < 0 ? "\x1b[A".repeat(-delta) : "\x1b[B".repeat(delta)) + "\r",
+    });
+    done.add(target);
+    focus = target;
+  }
+  return writes;
 }
 
 /// 「问题已了结」的收卡判定，两个信号（实测各自都有盲区，必须并用）：
