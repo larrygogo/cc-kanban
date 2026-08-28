@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
@@ -29,7 +29,8 @@ pub struct NotifyJob {
 static CLICK_CONTEXT: OnceLock<(AppHandle, crate::pty::PtyBroker)> = OnceLock::new();
 /// 通知标识 -> 点击路由参数（session_id, pid）。delegate 回调只拿得到 request.identifier，
 /// 路由所需参数存在这里；点击或上限清空时移除，防泄漏。
-static JOBS: Mutex<HashMap<String, (i64, i64)>> = Mutex::new(HashMap::new());
+static JOBS: LazyLock<Mutex<HashMap<String, (i64, i64)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 /// delegate 必须常驻：UNUserNotificationCenter.delegate 是 weak 引用，不持有即悬空。
 static DELEGATE: OnceLock<Retained<NotificationDelegate>> = OnceLock::new();
 /// 通知标识序号：同一会话可能连发多条，identifier 必须唯一才能逐条路由点击。
@@ -97,10 +98,14 @@ fn handle_response(center: &UNUserNotificationCenter, response: &UNNotificationR
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&identifier);
-    if !response
-        .actionIdentifier()
-        .isEqualToString(UNNotificationDefaultActionIdentifier)
-    {
+    // extern static 不受 Rust 类型系统约束，读取要 unsafe；它是 Apple 框架的常量字符串
+    // 指针，进程存续期有效，只读比较是安全的。
+    let is_default_action = unsafe {
+        response
+            .actionIdentifier()
+            .isEqualToString(UNNotificationDefaultActionIdentifier)
+    };
+    if !is_default_action {
         return;
     }
     // 点击后通知不会自动从"通知中心"消失，主动移除本应用的已投递通知（与旧实现一致：
