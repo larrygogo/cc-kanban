@@ -57,9 +57,10 @@ export function parseUserText(raw: string): UserTextParts {
         }
         break;
       case "local-command-stdout": {
-        // 终端转义剥掉后再判空：一段纯颜色码不该收成空输出块。
-        const out = value.replace(ANSI, "").trim();
-        if (out) parts.stdout.push(out);
+        // 终端转义剥掉后，被颜色码「挡住」而幸存的前导缩进/对齐空白要保留（剥完再 trim
+        // 会把对齐空格吃掉）。trim 只用来判空——纯控制码的一段不该收成空输出块。
+        const stripped = value.replace(ANSI, "");
+        if (stripped.trim()) parts.stdout.push(stripped);
         break;
       }
       case "task-notification":

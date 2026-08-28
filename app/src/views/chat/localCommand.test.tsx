@@ -105,6 +105,12 @@ describe("Message 渲染本地命令", () => {
     expect(details?.querySelector(".chat-tool-summary")?.textContent).toBe("Compacted (ctrl+o to see full summary)");
   });
 
+  it("剥码后暴露出来的前导缩进要保留（trim 只判空不吃对齐）", () => {
+    render(<Message item={userText("<command-name>/x</command-name><local-command-stdout>\x1b[2m  indented\x1b[22m</local-command-stdout>")} />);
+    const details = screen.getByText("命令输出").closest("details");
+    expect(details?.querySelector("pre")?.textContent).toBe("  indented");
+  });
+
   it("普通用户消息照旧走气泡", () => {
     render(<Message item={userText("继续实现")} />);
     expect(screen.getByText("继续实现")).toBeTruthy();

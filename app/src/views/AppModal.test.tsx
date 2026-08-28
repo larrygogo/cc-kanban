@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { AppModal } from "./AppModal";
+import { hasEscLayers } from "../escLayers";
 
 afterEach(cleanup);
 
@@ -23,6 +24,13 @@ function setup(onClose: () => void = () => {}) {
 }
 
 describe("AppModal（页内 modal 统一壳，G-3）", () => {
+  it("Esc 层注册随卸载注销，不泄漏（`useEffect(() => pushEscLayer(), [])` 的返回值即 cleanup）", () => {
+    const r = render(<AppModal label="测试弹层" onClose={() => {}}><button type="button">A</button></AppModal>);
+    expect(hasEscLayers()).toBe(true);
+    r.unmount();
+    expect(hasEscLayers()).toBe(false);
+  });
+
   it("role=dialog + aria-modal，初始焦点落到第一个可聚焦元素", () => {
     const { dlg, a } = setup();
     expect(dlg.getAttribute("aria-modal")).toBe("true");
