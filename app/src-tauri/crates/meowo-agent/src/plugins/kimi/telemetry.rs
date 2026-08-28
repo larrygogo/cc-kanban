@@ -1934,6 +1934,10 @@ mod tests {
     fn install_resolves_config_path_under_share_dir() {
         // 目录优先级本身由 meowo-agent 的变体表单测覆盖（不碰真实 home）；这里只守住薄封装的一致性：
         // config.toml 必须落在 share_dir 下，argv 非空且指向 kimi。
+        // env_guard：两次实况解析之间若有并行测试改写 home/SHARE_DIR 类环境变量，左右两边
+        // 会各看到一份（CI 实拍：左侧真 home、右侧别的测试的临时目录）。本测试不写环境，
+        // 但读环境，同样要排队。
+        let _env = crate::env_guard();
         let inst = kimi_install().expect("resolve 应总能给出实况或默认落点");
         assert_eq!(
             inst.config_path(),
