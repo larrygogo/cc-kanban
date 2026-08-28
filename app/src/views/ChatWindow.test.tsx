@@ -3347,7 +3347,10 @@ describe("ChatWindow", () => {
     expect((button as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(button);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 96, data: "\u001b" }));
-    const writes = invoke.mock.calls.filter(([command]) => command === "write_managed_terminal");
+    // 只按会话 96 算账：前面用例留下的在途异步链（模型菜单静默探测的幽灵 Esc 之类，
+    // 见 ChatWindow 2527 行的实拍注释）晚到时会混进全量调用，把 1 写成 2（CI 实拍）。
+    const writes = invoke.mock.calls.filter(([command, args]) => command === "write_managed_terminal"
+      && (args as { sessionId: number }).sessionId === 96);
     expect(writes).toHaveLength(1);
 
     const input = await screen.findByRole("combobox", { name: "发送消息给 Agent" });

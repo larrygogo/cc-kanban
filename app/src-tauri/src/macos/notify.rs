@@ -54,6 +54,8 @@ define_class!(
         // 应用处于前台时也照常弹横幅+声音——UNUserNotificationCenter 默认吞掉前台期间的
         // 通知，而旧实现（NSUserNotificationCenter）总是显示；不实现此方法就是行为回退。
         // SAFETY: 签名与协议声明一致。
+        // 方法名按 objc2 协议方法惯例非 snake_case，CI 的 -D warnings 会把它升级成错误。
+        #[allow(non_snake_case)]
         #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
         fn userNotificationCenter_willPresentNotification_withCompletionHandler(
             &self,
@@ -68,6 +70,7 @@ define_class!(
         }
 
         // SAFETY: 签名与协议声明一致。
+        #[allow(non_snake_case)]
         #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
         fn userNotificationCenter_didReceiveNotificationResponse_withCompletionHandler(
             &self,
