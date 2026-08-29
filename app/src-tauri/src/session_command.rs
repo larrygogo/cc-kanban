@@ -134,7 +134,7 @@ pub(crate) async fn add_session_extra_dir(
             // "/add-dir" 是 claude 的运行时命令;将来第二个声明 extra_dir_flag 的
             // agent 落地时,运行时命令串也要纳入插件声明,不得沿用这里的字面量。
             let modal = ptys.approval_session_ids().contains(&session_id)
-                || ptys.screen_states().get(&session_id).copied() == Some("blocked");
+                || ptys.screen_states().get(&session_id).is_some_and(|sight| sight.state == "blocked");
             if !modal {
                 let _ = ptys.write(session_id, format!("/add-dir \"{d}\"\r").as_bytes());
             }

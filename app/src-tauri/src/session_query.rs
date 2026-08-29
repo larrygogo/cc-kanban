@@ -6,9 +6,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
-/// 必须 ≥ 对话窗 650ms 的历史轮询周期:此前 300ms 意味着单开对话窗时每一轮都击穿缓存,
-/// Windows 上每 650ms 付一次 30-120ms 的全进程扫描(proc.rs 注释实测)。900ms 让相邻
-/// 轮询共享同一次采样;存活展示容忍 ~1s 的陈旧(RESUME_GRACE 是 120s 量级)。
+/// 罩住单次看板刷新内 counts+list 等多条查询（共享同一次采样）与远程模式的 650ms
+/// 轮询:此前 300ms 意味着单开对话窗时每一轮都击穿缓存,Windows 上每轮付一次
+/// 30-120ms 的全进程扫描(proc.rs 注释实测)。桌面端历史轮询已降为 2s 兜底
+/// (C-14 事件驱动),冷采样频率减半以上,无需再把 TTL 对齐它。
+/// 存活展示容忍 ~1s 的陈旧(RESUME_GRACE 是 120s 量级)。
 const PROCESS_SNAPSHOT_TTL_MS: i64 = 900;
 
 /// Counts and list queries share one process-table observation during a UI refresh.
@@ -173,6 +175,10 @@ pub(crate) struct LiveItem {
     /// 由 live_sessions_blocking 在裁定 tab 归属（tab_class）的同一处填充——DTO 里的
     /// 屏幕状态与该卡的 tab 归属出自同一份快照，enrich 不经手；外库卡恒 None。
     screen_state: Option<&'static str>,
+    /// screen_state 是否来自无规则命中的回退（detect.rs FALLBACK_RULE_ID）：回退 idle
+    /// 是「什么都没认出来」而非「确认空闲」，前端据此把角标从自信的「等你」降级为
+    /// 中性点（T-15）。tab 归属/通知等判定不消费它——行为口径仍只看 screen_state。
+    screen_assumed: bool,
     /// 还在跑的后台子任务数（transcript 分析，见 TranscriptInfo::busy_subagents）。
     /// 前端卡片状态环与 tab 分组按它把「主回合停了但后台在干活」的会话画成运行中——
     /// 必须与后端 tab_class 的 background_busy 同口径，否则环色与所在 tab 打架。
@@ -228,6 +234,10 @@ pub(crate) async fn get_live_sessions_counts(
     // 否则「黄环(等你)卡在运行中 tab」「计数与列表打架」两类症状都会回来。
     let approvals = state.ptys.approval_session_ids();
     let screen_states = state.ptys.screen_states();
+    // 启动中的 pending 会话(负 id 占位卡)也计入角标:列表首页能看到的卡,数字必须
+    // 数得到,否则「运行中 N」与列表又打架。它们按运行中计(PTY 已起、屏幕检测尚未
+    // 接管),total 同步 +N(与列表口径:占位卡进「全部」与「运行中」两个 tab)。
+    let pendings = state.ptys.pending_launches().len() as i64;
     let runtimes = state.session_runtimes.clone();
     let tx_cache = state.tx_cache.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -253,6 +263,8 @@ pub(crate) async fn get_live_sessions_counts(
             counts.waiting += foreign.waiting;
             counts.archived += foreign.archived;
         }
+        counts.total += pendings;
+        counts.running += pendings;
         Ok(counts)
     })
     .await
@@ -271,7 +283,7 @@ fn counts_for_store(
     pty_live: &std::collections::HashSet<i64>,
     runtimes: &SessionRuntimeIndex,
     approvals: &std::collections::HashSet<i64>,
-    screen_states: &std::collections::HashMap<i64, &'static str>,
+    screen_states: &std::collections::HashMap<i64, super::pty::ScreenSight>,
 ) -> Result<meowo_store::query::LiveSessionCounts, String> {
     let (mut total, mut archived) = store.live_sessions_totals().map_err(|e| e.to_string())?;
     // 列表把后台会话整个藏了（见 hidden_background），总数也得同口径扣掉。不能只在
@@ -328,7 +340,7 @@ fn counts_for_store(
             connected,
             &candidate.status,
             pending_review,
-            screen_states.get(&candidate.id).copied(),
+            screen_states.get(&candidate.id).map(|sight| sight.state),
             || {
                 subagents_busy(
                     tx_cache,
@@ -383,6 +395,9 @@ pub(crate) async fn get_live_sessions_page(
     // 是否附带外库(安装版)会话。只有贴纸看板传 true——对话侧栏/归档页按 id 加载
     // 会话详情,外库卡点开必然落空,不如从源头不给。None 当 false(旧前端兼容)。
     include_foreign: Option<bool>,
+    // 是否附带「正在启动」占位卡(pending PTY:已起 PTY、CLI 还没写库的新会话,负 id)。
+    // 同样只有贴纸看板传 true——占位卡不可点、没有会话详情,其它消费方给了也是死路。
+    include_pending: Option<bool>,
 ) -> Result<LiveSessionsPage, String> {
     let db_path = state.db_path.clone();
     let tx_cache = state.tx_cache.clone();
@@ -392,6 +407,7 @@ pub(crate) async fn get_live_sessions_page(
     let pty_live = state.ptys.active_session_ids();
     let approvals = state.ptys.approval_session_ids();
     let screen_states = state.ptys.screen_states();
+    let pendings = state.ptys.pending_launches();
     let filter = normalize_filter(filter);
     tauri::async_runtime::spawn_blocking(move || {
         let alive = snapshots.snapshot();
@@ -415,6 +431,22 @@ pub(crate) async fn get_live_sessions_page(
                 limit,
             },
         )?;
+        // 「正在启动」占位卡只进首页(无游标):占位不属于 SQL 扫描,翻页游标语义不变。
+        // 插到页首——它们 connected 且最新,stable sort(外库合并处)会保持其在连接组最前。
+        if include_pending.unwrap_or(false)
+            && before_id.is_none()
+            && before_last_event_at.is_none()
+        {
+            let placeholders = pending_placeholder_items(
+                &pendings,
+                &filter,
+                search.as_deref(),
+                cwd.as_deref(),
+            );
+            if !placeholders.is_empty() {
+                page.items.splice(0..0, placeholders);
+            }
+        }
         // 外库聚合只做首页(无游标):外库不参与翻页,一次全并入;后续页的游标语义
         // 始终属于本库。稳定排序把外库卡排到各 connected 组的尾部——观察性信息不与
         // 本库的活动卡抢位置。外库卡的屏幕状态恒 None(本地 broker 不托管它们),
@@ -448,6 +480,129 @@ fn normalize_filter(filter: String) -> String {
         filter
     } else {
         "all".into()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 「正在启动」占位卡（pending PTY 合成，负 id）
+// ---------------------------------------------------------------------------
+
+/// 目录筛选的归一 key：与 store 的 cwd 谓词同口径（反斜杠→斜杠、去尾斜杠、
+/// NOCASE 只管 ASCII，这里 to_lowercase 略宽但对 CJK 路径无影响）。
+fn cwd_key(dir: &str) -> String {
+    dir.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
+/// 工作目录的末段名（卡片上的仓库名）。两种斜杠都认。
+fn cwd_basename(cwd: &str) -> &str {
+    cwd.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(cwd)
+}
+
+/// 把 pending PTY（已起 PTY、CLI 尚未写库的启动中会话）整形成看板占位卡（负 id）。
+///
+/// 只进「全部/运行中」两个 tab：占位会话连通且按运行中计（PTY 已起、屏幕检测尚未接管），
+/// 与 get_live_sessions_counts 的 +N 同口径——数字与列表不打架。过滤口径向真实会话看齐：
+/// 目录筛选按斜杠归一的精确比较（store 的 cwd 谓词），搜索按 cwd/目录名子串
+/// （SQL 对真实会话的 s.cwd / p.name LIKE）。占位卡没有标题/便签/往来正文可搜。
+fn pending_placeholder_items(
+    pendings: &[(i64, super::pty::PendingLaunch)],
+    filter: &str,
+    search: Option<&str>,
+    cwd: Option<&str>,
+) -> Vec<LiveItem> {
+    if !matches!(filter, "all" | "running") {
+        return Vec::new();
+    }
+    let search = search
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase);
+    let cwd_filter = cwd.map(str::trim).filter(|s| !s.is_empty()).map(cwd_key);
+    pendings
+        .iter()
+        .filter_map(|(temp_id, info)| {
+            if let Some(want) = &cwd_filter {
+                match &info.cwd {
+                    Some(dir) if cwd_key(dir) == *want => {}
+                    _ => return None,
+                }
+            }
+            if let Some(q) = &search {
+                let dir = info.cwd.as_deref().unwrap_or_default().to_lowercase();
+                let name = cwd_basename(&dir);
+                if !dir.contains(q.as_str()) && !name.contains(q.as_str()) {
+                    return None;
+                }
+            }
+            Some(pending_placeholder_item(*temp_id, info))
+        })
+        .collect()
+}
+
+/// 单张占位卡：负 id 即「这是占位」的全部契约——前端凭它走纯展示分支（不可点、无菜单），
+/// 并在同 provider+cwd 的真实会话出现时撤卡对账。connected=true / status=running：
+/// PTY 已起进程必在，tab 归属（前端 match / cardTone 与后端 counts）据此都落在运行中。
+fn pending_placeholder_item(
+    temp_id: i64,
+    info: &super::pty::PendingLaunch,
+) -> LiveItem {
+    let cwd = info.cwd.clone();
+    let project_name = info
+        .cwd
+        .as_deref()
+        .map(cwd_basename)
+        .unwrap_or_default()
+        .to_string();
+    LiveItem {
+        inner: LiveSession {
+            session: meowo_store::Session {
+                id: temp_id,
+                project_id: 0,
+                cc_session_id: String::new(),
+                status: "running".into(),
+                started_at: info.started_at,
+                last_event_at: info.started_at,
+                ended_at: None,
+            },
+            project_name,
+            // 标题留空：前端占位分支不读它（i18n 文案由前端给），不给后端造伪标题。
+            task_title: String::new(),
+            current_activity: None,
+            column: "doing".into(),
+            todo_done: 0,
+            todo_total: 0,
+            todos: Vec::new(),
+            pid: None,
+            archived: false,
+            archived_at: None,
+            cwd,
+            context_pct: None,
+            context_window: None,
+            model: None,
+            note: None,
+            pending_review: None,
+            last_ai_text: None,
+            last_user_text: None,
+            provider: info.provider.clone(),
+            profile: None,
+            predecessor_id: None,
+            extra_dirs: Vec::new(),
+        },
+        connected: true,
+        pty_managed: true,
+        background: false,
+        errored: false,
+        error_label: None,
+        error_raw: None,
+        preview: None,
+        profile_name: None,
+        screen_state: None,
+        screen_assumed: false,
+        busy_subagents: 0,
+        foreign: false,
     }
 }
 
@@ -604,10 +759,10 @@ pub(crate) struct LiveContext<'a> {
     /// 此刻 broker 手里还压着审批请求的会话(见 [`pending_review_live`])。DB 的
     /// `pending_review` 是滞后快照,要靠它校正,否则被放行的工具跑多久就错挂多久「待批准」。
     pub(crate) approvals: &'a std::collections::HashSet<i64>,
-    /// 托管会话的实时屏幕状态（sid → "working"|"idle"|"blocked"，见 PtyBroker::screen_states）。
+    /// 托管会话的实时屏幕状态（sid → [`super::pty::ScreenSight`]，见 PtyBroker::screen_states）。
     /// 既填进卡片 DTO，也参与 tab 归属判定（[`tab_class`]）——两者必须同一份快照，
     /// 否则又回到「黄环卡在运行中 tab」的打架现场。
-    pub(crate) screen_states: &'a std::collections::HashMap<i64, &'static str>,
+    pub(crate) screen_states: &'a std::collections::HashMap<i64, super::pty::ScreenSight>,
 }
 
 pub(crate) fn live_sessions_blocking(
@@ -684,7 +839,8 @@ pub(crate) fn live_sessions_blocking(
                 session.session.last_event_at,
                 now,
             );
-            let screen_state = live.screen_states.get(&session.session.id).copied();
+            let screen_sight = live.screen_states.get(&session.session.id).copied();
+            let screen_state = screen_sight.map(|sight| sight.state);
             // waiting|running：SQL 只出候选并集，这里按统一口径裁归属（与卡片状态环、
             // 角标同源，见 tab_class 文档）。未连接项 tab_class 恒 None，天然被裁掉。
             let class_ok = !class_filtered
@@ -711,6 +867,7 @@ pub(crate) fn live_sessions_blocking(
                 if let Some(mut item) = enrich(tx_cache, session, connected, pty_managed, &runtime)
                 {
                     item.screen_state = screen_state;
+                    item.screen_assumed = screen_sight.is_some_and(|sight| sight.fallback);
                     items.push(item);
                 }
             }
@@ -831,6 +988,7 @@ fn enrich(
         profile_name: None,
         // 屏幕状态由 live_sessions_blocking 在 tab 归属裁定处填充（enrich 不经手）。
         screen_state: None,
+        screen_assumed: false,
         busy_subagents,
         // 外库标记由 foreign_live_items 在聚合时置真，本库路径恒为 false。
         foreign: false,
@@ -1353,12 +1511,57 @@ mod tests {
         );
     }
 
+    /// 占位卡（pending PTY）的成形与过滤口径：负 id 保留、按运行中连通计、只进
+    /// 全部/运行中两个 tab；目录筛选与搜索与真实会话同口径（斜杠归一精确比 /
+    /// cwd 与目录名子串），占位卡没有标题/便签/正文可搜。
+    #[test]
+    fn pending_placeholders_follow_the_same_filter_rules_as_real_cards() {
+        let pendings = vec![
+            (
+                -1,
+                crate::pty::PendingLaunch {
+                    provider: "codex".into(),
+                    cwd: Some("C:\\work\\Proj".into()),
+                    started_at: 1000,
+                },
+            ),
+            (
+                -2,
+                crate::pty::PendingLaunch {
+                    provider: "claude".into(),
+                    cwd: Some("/home/other".into()),
+                    started_at: 900,
+                },
+            ),
+        ];
+        // waiting / archived 不出占位卡（占位按运行中计，与 counts 的 +N 同口径）。
+        assert!(pending_placeholder_items(&pendings, "waiting", None, None).is_empty());
+        assert!(pending_placeholder_items(&pendings, "archived", None, None).is_empty());
+        for filter in ["all", "running"] {
+            let items = pending_placeholder_items(&pendings, filter, None, None);
+            assert_eq!(items.len(), 2, "{filter} 应出全部占位卡");
+            let first = &items[0];
+            assert_eq!(first.inner.session.id, -1, "负 id 是占位契约，必须原样保留");
+            assert!(first.connected && first.pty_managed);
+            assert_eq!(first.inner.session.status, "running");
+            assert_eq!(first.inner.provider, "codex");
+            assert_eq!(first.inner.project_name, "Proj");
+            assert_eq!(first.inner.cwd.as_deref(), Some("C:\\work\\Proj"));
+            assert_eq!(first.inner.session.started_at, 1000);
+        }
+        // 目录筛选：斜杠归一 + 去尾斜杠 + 不分大小写的精确比较（store 的 cwd 谓词同口径）。
+        let items = pending_placeholder_items(&pendings, "all", None, Some("c:/work/proj/"));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].inner.session.id, -1);
+        // 搜索：cwd / 目录名子串命中；provider 等其它字段无可搜内容。
+        assert_eq!(pending_placeholder_items(&pendings, "all", Some("proj"), None).len(), 1);
+        assert!(pending_placeholder_items(&pendings, "all", Some("codex"), None).is_empty());
+    }
+
     #[test]
     fn process_snapshot_is_reused_within_ttl_and_refreshed_afterwards() {
         let cache = ProcessSnapshotCache::default();
         let first = cache.snapshot_with(1_000, || [7].into_iter().collect());
-        // TTL 必须罩得住对话窗 650ms 的轮询周期:651ms 后仍复用同一次采样,
-        // 否则单开对话窗时每轮都冷采样(Windows 上一次 30-120ms)。
         let reused = cache.snapshot_with(1_651, || panic!("must reuse the cached sample"));
         let refreshed = cache.snapshot_with(1_000 + PROCESS_SNAPSHOT_TTL_MS + 1, || {
             [9].into_iter().collect()

@@ -50,6 +50,17 @@ export function useBoardRefresh(doRefresh: () => void): () => void {
     refresh();
   });
 
+  // T-15 高优通道：screen_state「运行中 → 空闲/阻塞」的降级转变由后端绕过 board-changed
+  // 合流直发（检测节拍 + 防抖之后若再叠 300ms 合流 + 400ms 节流，最坏 ~1.7s 才落看板，
+  // 而「agent 停下来等你」恰是角标最该即时的转变）。这里对应地绕过节流：清掉排队中的
+  // trailing 立即刷新。降级转变是稀有事件（一次任务收一次），不走合并也不存在刷爆风险。
+  useTauriEvent("board-urgent", () => {
+    window.clearTimeout(timerRef.current);
+    timerRef.current = undefined;
+    lastRunRef.current = Date.now();
+    doRefreshRef.current();
+  });
+
   useEffect(() => {
     if (import.meta.env.VITE_E2E === "1") {
       // 挂载即初始化为 0，让 E2E 测试挂载后立刻能读到计数（不必等第一次事件）。

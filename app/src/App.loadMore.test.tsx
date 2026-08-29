@@ -44,8 +44,13 @@ vi.mock("./api", () => ({
   agentName: (agents: { id: string; display_name: string }[], id: string) =>
     agents.find((a) => a.id === id)?.display_name ?? id,
 }));
+// 捕获 board-changed 监听（增量刷新测试要手动触发）。
+let emitBoardChanged: () => void = () => {};
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: () => Promise.resolve(() => {}),
+  listen: (event: string, cb: () => void) => {
+    if (event === "board-changed") emitBoardChanged = cb;
+    return Promise.resolve(() => {});
+  },
   emit: vi.fn(() => Promise.resolve()),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
@@ -153,5 +158,50 @@ describe("App loadMore 重入守卫", () => {
     expect(cursorCalls()).toHaveLength(2);
     expect(cursorCalls()[0][2]).toEqual({ last_event_at: 9_900, id: 100 });
     expect(cursorCalls()[1][2]).toEqual({ last_event_at: 9_800, id: 200 });
+  });
+});
+
+describe("App board-changed 增量刷新（B-6）", () => {
+  it("只重查首页（limit=100），已加载尾部按 id 保留，尾部有事件的会话随首页冒到最前", async () => {
+    const firstPage = Array.from({ length: 100 }, (_, i) => mk(i + 1));
+    const secondPage = Array.from({ length: 100 }, (_, i) => mk(i + 101));
+    let refreshed = false;
+    getLiveSessionsPage.mockImplementation((_f: string, search: string | null, cursor: unknown) => {
+      if (search === null) return Promise.resolve([]); // 折叠条查询，与本测试无关
+      if (cursor) return Promise.resolve(secondPage);
+      if (!refreshed) return Promise.resolve(firstPage);
+      // 刷新后的首页：尾部会话 150 刚有事件（last_event_at 提前），随首页权威冒到最前。
+      return Promise.resolve([{ ...mk(150), task_title: "t-150-new" }, ...firstPage.slice(0, 99)]);
+    });
+
+    render(<App />);
+    await waitFor(() => expect(stickerProps.data).toHaveLength(100));
+    await act(async () => {
+      await stickerProps.loadMore!();
+    });
+    expect(stickerProps.data).toHaveLength(200);
+
+    refreshed = true;
+    const callsBefore = getLiveSessionsPage.mock.calls.length;
+    act(() => emitBoardChanged());
+    await waitFor(() =>
+      expect(getLiveSessionsPage.mock.calls.length).toBeGreaterThan(callsBefore)
+    );
+
+    // 重查的是首页大小，不是已加载窗口（200 条时整窗重查 = limit 200）。
+    const refreshCall = getLiveSessionsPage.mock.calls[callsBefore];
+    expect(refreshCall[2]).toBeNull();
+    expect(refreshCall[3]).toBe(100);
+
+    // 增量修补：尾部原样保留（仍 200 条），刚有事件的 150 拿新数据冒到最前。
+    await waitFor(() => {
+      const first = stickerProps.data![0] as { session: { id: number }; task_title: string };
+      expect(first.session.id).toBe(150);
+      expect(first.task_title).toBe("t-150-new");
+    });
+    const ids = stickerProps.data!.map((l) => (l as { session: { id: number } }).session.id);
+    expect(ids).toHaveLength(200);
+    expect(ids.slice(1, 4)).toEqual([1, 2, 3]);
+    expect(ids).toContain(200);
   });
 });

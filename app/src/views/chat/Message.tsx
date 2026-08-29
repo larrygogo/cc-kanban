@@ -183,7 +183,7 @@ export function ImageRef({ path }: { path: string }) {
   const name = path.split(/[\\/]/).pop() || path;
   if (failed) {
     return (
-      <span className="chat-image-chip" title={name}>
+      <span className="chat-image-chip" data-tip={name}>
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="9" cy="10" r="1.6" /><path d="m5 17 4.5-4.5L13 16l3-3 3 4" /></svg>
         <span>{name}</span>
       </span>
@@ -192,7 +192,7 @@ export function ImageRef({ path }: { path: string }) {
   const src = convertFileSrc(path);
   return (
     <>
-      <button type="button" className="chat-image-thumb-btn" title={name} onClick={() => setExpanded(true)}>
+      <button type="button" className="chat-image-thumb-btn" data-tip={name} onClick={() => setExpanded(true)}>
         <img className="chat-image-thumb" src={src} alt={name} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} />
       </button>
       {/* 灯箱走 portal（在 Lightbox 内）：消息块开着 content-visibility（paint 包含），
@@ -256,7 +256,7 @@ function ReasoningBlock({ item }: { item: Extract<ChatItem, { type: "reasoning" 
 /// parseUserText / split 这类逐条解析不再全量重跑。
 export const Message = memo(function Message({ item }: { item: ChatItem }) {
   const t = useT();
-  // hover 显示精确时间：原生 title 而非自绘浮层——时间是低频查询信息，不值一个浮层；
+  // hover 显示精确时间：统一走 data-tip 自绘浮层（全仓不再混用原生 title，G-5）。
   // 上面「路径不进 title」的纪律针对身份信息，时间无此虑。timestamp 缺失就整个不挂。
   const stampDate = item.timestamp ? new Date(item.timestamp) : null;
   const timeTitle = stampDate && !Number.isNaN(stampDate.getTime())
@@ -313,7 +313,7 @@ export const Message = memo(function Message({ item }: { item: ChatItem }) {
     // 有图时缩略图独立成行排在**气泡上方**、气泡只包正文（Claude Code 同款布局，
     // has-images 把气泡皮从 article 挪到 .chat-text 上）；纯图消息没有气泡，只有图。
     return (
-      <article className={"chat-message is-user" + (images.length ? " has-images" : "")} title={timeTitle}>
+      <article className={"chat-message is-user" + (images.length ? " has-images" : "")} data-tip={timeTitle}>
         {images.length > 0 && <ImageRow images={images} />}
         {body && <div className="chat-text">{body}</div>}
       </article>
@@ -335,7 +335,7 @@ export const Message = memo(function Message({ item }: { item: ChatItem }) {
   }
   if (item.type === "assistant_text" || item.type === "assistant_delta") {
     return (
-      <article className="chat-message is-assistant" title={timeTitle}>
+      <article className="chat-message is-assistant" data-tip={timeTitle}>
         <div className="chat-text chat-md"><ChatMarkdown text={item.text} /></div>
       </article>
     );

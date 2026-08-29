@@ -21,11 +21,13 @@ const closeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ close: closeMock }) }));
 // 收集 login-done 回调，测试里手动广播（模拟 Tauri emit）。其余事件（ns-prefill）照常返回 unlisten。
 const ev = vi.hoisted(() => ({ loginCbs: [] as Array<(e: unknown) => void> }));
+const emitMock = vi.hoisted(() => vi.fn((_event: string, _payload?: unknown) => Promise.resolve()));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: (event: string, cb: (e: unknown) => void) => {
     if (event === "login-done") ev.loginCbs.push(cb);
     return Promise.resolve(() => {});
   },
+  emit: emitMock,
 }));
 const fireLogin = (provider: string, outcome: "success" | "cancelled" | "timeout") => {
   const call = [...api.loginAgent.mock.calls].reverse().find(([p]) => p === provider);
@@ -48,6 +50,7 @@ const waiting = () => screen.getByTestId("ns-login").textContent === zh.newSessi
 beforeEach(() => {
   Object.values(api).forEach((m) => m.mockReset());
   closeMock.mockReset();
+  emitMock.mockClear();
   ev.loginCbs.length = 0;
   api.recentCwds.mockResolvedValue([]);
   api.checkProviderHooks.mockResolvedValue("installed");
@@ -154,6 +157,46 @@ describe("NewSessionPanel (独立窗口)", () => {
     await waitFor(() => expect(screen.queryByTestId("ns-options")).toBeNull());
   });
 
+  it("高风险启动档（契约 risk=true）渲染警示色与风险副标题", async () => {
+    render(<NewSessionPanel />);
+    fireEvent.click(within(await screen.findByTestId("ns-option-permission")).getByRole("button"));
+    const risky = screen.getByRole("option", { name: new RegExp(zh.newSession.launchChoice["permission.bypassPermissions"]) });
+    expect(risky.className).toContain("risk");
+    expect(within(risky).getByText(zh.newSession.riskyChoiceSub)).toBeTruthy();
+    // 普通档不带警示样式与副标题。
+    const plain = screen.getByRole("option", { name: zh.newSession.launchChoice["permission.plan"] });
+    expect(plain.className).not.toContain("risk");
+    expect(within(plain).queryByText(zh.newSession.riskyChoiceSub)).toBeNull();
+  });
+
+  it("relay 启用时 model 档置灰并注明「由中转固定为 X」，其余档不受影响", async () => {
+    api.getAccounts.mockResolvedValue([
+      { provider: "claude", account: { email: "a@b.c" }, usage: null, usage_supported: true, relay_enabled: true },
+    ]);
+    api.getSettings.mockResolvedValue({
+      default_agent: "claude",
+      resume_terminal: "wt",
+      relay: { per_agent: { claude: { enabled: true, base_url: "https://r.example/v1", model: "claude-sonnet-5", protocol: "", auth: "bearer" } } },
+    });
+    render(<NewSessionPanel />);
+    const modelOption = await screen.findByTestId("ns-option-model");
+    const note = await within(modelOption).findByTestId("ns-option-pinned");
+    expect(note.textContent).toBe(zh.newSession.relayPinnedModel("claude-sonnet-5"));
+    expect((within(modelOption).getByRole("button") as HTMLButtonElement).disabled).toBe(true);
+    // 权限档不被 relay 置灰。
+    expect((within(screen.getByTestId("ns-option-permission")).getByRole("button") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("启动成功后面板自关；「正在启动」反馈由看板占位卡承担，不再 emit session-starting", async () => {
+    api.newSession.mockResolvedValue(undefined);
+    render(<NewSessionPanel />);
+    fireEvent.change(await screen.findByTestId("ns-dir"), { target: { value: "C:/proj" } });
+    fireEvent.click(screen.getByTestId("ns-launch"));
+    await waitFor(() => expect(closeMock).toHaveBeenCalled());
+    // 占位卡（后端 pending PTY 合成负 id 占位项）取代了 toast 回执——这条事件已没有听众。
+    expect(emitMock).not.toHaveBeenCalledWith("session-starting", expect.anything());
+  });
+
   /// 跨仓同一需求 = 一个会话 + 附加目录:Ctrl+点击最近项附加,启动把附加目录交给后端
   /// 拼 --add-dir;主目录本身不重复附加。
   it("Ctrl+点击最近项加为附加目录,启动带 extraDirs", async () => {
@@ -165,11 +208,11 @@ describe("NewSessionPanel (独立窗口)", () => {
     render(<NewSessionPanel />);
     // claude 支持附加目录 → 入口可见。
     await screen.findByTestId("ns-extra-add");
-    fireEvent.click(await screen.findByTitle(/w\\api/), { ctrlKey: true });
-    fireEvent.click(screen.getByTitle(/w\\proto/), { ctrlKey: true });
+    fireEvent.click(await screen.findByText("C:\\w\\api"), { ctrlKey: true });
+    fireEvent.click(screen.getByText("C:\\w\\proto"), { ctrlKey: true });
     expect(screen.getByTestId("ns-extra-list").textContent).toContain("api");
     // 主目录默认预填首个最近项(C:\w\web),Ctrl+点它不该重复附加。
-    fireEvent.click(screen.getByTitle(/w\\web/), { ctrlKey: true });
+    fireEvent.click(screen.getByText("C:\\w\\web"), { ctrlKey: true });
     fireEvent.click(screen.getByTestId("ns-launch"));
     await waitFor(() => expect(api.newSession).toHaveBeenCalledWith(
       "C:\\w\\web", "claude", {}, ["C:\\w\\api", "C:\\w\\proto"],
@@ -180,7 +223,7 @@ describe("NewSessionPanel (独立窗口)", () => {
     api.recentCwds.mockResolvedValue(["C:/w/web", "C:/w/api"]);
     render(<NewSessionPanel />);
     await screen.findByTestId("ns-extra-add");
-    fireEvent.click(await screen.findByTitle(/w\\api/), { ctrlKey: true });
+    fireEvent.click(await screen.findByText("C:\\w\\api"), { ctrlKey: true });
     expect(screen.getByTestId("ns-extra-list")).toBeTruthy();
     // kimi 未声明附加目录 flag → 入口消失、已选清空(静默带过去会被后端如实拒绝)。
     fireEvent.click(screen.getByTestId("ns-agent-kimi"));

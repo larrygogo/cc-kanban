@@ -232,9 +232,11 @@ pub fn update_tray_status(app: &AppHandle, running: usize, waiting: usize) {
     let _ = tray.set_title(None::<&str>);
 }
 
-/// 托盘右键菜单（设置 / 退出），按语言构建；切语言/改设置时由 lib.rs 的 apply_language 重建。
-/// `chat_enabled` 为 false（轻量模式）时不放「打开对话窗口」项——入口都不该出现，
-/// 而不是点了被拦。设置页切换开关会经 set_settings → apply_language 即时重建。
+/// 托盘右键菜单（打开对话窗口 / 找回贴纸 / 使用引导 / 设置 / 官网 / 退出），按语言构建；
+/// 切语言/改设置时由 lib.rs 的 apply_language 重建。菜单构成与 Windows
+/// （window::build_tray_menu）对齐：同一组项、同一顺序。`chat_enabled` 为 false
+/// （轻量模式）时不放「打开对话窗口」项——入口都不该出现，而不是点了被拦。
+/// 设置页切换开关会经 set_settings → apply_language 即时重建。
 pub fn build_tray_menu(
     app: &AppHandle,
     lang: &str,
@@ -245,6 +247,7 @@ pub fn build_tray_menu(
     } else {
         None
     };
+    let recall = MenuItemBuilder::with_id("recall", crate::tr(lang, "tray.recall")).build(app)?;
     let guide = MenuItemBuilder::with_id("guide", crate::tr(lang, "tray.guide")).build(app)?;
     let settings =
         MenuItemBuilder::with_id("settings", crate::tr(lang, "tray.settings")).build(app)?;
@@ -255,7 +258,7 @@ pub fn build_tray_menu(
     if let Some(chat) = &chat {
         builder = builder.item(chat);
     }
-    builder.items(&[&guide, &settings, &website, &quit]).build()
+    builder.items(&[&recall, &guide, &settings, &website, &quit]).build()
 }
 
 /// 创建 macOS 状态栏托盘：左键切换面板，右键弹「设置 / 退出」菜单。
@@ -273,6 +276,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false) // 左键不弹菜单 => 留给右键
         .on_menu_event(|app, event| match event.id().as_ref() {
             "chat" => crate::open_latest_chat_window(app),
+            "recall" => panel::recall_panel(app),
             "guide" => crate::open_onboarding_window(app),
             "settings" => crate::open_settings_window(app),
             "website" => {

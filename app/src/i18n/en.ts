@@ -7,9 +7,6 @@ export const en: Dict = {
   tabs: { all: "All", waiting: "Waiting", running: "Running" },
   time: {
     now: "now",
-    minAgo: (m) => `${m} min ago`,
-    hourAgo: (h) => `${h} hr ago`,
-    dayAgo: (d) => `${d} d ago`,
     waitedNow: "just started waiting",
     waitedMin: (m) => `waiting ${m} min`,
     waitedHour: (h) => `waiting ${h} hr`,
@@ -38,15 +35,17 @@ export const en: Dict = {
     search: "Search sessions",
     searchPlaceholder: "Search title / repo…",
     searchClose: "Close search",
-    usage5h: "5h",
-    usage7d: "7d",
-    usageOpus: "Opus 7d",
     pinOn: "Unpin window",
     pinOff: "Pin window",
+    // macOS 面板没有 always-on-top 语义（层级本就常驻最前），pin 在那边是「保持打开」。
+    keepOpenOn: "Stop keeping open",
+    keepOpenOff: "Keep open (don't auto-hide on focus loss)",
     waitingFirstInput: "Waiting for first input",
     stopped: "Disconnected / stopped",
     sessionError: "Session error",
     online: "Online",
+    // Weakened-badge tip for external sessions without screen detection (T-15).
+    assumedState: "Inferred from session records, may be stale",
     openSession: "Open session",
     resumeSession: "Resume session",
     cardResumeTip: "Click to resume — this restarts the CLI process",
@@ -59,7 +58,6 @@ export const en: Dict = {
     cardMenu: "More actions",
     openChat: "View full conversation",
     newSession: "New session",
-    previewMark: "Latest",
     // 会话星标与窗口置顶（pinOn "Unpin" / pinOff "Pin window"）同为 pin 语义：与 zh 的
     //「置顶/取消置顶」同步简化（P2-8 的旧区分按用户要求回退）。两者不同菜单不同层级，
     // 唯一同屏的是侧栏星标的 aria-label 与窗口按钮，语境足以区分。
@@ -85,6 +83,13 @@ export const en: Dict = {
     focusNotFound: "The session is running, but its terminal tab couldn't be located.",
     focusUnsupported: "This terminal doesn't support auto-focus. Switch manually.",
     focusPermission: "Allow Meowo to control your terminal to jump there.",
+    openSystemSettings: "Open System Settings",
+    // Positive feedback after a successful attach/resume: when the window lives on another
+    // virtual desktop the focus "succeeds" but the user sees nothing — without this it's a no-op.
+    openedIn: (target: string) => `Opened in ${target}`,
+    openTargetChat: "the chat window",
+    openTargetTerminal: "the external terminal",
+    resumeAlreadyRunning: "Session already running — switched to its window",
     focusEnded: "The session has ended.",
     focusFailed: "Meowo couldn't open the session terminal. Try again shortly.",
     // Agent 自己派生的后台会话（Claude Code 的 FleetView）：没有终端窗口可切，接管也无效。
@@ -96,11 +101,22 @@ export const en: Dict = {
     reopenSupported: "Reopen in a supported terminal",
     reopen: "Reopen",
     reopenConfirm: "The original session is still running. It will be ended, then reopened.",
+    reopenConfirmLabel: "End and reopen",
     reopening: "Reopening…",
     resuming: "Resuming session…",
+    // "Launching" placeholder card (pending PTY, negative id): the PTY is up but the CLI
+    // hasn't written its session row yet — codex isn't claimed until its first turn, and
+    // without a placeholder, clicking Launch feels like a no-op.
+    startingCard: "Launching session…",
+    startingTip: "Terminal is up — this becomes a real card once the agent first reports in",
+    // One-time notice after the first-launch history import (S-12): the import used to be
+    // completely silent. The backend first_import_notice guarantees it shows only once.
+    importNotice: (n: number) => `Imported ${n} session${n > 1 ? "s" : ""} from the last 7 days (read-only — your data is untouched)`,
     dismiss: "Dismiss",
     // Expand action of the collapsed strip (hover/focus/Enter all trigger it).
     expandBoard: "Expand board",
+    // Sessions that don't fit on the strip collapse into a trailing "+N" badge (W-5).
+    stripMore: (n: number) => `${n} more active session${n > 1 ? "s" : ""}`,
   },
   newSession: {
     title: "New session",
@@ -116,9 +132,7 @@ export const en: Dict = {
     drives: "Pick a drive",
     fixOnDesktop: "Resolve on the desktop before launching",
     noSubdirs: "No subfolders",
-    recent: "Recent",
     agent: "Agent",
-    terminal: "Terminal",
     cancel: "Cancel",
     launch: "Launch",
     launching: "Launching…",
@@ -132,14 +146,13 @@ export const en: Dict = {
     activeProfile: (name: string) => `Will use account: ${name}`,
     login: "Sign in",
     loggingIn: "Waiting for sign-in…",
-    cancelLogin: "Cancel",
+    cancelLogin: "Stop waiting",
     loginCancelled: "Stopped waiting. If you signed in, focus this window to re-check.",
-    loginFailed: "Failed to start sign-in",
     loginTimeout: "Sign-in not detected. If you signed in, focus this window to re-check",
-    hooksHelp: "How to set up",
     repairHooks: "Repair connection",
     repairingHooks: "Repairing…",
-    repairFailed: "Repair had no effect. Check the repair log in the terminal.",
+    repairHooksTip: "Re-writes Meowo's hooks into this agent's config. Use it when new sessions don't appear on the board.",
+    repairFailed: "Repair had no effect. Try again, or reinstall the agent.",
     repairNeedLogin: "Sign in to this agent in a terminal first, then repair the connection.",
     repairNoReporter: "Missing component meowo-reporter. Please reinstall Meowo.",
     repairNotDetected: "This agent's data directory wasn't detected. Make sure it's installed.",
@@ -167,10 +180,13 @@ export const en: Dict = {
       "work.default": "Default",
       "work.plan": "Plan mode",
     } as Record<string, string>,
+    // Subtitle for risky tiers (contract LaunchChoice.risk=true): one line spelling out the cost.
+    riskyChoiceSub: "Skips human confirmation — the agent can run high-risk actions on its own",
+    // With relay enabled the model is pinned by the relay (backend --model wins): grey out and say so.
+    relayPinnedModel: (model: string) => `Pinned to ${model} by the API relay`,
   },
   chat: {
     title: "Session conversation",
-    live: "Live sync",
     // Header status badge (keyed by SessionTone). Short: it sits in the title bar.
     status: {
       running: "Running",
@@ -184,11 +200,14 @@ export const en: Dict = {
     empty: "No conversation entries to display yet",
     emptyWorking: "The agent is already working — the conversation will appear shortly",
     emptyStarting: "Starting session…",
-    loading: "Loading conversation…",
     pickSession: "Pick a session from the sidebar",
     loadEarlier: "Load earlier messages",
     loadingEarlier: "Loading…",
     loadError: "Could not read the conversation. Retrying…",
+    // Sync interrupted (C-18): only after consecutive IPC poll failures — it means the
+    // window lost its channel to the backend, NOT that the agent process died (that is
+    // the "Disconnected" status badge). Keep the two phrasings distinct.
+    syncInterrupted: "Sync with the backend interrupted — reconnecting; showing cached content",
     jumpLatest: "Jump to latest",
     switcherTitle: "Quick session switcher",
     switcherPlaceholder: "Search and jump to a session (↑↓ to select, Enter to open)",
@@ -216,8 +235,6 @@ export const en: Dict = {
     questionExpired: "The question card timed out and closed; keep answering on the Terminal tab",
     terminalApprovalBanner: "1 request pending approval — the agent is waiting for you",
     terminalApprovalGo: "Review",
-    you: "You",
-    assistant: "Agent",
     toolResult: "Tool result",
     lightboxClose: "Close image",
     zoomIn: "Zoom in",
@@ -231,7 +248,6 @@ export const en: Dict = {
     reasoning: "Reasoning",
     reasoningLines: (n) => `${n} lines`,
     compact: "Context compacted",
-    readOnly: "Conversation syncs live. Switch to Terminal to take over a disconnected session.",
     inputLabel: "Send a message to the Agent",
     inputPlaceholder: "Message the Agent directly (Enter to send, Shift+Enter for a new line)",
     inputPlaceholderRemote: "Message the Agent",
@@ -247,7 +263,6 @@ export const en: Dict = {
     chooseAttachments: "Choose images or files to send to the Agent",
     removeAttachment: "Remove attachment",
     // Attachment type badges (tiny monospace tag on each compose attachment chip).
-    attachmentImage: "IMG",
     attachmentFile: "FILE",
     attachmentLimit: (max) => `Up to ${max} attachments; the rest were skipped`,
     attachmentInstruction: (files) => `Read the following local attachments and use them to complete the task (use image reading for images):\n${files}`,
@@ -259,7 +274,7 @@ export const en: Dict = {
     questionFormLoading: "Pick an answer; it will be applied once the terminal form is ready",
     queuedAnswerHint: (label: string) => `Picked "${label}" — it will be applied once the form is ready`,
     questionExternalHint: "Answer in the terminal running this session; the card closes automatically",
-    questionMultiHint: "Answer multi-select forms in the terminal; the card closes automatically",
+    questionMultiHint: "No clickable options here — answer in the terminal; the card closes automatically",
     answerOnDesktop: "Answer on the desktop; the card closes automatically",
     customAnswerPlaceholder: "Type another answer",
     addCustomAnswer: "Add answer",
@@ -269,9 +284,12 @@ export const en: Dict = {
     questionAnswerIncomplete: (count: number) => `${count} question${count === 1 ? "" : "s"} left`,
     chatAboutThis: "Discuss with Agent",
     planTitle: "Agent is waiting for plan approval",
-    approvalDetails: "View request details",
     approvalTool: "Requested tool",
     approvalInput: "Full parameters",
+    // 长命令详情的两个出口:展开全部(摘掉 pre 限高)与复制命令(见 ApprovalCommandDetail)。
+    approvalExpand: "Expand all",
+    approvalCollapse: "Collapse",
+    copyCommand: "Copy command",
     approvalReadingTerminal: "Reading the Agent's choices…",
     allowOnce: "Allow once",
     allowRemember: "Allow and remember",
@@ -304,12 +322,24 @@ export const en: Dict = {
     terminalStarting: "Starting terminal…",
     terminalInitializing: "Initializing Agent…",
     terminalExited: (code: number | null) => `The Agent exited${code == null ? "" : ` with code ${code}`}; its terminal output is preserved above`,
+    // Forced finalize (last resort when kill silently failed): session detached, but the process may still linger.
+    terminalExitedForced: (code: number | null) => `Force-ended${code == null ? "" : ` (exit code ${code})`} — the process did not exit cleanly and may still be lingering; its terminal output is preserved above`,
     terminalStopping: "Stopping…",
     endSession: "End session",
+    endAndResume: "End & resume",
     endSessionConfirm: "This stops the running task. End the session?",
-    archiveTip: "Hide from board",
-    unarchiveTip: "Bring back to board",
     terminalAttach: "Open synced external terminal",
+    // Hover hint shown bottom-right when the mouse is over a link / file path in the terminal
+    // (T-4: Ctrl+click previously had no on-screen affordance).
+    terminalLinkHint: "Ctrl+click to open link",
+    terminalPathHint: "Ctrl+click to reveal in file manager",
+    // Terminal context menu (U0-11: replaces the WebView default menu blocked by devtools-guard in prod).
+    terminalMenuCopy: "Copy",
+    terminalMenuPaste: "Paste",
+    terminalMenuSelectAll: "Select all",
+    terminalMenuSearch: "Search terminal…",
+    // Chat-page hint while an external mirror terminal is attached to the same PTY (T-14).
+    externalViewerHint: "An external terminal is attached to this session — input from both sides may interleave",
     modelMenuOpen: "The model menu is open in the terminal — click to dismiss",
     slashMenuOpened: "The command opened a terminal UI — detecting its options…",
     slashMenuDismiss: "Dismiss",
@@ -362,15 +392,17 @@ export const en: Dict = {
     subagentDurationHour: (h: number, m: number) => `${h}h ${m}m`,
     subagentLoading: "Loading the subtask's record…",
     subagentEmpty: "This subtask left no record",
-    terminalStartExited: (code: number | null) => `The Agent exited right after starting${code == null ? "" : ` (exit code ${code})`}; check the Terminal tab for its output`,
+    terminalStartExited: (code: number | null, tail?: string) => `The Agent exited during startup${code == null ? "" : ` (exit code ${code})`}${tail ? `: ${tail}` : "; check the Terminal tab for its output"}`,
     terminalStartFailed: "The Agent terminal failed to start",
     terminalReadyTimeout: "Timed out waiting for the Agent terminal to become ready; check the Terminal tab",
+    // 就绪等待的进度横幅（waitForTerminalReady 报送整秒）：秒数 + 「去终端页看」。
+    terminalWaitingReady: (seconds: number) => `Waiting for the Agent terminal to be ready… ${seconds}s elapsed. Check the Terminal tab for startup progress.`,
     sendNeedsTakeover: "Running in an external terminal. Taking over stops that process and continues here.",
     composerGateEnded: "This session has ended. Resume it to continue chatting.",
     resumeSession: "Resume session",
     terminalNeedsAttention: "The Agent awaits a startup confirmation. Pick an option in the card, then send again.",
     sendEchoTimeout: "The message didn't reach the terminal and was cancelled. Check the Terminal tab, then retry.",
-    terminalStreamStalled: "The terminal screen is stuck and won't recover on its own. Click \"End session\" and start again — the conversation is unaffected.",
+    terminalStreamStalled: "The terminal screen is stuck and won't recover on its own. Click \"End & resume\" — the conversation is unaffected.",
     terminalInitTimeout: "No terminal output for a while — startup may have failed. You can end the session and retry; the conversation is unaffected.",
     queuedInterjections: (n: number) => n === 1 ? "1 queued message — processed after the current turn" : `${n} queued messages — processed after the current turn`,
     queuedAttachmentOnly: "(attachment)",
@@ -424,6 +456,8 @@ export const en: Dict = {
     sidebarDirAll: "All folders",
     sidebarShowIdle: (n: number) => `Show ${n} not running`,
     sidebarHideIdle: "Hide not running",
+    sidebarLiveSummary: (approval: number, waiting: number, error: number) =>
+      `Session summary: ${approval} awaiting approval, ${waiting} waiting for input, ${error} errored`,
     dirsSection: "Folders",
     addExtraDir: "Add directory",
     sidebarNoDir: "No folder recorded",
@@ -457,6 +491,7 @@ export const en: Dict = {
     switchProvider: "Switch engine",
     switchProviderConfirm: (from: string, to: string) =>
       `This ends the ${from} process and hands the conversation off to ${to}. The original stays available for review.`,
+    switchProviderConfirmLabel: "End process and switch",
     switchProviderDefaultModel: "Default model",
     handoffPrompt: (path: string) =>
       `Please read the file ${path} in full first — it is the context handoff from this session's earlier run in another CLI. Once read, continue the task directly; do not repeat the file's contents back.`,
@@ -525,12 +560,6 @@ export const en: Dict = {
       "/undo": "Undo the last change",
     } as Record<string, string>,
   },
-  update: {
-    clickToInstall: "Click to download and install the update",
-    downloading: (pct) => `Downloading update ${pct}%`,
-    downloadingNoPct: "Downloading update…",
-    newVersion: (v) => `v${v} available · click to update`,
-  },
   errorLabels: {
     "工具调用解析失败": "Tool call parse failed",
     "需要重新登录": "Re-login required",
@@ -538,6 +567,8 @@ export const en: Dict = {
   },
   settings: {
     nav: { general: "General", sessions: "Sessions", appearance: "Appearance", network: "Network", account: "Accounts & usage", about: "About" },
+    searchPlaceholder: "Search settings…",
+    searchNoResults: "No matching settings",
     archivedSessions: "Archived sessions",
     archivedEmpty: "No archived sessions",
     archivedLoadMore: "Load more",
@@ -549,7 +580,9 @@ export const en: Dict = {
     notify: "Desktop notifications",
     notifyDesc: "Notify when a session needs your reply or errors out",
     attentionFlash: "Taskbar alert",
-    attentionFlashDesc: "Highlight the taskbar icon when a session needs attention",
+    attentionFlashDesc: "Highlight the taskbar icon when a session needs attention; independent of desktop notifications, so it still works with notifications off",
+    clickThrough: "Click-through",
+    clickThroughDesc: "Clicks pass through the sticker to windows below; hold Alt to interact temporarily",
     autoUpdate: "Automatic updates",
     autoUpdateDesc: "Check and download new versions automatically, then let you choose when to restart",
     resumeTerm: "Default terminal",
@@ -601,14 +634,19 @@ export const en: Dict = {
     termFontSizeDesc: "Text size in the terminal",
     termLineHeight: "Terminal line height",
     termLineHeightDesc: "Line spacing in the terminal",
+    termScrollback: "Terminal scrollback",
+    termScrollbackDesc: "Lines of terminal history kept for scrolling back",
     lineCompact: "Compact",
     lineNormal: "Normal",
     lineRelaxed: "Relaxed",
     appearanceHint: "Changes apply instantly.",
+    // S-5 mini sticker preview beside the rows: sample title/subtitle; opacity & UI scale apply to it live.
+    appearancePreviewTag: "Preview · updates live with the settings below",
+    appearancePreviewTitle: "Tidy release scripts",
+    appearancePreviewSub: "~/projects/meowo",
     showQuotaOnSticker: "Show quota on sticker",
   },
   proxy: {
-    title: "Proxy",
     desc: "Written into each agent's own config; usage checks and downloads use it too.",
     mode: "Default proxy",
     modeDesc: "Used by every agent without its own setting",
@@ -625,7 +663,6 @@ export const en: Dict = {
     effective: (p) => `Effective: ${p}`,
     effectiveDirect: "Effective: direct",
     saveFailed: (e) => `Save failed: ${e}`,
-    coverageTitle: "Applies to",
     coverageFull: "All sessions (including ones you start in your own terminal)",
     coverageFullWhy: "The proxy is written into its config file, so it applies no matter who launches it",
     coveragePartial: "Only sessions opened from Meowo",
@@ -638,7 +675,6 @@ export const en: Dict = {
     updaterSocksHint: "Self-update supports HTTP proxies only; SOCKS has no effect.",
   },
   remote: {
-    title: "Phone remote",
     enable: "Enable remote access",
     enableDesc: "View and send messages from your phone on the same LAN or Tailscale",
     port: "Port",
@@ -666,11 +702,8 @@ export const en: Dict = {
   },
   relay: {
     title: "API relay",
-    desc: "Each agent uses either an official account or an API relay.",
     accessMode: "Access mode",
     official: "Official account",
-    enabled: "Relay enabled",
-    disabled: "Using official service",
     baseUrl: "Relay URL",
     baseUrlPlaceholder: "https://relay.example.com/v1",
     model: "Model",
@@ -687,7 +720,6 @@ export const en: Dict = {
     protocol: "API protocol",
     secret: "Relay credential",
     secretPlaceholder: "Enter API key / token",
-    secretSaved: "Saved. Enter a new value to replace it",
     completeToEnable: "Enables automatically once URL, model and credential are set. Official account stays active until then.",
     missingFields: (fields: string[]) => `Still needed: ${fields.join(", ")} — enables automatically once set`,
     coverage: "Applies only to sessions created or resumed from now on.",
@@ -724,10 +756,11 @@ export const en: Dict = {
     deleteProfile: "Delete account",
     deleteProfileConfirm: (name: string) =>
       `Delete account "${name}"? Its credentials and session history will be deleted for good.`,
-    profileUnsupported: "This agent doesn't support multiple accounts",
     login: "Sign in",
     loggingIn: "Waiting for sign-in…",
-    cancelLogin: "Cancel",
+    loginWaiting: (terminal) =>
+      `Sign-in opened in ${terminal}. We'll detect it when you finish — waiting up to 5 minutes.`,
+    cancelLogin: "Stop waiting",
     loginCancelled: "Stopped waiting. If you finished signing in, focus this window to re-check.",
     loginFailed: "Failed to start sign-in",
     loginTimeout: "Sign-in not detected. If you already signed in, focus this window to re-check",
@@ -743,12 +776,14 @@ export const en: Dict = {
     loggedOut: "Signed out. Sessions and settings kept.",
     logoutFailed: (e: string) => `Could not sign out: ${e}`,
     install: "Install",
-    installHint: "Install to view account and quota",
+    installHint: "Install to view account and quota. Downloads components online — usually a minute or two",
     installing: "Installing…",
     installingFor: (s) => `Installing… (${s}s)`,
+    cancelInstall: "Cancel install",
     installRetry: "Retry",
     installFailed: "Installation failed",
-    installLogHint: (p: string) => `Install log: ${p}`,
+    installLogOpen: "Open install log",
+    installLogOpenFailed: (e: string) => `Couldn't open the log: ${e}`,
     pathGap: "Not found in your terminal?",
     pathGapDetail: (dir: string) => `${dir} is not on your PATH — the command won't be found in a terminal`,
     addToPath: "Add to PATH",
@@ -760,13 +795,10 @@ export const en: Dict = {
     relayActive: "Using an API relay; official account quota does not apply",
     refresh: "Refresh",
     usageUpdatedAt: (time) => `Updated at ${time}`,
-    quota5h: "5-hour quota",
-    quota7d: "7-day quota",
-    quotaOpus: "Opus · 7 days",
     extraUsage: "Extra usage enabled",
     credits: (n) => `Credits: ${n}`,
     refreshFailed: "Refresh failed; showing cached values",
-    usageUnavailable: "Usage unavailable. Make sure you're signed in or check your network",
+    usageUnavailable: "Couldn't load usage — check your network, then hit Refresh above to retry",
     usageUnsupported: "Usage is not available for this account",
     loading: "Loading…",
     resetSoon: "Resets soon",
@@ -789,7 +821,6 @@ export const en: Dict = {
     current: (v) => `Current version v${v}`,
     found: (v) => `New version v${v} available`,
     notes: "What's new",
-    install: "Update now",
     download: "Download update",
     ready: "Update downloaded and ready to install",
     readyHint: "No rush. The update installs automatically when you quit Meowo",
@@ -800,6 +831,7 @@ export const en: Dict = {
         : `Restarting will interrupt ${n} running sessions. Continue?`,
     downloading: "Downloading update…",
     downloadingPct: (p) => `Downloading update ${p}%`,
+    cancelDownload: "Cancel download",
     restartHint: "Downloads don't interrupt your work. Installing restarts Meowo and interrupts managed sessions.",
     error: "Update check failed. Check your network and try again",
     retry: "Retry",
@@ -808,7 +840,6 @@ export const en: Dict = {
     fullChangelog: "View full changelog",
   },
   about: {
-    updating: "Updating…",
     updateTo: (v) => `Update to v${v}`,
     checking: "Checking…",
     checkUpdate: "Check for updates",
@@ -834,6 +865,27 @@ export const en: Dict = {
     welcome: {
       title: "Welcome to Meowo",
       desc: "A desktop sticker with live progress of your AI coding sessions — see who's running and who's waiting on you at a glance.",
+    },
+    // The board stays empty until an agent is installed and signed in — without this step,
+    // users finished the guide staring at an empty board.
+    connect: {
+      title: "Connect your AI CLIs",
+      points: [
+        "Install agents like Claude Code or Codex under Settings → Accounts & usage.",
+        "Then click “Sign in” and finish authorization in the terminal that pops up.",
+        "Sessions these CLIs start will show up on the board.",
+      ],
+    },
+    // S-12: hooks used to silently rewrite ~/.claude/settings.json — state what changes,
+    // where the backup is, and how to remove it; also covers the first-launch 7-day import.
+    progress: {
+      title: "How Meowo reads progress",
+      points: [
+        "Meowo writes hooks into each CLI's config file (e.g. ~/.claude/settings.json) to report session status. Everything else in the file is kept as-is.",
+        "Before the first write, the original file is backed up next to it (a .cckb-bak file).",
+        "To remove them later, delete the hooks entries from the config or restore the .cckb-bak backup.",
+        "On first launch, sessions from the last 7 days are imported to the board read-only — your original data is untouched.",
+      ],
     },
     board: {
       title: "Live session board",

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { pickAndAddExtraDir, confirmStopSession, getLiveSessionsPage, getSessionLineage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, searchChatTranscripts, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LineageEntry, type LiveSession, type SessionTone, type TranscriptSearchHit } from "../api";
 import { remoteUi } from "../remoteMode";
 import { useBoardRefresh } from "../hooks/useBoardRefresh";
+import { useSessionActions } from "../hooks/useSessionActions";
 import { useSettingsEffect } from "../hooks/useSettings";
 import { agentAssets, tintStyle } from "../providers";
 import { folderName, parentSegment, pathKey } from "../paths";
@@ -403,6 +404,15 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
   limitRef.current = limit;
   // 行级结构共享的缓存（键 = session.id，只增不清，量级是本窗口见过的会话数）。
   const rowCacheRef = useRef<RowCache<LiveSession>>(new Map());
+  const listRef = useRef<HTMLElement>(null);
+  // 外部切换（贴纸/快捷键/审批召唤等不经由本列表点击的路径）后，当前项可能滚在视口外，
+  // 高亮看不见等于没切。activeId 变化时把它滚回可视区；用户自己点击的切换本来就在
+  // 视口内，block:"nearest" 下是 no-op，不打断浏览。
+  useEffect(() => {
+    // jsdom 无 scrollIntoView，可选调用兜底（与 composerCompletion 同法）。
+    (listRef.current?.querySelector(".chat-sidebar-item.is-active") as HTMLElement | null)
+      ?.scrollIntoView?.({ block: "nearest" });
+  }, [activeId]);
   // 目录筛选:选中的 cwd 走后端的**专用 cwd 参数**(斜杠归一后精确比较,子目录一并命中),
   // 不是 search 的子串 LIKE——理由见下面 load 里的注释。分页与排序仍全在后端做:前端过滤
   // 只能过滤「已加载的这一页」,筛出来的清单是残缺的。
@@ -698,22 +708,12 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
     }
     setNotingId(null);
   };
-  // 归档撤销:动作无确认、取回入口(筛选菜单→已归档)较隐蔽,归档成功后给 8s 一键撤销
-  // (与看板 toast、对话窗标题菜单同一语义)。数组承载批量归档的整批撤销。
-  const [archiveUndo, setArchiveUndo] = useState<number[] | null>(null);
-  useEffect(() => {
-    if (archiveUndo == null) return;
-    const timer = window.setTimeout(() => setArchiveUndo(null), 8_000);
-    return () => window.clearTimeout(timer);
-  }, [archiveUndo]);
-  const undoArchive = (ids: number[]) => {
-    setArchiveUndo(null);
-    void Promise.allSettled(ids.map((id) => setArchived(id, false))).then((results) => {
-      if (results.some((entry) => entry.status === "rejected")) setActionError(t.chat.sidebarActionFailed);
-      void loadRef.current("refresh");
-      onSelect(ids[0]);
-    });
-  };
+  // 归档动作(单条/批量)与撤销条统一走 useSessionActions(C-13):与对话窗标题菜单同一条
+  // set_archived、同一个「下一条」取序(按当前可见顺序取当前条之后的第一条)、同一个 8s 撤销窗。
+  const { archiveUndo, archive: archiveSessions, undoArchive } = useSessionActions({
+    onNavigate: onSelect,
+    onError: setActionError,
+  });
   // 批量归档:Ctrl/Cmd+点击进入多选(继续 Ctrl+点击增删),普通点击退出多选并正常切会话,
   // Esc 清空退出。选中集按 id,刷新/翻页不受影响。
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<number>>(() => new Set());
@@ -738,19 +738,14 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
     const ids = [...selectedIds];
     if (ids.length === 0) return;
     setSelectedIds(new Set());
-    // 乐观整批摘除;当前打开的也在其中时切到幸存的下一条(与单条归档同语义)。
+    // 乐观整批摘除;当前打开的也在其中时跳「下一条」(取序与对话窗归档一致,见 useSessionActions)。
     setSessions((prev) => prev?.filter((s) => !ids.includes(s.session.id)) ?? prev);
-    if (ids.includes(activeId)) {
-      const following = (ordered ?? []).find((s) => !ids.includes(s.session.id));
-      if (following) onSelect(following.session.id);
-    }
-    void Promise.allSettled(ids.map((id) => setArchived(id, true))).then((results) => {
-      const ok = ids.filter((_, index) => results[index].status === "fulfilled");
-      if (ok.length < ids.length) {
-        setActionError(t.chat.sidebarActionFailed);
-        void loadRef.current("refresh");
-      }
-      if (ok.length > 0) setArchiveUndo(ok);
+    void archiveSessions({
+      ids,
+      visibleOrder: (ordered ?? []).map((s) => s.session.id),
+      activeId,
+      onFailure: () => void loadRef.current("refresh"),
+      errorMessage: t.chat.sidebarActionFailed,
     });
   };
   const toggleArchived = (item: LiveSession) => {
@@ -759,18 +754,21 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
     // 归档 = 从 "all" 里消失,乐观摘掉(不等 IPC 往返),失败重取拉回。当前打开的那条也照摘:
     // 已归档 = 已收纳,列表里就不该再有它,哪怕右边还开着它的对话。
     setSessions((prev) => prev?.filter((s) => s.session.id !== id) ?? prev);
-    // 归档的正是当前打开的这条:右边也得跟着走,否则「收起来了却还摊在桌上」。
-    // 切到列表里的下一条;它是唯一一条时留在原地(空窗比自作主张关窗好)。
-    if (target && id === activeId) {
-      const following = (ordered ?? []).find((s) => s.session.id !== id);
-      if (following) onSelect(following.session.id);
-    }
-    setArchived(id, target)
-      .then(() => { if (target) setArchiveUndo([id]); })
-      .catch(() => {
-        setActionError(t.chat.sidebarActionFailed);
-        void loadRef.current("refresh");
+    if (target) {
+      // 归档的正是当前打开的这条:右边也跟着跳到「下一条」(取序同对话窗,见 useSessionActions)。
+      void archiveSessions({
+        ids: [id],
+        visibleOrder: (ordered ?? []).map((s) => s.session.id),
+        activeId,
+        onFailure: () => void loadRef.current("refresh"),
+        errorMessage: t.chat.sidebarActionFailed,
       });
+      return;
+    }
+    setArchived(id, false).catch(() => {
+      setActionError(t.chat.sidebarActionFailed);
+      void loadRef.current("refresh");
+    });
   };
   const endSession = (item: LiveSession) => {
     void confirmStopSession(item.session.id, { title: t.chat.endSession, message: t.chat.endSessionConfirm })
@@ -867,6 +865,28 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
     setLimit((n) => n + PAGE_LIMIT);
   };
 
+  // C-17：侧栏列表 roving tabindex——上百条会话只占一个 Tab 停靠点，↑↓/Home/End 在
+  // 条目间搬 DOM 焦点。可停靠条目取当前选中的那条（被筛选掉时退回首条）。
+  const tabbableId = useMemo(() => {
+    if (!ordered || ordered.length === 0) return null;
+    return ordered.some((item) => item.session.id === activeId) ? activeId : ordered[0].session.id;
+  }, [ordered, activeId]);
+
+  // G-16：状态点已全部降级为 role=img（每条会话一个 role=status 就是 N 个播报源，
+  // 状态秒级跳变等于播报风暴）；全侧栏只留这一个视觉隐藏的汇总 live region。
+  // 文本没变时 React 不动 DOM，读屏不会重复播报。
+  const liveSummary = useMemo(() => {
+    if (!ordered || ordered.length === 0) return "";
+    let approval = 0, waiting = 0, error = 0;
+    for (const item of ordered) {
+      if (approvalAwaitingIds.has(item.session.id)) approval += 1;
+      const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored, item.busy_subagents);
+      if (tone === "waiting") waiting += 1;
+      else if (tone === "error") error += 1;
+    }
+    return t.chat.sidebarLiveSummary(approval, waiting, error);
+  }, [ordered, approvalAwaitingIds, t]);
+
   // 平铺与分组共用同一份条目渲染:两套 JSX 会各自漂移(状态点口径、标题回退文案),
   // 那正是「贴纸报错、侧栏亮绿点」那类不一致的来源。
   const renderItem = (item: LiveSession) => {
@@ -883,12 +903,13 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
     const editing = editingId === item.session.id;
     const noting = notingId === item.session.id;
     // 条目从 <button> 改成 role=button 的 <div>：里面要放「⋯」按钮，button 套 button 是
-    // 非法 HTML（浏览器会把内层拆出去）。键盘可达性靠 tabIndex + Enter/Space 补齐。
+    // 非法 HTML（浏览器会把内层拆出去）。键盘可达性靠 tabIndex + Enter/Space 补齐；
+    // tabIndex 是 roving 的——只有 tabbableId 那条进 Tab 序，其余靠列表的 ↑↓ 到达（C-17）。
     return (
       <div
         key={item.session.id}
         role="button"
-        tabIndex={0}
+        tabIndex={item.session.id === tabbableId ? 0 : -1}
         className={"chat-sidebar-item" + (item.session.id === activeId ? " is-active" : "") + (selectedIds.has(item.session.id) ? " is-checked" : "")}
         aria-current={item.session.id === activeId ? "true" : undefined}
         aria-selected={selectedIds.size > 0 ? selectedIds.has(item.session.id) : undefined}
@@ -928,8 +949,8 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
         >
           <Icon />
           {awaitingApproval
-            ? <i className="chat-sidebar-dot is-approval" role="status" aria-label={t.chat.sidebarApproval} data-tip={t.chat.sidebarApproval} />
-            : showDot && <i className={`chat-sidebar-dot is-${tone}`} role="status" aria-label={t.chat.status[tone]} data-tip={t.chat.status[tone]} />}
+            ? <i className="chat-sidebar-dot is-approval" role="img" aria-label={t.chat.sidebarApproval} data-tip={t.chat.sidebarApproval} />
+            : showDot && <i className={`chat-sidebar-dot is-${tone}`} role="img" aria-label={t.chat.status[tone]} data-tip={t.chat.status[tone]} />}
         </span>
         <span className="chat-sidebar-text">
           {editing ? (
@@ -1113,7 +1134,27 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
           >×</button>
         )}
       </div>
-      <nav className="chat-sidebar-list" aria-label={t.chat.sidebarTitle} onScroll={onScroll}>
+      <nav
+        ref={listRef}
+        className="chat-sidebar-list"
+        aria-label={t.chat.sidebarTitle}
+        onScroll={onScroll}
+        // C-17：↑↓/Home/End 在会话条目间搬 DOM 焦点（roving，与 menu.tsx 同款）。
+        // 只认焦点落在条目本体上的情况——编辑输入框/行内按钮里的方向键各自自理。
+        onKeyDown={(e) => {
+          if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+          const target = e.target as HTMLElement;
+          if (!target.classList?.contains("chat-sidebar-item")) return;
+          const items = Array.from(listRef.current?.querySelectorAll<HTMLElement>(".chat-sidebar-item") ?? []);
+          if (items.length === 0) return;
+          e.preventDefault();
+          const at = items.indexOf(target);
+          const next = e.key === "Home" ? items[0]
+            : e.key === "End" ? items[items.length - 1]
+            : items[(at + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length];
+          next?.focus();
+        }}
+      >
         {sessions === null && <div className="chat-sidebar-empty">{t.chat.sidebarLoading}</div>}
         {sessions !== null && sessions.length === 0 && (
           <div className="chat-sidebar-empty">
@@ -1154,8 +1195,8 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
                     <ChevronDownIcon className={"chat-sidebar-caret" + (isFolded ? " is-folded" : "")} size={10} strokeWidth={2.6} />
                     <span className="chat-sidebar-group-name">{group.label || t.chat.sidebarNoDir}</span>
                     {approval
-                      ? <i className="chat-sidebar-dot is-approval" role="status" aria-label={t.chat.sidebarApproval} data-tip={t.chat.sidebarApproval} />
-                      : showDot && <i className={`chat-sidebar-dot is-${tone}`} role="status" aria-label={t.chat.status[tone]} data-tip={t.chat.status[tone]} />}
+                      ? <i className="chat-sidebar-dot is-approval" role="img" aria-label={t.chat.sidebarApproval} data-tip={t.chat.sidebarApproval} />
+                      : showDot && <i className={`chat-sidebar-dot is-${tone}`} role="img" aria-label={t.chat.status[tone]} data-tip={t.chat.status[tone]} />}
                     <span className="chat-sidebar-group-count">{group.items.length}</span>
                   </button>
                   {!isFolded && shown.map(renderItem)}
@@ -1214,13 +1255,15 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
           </div>
         )}
       </nav>
+      {/* G-16：全侧栏唯一的读屏汇总播报源（视觉隐藏），取代每条会话一个 role=status。 */}
+      <div className="chat-sidebar-sronly" role="status">{liveSummary}</div>
       {/* 动作失败的唯一出口（重命名/便签/归档）：4s 后自动消失。 */}
       {actionError && <div className="chat-sidebar-error" role="status">{actionError}</div>}
       {/* 归档撤销条:8s 内可一键取回并跳回该会话(批量归档整批撤销)。 */}
       {archiveUndo != null && !actionError && (
         <div className="chat-sidebar-error is-undo" role="status">
           <span>{archiveUndo.length > 1 ? `${t.sticker.archivedNotice} × ${archiveUndo.length}` : t.sticker.archivedNotice}</span>
-          <button type="button" onClick={() => undoArchive(archiveUndo)}>{t.sticker.archiveUndo}</button>
+          <button type="button" onClick={() => undoArchive({ onUndone: (ids) => { void loadRef.current("refresh"); onSelect(ids[0]); }, errorMessage: t.chat.sidebarActionFailed })}>{t.sticker.archiveUndo}</button>
         </div>
       )}
       {/* 批量归档操作条:多选态常驻底部(Ctrl+点击增删,Esc 退出)。 */}

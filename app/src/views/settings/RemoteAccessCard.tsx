@@ -165,12 +165,13 @@ export function RemoteAccessCard() {
                 <button type="button" className="remote-copy" onClick={copy}>
                   {copied ? t.remote.copied : t.remote.copy}
                 </button>
-                {/* 换发即吊销:apply 比对 token 差异重启 server,已配对手机全部 401 回配对页。 */}
+                {/* 换发即吊销:apply 比对 token 差异重启 server,已配对手机全部 401 回配对页。
+                    但无可逆破坏——重新扫码即可配对,不销毁任何数据,故不用 danger 红(S-14)。 */}
                 <button
                   type="button"
                   className="remote-copy"
                   onClick={() => {
-                    void appConfirm(t.remote.regenerateConfirm, { title: t.remote.regenerate, danger: true }).then((yes) => {
+                    void appConfirm(t.remote.regenerateConfirm, { title: t.remote.regenerate, confirmLabel: t.remote.regenerate }).then((yes) => {
                       if (!yes) return;
                       void regenerateRemoteToken().then(refreshSettled).catch(() => {});
                     });

@@ -83,8 +83,9 @@ pub use relay::{
     RelaySuggestionGroup, RelayUi,
 };
 pub use transcript::{
-    default_resolve_cwd, read_chat_delta, AgentMode, ChatDelta, ChatItem, TranscriptCache,
-    TranscriptEvent, TranscriptInfo, TranscriptParser, TranscriptSpec, TurnError,
+    default_resolve_cwd, read_chat_delta, read_chat_delta_paged, read_chat_window, AgentMode,
+    ChatDelta, ChatItem, ChatWindow, TranscriptCache, TranscriptEvent, TranscriptInfo,
+    TranscriptParser, TranscriptSpec, TurnError,
 };
 pub use variant::{DataDirSpec, Installation, Variant};
 pub use wiring::{backup_once, wire_hooks, WiringCap, WiringContext};

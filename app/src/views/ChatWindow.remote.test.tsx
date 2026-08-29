@@ -77,6 +77,6 @@ describe("ChatWindow 远程门控", () => {
     expect(screen.queryByRole("button", { name: "对话" })).toBeNull();
     expect(screen.queryByRole("button", { name: "查看改动" })).toBeNull();
     // 但对话核心(发消息)不受影响。
-    expect(screen.getByRole("textbox", { name: "发送消息给 Agent" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "发送消息给 Agent" })).toBeTruthy();
   });
 });

@@ -27,4 +27,15 @@ describe("formatBackendError", () => {
   it("未命中且不含汉字:英文界面原样显示", () => {
     expect(formatBackendError("connection refused", "en-US")).toBe("connection refused");
   });
+
+  it("profile reason 码(S-9):按当前语言映射,detail 透传", () => {
+    // 进行中会话数走 tail 透传
+    expect(formatBackendError("profile/has-live-sessions: 2", "zh-CN")).toContain("进行中的会话");
+    expect(formatBackendError("profile/has-live-sessions: 2", "en-US")).toContain("live sessions");
+    // 长前缀优先:unrestored 不被 delete-dir-failed 抢先命中
+    expect(formatBackendError("profile/delete-dir-failed-unrestored: io", "en-US")).toContain("restoring the entry also failed");
+    expect(formatBackendError("profile/delete-dir-failed: io", "zh-CN")).toContain("已恢复");
+    // 英文界面不再漏中文
+    expect(formatBackendError("profile/copy-failed: /tmp/x: io", "en-US")).not.toMatch(/[一-鿿]/);
+  });
 });

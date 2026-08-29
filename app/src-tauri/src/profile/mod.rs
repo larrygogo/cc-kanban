@@ -258,6 +258,15 @@ pub(crate) async fn list_profiles(provider: String) -> Vec<ProfileView> {
     .unwrap_or_default()
 }
 
+/// 结构化错误（S-9）：`profile/<code>: <detail>`。invoke 的错误通道只有 String，reason 码
+/// 与前端 `i18n/errors.ts` 的映射表一一对应（改这里必须同步那边），英文界面按当前语言出文案。
+/// 旧前端不认识这些码时会原样显示——英文短语，不会像硬编码中文那样在英文界面漏中文。
+/// 已被旧映射覆盖的用户向 sentinel（「没有这个账号」「账号名不能为空」等）保持原样不动：
+/// 换成码反而让旧前端的中文界面退化。
+fn coded(code: &str, detail: impl std::fmt::Display) -> String {
+    format!("{code}: {detail}")
+}
+
 /// 新建一个账号：建目录 → 接线 hooks → 存进 settings。返回它的 id。
 ///
 /// **不自动切过去**，也不自动登录：切换与登录是用户的两个独立动作，替他决定只会让人困惑。
@@ -273,7 +282,7 @@ pub(crate) async fn create_profile(provider: String, name: String) -> Result<Str
             let id = unique_id(existing, &slug(&name));
             let root = profile_root(&provider, &id);
             for dir in spec.dirs(&root) {
-                std::fs::create_dir_all(&dir).map_err(|e| format!("创建账号目录失败：{e}"))?;
+                std::fs::create_dir_all(&dir).map_err(|e| coded("profile/create-dir-failed", e))?;
             }
             if let Some(reason) = wire_profile(agent, &id) {
                 eprintln!(
@@ -401,8 +410,8 @@ pub(crate) async fn delete_profile(provider: String, id: String) -> Result<(), S
                     Ok(())
                 });
                 return Err(match restore {
-                    Ok(()) => format!("删除账号目录失败：{e}；账号入口已恢复，可稍后重试"),
-                    Err(r) => format!("删除账号目录失败：{e}；且恢复账号入口失败：{r}"),
+                    Ok(()) => coded("profile/delete-dir-failed", e),
+                    Err(r) => coded("profile/delete-dir-failed-unrestored", format!("{e}; {r}")),
                 });
             }
         }
@@ -440,9 +449,7 @@ pub fn merge_into_default(provider: &str, id: &str) -> Result<(), String> {
         .profile_live_session_count(id)
         .map_err(|e| e.to_string())?;
     if live > 0 {
-        return Err(format!(
-            "该账号还有 {live} 个进行中的会话，请先结束这些会话再合并"
-        ));
+        return Err(coded("profile/has-live-sessions", live));
     }
 
     let src = data_dir(provider, Some(id)).ok_or("找不到该账号的数据目录")?;
@@ -492,15 +499,15 @@ fn merge_dir_no_overwrite(src: &std::path::Path, dst: &std::path::Path) -> Resul
     // 默认账号下跑过该 agent 的用户点「合并进默认账号」时，~/.claude 就是不存在的。
     // 下面只为**子**目录建目录，成不成于是取决于 read_dir 先吐出目录还是文件——先目录就
     // 顺带建出来了，先文件就 fs::copy 报「系统找不到指定的路径」。这一行把它定死。
-    std::fs::create_dir_all(dst).map_err(|e| format!("创建目录失败：{e}"))?;
-    for entry in std::fs::read_dir(src).map_err(|e| format!("读取账号目录失败：{e}"))? {
-        let entry = entry.map_err(|e| format!("读取账号目录失败：{e}"))?;
+    std::fs::create_dir_all(dst).map_err(|e| coded("profile/create-dir-failed", e))?;
+    for entry in std::fs::read_dir(src).map_err(|e| coded("profile/read-dir-failed", e))? {
+        let entry = entry.map_err(|e| coded("profile/read-dir-failed", e))?;
         let name = entry.file_name();
         let from = entry.path();
         let to = dst.join(&name);
         if from.is_dir() {
             if !to.exists() {
-                std::fs::create_dir_all(&to).map_err(|e| format!("创建目录失败：{e}"))?;
+                std::fs::create_dir_all(&to).map_err(|e| coded("profile/create-dir-failed", e))?;
             }
             merge_dir_no_overwrite(&from, &to)?;
         } else if name == "history.jsonl" && to.is_file() {
@@ -509,7 +516,8 @@ fn merge_dir_no_overwrite(src: &std::path::Path, dst: &std::path::Path) -> Resul
             merge_jsonl_no_loss(&from, &to)?;
         } else if !to.exists() {
             // 目标没有才复制——默认账号的凭据/配置绝不会被覆盖。
-            std::fs::copy(&from, &to).map_err(|e| format!("复制 {} 失败：{e}", from.display()))?;
+            std::fs::copy(&from, &to)
+                .map_err(|e| coded("profile/copy-failed", format!("{}: {e}", from.display())))?;
         }
     }
     Ok(())
@@ -522,7 +530,7 @@ fn merge_dir_no_overwrite(src: &std::path::Path, dst: &std::path::Path) -> Resul
 ///   不会被 claude 的 transcript 扫描（按 `<sid>.jsonl` 命名）误认。
 fn merge_jsonl_no_loss(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
     let read = |p: &std::path::Path| {
-        std::fs::read(p).map_err(|e| format!("读取 {} 失败：{e}", p.display()))
+        std::fs::read(p).map_err(|e| coded("profile/read-file-failed", format!("{}: {e}", p.display())))
     };
     let src = read(from)?;
     let dst = read(to)?;
@@ -531,7 +539,8 @@ fn merge_jsonl_no_loss(from: &std::path::Path, to: &std::path::Path) -> Result<(
     }
     if src.starts_with(&dst) {
         // 源是目标的续写（目标停在陈旧副本）：用超集覆盖——旧内容一字节不少。
-        std::fs::copy(from, to).map_err(|e| format!("复制 {} 失败：{e}", from.display()))?;
+        std::fs::copy(from, to)
+            .map_err(|e| coded("profile/copy-failed", format!("{}: {e}", from.display())))?;
         return Ok(());
     }
     // 真分叉：哪边都不能丢。默认侧优先保位，源侧存侧车（重名时递增序号，不覆盖旧侧车）。
@@ -546,19 +555,20 @@ fn merge_jsonl_no_loss(from: &std::path::Path, to: &std::path::Path) -> Result<(
         n += 1;
         bak = to.with_file_name(format!("{name}.merge-conflict-{n}.bak"));
     }
-    std::fs::copy(from, &bak).map_err(|e| format!("复制 {} 失败：{e}", from.display()))?;
+    std::fs::copy(from, &bak)
+        .map_err(|e| coded("profile/copy-failed", format!("{}: {e}", from.display())))?;
     Ok(())
 }
 
 /// history.jsonl 特判：把源文件里**目标还没有的行**追加到目标末尾（按整行去重，保住两边历史）。
 fn merge_history_jsonl(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     let existing =
-        std::fs::read_to_string(dst).map_err(|e| format!("读取 history.jsonl 失败：{e}"))?;
+        std::fs::read_to_string(dst).map_err(|e| coded("profile/read-file-failed", format!("history.jsonl: {e}")))?;
     // mut + insert 判重：源文件**自己**也可能有重复行（两个 profile 从同一份历史分叉出来，
     // 各自又追加过同样的命令）。只对着目标查的话，那些行会被原样追加两遍。
     let mut known: std::collections::HashSet<&str> = existing.lines().collect();
     let incoming =
-        std::fs::read_to_string(src).map_err(|e| format!("读取 history.jsonl 失败：{e}"))?;
+        std::fs::read_to_string(src).map_err(|e| coded("profile/read-file-failed", format!("history.jsonl: {e}")))?;
     let mut append = String::new();
     // 目标末尾没有换行时先补一个，否则追加的第一行会黏在既有末行上。
     if !existing.is_empty() && !existing.ends_with('\n') {
@@ -579,9 +589,9 @@ fn merge_history_jsonl(src: &std::path::Path, dst: &std::path::Path) -> Result<(
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(dst)
-        .map_err(|e| format!("写入 history.jsonl 失败：{e}"))?;
+        .map_err(|e| coded("profile/write-file-failed", format!("history.jsonl: {e}")))?;
     file.write_all(append.as_bytes())
-        .map_err(|e| format!("写入 history.jsonl 失败：{e}"))?;
+        .map_err(|e| coded("profile/write-file-failed", format!("history.jsonl: {e}")))?;
     Ok(())
 }
 

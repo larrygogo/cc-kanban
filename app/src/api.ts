@@ -108,6 +108,12 @@ export type LiveSession = Omit<LiveSessionDto, "session" | "todos" | "column" | 
    */
   screen_state?: "working" | "idle" | "blocked" | null;
   /**
+   * screen_state 是否来自无规则命中的回退（后端 detect.rs FALLBACK_RULE_ID）。回退 idle
+   * 是「什么都没认出来」而非「确认空闲」——卡片角标据此从自信的「等你」降级为中性点
+   * （T-15）；tab 归属等判定不消费它。
+   */
+  screen_assumed?: boolean;
+  /**
    * 由 agent 自己的后台守护进程托管（Claude Code FleetView 的后台会话）。这类卡片是
    * agent 在会话中途自行派生的——用户没开过它，看板却凭空多出一张卡。界面据此标注来历，
    * 并收起接管/结束/定位终端：那几条路对它注定失败（supervisor 会把被杀的进程拉回来，
@@ -166,11 +172,13 @@ export type SubagentProbe = SubagentProbeDto;
 export type PendingApproval = PendingApprovalDto;
 
 /**
- * 取对话历史。offset>0 只回增量；offset=0 的首读默认只回尾部若干条（长会话可达上千条，
- * 全量会把巨大的 JSON 压到主线程），`full` 传 true 才返回整段——用于「加载更早的对话」。
+ * 取对话历史。offset>0 只回增量；offset=0 的首读默认只回尾部一屏（长会话可达上千条，
+ * 全量会把巨大的 JSON 压到主线程），响应里的 `earliest`/`hasMore` 标记前面还有更早历史。
+ * 「加载更早」传 `before`（= 上一屏响应的 earliest）向上翻一屏，只解析还没展示过的那段；
+ * `full` 传 true 仍返回整段——只留给接续段历史这类「内容静态、只取一次」的场景。
  */
-export function getChatHistory(sessionId: number, offset: number, full?: boolean): Promise<ChatHistory> {
-  return invoke("get_chat_history", { sessionId, offset, full });
+export function getChatHistory(sessionId: number, offset: number, full?: boolean, before?: number): Promise<ChatHistory> {
+  return invoke("get_chat_history", { sessionId, offset, full, before });
 }
 
 /**
@@ -178,7 +186,7 @@ export function getChatHistory(sessionId: number, offset: number, full?: boolean
  *
  * 子任务过程不在主 transcript 里，而在 provider 各自的侧车流中（claude 的
  * `subagents/agent-*.jsonl`、kimi 的 `agents/agent-N/wire.jsonl`）。刻意不并进
- * 650ms 的历史轮询：一个会话可能有几十个子任务，跟着热路径一起读毫无必要。
+ * 历史轮询：一个会话可能有几十个子任务，跟着热路径一起读毫无必要。
  */
 export function getSubagentTranscript(sessionId: number, toolUseId: string): Promise<SubagentRun[]> {
   return invoke("get_subagent_transcript", { sessionId, toolUseId });
@@ -190,7 +198,7 @@ export function getSubagentTranscript(sessionId: number, toolUseId: string): Pro
  * 折叠状态下的进度只能来自主链回执，而并行委派的回执要等同一步里的工具全部跑完才一起
  * 写盘——整批跑完之前，先收工的子任务在主链上毫无痕迹，面板只能一律显示「在跑」。侧车流
  * 自己带着终结标记，这条按需 I/O 逐条读它的尾部补齐；同 {@link getSubagentTranscript}，
- * 刻意不并进 650ms 的历史轮询。
+ * 刻意不并进历史轮询。
  *
  * 返回值按 tool_use_id 索引，读不出状态的 id 直接缺席——「读不到」不等于「已结束」。
  */
@@ -385,7 +393,9 @@ export async function confirmStopSession(
   text: { title: string; message: string },
   onConfirmed?: () => void,
 ): Promise<boolean> {
-  const yes = await appConfirm(text.message, { title: text.title, danger: true });
+  // 保留 danger：杀的是正在执行任务的进程。主按钮复用 title（各入口都传「结束会话」），
+  // 说清后果而不是通用「确定」（S-14）。
+  const yes = await appConfirm(text.message, { title: text.title, danger: true, confirmLabel: text.title });
   if (!yes) return false;
   onConfirmed?.();
   await stopManagedTerminal(sessionId);
@@ -537,7 +547,10 @@ export function getLiveSessionsPage(
   cwd: string | null = null,
   /** 附带外库(安装版)会话——只有贴纸看板传 true(dev 构建的监控视野补全);
       对话侧栏/归档页按 id 加载详情,外库卡点开必落空,从源头不给。 */
-  includeForeign = false
+  includeForeign = false,
+  /** 附带「正在启动」占位卡(pending PTY:已起 PTY、CLI 未写库的新会话,负 id)——
+      同样只有贴纸看板传 true;占位卡不可点,其它消费方给了也是死路。 */
+  includePending = false
 ): Promise<LiveSessionsPage> {
   return invoke<unknown>("get_live_sessions_page", {
     filter,
@@ -549,6 +562,7 @@ export function getLiveSessionsPage(
     beforeId: cursor?.id ?? null,
     limit,
     includeForeign,
+    includePending,
   }).then((res) => {
     // 旧后端 / demo mock 仍返回裸数组：给不满 limit 视作到底，满页时按旧约定用末项续查
     // （旧后端本就只有这套语义）。undefined = 后端没有该命令，静默降级为空列表。
@@ -609,10 +623,14 @@ export type Settings = {
   card_menu_mode: CardMenuMode;
   /** 是否在卡片显示对话预览（你的提问 + AI 回复两行）。缺省开启。 */
   preview_enabled: boolean;
+  /** 点击穿透（W-8，仅 Windows）：鼠标穿过贴纸直达下层窗口，按住 Alt 临时恢复交互。 */
+  click_through_enabled: boolean;
   /** 终端（PTY 画面）字号（px，10–18）。缺省 12。 */
   terminal_font_size: number;
   /** 终端行高预设：compact / normal（默认，1.22）/ relaxed。 */
   terminal_line_height: TerminalLineHeight;
+  /** 终端回滚缓冲行数（xterm scrollback，500–50000）。缺省 5000。 */
+  terminal_scrollback: number;
   /** 贴纸风格：elevated = 立体感（默认）/ flat = 扁平。 */
   sticker_style: StickerStyle;
   /** 贴纸底色预设 key（neutral/classic/slate/moss/plum/rose/amber）。 */
@@ -634,6 +652,16 @@ export type Settings = {
   /** 远程访问 token。由 remote_access_info 惰性生成落盘；get_settings 不返回明文(恒空串),
    *  set_settings 忽略回传值(后端以磁盘值为准)。 */
   remote_access_token: string;
+  /** 贴纸主窗口几何（W-17）。设置窗不编辑它；后端 set_settings 落盘前以磁盘值回填。
+   *  读写走 windowState.ts 的 get/set_sticker_window_state，这里仅为快照对齐。 */
+  sticker_window?: {
+    normal_width: number | null;
+    normal_height: number | null;
+    snap_edge: "left" | "right" | "top" | null;
+    pinned: boolean;
+    x: number | null;
+    y: number | null;
+  };
 };
 
 /** 远程桥绑定模式（与后端 settings.rs remote_access_bind 逐值对齐）。 */
@@ -719,9 +747,25 @@ export function checkUpdate(): Promise<AvailableUpdate | null> {
   return invoke("check_update");
 }
 
-/** 下载最近一次 checkUpdate() 返回的更新；进度经 update-download-progress 事件通知。 */
-export function downloadUpdate(): Promise<"downloading" | "ready"> {
+/** 下载最近一次 checkUpdate() 返回的更新；进度经 update-download-progress 事件通知。
+ *  被取消时 resolve "available"（回到可重新下载状态）。 */
+export function downloadUpdate(): Promise<"available" | "downloading" | "ready"> {
   return invoke("download_update");
+}
+
+/** 取消进行中的更新下载（S-13）；没在下载时为 no-op。 */
+export function cancelUpdateDownload(): Promise<void> {
+  return invoke("cancel_update_download");
+}
+
+/** 用系统默认应用打开指定 provider 的安装日志（S-8：失败日志从纯文本改可点）。 */
+export function openInstallLog(provider: string): Promise<void> {
+  return invoke("open_install_log", { provider });
+}
+
+/** 首启历史导入的一次性提示（S-12）：有未提示过的导入结果时返回条数，取走即标记已提示。 */
+export function firstImportNotice(): Promise<number | null> {
+  return invoke("first_import_notice");
 }
 
 /** 安装已下载并通过签名校验的更新。Windows 会在安装前退出应用。 */
@@ -931,8 +975,14 @@ export function installAgent(provider: AgentId): Promise<void> {
   return invoke("install_agent", { provider });
 }
 
-/** 后台安装结束事件 payload（对应后端 install-done）。logPath 为安装脚本输出的落盘处（可能为 null）。 */
-export type InstallDone = { provider: AgentId; ok: boolean; code: number | null; logPath: string | null };
+/** 取消进行中的安装：后端强杀脚本进程树（直下路径丢弃结果），并补发 cancelled 的 install-done。 */
+export function cancelInstall(provider: AgentId): Promise<void> {
+  return invoke("cancel_install", { provider });
+}
+
+/** 后台安装结束事件 payload（对应后端 install-done）。logPath 为安装脚本输出的落盘处（可能为 null）。
+ *  cancelled=true 是用户主动取消（由 cancel_install 代发），应回到初始态而非按失败展示。 */
+export type InstallDone = { provider: AgentId; ok: boolean; code: number | null; logPath: string | null; cancelled: boolean };
 
 /**
  * 该 agent 装好了、但它的 bin 目录不在持久 PATH 上 → 返回该目录；无需处理时 null。

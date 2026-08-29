@@ -6,6 +6,7 @@ const getLiveSessionsCounts = vi.fn();
 const getLiveSessionsPage = vi.fn();
 let emitBoardChanged: () => void = () => {};
 let emitSnapChanged: (e: { payload: { edge: "left" | "right" | "top" | null } }) => void = () => {};
+let emitRecallSticker: () => void = () => {};
 const unlisten = vi.fn();
 
 // jsdom 没有真实视口尺寸，@tanstack/react-virtual 会以为 .stk-scroll 高度为 0 而不渲染卡片。
@@ -89,6 +90,7 @@ vi.mock("./api", () => ({
       default_agent: "claude",
     }),
   getAccounts: () => Promise.resolve([]),
+  firstImportNotice: () => Promise.resolve(null),
   refreshUsage: (_provider: string) => Promise.reject(new Error("USAGE_UNSUPPORTED")),
   // 本 mock 不展开真实模块（工厂里显式列举导出），故 useAgents 用到的两个都得在此提供。
   listAgents: () => Promise.resolve([]),
@@ -101,6 +103,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: (event: string, cb: (e: { payload: { edge: "left" | "right" | "top" | null } }) => void) => {
     if (event === "board-changed") emitBoardChanged = cb as () => void;
     if (event === "snap-changed") emitSnapChanged = cb;
+    if (event === "recall-sticker") emitRecallSticker = cb as unknown as () => void;
     return Promise.resolve(unlisten);
   },
   emit: vi.fn(() => Promise.resolve()),
@@ -129,10 +132,27 @@ beforeEach(() => {
   getLiveSessionsPage.mockReset();
   getLiveSessionsPage.mockResolvedValue([]);
   unlisten.mockReset();
-  vi.mocked(invoke).mockClear();
+  // mockReset 连实现一起清（防上个用例的 mockImplementation 泄漏），再装回默认空实现。
+  vi.mocked(invoke).mockReset();
+  vi.mocked(invoke).mockImplementation(() => Promise.resolve(undefined));
   localStorage.clear();
 });
 afterEach(() => cleanup());
+
+/** W-17：贴纸几何（尺寸/吸附边/置顶/位置）在 settings.json——用 invoke mock 播种读取值。 */
+const seedWindowState = (s: {
+  normal_width: number | null;
+  normal_height: number | null;
+  snap_edge: "left" | "right" | "top" | null;
+  pinned: boolean;
+  x: number | null;
+  y: number | null;
+}) => {
+  vi.mocked(invoke).mockImplementation((cmd: string) =>
+    Promise.resolve(cmd === "get_sticker_window_state" ? s : undefined)
+  );
+};
+const EMPTY_WS = { normal_width: null, normal_height: null, snap_edge: null, pinned: false, x: null, y: null };
 
 describe("App", () => {
   it("挂载时拉取 counts 和第 0 页", async () => {
@@ -188,6 +208,61 @@ describe("App", () => {
     emitBoardChanged();
     await waitFor(() => expect(getLiveSessionsCounts).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(getLiveSessionsPage).toHaveBeenCalledWith("all", "", null, 100));
+  });
+
+  // T-12：「正在启动」占位卡（后端合成的负 id 占位项）随首页进列表；同 provider+cwd
+  // 且 started_at 不早于占位的真实会话出现时对账撤卡（增量刷新也不留残影）。
+  it("pending 占位卡（负 id）在真实会话出现时对账撤下", async () => {
+    const startedAt = Date.now();
+    const pendingRow = {
+      session: { id: -1, project_id: 0, cc_session_id: "", status: "running", started_at: startedAt, last_event_at: startedAt, ended_at: null },
+      project_name: "proj", task_title: "", current_activity: null, column: "doing",
+      todo_done: 0, todo_total: 0, todos: [], pid: null, archived: false, archived_at: null,
+      cwd: "C:/work/proj", context_pct: null, context_window: null, model: null, note: null,
+      pending_review: null, last_ai_text: null, last_user_text: null, provider: "codex",
+      profile: null, predecessor_id: null, extra_dirs: [],
+      connected: true, pty_managed: true, background: false, errored: false,
+      error_label: null, error_raw: null, busy_subagents: 0, preview: null,
+      profile_name: null, foreign: false,
+    };
+    const realRow = {
+      ...pendingRow,
+      session: { ...pendingRow.session, id: 42, cc_session_id: "real-42", started_at: startedAt + 500, last_event_at: startedAt + 500 },
+      task_title: "真实会话",
+    };
+    // 折叠条查询 search=null → 空；看板查询 search="" → 先只给占位行。
+    getLiveSessionsPage.mockImplementation((_f: string, search: string | null) =>
+      Promise.resolve(search === null ? [] : [pendingRow]));
+    render(<App />);
+    await screen.findByTestId("stk-starting-card");
+    // 认领完成：后端不再上报占位，真实行（同 provider+cwd、started_at 更晚）进首页。
+    getLiveSessionsPage.mockImplementation((_f: string, search: string | null) =>
+      Promise.resolve(search === null ? [] : [realRow]));
+    emitBoardChanged();
+    await waitFor(() => expect(screen.queryByTestId("stk-starting-card")).toBeNull());
+    await screen.findByText("真实会话");
+  });
+
+  // 回归（W-6）：「找回贴纸」曾永久改写用户的置顶偏好。现在只做临时置顶（recall_center
+  // 带上当前偏好，聚焦后由后端还原），持久化偏好（W-17 起在 settings.json）不动。
+  it("找回贴纸不改写 pin 偏好：recall_center 带当前偏好，不写 localStorage", async () => {
+    render(<App />);
+    await waitFor(() => expect(getLiveSessionsCounts).toHaveBeenCalledTimes(1));
+    emitRecallSticker();
+    await waitFor(() =>
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith("recall_center", { pinned: false })
+    );
+    expect(localStorage.getItem("meowo-pinned")).toBeNull();
+  });
+
+  it("找回贴纸：用户本就置顶时 recall_center 带 pinned=true（保持置顶）", async () => {
+    seedWindowState({ ...EMPTY_WS, pinned: true });
+    render(<App />);
+    await waitFor(() => expect(getLiveSessionsCounts).toHaveBeenCalledTimes(1));
+    emitRecallSticker();
+    await waitFor(() =>
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith("recall_center", { pinned: true })
+    );
   });
 
   // 回归：拖拽中途卸载组件，90ms 的 pointer_left_down 松手轮询必须随 cleanup 停掉——
@@ -279,9 +354,10 @@ describe("App", () => {
     await waitFor(() => expect(titles()).toEqual(["B", "A"]));
   });
 
-  // 单一真相源：window-state 不再恢复尺寸(lib.rs)，main 窗口尺寸由 SIZE_KEY 持有。非吸附态启动
-  // 无条件按 SIZE_KEY(默认 {360,440}) snap_restore 还原正常尺寸，且不走折叠分支。
-  it("非吸附态启动按 SIZE_KEY 还原正常尺寸(snap_restore)，不折叠", async () => {
+  // 单一真相源（W-17）：main 窗口尺寸/吸附边/置顶由 settings.json 的 sticker_window 持有
+  // （window-state 插件对 main 已 denylist，位置由后端 setup 从 settings 恢复）。非吸附态启动
+  // 无条件按记住的正常尺寸（默认 {360,440}）snap_restore 还原，且不走折叠分支。
+  it("非吸附态启动按 settings 尺寸还原正常尺寸(snap_restore)，不折叠", async () => {
     render(<App />);
     await waitFor(() =>
       expect(vi.mocked(invoke)).toHaveBeenCalledWith(
@@ -292,8 +368,8 @@ describe("App", () => {
     expect(vi.mocked(invoke)).not.toHaveBeenCalledWith("snap_collapse", expect.anything());
   });
 
-  it("吸附态启动(SNAP_KEY 有边)走折叠分支，不触发尺寸还原", async () => {
-    localStorage.setItem("meowo-snap-edge", "left");
+  it("吸附态启动(settings.snap_edge 有边)走折叠分支，不触发尺寸还原", async () => {
+    seedWindowState({ ...EMPTY_WS, snap_edge: "left" });
     render(<App />);
     await waitFor(() =>
       expect(vi.mocked(invoke)).toHaveBeenCalledWith("snap_collapse", expect.anything())
@@ -301,10 +377,84 @@ describe("App", () => {
     expect(vi.mocked(invoke)).not.toHaveBeenCalledWith("snap_restore", expect.anything());
   });
 
-  // 回归：SIZE_KEY 曾被「吸附态拖角缩成细条」的尺寸毒化(实测 {80,240}/{136,20})。loadSize 须把低于
-  // 最小尺寸的值回落默认 {360,440}，否则还原会用毒化的细条尺寸、把窗口缩成细条。
-  it("SIZE_KEY 被细条尺寸毒化时，loadSize 回落默认 {360,440} 再 snap_restore", async () => {
-    localStorage.setItem("meowo-normal-size", JSON.stringify({ w: 80, h: 37 }));
+  // W-17 一次性迁移：旧版三套 localStorage 键（尺寸/吸附边/置顶）在 settings 字段缺席时
+  // 并入 sticker_window 原子落盘，旧键随即删除；此后 settings.json 是唯一真相源。
+  it("W-17：localStorage 旧键一次性迁移进 settings 并删除旧键", async () => {
+    localStorage.setItem("meowo-normal-size", JSON.stringify({ w: 420, h: 500 }));
+    localStorage.setItem("meowo-snap-edge", "top");
+    localStorage.setItem("meowo-pinned", "1");
+    render(<App />);
+    await waitFor(() =>
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith("set_sticker_window_state", {
+        state: { normal_width: 420, normal_height: 500, snap_edge: "top", pinned: true, x: null, y: null },
+      })
+    );
+    expect(localStorage.getItem("meowo-normal-size")).toBeNull();
+    expect(localStorage.getItem("meowo-snap-edge")).toBeNull();
+    expect(localStorage.getItem("meowo-pinned")).toBeNull();
+    // 迁移来的吸附边生效：走折叠分支。
+    await waitFor(() =>
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith("snap_collapse", expect.anything())
+    );
+  });
+
+  it("W-17：settings 已有几何值时，残留旧键不覆盖（仅清除），不触发迁移写", async () => {
+    seedWindowState({ ...EMPTY_WS, normal_width: 400, normal_height: 460 });
+    localStorage.setItem("meowo-normal-size", JSON.stringify({ w: 999, h: 999 }));
+    render(<App />);
+    await waitFor(() =>
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+        "snap_restore",
+        expect.objectContaining({ width: 400, height: 460 })
+      )
+    );
+    expect(localStorage.getItem("meowo-normal-size")).toBeNull();
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith("set_sticker_window_state", expect.anything());
+  });
+
+  it("W-17：切换置顶经 set_sticker_window_state 落盘，不再写 localStorage", async () => {
+    render(<App />);
+    await waitFor(() => expect(getLiveSessionsCounts).toHaveBeenCalledTimes(1));
+    fireEvent.click(await screen.findByLabelText(zh.sticker.pinOff));
+    await screen.findByLabelText(zh.sticker.pinOn);
+    await waitFor(() =>
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith("set_sticker_window_state", {
+        state: expect.objectContaining({ pinned: true }),
+      })
+    );
+    expect(localStorage.getItem("meowo-pinned")).toBeNull();
+  });
+
+  // 回归（W-4）：展开过渡期（snap_restore 未落地）窗口仍是 28px 细条几何，直接渲染
+  // 全量看板会被压进细条宽度造成布局抖动。过渡期必须渲染 .snap-expanding 纯色占位，
+  // 落地后才挂载看板。
+  it("W-4：找回展开过渡期渲染纯色占位，snap_restore 落地后才挂载看板", async () => {
+    let resolveRestore: () => void = () => {};
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "get_sticker_window_state") {
+        return Promise.resolve({ ...EMPTY_WS, snap_edge: "right" });
+      }
+      return cmd === "snap_restore"
+        ? new Promise<void>((r) => { resolveRestore = r; })
+        : Promise.resolve(undefined);
+    });
+    const { container } = render(<App />);
+    await waitFor(() =>
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith("snap_collapse", expect.anything())
+    );
+    emitRecallSticker();
+    await waitFor(() => expect(container.querySelector(".snap-expanding")).toBeTruthy());
+    // 占位期间缩略条不得回闪（展开瞬间渲染缩略条正是 expanding 闸门要防的）。
+    expect(container.querySelector(".cstrip")).toBeNull();
+    resolveRestore();
+    await waitFor(() => expect(container.querySelector(".snap-expanding")).toBeNull());
+  });
+
+  // 回归：尺寸基准曾被「吸附态拖角缩成细条」的尺寸毒化(实测 {80,240}/{136,20})。
+  // 读入时的 sanitize 须把低于最小尺寸的值丢弃、回落默认 {360,440}，否则还原会用毒化的
+  // 细条尺寸、把窗口缩成细条。（W-17 起折叠态禁 resizable，细条已拖不出来；这里是纵深防御。）
+  it("settings 尺寸被细条尺寸毒化时，启动回落默认 {360,440} 再 snap_restore", async () => {
+    seedWindowState({ ...EMPTY_WS, normal_width: 80, normal_height: 37 });
     render(<App />);
     await waitFor(() =>
       expect(vi.mocked(invoke)).toHaveBeenCalledWith(
@@ -314,10 +464,10 @@ describe("App", () => {
     );
   });
 
-  // 回归：SIZE_KEY 异常大值/非有限数(localStorage 被改坏)不能直接喂给 set_size，否则设出极端窗口。
-  // loadSize 须校验上界(<=20000)与有限数，超界则回落默认 {360,440}。
-  it("SIZE_KEY 异常大值时，loadSize 回落默认 {360,440}，不设出极端窗口", async () => {
-    localStorage.setItem("meowo-normal-size", JSON.stringify({ w: 999999, h: 999999 }));
+  // 回归：异常大值/非有限数(settings.json 被手改坏)不能直接喂给 set_size，否则设出极端窗口。
+  // sanitize 须校验上界(<=20000)与有限数，超界则回落默认 {360,440}。
+  it("settings 尺寸异常大值时，启动回落默认 {360,440}，不设出极端窗口", async () => {
+    seedWindowState({ ...EMPTY_WS, normal_width: 999999, normal_height: 999999 });
     render(<App />);
     await waitFor(() =>
       expect(vi.mocked(invoke)).toHaveBeenCalledWith(

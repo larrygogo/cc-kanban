@@ -10,7 +10,9 @@ use crate::{account, agent_id, db_path, install_for, ports, setup};
 use std::path::PathBuf;
 
 /// 后台安装结束事件：ok=true 表示进程 0 退出；code 为退出码（无法取得时 None）。
-/// camelCase：`log_path` 须序列化成前端拿得到的 `logPath`（其余字段是单词，改名前后一致）。
+/// cancelled=true 表示用户主动取消（由 cancel_install 代发）——前端据此回到初始态，
+/// 而不是把它当失败展示。camelCase：`log_path` 须序列化成前端拿得到的 `logPath`
+/// （其余字段是单词，改名前后一致）。
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InstallDone {
@@ -20,6 +22,7 @@ pub(crate) struct InstallDone {
     /// 安装脚本的完整输出落盘处（失败时供用户/我们排查）。UI 不展示英文原文，只给路径。
     /// 建不出日志文件时为 None——不因为记不了日志就让安装失败。
     log_path: Option<String>,
+    cancelled: bool,
 }
 
 /// 安装成功、或登录成功之后，顺手把 hooks 接上——不必等下次启动的 `setup::apply_all`，
@@ -185,6 +188,89 @@ fn finish_login_operation(key: meowo_agent::AgentId, epoch: u64, operation_id: &
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .finish(key, epoch, operation_id)
+}
+
+/// 进行中安装的取消句柄（S-8：安装曾是不可中断的黑盒，官方脚本动辄几分钟）。
+///
+/// 与登录的代次表同一思路，但登录等的是「文件出现」（轮询可自愈），安装等的是子进程
+/// 退出（不杀就一直跑），所以句柄里多了 pid：取消方负责强杀进程树，worker 看到标志位
+/// 后静默退场——cancelled 的 install-done 由取消方代发，worker 不再 emit，否则迟到的
+/// 「安装失败」会把卡片从「已取消」刷成错误态。
+struct InstallHandle {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 脚本路径的子进程 pid（spawn 成功后才填入）。直下路径没有子进程——下载在进程内
+    /// 没法中途掐断，取消靠标志位让 worker 下载完后丢弃结果（见 run_direct_install）。
+    pid: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
+}
+
+static INSTALL_HANDLES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<&'static str, std::sync::Arc<InstallHandle>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// 登记一轮新安装并返回句柄。同 agent 的上一轮（若有）被标志位静默——前端已挡双击，
+/// 这里是「取消后立刻重装」等竞态的兜底：旧 worker 不得再 emit 或接线。
+fn begin_install(key: meowo_agent::AgentId) -> std::sync::Arc<InstallHandle> {
+    let handle = std::sync::Arc::new(InstallHandle {
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        pid: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    });
+    let mut map = INSTALL_HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(old) = map.insert(key.as_str(), handle.clone()) {
+        old.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    handle
+}
+
+/// worker 收尾：只摘自己的条目（取消方已摘走、或新一轮已覆盖时不许误摘）。
+fn finish_install(key: meowo_agent::AgentId, handle: &std::sync::Arc<InstallHandle>) {
+    let mut map = INSTALL_HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+    if map
+        .get(key.as_str())
+        .is_some_and(|current| std::sync::Arc::ptr_eq(current, handle))
+    {
+        map.remove(key.as_str());
+    }
+}
+
+/// 取消该 agent 正在进行的安装（S-8）。
+///
+/// - **脚本路径**：强杀子进程树（proc::kill_descendants + kill_pid，pty 的同款兜杀），
+///   脚本里正在跑的 curl/irm 一并收掉。
+/// - **直下路径**：下载在进程内没法中途掐断，靠标志位让 worker 丢弃结果（不接线、不 emit）；
+///   下载完成、真正执行安装前 run_direct_install 也会再看一眼标志位提前收手。
+///
+/// cancelled 的 install-done 由这里代发（worker 见标志位保持静默），前端据此回到可重新
+/// 安装的初始态。无进行中的安装 → Ok(())：每轮安装必以 install-done 收尾，前端不会卡死。
+#[tauri::command]
+pub(crate) async fn cancel_install(app: tauri::AppHandle, provider: String) -> Result<(), String> {
+    let key = agent_id(&provider).ok_or("未知 agent")?;
+    let handle = INSTALL_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(key.as_str());
+    let Some(handle) = handle else {
+        return Ok(());
+    };
+    handle
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(pid) = *handle.pid.lock().unwrap_or_else(|e| e.into_inner()) {
+        crate::proc::kill_descendants(pid);
+        crate::proc::kill_pid(pid);
+    }
+    use tauri::Emitter;
+    let _ = app.emit(
+        "install-done",
+        InstallDone {
+            provider: key.as_str().to_string(),
+            ok: false,
+            code: None,
+            log_path: None,
+            cancelled: true,
+        },
+    );
+    Ok(())
 }
 
 /// 取消该 agent 正在进行的登录等待。
@@ -612,6 +698,7 @@ pub(crate) fn run_direct_install(
     id: meowo_agent::AgentId,
     plan: &meowo_agent::InstallPlan,
     log: Option<&mut std::fs::File>,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     use std::io::Write;
@@ -671,6 +758,12 @@ pub(crate) fn run_direct_install(
         let _ = std::fs::remove_file(dest);
         msg
     };
+    // 下载完成、真正执行安装前看一眼取消标志：下载在进程内没法中途掐断，但至少别让
+    // 「已取消」的安装继续把二进制装上去。取消的 install-done 由 cancel_install 代发，
+    // 这个 Err 只会被早已静默的 worker 丢弃，不会上屏。
+    if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(fail(&dest, "安装已取消".to_string()));
+    }
     if written != plan.size {
         return Err(fail(
             &dest,
@@ -893,6 +986,9 @@ pub(crate) async fn install_agent(app: tauri::AppHandle, provider: String) -> Re
     let id = agent.id(); // Copy；两条安装路径的收尾线程都要用它接线
     let provider = id.as_str().to_string(); // 归一：文件名/emit 全用规范串，消除路径注入面+大小写不一致
     let windows = cfg!(target_os = "windows");
+    // 登记取消句柄（S-8）：同 agent 的上一轮被标志位静默。两条安装路径的 worker 都在
+    // emit 前检查它——cancelled 的 install-done 由 cancel_install 代发。
+    let handle = begin_install(id);
 
     // 优先直下：绕开引导脚本，也就绕开它身后的 Cloudflare。plan() 只做两次小请求（版本号 + 清单），
     // 失败（发布物 schema 变了 / 下载服务本地区不可用）就回退到引导脚本，不让用户卡死在这条路上。
@@ -912,10 +1008,20 @@ pub(crate) async fn install_agent(app: tauri::AppHandle, provider: String) -> Re
                         .as_ref()
                         .and_then(|p| std::fs::File::create(p).ok());
                     let logged = log.is_some();
-                    let res = run_direct_install(id, &plan, log.as_mut());
+                    let res = run_direct_install(id, &plan, log.as_mut(), &handle.cancelled);
                     if let (Some(f), Err(e)) = (log.as_mut(), res.as_ref()) {
                         use std::io::Write;
                         let _ = writeln!(f, "Installation failed: {e}");
+                    }
+                    // 先摘条目再判标志位（与脚本路径 watcher 同序）：取消方晚于摘条目到达时
+                    // 找不到条目、不发事件，这里看到标志位保持静默，前端由 cancel() 本地清态；
+                    // 反序则会出现 cancelled 与正常 done 双发。
+                    finish_install(id, &handle);
+                    if handle
+                        .cancelled
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        return;
                     }
                     let log_path = logged
                         .then(|| log_path.map(|p| p.to_string_lossy().into_owned()))
@@ -932,6 +1038,7 @@ pub(crate) async fn install_agent(app: tauri::AppHandle, provider: String) -> Re
                             ok,
                             code: Some(if ok { 0 } else { 1 }),
                             log_path,
+                            cancelled: false,
                         },
                     );
                 });
@@ -943,9 +1050,12 @@ pub(crate) async fn install_agent(app: tauri::AppHandle, provider: String) -> Re
         }
     }
 
-    let script = agent
-        .install_script(windows)
-        .ok_or("该 agent 没有可用的一键安装命令")?;
+    let script = agent.install_script(windows);
+    let Some(script) = script else {
+        // 整轮安装结束于这个 Err：摘掉取消句柄，别让注册表残留一轮不会 emit 的安装。
+        finish_install(id, &handle);
+        return Err("该 agent 没有可用的一键安装命令".to_string());
+    };
 
     let unix_shell = script.unix_shell();
     let script_url = script.source();
@@ -954,8 +1064,22 @@ pub(crate) async fn install_agent(app: tauri::AppHandle, provider: String) -> Re
     // ureq 是同步的，不能堵住 tauri 的事件循环。
     let body = tauri::async_runtime::spawn_blocking(move || resolve_install_body(id, &script))
         .await
-        .map_err(|e| e.to_string())??;
-    let path = write_install_script(&provider, &body, windows).map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string());
+    let body = match body {
+        Ok(Ok(body)) => body,
+        // 同上的句柄清理：安装未能开始，句柄必须随这个 Err 一起收场。
+        Ok(Err(e)) | Err(e) => {
+            finish_install(id, &handle);
+            return Err(e);
+        }
+    };
+    let path = match write_install_script(&provider, &body, windows) {
+        Ok(path) => path,
+        Err(e) => {
+            finish_install(id, &handle);
+            return Err(e.to_string());
+        }
+    };
 
     // 安装输出落盘：此前 stdout/stderr 直接丢进 Stdio::null()，判成功只看退出码，于是「装是装上了
     // 但没接好」的半成功一律报成功。claude 就是这样——`claude.exe install` 在 Windows 上打印一行
@@ -1008,11 +1132,29 @@ pub(crate) async fn install_agent(app: tauri::AppHandle, provider: String) -> Re
             .env("CODEX_NON_INTERACTIVE", "1")
             .envs(proxy_env)
             .spawn()
-            .map_err(|e| format!("启动安装失败：{e}"))?;
+            .map_err(|e| {
+                // spawn 失败即整轮安装结束（前端立即显示错误）：摘掉取消句柄，
+                // 免得注册表残留一轮永远不会 emit 的安装。
+                finish_install(id, &handle);
+                format!("启动安装失败：{e}")
+            })?;
+        let child_pid = child.id();
+        *handle.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(child_pid);
+        // spawn 期间被取消（冷启动首次 spawn 可达数秒）：立刻补杀，别让它跑完。
+        // 之后的收尾（emit cancelled）归 cancel_install；watcher 见标志位静默。
+        if handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            crate::proc::kill_descendants(child_pid);
+            crate::proc::kill_pid(child_pid);
+        }
         // 等退出 + emit done 放独立线程，让 spawn_blocking 尽快归还线程池。
         std::thread::spawn(move || {
             use tauri::Emitter;
             let code = child.wait().ok().and_then(|s| s.code());
+            finish_install(id, &handle);
+            // 已取消：cancel_install 代发了 cancelled 事件，这里静默（不接线、不 emit）。
+            if handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
             let log_path = logged
                 .then(|| log_path.map(|p| p.to_string_lossy().into_owned()))
                 .flatten();
@@ -1027,6 +1169,7 @@ pub(crate) async fn install_agent(app: tauri::AppHandle, provider: String) -> Re
                     ok: code == Some(0),
                     code,
                     log_path,
+                    cancelled: false,
                 },
             );
         });
@@ -1042,6 +1185,21 @@ pub(crate) fn install_log_path(provider: &str) -> Option<PathBuf> {
     let dir = db_path().parent()?.to_path_buf();
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join(format!("install-{provider}.log")))
+}
+
+/// 「打开安装日志」按钮（S-8：失败日志路径从纯文本改可点）。路径由后端按 provider 重算，
+/// 前端不传路径——没有路径穿越面。用系统默认关联打开（.log → 记事本等）。
+#[tauri::command]
+pub(crate) async fn open_install_log(provider: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = install_log_path(&provider).ok_or("无法确定日志位置")?;
+        if !path.exists() {
+            return Err("安装日志不存在（可能已被清理）".to_string());
+        }
+        crate::fsutil::open_with_default_app(&path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 该 agent 可执行**所在目录**——仅当 launch argv 首元素是绝对路径时才有意义。
@@ -1251,5 +1409,50 @@ mod login_operation_tests {
         assert!(!state.finish(claude, epoch, "op-1"));
         // 没有进行中操作时再取 → None：登出方不得凭空发 login-done。
         assert_eq!(state.take(claude), None);
+    }
+}
+
+#[cfg(test)]
+mod install_handle_tests {
+    use super::{begin_install, finish_install, INSTALL_HANDLES};
+    use std::sync::atomic::Ordering;
+
+    fn registered(key: meowo_agent::AgentId) -> bool {
+        INSTALL_HANDLES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(key.as_str())
+    }
+
+    #[test]
+    fn a_new_install_silences_the_previous_handle() {
+        let claude = meowo_agent::id::CLAUDE;
+        let first = begin_install(claude);
+        let second = begin_install(claude);
+
+        // 旧轮被标志位静默（它的 worker 不再 emit/接线），注册表只认新句柄。
+        assert!(first.cancelled.load(Ordering::SeqCst));
+        assert!(!second.cancelled.load(Ordering::SeqCst));
+
+        finish_install(claude, &first); // 旧 worker 收尾：不许误摘新轮的条目
+        assert!(registered(claude));
+        finish_install(claude, &second);
+        assert!(!registered(claude));
+    }
+
+    #[test]
+    fn finish_only_removes_the_callers_own_entry() {
+        let codex = meowo_agent::id::CODEX;
+        let kimi = meowo_agent::id::KIMI;
+        let codex_handle = begin_install(codex);
+        let kimi_handle = begin_install(kimi);
+
+        // 按 agent 分开：一个 agent 的收尾不影响另一个 agent 的进行轮。
+        finish_install(codex, &kimi_handle);
+        assert!(registered(codex));
+        finish_install(codex, &codex_handle);
+        assert!(!registered(codex));
+        assert!(registered(kimi));
+        finish_install(kimi, &kimi_handle);
     }
 }

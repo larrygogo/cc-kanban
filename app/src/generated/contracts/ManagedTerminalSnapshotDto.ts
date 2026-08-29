@@ -8,6 +8,12 @@ export type ManagedTerminalSnapshotDto = { sessionId: number, active: boolean,
  */
 managed: boolean, data: string, startOffset: number, endOffset: number, exited: boolean, exitCode: number | null, 
 /**
+ * 已退出会话的输出尾部可读文本：CLI 拒绝启动时（resume 冲突、认证失败…）原因只
+ * 打在 PTY 输出里。秒退探测只盖启动后第 1 秒，那之后退出的失败靠它把原因带给
+ * 对话页（否则只有一句「退出码 X」，用户得自己去终端页翻）。仅 exited 时有值。
+ */
+exitTail: string | null, 
+/**
  * PTY 当前生效的行列数（0 = 未知：无活跃 PTY / 尚未设置尺寸）。前端在终端视图
  * **隐藏**时用它把 xterm 网格钉到 PTY 真实尺寸——隐藏态宿主是屏外停靠盒，按盒子
  * fit 出来的网格与 PTY 脱节，隐藏期到达的帧会按错误宽度换行/错行叠画（实拍花屏）。
@@ -21,4 +27,10 @@ cols: number, rows: number,
  * 上报，而 TUI 仍按全屏 + 鼠标模式画（实拍：两条滚动条、滚轮滚的不是 TUI 的内容）。
  * 空 = 无活跃 PTY / 旁路快照 / 已退出定格。
  */
-modes: Array<number>, };
+modes: Array<number>, 
+/**
+ * 此刻有外部同步终端（attach 客户端）在线。双视图同写同一 PTY 时对话页据此提示
+ * 「输入可能交错」（T-14）；实时增删另有 `pty-external-viewers` 事件推送，这里
+ * 承担的是重开窗口/重对齐时的初始值。
+ */
+externalViewers: boolean, };

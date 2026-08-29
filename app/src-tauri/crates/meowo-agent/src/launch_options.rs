@@ -20,6 +20,9 @@ pub struct LaunchChoice {
     /// 追加到启动 argv 的参数（字面量，非模板）。默认项必须为空——「默认」的诚实含义是
     /// 「不传任何 flag，行为由 CLI 自己决定」，而不是我们替 CLI 猜一个默认值。
     pub args: &'static [&'static str],
+    /// 高风险档（跳过权限确认/拆沙箱一类）。true 时前端以警示色渲染并附风险副标题——
+    /// 与普通档同视觉零警示的话，用户会把它当成无害的快捷档随手点上。
+    pub risk: bool,
 }
 
 /// 一栏启动选项（单选）。
@@ -74,11 +77,13 @@ mod tests {
                     id: "default",
                     label: "Default",
                     args: &[],
+                    risk: false,
                 },
                 LaunchChoice {
                     id: "opus",
                     label: "Opus",
                     args: &["--model", "opus"],
+                    risk: false,
                 },
             ],
         },
@@ -90,11 +95,13 @@ mod tests {
                     id: "default",
                     label: "Default",
                     args: &[],
+                    risk: false,
                 },
                 LaunchChoice {
                     id: "plan",
                     label: "Plan",
                     args: &["--permission-mode", "plan"],
+                    risk: false,
                 },
             ],
         },

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { checkUpdate, downloadUpdate, getSettings, installDownloadedUpdate, type Settings } from "./api";
+import { cancelUpdateDownload, checkUpdate, downloadUpdate, getSettings, installDownloadedUpdate, type Settings } from "./api";
 
 // "unknown"：本会话从未检查过（自动更新被关掉）。不能用 "latest" 顶替——那会让
 // 「关于」页在从未联网确认的情况下显示「已是最新版本」，恰恰误导了最需要手动确认的用户。
@@ -56,6 +56,16 @@ export function useUpdate(options: { automatic?: boolean; delayMs?: number } = {
     }
   }, []);
 
+  // 取消进行中的下载（S-13）：后端丢弃下载 future 并广播 update-download-cancelled，
+  // 状态由该事件的监听统一落回 available（多窗口一致）。
+  const cancelDownload = useCallback(async () => {
+    try {
+      await cancelUpdateDownload();
+    } catch (err) {
+      console.error("[update] 取消下载失败：", err);
+    }
+  }, []);
+
   const install = useCallback(async () => {
     try {
       await installDownloadedUpdate();
@@ -97,6 +107,12 @@ export function useUpdate(options: { automatic?: boolean; delayMs?: number } = {
     register(listen("update-download-failed", () => {
       if (disposed) return;
       setStatus("error");
+    }));
+    register(listen("update-download-cancelled", () => {
+      if (disposed) return;
+      // 取消 = 回到「发现新版本」：checkedRef 仍在，可立即重新下载。
+      setProgress(0);
+      setStatus("available");
     }));
     return () => {
       disposed = true;
@@ -163,5 +179,5 @@ export function useUpdate(options: { automatic?: boolean; delayMs?: number } = {
     };
   }, [automatic, delayMs, download, recheck]);
 
-  return { status, version, notes, progress, download, install, recheck };
+  return { status, version, notes, progress, download, cancelDownload, install, recheck };
 }

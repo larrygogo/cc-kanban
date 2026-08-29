@@ -255,21 +255,25 @@ impl AgentPlugin for Codex {
                     id: "default",
                     label: "Default",
                     args: &[],
+                    risk: false,
                 },
                 LaunchChoice {
                     id: "readOnly",
                     label: "Read Only",
                     args: &["--sandbox", "read-only"],
+                    risk: false,
                 },
                 LaunchChoice {
                     id: "fullAuto",
                     label: "Full Auto",
                     args: &["--full-auto"],
+                    risk: false,
                 },
                 LaunchChoice {
                     id: "yolo",
                     label: "YOLO",
                     args: &["--dangerously-bypass-approvals-and-sandbox"],
+                    risk: true,
                 },
             ],
         }];

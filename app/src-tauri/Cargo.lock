@@ -2629,18 +2629,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "113b30b4cd05f7c06868fdb2854f66a7b9fece9a48425351cd532e810d74024f"
 
 [[package]]
-name = "mac-notification-sys"
-version = "0.6.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50efa634682b3fc5a1ab6f3dd5b2bce7b848011fc485b53b063dc68f2f74feae"
-dependencies = [
- "cc",
- "objc2",
- "objc2-foundation",
- "time",
-]
-
-[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2701,17 +2689,19 @@ dependencies = [
  "arboard",
  "axum",
  "base64 0.22.1",
+ "block2",
  "dunce",
  "encoding_rs",
  "getrandom 0.3.4",
  "image",
- "mac-notification-sys",
  "meowo-agent",
  "meowo-protocol",
  "meowo-reporter",
  "meowo-store",
  "notify",
  "objc2",
+ "objc2-foundation",
+ "objc2-user-notifications",
  "percent-encoding",
  "portable-pty",
  "regex",
@@ -3233,6 +3223,8 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.12.1",
+ "block2",
  "objc2",
  "objc2-foundation",
 ]

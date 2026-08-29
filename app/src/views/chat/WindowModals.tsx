@@ -3,13 +3,14 @@
  * - RenameModal：重命名会话；
  * - QuickSwitcher：Ctrl/Cmd+K 快速切换器；
  * - ShortcutSheet：? 唤出的快捷键速查表。
+ * 三者共用 AppModal 壳（G-3）：Esc 关、Tab 焦点循环、初始焦点、关闭归还焦点、背景 inert。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getLiveSessionsPage, sessionTone, type LiveSession } from "../../api";
-import { pushEscLayer } from "../../escLayers";
 import { useT } from "../../i18n";
 import { formatBackendError } from "../../i18n/errors";
 import { parentSegment } from "../../paths";
+import { AppModal } from "../AppModal";
 
 /** 重命名会话的独立 modal（用户指定，不做就地编辑）。Enter 保存、Esc/取消/点遮罩关闭；
  *  失败原因就地显示在弹层里，不静默吞。 */
@@ -22,8 +23,6 @@ export function RenameModal({ initial, onSubmit, onClose, t }: {
   const [value, setValue] = useState(initial);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 注册 Esc 层：弹层存续期间窗口级「Esc=拒绝审批」让位（容器 stopPropagation 是双保险）。
-  useEffect(() => pushEscLayer(), []);
   const submit = async () => {
     const title = value.trim();
     if (!title || saving) return;
@@ -39,38 +38,24 @@ export function RenameModal({ initial, onSubmit, onClose, t }: {
     }
   };
   return (
-    <div className="chat-modal-overlay" role="presentation" onClick={onClose}>
-      <div
-        className="chat-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t.sticker.renameTitle}
-        onClick={(event) => event.stopPropagation()}
+    <AppModal label={t.sticker.renameTitle} onClose={onClose}>
+      <div className="chat-modal-title">{t.sticker.renameTitle}</div>
+      <input
+        className="ns-input"
+        autoFocus
+        value={value}
+        placeholder={t.sticker.renamePlaceholder}
+        onChange={(event) => setValue(event.target.value)}
         onKeyDown={(event) => {
-          // Esc 关弹层挂在容器上：窗口级「Esc=拒绝审批」监听按 activeElement 白名单让路，
-          // 焦点在 modal 的按钮上时不在白名单内——只在 input 上处理会漏掉这一路，
-          // 按 Esc 就顺手把 agent 的审批请求拒了。容器统一截停传播。
-          if (event.key === "Escape") { event.stopPropagation(); onClose(); }
+          if (event.key === "Enter" && !event.nativeEvent.isComposing) void submit();
         }}
-      >
-        <div className="chat-modal-title">{t.sticker.renameTitle}</div>
-        <input
-          className="ns-input"
-          autoFocus
-          value={value}
-          placeholder={t.sticker.renamePlaceholder}
-          onChange={(event) => setValue(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.nativeEvent.isComposing) void submit();
-          }}
-        />
-        {error && <div className="chat-modal-error" role="alert">{error}</div>}
-        <div className="chat-modal-actions">
-          <button type="button" className="ns-btn" onClick={onClose}>{t.newSession.cancel}</button>
-          <button type="button" className="ns-btn is-primary" disabled={!value.trim() || saving} onClick={() => void submit()}>{t.chat.renameSave}</button>
-        </div>
+      />
+      {error && <div className="chat-modal-error" role="alert">{error}</div>}
+      <div className="chat-modal-actions">
+        <button type="button" className="ns-btn" onClick={onClose}>{t.newSession.cancel}</button>
+        <button type="button" className="ns-btn is-primary" disabled={!value.trim() || saving} onClick={() => void submit()}>{t.chat.renameSave}</button>
       </div>
-    </div>
+    </AppModal>
   );
 }
 
@@ -87,8 +72,6 @@ export function QuickSwitcher({ activeId, onPick, onClose }: {
   const [active, setActive] = useState(0);
   const seqRef = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
-  // 注册 Esc 层：切换器开着期间窗口级「Esc=拒绝审批」让位。
-  useEffect(() => pushEscLayer(), []);
   // 首屏立即取（空查询 = 最近活跃），输入防抖 200ms；旧响应按序号丢弃。
   useEffect(() => {
     const seq = ++seqRef.current;
@@ -121,73 +104,62 @@ export function QuickSwitcher({ activeId, onPick, onClose }: {
     };
   }, [rows]);
   return (
-    <div className="chat-modal-overlay" role="presentation" onClick={onClose}>
-      <div
-        className="chat-modal chat-switcher"
-        role="dialog"
-        aria-modal="true"
+    <AppModal
+      label={t.chat.switcherTitle}
+      className="chat-switcher"
+      onClose={onClose}
+      onKeyDown={(event) => {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          if (rows.length === 0) return;
+          const next = (active + (event.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length;
+          setActive(next);
+          // 只在键盘导航时跟滚：mouseEnter 的 setActive 不滚——悬停在半可见项上
+          // 会「滚动↔悬停」互相触发抖起来。jsdom 无 scrollIntoView，可选调用兜底。
+          (listRef.current?.children[next] as HTMLElement | undefined)?.scrollIntoView?.({ block: "nearest" });
+          return;
+        }
+        if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+          event.preventDefault();
+          const row = rows[active];
+          if (row) pick(row.session.id);
+        }
+      }}
+    >
+      <input
+        className="ns-input"
+        autoFocus
+        value={query}
+        placeholder={t.chat.switcherPlaceholder}
         aria-label={t.chat.switcherTitle}
-        onClick={(event) => event.stopPropagation()}
-        onKeyDown={(event) => {
-          // Esc 关弹层并截停：窗口级「Esc=拒绝审批」以 defaultPrevented/白名单让路，
-          // 焦点在列表按钮上时不截停就会误拒（与 RenameModal 同一课）。
-          if (event.key === "Escape") {
-            event.stopPropagation();
-            onClose();
-            return;
-          }
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-            event.preventDefault();
-            if (rows.length === 0) return;
-            const next = (active + (event.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length;
-            setActive(next);
-            // 只在键盘导航时跟滚：mouseEnter 的 setActive 不滚——悬停在半可见项上
-            // 会「滚动↔悬停」互相触发抖起来。jsdom 无 scrollIntoView，可选调用兜底。
-            (listRef.current?.children[next] as HTMLElement | undefined)?.scrollIntoView?.({ block: "nearest" });
-            return;
-          }
-          if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-            event.preventDefault();
-            const row = rows[active];
-            if (row) pick(row.session.id);
-          }
+        onChange={(event) => {
+          if ((event.nativeEvent as InputEvent).isComposing) return;
+          setQuery(event.target.value);
         }}
-      >
-        <input
-          className="ns-input"
-          autoFocus
-          value={query}
-          placeholder={t.chat.switcherPlaceholder}
-          aria-label={t.chat.switcherTitle}
-          onChange={(event) => {
-            if ((event.nativeEvent as InputEvent).isComposing) return;
-            setQuery(event.target.value);
-          }}
-          onCompositionEnd={(event) => setQuery(event.currentTarget.value)}
-        />
-        <div className="chat-switcher-list" ref={listRef} role="listbox" aria-label={t.chat.switcherTitle}>
-          {rows.length === 0 && <div className="chat-switcher-empty">{t.chat.switcherEmpty}</div>}
-          {rows.map((row, index) => {
-            const tone = sessionTone(row.connected, row.session.status, row.pending_review, row.errored, row.busy_subagents);
-            return (
-              <button
-                type="button"
-                key={row.session.id}
-                role="option"
-                aria-selected={index === active}
-                className={"chat-switcher-item" + (index === active ? " is-active" : "") + (row.session.id === activeId ? " is-current" : "")}
-                onMouseEnter={() => setActive(index)}
-                onClick={() => pick(row.session.id)}
-              >
-                <i className={`chat-sidebar-dot is-${tone}`} aria-hidden="true" />
-                <span className="chat-switcher-name">{row.task_title || t.sticker.waitingFirstInput}</span>
-                <span className="chat-switcher-meta">{metaOf(row)}</span>
-              </button>
-            );
-          })}
-        </div>
+        onCompositionEnd={(event) => setQuery(event.currentTarget.value)}
+      />
+      <div className="chat-switcher-list" ref={listRef} role="listbox" aria-label={t.chat.switcherTitle}>
+        {rows.length === 0 && <div className="chat-switcher-empty">{t.chat.switcherEmpty}</div>}
+        {rows.map((row, index) => {
+          const tone = sessionTone(row.connected, row.session.status, row.pending_review, row.errored, row.busy_subagents);
+          return (
+            <button
+              type="button"
+              key={row.session.id}
+              role="option"
+              aria-selected={index === active}
+              className={"chat-switcher-item" + (index === active ? " is-active" : "") + (row.session.id === activeId ? " is-current" : "")}
+              onMouseEnter={() => setActive(index)}
+              onClick={() => pick(row.session.id)}
+            >
+              <i className={`chat-sidebar-dot is-${tone}`} aria-hidden="true" />
+              <span className="chat-switcher-name">{row.task_title || t.sticker.waitingFirstInput}</span>
+              <span className="chat-switcher-meta">{metaOf(row)}</span>
+            </button>
+          );
+        })}
       </div>
-    </div>
+    </AppModal>
   );
 }
 
@@ -195,7 +167,6 @@ export function QuickSwitcher({ activeId, onPick, onClose }: {
  *  没有一张总表就等于只有装了肌肉记忆的人用得上。纯静态展示，Esc/点外关闭。 */
 export function ShortcutSheet({ onClose }: { onClose: () => void }) {
   const t = useT();
-  useEffect(() => pushEscLayer(), []);
   const rows: Array<[string, string]> = [
     ["Ctrl+K", t.chat.shortcutSwitcher],
     ["Ctrl+B", t.chat.shortcutSidebar],
@@ -211,35 +182,21 @@ export function ShortcutSheet({ onClose }: { onClose: () => void }) {
     ["?", t.chat.shortcutSheet],
   ];
   return (
-    <div className="chat-modal-overlay" role="presentation" onClick={onClose}>
-      <div
-        className="chat-modal chat-shortcuts"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t.chat.shortcutsTitle}
-        onClick={(event) => event.stopPropagation()}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.stopPropagation();
-            onClose();
-          }
-        }}
-      >
-        <div className="chat-modal-title">{t.chat.shortcutsTitle}</div>
-        <dl className="chat-shortcuts-list">
-          {rows.map(([keys, desc]) => (
-            <div className="chat-shortcuts-row" key={keys}>
-              <dt>{keys.split(" / ").map((combo, i) => (
-                <span key={combo}>{i > 0 && " / "}<kbd>{combo}</kbd></span>
-              ))}</dt>
-              <dd>{desc}</dd>
-            </div>
-          ))}
-        </dl>
-        {/* 终端视图的让位说明:Ctrl+K/B/N/1/2 被应用导航占用、readline 编辑键失效,
-            Ctrl+F 也不抢 xterm 焦点——这些"静默失效"必须有一处写明,否则无从排查。 */}
-        <div className="chat-shortcuts-note">{t.chat.shortcutTerminalNote}</div>
-      </div>
-    </div>
+    <AppModal label={t.chat.shortcutsTitle} className="chat-shortcuts" onClose={onClose}>
+      <div className="chat-modal-title">{t.chat.shortcutsTitle}</div>
+      <dl className="chat-shortcuts-list">
+        {rows.map(([keys, desc]) => (
+          <div className="chat-shortcuts-row" key={keys}>
+            <dt>{keys.split(" / ").map((combo, i) => (
+              <span key={combo}>{i > 0 && " / "}<kbd>{combo}</kbd></span>
+            ))}</dt>
+            <dd>{desc}</dd>
+          </div>
+        ))}
+      </dl>
+      {/* 终端视图的让位说明:Ctrl+K/B/N/1/2 被应用导航占用、readline 编辑键失效,
+          Ctrl+F 也不抢 xterm 焦点——这些"静默失效"必须有一处写明,否则无从排查。 */}
+      <div className="chat-shortcuts-note">{t.chat.shortcutTerminalNote}</div>
+    </AppModal>
   );
 }

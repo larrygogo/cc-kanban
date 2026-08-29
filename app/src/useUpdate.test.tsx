@@ -13,6 +13,7 @@ vi.mock("./api", () => ({
   getSettings: async () => ({ auto_update_enabled: mocks.enabled }),
   checkUpdate: () => mocks.check(),
   downloadUpdate: () => mocks.download(),
+  cancelUpdateDownload: async () => {},
   installDownloadedUpdate: async () => {},
 }));
 
@@ -77,7 +78,7 @@ describe("automatic updater", () => {
     mocks.listen.mockImplementation(() => new Promise((resolve) => resolvers.push(resolve)));
 
     const view = render(<Probe />);
-    expect(resolvers).toHaveLength(4);
+    expect(resolvers).toHaveLength(5);
     view.unmount();
 
     await act(async () => {
@@ -85,6 +86,6 @@ describe("automatic updater", () => {
       await Promise.resolve();
     });
 
-    expect(unlisten).toHaveBeenCalledTimes(4);
+    expect(unlisten).toHaveBeenCalledTimes(5);
   });
 });

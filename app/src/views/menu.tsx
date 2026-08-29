@@ -7,8 +7,8 @@
 // - `Dropdown`（选值）、`ActionMenu`（执行动作）：本文件内的组件，fixed 定位；
 // - 对话窗模型/模式菜单：CSS 绝对定位 + 互斥状态在父组件，受控复用 `useMenuPopup`；
 // - RelayAccess 的 ModelPicker 是 combobox（输入过滤 + aria-activedescendant），模式不同，不并入。
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from "react";
-import { pushEscLayer } from "../escLayers";
+import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from "react";
+import { useDismissable } from "../hooks/useDismissable";
 import { CheckIcon, ChevronDownIcon } from "./sticker/icons";
 
 /** 菜单定位坐标（仅 fixed 模式；`cssPositioned` 时恒为空对象，定位交给 CSS）。
@@ -96,52 +96,16 @@ export function useMenuPopup({
   }, [open, cssPositioned, align]);
   useLayoutEffect(() => { relayout(); }, [relayout]);
 
-  useEffect(() => {
-    if (!open) return;
-    // 注册 Esc 层（见 escLayers.ts）：菜单开着期间，窗口级「Esc=拒绝审批」一律让位。
-    const popLayer = pushEscLayer();
-    const setOpen = setOpenRef.current;
-    // pointerdown + 捕获段，而不是 mousedown 冒泡：窗口拖拽区（data-tauri-drag-region，
-    // 如侧栏头部/标题栏）的 mousedown 会被拖拽逻辑消费、到不了 document 冒泡段——
-    // 用户点那里想关菜单却毫无反应（实拍反馈）。pointerdown 先于 mousedown 派发，
-    // 捕获段先于任何元素级监听执行，拖拽区也拦不住它。
-    const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const close = () => setOpen(false);
-    // 滚动关闭只针对**菜单外**的滚动（fixed 定位下页面滚走会错位）；菜单自身限高内滚
-    // （.dd-menu overflow-y:auto），在长清单里滚菜单不是「页面滚走了」，不能一滚就收起。
-    const closeOnOutsideScroll = (e: Event) => {
-      if (ref.current && e.target instanceof Node && ref.current.contains(e.target)) return;
-      setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      // 这次 Esc 被菜单消费掉了,必须标记 preventDefault:document 冒泡在 window 之前,
-      // 后面还有 ChatWindow 的窗口级「Esc=拒绝审批」监听(它以 defaultPrevented 让路)。
-      // 不标记的话,关个下拉菜单的同一次按键会顺手把 agent 的审批请求拒了。
-      e.preventDefault();
-      setOpen(false);
-      // Esc 后焦点归还触发钮，键盘用户不至于丢焦点；但只在焦点确实落在菜单容器内时归还——
-      // 鼠标开着菜单、焦点在输入框时按 Esc 不能把焦点抢回按钮。
-      if (ref.current?.contains(document.activeElement)) btnRef.current?.focus();
-    };
-    document.addEventListener("pointerdown", onDoc, true);
-    document.addEventListener("keydown", onKey);
-    if (!cssPositioned) {
-      window.addEventListener("resize", close);
-      window.addEventListener("scroll", closeOnOutsideScroll, true);
-    }
-    return () => {
-      popLayer();
-      document.removeEventListener("pointerdown", onDoc, true);
-      document.removeEventListener("keydown", onKey);
-      if (!cssPositioned) {
-        window.removeEventListener("resize", close);
-        window.removeEventListener("scroll", closeOnOutsideScroll, true);
-      }
-    };
-  }, [open, cssPositioned]);
+  // 关闭语义统一走 useDismissable（G-1，与 CardContextMenu 同一份实现）：点外关、
+  // Esc 关（焦点在菜单里时归还触发钮）；fixed 模式下 resize / 菜单外滚动也关——
+  // 菜单坐标在打开时一次性测量，滚动后与按钮错位，故滚动即关（capture 捕获内层滚动）。
+  useDismissable(ref, {
+    open,
+    onClose: () => setOpenRef.current(false),
+    closeOnResize: !cssPositioned,
+    closeOnScroll: !cssPositioned,
+    escFocusReturn: () => btnRef.current,
+  });
 
   const toggle = () => setOpen(!open);
 
@@ -181,6 +145,8 @@ export function useMenuPopup({
  * 选值下拉（替代原生 select，使下拉列表也跟随主题、圆角一致）。
  * icon 可选：给「选择器」型下拉（如账号页的模型切换）在按钮与每个选项前挂一个徽标；
  * muted 可选：把该选项显示为「次要/未就绪」（如未安装的 agent）——置灰、沉底由调用方排序。
+ * risky 可选：高风险档（如跳过权限确认）——警示色渲染，sub 附一行风险说明（契约
+ * LaunchChoice.risk 的展示侧）。
  * 都不传则退化成纯文字下拉。
  */
 export function Dropdown<T extends string | number>({
@@ -191,7 +157,7 @@ export function Dropdown<T extends string | number>({
   disabled,
 }: {
   value: T;
-  options: { value: T; label: string; icon?: ReactElement; muted?: boolean }[];
+  options: { value: T; label: string; icon?: ReactElement; muted?: boolean; risky?: boolean; sub?: string }[];
   onChange: (v: T) => void;
   /** 水平对齐：默认右对齐（设置页行尾）；`"left"` 左对齐并钉成按钮宽（新建会话的整宽表单）。 */
   align?: "left" | "right";
@@ -225,7 +191,7 @@ export function Dropdown<T extends string | number>({
               role="option"
               aria-selected={o.value === value}
               key={o.value}
-              className={"dd-item" + (o.value === value ? " sel" : "") + (o.muted ? " muted" : "")}
+              className={"dd-item" + (o.value === value ? " sel" : "") + (o.muted ? " muted" : "") + (o.risky ? " risk" : "")}
               onClick={() => {
                 onChange(o.value);
                 setOpen(false);
@@ -234,7 +200,10 @@ export function Dropdown<T extends string | number>({
             >
               <span className="dd-val">
                 {o.icon && <span className="dd-ico">{o.icon}</span>}
-                <span className="dd-label">{o.label}</span>
+                <span className="dd-label">
+                  {o.label}
+                  {o.sub && <span className="dd-sub">{o.sub}</span>}
+                </span>
               </span>
               {o.value === value && <CheckIcon className="dd-check" />}
             </button>

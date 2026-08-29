@@ -44,8 +44,8 @@ export const ENTRIES: ErrorEntry[] = [
   { m: "打开外部同步终端失败", zh: "打开外部终端失败", en: "Couldn't open the external terminal" },
   { m: "打开外部终端失败", zh: "无法打开外部终端", en: "Couldn't open the external terminal" },
   { m: "同步会话失败", tail: true, zh: "同步会话失败", en: "Couldn't sync the session" },
-  // tail 透传:前端 i18n 也会生成同前缀消息(t.chat.terminalStartExited,含退出码),
-  // zh 必须原样保留尾部信息;英文界面下该消息本就是英文,不会命中此中文前缀。
+  // tail 透传:后端秒退探测的报错带输出尾部(「…（退出码 N）：tail」),zh 必须原样保留;
+  // 英文界面下该消息本就是英文,不会命中此中文前缀。
   { m: "Agent 启动后立即退出", tail: true, zh: "Agent 启动后立即退出", en: "The agent exited right after starting; check the Terminal tab —" },
   { m: "该会话所属账号", zh: "会话所属账号已被删除，无法恢复", en: "This session's account was deleted; it can't be resumed" },
   { m: "请选择工作目录", exact: true, zh: "请选择工作目录", en: "Pick a working directory" },
@@ -96,7 +96,17 @@ export const ENTRIES: ErrorEntry[] = [
   { m: "找不到该账号的数据目录", exact: true, zh: "找不到该账号的数据目录", en: "Couldn't locate this account's data directory" },
   { m: "找不到默认账号的数据目录", exact: true, zh: "找不到默认账号的数据目录", en: "Couldn't locate the default account's data directory" },
   { m: "解析不到该 agent 的安装实况", zh: "无法确认该 Agent 的安装状态", en: "Couldn't determine this agent's install state" },
-  { m: "删除账号目录失败", tail: true, zh: "删除账号目录失败", en: "Couldn't delete the account directory" },
+  // ── 多账号结构化 reason 码(profile/mod.rs 的 coded(),S-9)──
+  // 前后端约定:错误串 = `profile/<code>: <detail>`,tail 把 detail(路径/错误原文)透传保留排障信息。
+  // 长前缀在前:delete-dir-failed-unrestored 会被 delete-dir-failed 抢先命中。
+  { m: "profile/delete-dir-failed-unrestored", tail: true, zh: "删除账号目录失败，且恢复账号入口也失败，请手动检查账号列表", en: "Couldn't delete the account folder, and restoring the entry also failed — check the account list" },
+  { m: "profile/delete-dir-failed", tail: true, zh: "删除账号目录失败，账号入口已恢复，可关闭占用进程后重试", en: "Couldn't delete the account folder; the entry was restored — close whatever is using it and retry" },
+  { m: "profile/has-live-sessions", tail: true, zh: "该账号还有进行中的会话，请先结束这些会话再合并；进行中会话数", en: "End this account's live sessions before merging; live sessions" },
+  { m: "profile/create-dir-failed", tail: true, zh: "创建账号目录失败", en: "Couldn't create the account folder" },
+  { m: "profile/read-dir-failed", tail: true, zh: "读取账号目录失败", en: "Couldn't read the account folder" },
+  { m: "profile/copy-failed", tail: true, zh: "复制账号数据失败", en: "Couldn't copy account data" },
+  { m: "profile/read-file-failed", tail: true, zh: "读取账号数据失败", en: "Couldn't read account data" },
+  { m: "profile/write-file-failed", tail: true, zh: "写入账号数据失败", en: "Couldn't write account data" },
   { m: "该 agent 没有可用的一键安装命令", exact: true, zh: "该 Agent 不支持一键安装", en: "One-click install isn't available for this agent" },
   { m: "未找到该 agent 的可执行目录", exact: true, zh: "找不到该 Agent 的安装目录", en: "Couldn't find this agent's install directory" },
   { m: "下载失败", tail: true, zh: "下载失败", en: "Download failed" },

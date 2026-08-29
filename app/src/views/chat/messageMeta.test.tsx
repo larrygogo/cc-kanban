@@ -42,20 +42,20 @@ describe("Transcript 日期分隔条", () => {
 });
 
 describe("Message 悬停时间", () => {
-  it("带 timestamp 的用户/AI 气泡挂原生 title", () => {
+  it("带 timestamp 的用户/AI 气泡挂 data-tip", () => {
     const { container } = render(
       <>
         <Message item={user("u", "2026-08-16T10:00:00Z", "你好")} />
         <Message item={{ type: "assistant_text", id: "a", timestamp: "2026-08-16T10:01:00Z", text: "在" }} />
       </>,
     );
-    const titled = container.querySelectorAll("article[title]");
-    expect(titled).toHaveLength(2);
+    const tipped = container.querySelectorAll("article[data-tip]");
+    expect(tipped).toHaveLength(2);
   });
 
-  it("timestamp 为 null 时不挂 title", () => {
+  it("timestamp 为 null 时不挂 data-tip", () => {
     const { container } = render(<Message item={user("u", null, "你好")} />);
-    expect(container.querySelector("article[title]")).toBeNull();
+    expect(container.querySelector("article[data-tip]")).toBeNull();
   });
 });
 

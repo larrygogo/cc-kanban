@@ -329,6 +329,7 @@ impl AgentPlugin for Claude {
                         id: "default",
                         label: "Default",
                         args: &[],
+                        risk: false,
                     },
                     // 别名是 CLI 文档化的稳定契约（不带版本，由 CLI 解析到当期型号）；
                     // 这里的 label 只是**学到真实菜单之前的兜底**——GUI 会从 CLI 自己弹出的
@@ -338,26 +339,31 @@ impl AgentPlugin for Claude {
                         id: "fable",
                         label: "Fable 5",
                         args: &["--model", "fable"],
+                        risk: false,
                     },
                     LaunchChoice {
                         id: "opus",
                         label: "Opus 5",
                         args: &["--model", "opus"],
+                        risk: false,
                     },
                     LaunchChoice {
                         id: "sonnet",
                         label: "Sonnet 5",
                         args: &["--model", "sonnet"],
+                        risk: false,
                     },
                     LaunchChoice {
                         id: "haiku",
                         label: "Haiku 4.5",
                         args: &["--model", "haiku"],
+                        risk: false,
                     },
                     LaunchChoice {
                         id: "opusplan",
                         label: "Opus Plan",
                         args: &["--model", "opusplan"],
+                        risk: false,
                     },
                     // `[m1]` 是字面方括号（CLI 文档化的 1M 上下文别名形式）。订阅计划下
                     // Fable/Opus 分 200K 与 1M 两档，裸别名落 200K 档——不提供这几个变体，
@@ -366,16 +372,19 @@ impl AgentPlugin for Claude {
                         id: "fable[1m]",
                         label: "Fable 5 (1M)",
                         args: &["--model", "fable[1m]"],
+                        risk: false,
                     },
                     LaunchChoice {
                         id: "opus[1m]",
                         label: "Opus 5 (1M)",
                         args: &["--model", "opus[1m]"],
+                        risk: false,
                     },
                     LaunchChoice {
                         id: "sonnet[1m]",
                         label: "Sonnet 5 (1M)",
                         args: &["--model", "sonnet[1m]"],
+                        risk: false,
                     },
                 ],
             },
@@ -387,21 +396,25 @@ impl AgentPlugin for Claude {
                         id: "default",
                         label: "Default",
                         args: &[],
+                        risk: false,
                     },
                     LaunchChoice {
                         id: "plan",
                         label: "Plan",
                         args: &["--permission-mode", "plan"],
+                        risk: false,
                     },
                     LaunchChoice {
                         id: "acceptEdits",
                         label: "Accept Edits",
                         args: &["--permission-mode", "acceptEdits"],
+                        risk: false,
                     },
                     LaunchChoice {
                         id: "bypassPermissions",
                         label: "Bypass Permissions",
                         args: &["--permission-mode", "bypassPermissions"],
+                        risk: true,
                     },
                 ],
             },

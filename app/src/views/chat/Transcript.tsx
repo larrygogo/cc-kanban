@@ -42,7 +42,7 @@ type BlockCache = {
   settledAt: Map<string, number>;
 };
 
-/// items 引用不变就不重算：稳态下 650ms 一轮的 history 刷新会让父组件重渲染，
+/// items 引用不变就不重算：稳态下历史轮询每轮都让父组件重渲染，
 /// 但 items 往往原样不动（reduceChatEvents 无新消息时返回同一引用）。没有这层
 /// memo 时，每一轮都要重跑下面的分组循环、重建全部 JSX——长会话上千条时很贵。
 ///

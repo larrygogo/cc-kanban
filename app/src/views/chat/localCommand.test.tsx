@@ -97,6 +97,20 @@ describe("Message 渲染本地命令", () => {
     expect(details?.querySelector("pre")?.textContent).toBe("Total: $1.20");
   });
 
+  it("命令输出里的终端转义（SGR 灰度/颜色码）被剥掉，不渲染成乱码", () => {
+    // 实拍：/compact 的 stdout 是 `ESC[2mCompacted (ctrl+o to see full summary)ESC[22m`。
+    render(<Message item={userText("<command-name>/compact</command-name><local-command-stdout>\x1b[2mCompacted (ctrl+o to see full summary)\x1b[22m</local-command-stdout>")} />);
+    const details = screen.getByText("命令输出").closest("details");
+    expect(details?.querySelector("pre")?.textContent).toBe("Compacted (ctrl+o to see full summary)");
+    expect(details?.querySelector(".chat-tool-summary")?.textContent).toBe("Compacted (ctrl+o to see full summary)");
+  });
+
+  it("剥码后暴露出来的前导缩进要保留（trim 只判空不吃对齐）", () => {
+    render(<Message item={userText("<command-name>/x</command-name><local-command-stdout>\x1b[2m  indented\x1b[22m</local-command-stdout>")} />);
+    const details = screen.getByText("命令输出").closest("details");
+    expect(details?.querySelector("pre")?.textContent).toBe("  indented");
+  });
+
   it("普通用户消息照旧走气泡", () => {
     render(<Message item={userText("继续实现")} />);
     expect(screen.getByText("继续实现")).toBeTruthy();

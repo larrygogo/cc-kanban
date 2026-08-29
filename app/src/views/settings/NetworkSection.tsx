@@ -293,6 +293,9 @@ export function NetworkSection() {
                     {proxied && (
                       <div className="row-desc proxy-coverage">
                         {full ? t.proxy.coverageFull : t.proxy.coveragePartial}
+                        {/* 为什么覆盖范围不同（写进配置文件 vs 只注环境变量）：样式 .proxy-why 早已存在，
+                            文案键却一直没接上——不说原因，用户只会当它是套话。 */}
+                        <span className="proxy-why">{full ? t.proxy.coverageFullWhy : t.proxy.coveragePartialWhy}</span>
                       </div>
                     )}
                     {rep?.unsupported && <div className="row-desc proxy-err">{t.proxy.unsupported(rep.unsupported)}</div>}

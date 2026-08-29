@@ -392,7 +392,7 @@ function DirSwitcher({ cwd, dirs, onDirChange, onAddDir, onRemoveDir }: {
   const pick = (action: () => void) => { setOpen(false); btnRef.current?.focus(); action(); };
   return (
     <div className="dd chat-diff-dirs" ref={ref} onKeyDown={onKeyDown}>
-      <button ref={btnRef} type="button" className="chat-diff-dirs-btn" aria-haspopup="menu" aria-expanded={open} data-tip={t.chat.dirsSection} title={cwd} onClick={toggle}>
+      <button ref={btnRef} type="button" className="chat-diff-dirs-btn" aria-haspopup="menu" aria-expanded={open} data-tip={`${t.chat.dirsSection} · ${cwd}`} onClick={toggle}>
         <FolderIcon />
         <span className="chat-diff-dirs-name">{folderName(cwd)}</span>
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
@@ -407,6 +407,7 @@ function DirSwitcher({ cwd, dirs, onDirChange, onAddDir, onRemoveDir }: {
               // 行是 div 而非 button:× 要住在行**内部**(用户指定),button 套 button
               // 非法。键盘可达靠 role+tabIndex,Enter/Space 由 useMenuPopup 显式 click。
               // 选中态 = 整行 active 背景(is-active),不再用勾。
+              // 菜单内刻意用原生 title：TooltipLayer 对 .dd-menu 区域静默（自绘提示会糊在菜单上）。
               <div
                 key={dir}
                 role="menuitem"
@@ -778,7 +779,7 @@ function ChangesView({ cwd, summary }: { cwd: string; summary: GitDiffSummaryDto
         <div className="chat-diff-filehead">
           <BackButton label={t.chat.diffBack} onClick={() => setSelectedPath(null)} />
           {selected && <span className={`chat-diff-status is-${selected.status.toLowerCase()}`}>{selected.status}</span>}
-          <span className="chat-diff-path" title={selectedPath}>{selectedPath}</span>
+          <span className="chat-diff-path" data-tip={selectedPath}>{selectedPath}</span>
           {selected && selected.status !== "D" && <OpenSplitButton cwd={cwd} rel={selectedPath} />}
         </div>
         {fileView}
@@ -789,7 +790,7 @@ function ChangesView({ cwd, summary }: { cwd: string; summary: GitDiffSummaryDto
     <>
       {/* 分支名放页签内部而非面板头行：这里整行宽度可用，长分支名截断不挤布局。 */}
       {summary.branch && (
-        <div className="chat-diff-branchline" title={summary.branch}>
+        <div className="chat-diff-branchline" data-tip={summary.branch}>
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="9" r="2.5" />
             <path d="M6 8.5v7" /><path d="M18 11.5c0 4-4 4.5-9.2 4.6" />
@@ -1089,7 +1090,7 @@ function FilesView({ cwd }: { cwd: string }) {
                     </svg>
                   )}
                   {group.isDir ? <FolderIcon /> : <FileIcon />}
-                  <span className="chat-diff-path" title={group.relPath}>{group.relPath}</span>
+                  <span className="chat-diff-path" data-tip={group.relPath}>{group.relPath}</span>
                   {group.totalLineMatches > 0 && (
                     <span className="chat-diff-hit-count">{group.totalLineMatches}</span>
                   )}
@@ -1180,7 +1181,7 @@ function FilesView({ cwd }: { cwd: string }) {
       <>
         <div className="chat-diff-filehead">
           <BackButton label={t.chat.diffBack} onClick={() => setSelectedPath(null)} />
-          <span className="chat-diff-path" title={selectedPath}>{selectedPath}</span>
+          <span className="chat-diff-path" data-tip={selectedPath}>{selectedPath}</span>
           {showModeToggle && (
             <div className="chat-diff-tabs">
               <button type="button" className={sourceMode ? "" : "is-active"} onClick={() => setMode(false)}>

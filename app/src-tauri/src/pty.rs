@@ -6,7 +6,9 @@ pub(crate) use meowo_protocol::broker::{ApprovalDecision, ApprovalRequest};
 #[cfg(not(test))]
 use meowo_protocol::broker::{BrokerDiscovery, APPROVAL_BROKER_FILE};
 pub(crate) use meowo_protocol::ipc::ManagedTerminalSnapshotDto as PtySnapshot;
-use meowo_protocol::ipc::{PtyExitEvent as PtyExit, PtyOutputEvent as PtyOutput};
+use meowo_protocol::ipc::{
+    ExternalViewersEvent, PtyExitEvent as PtyExit, PtyOutputEvent as PtyOutput,
+};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
@@ -242,6 +244,29 @@ pub(crate) enum ExternalViewer {
     Pid(u32),
 }
 
+/// [`PtyBroker::screen_states`] 的单条取值：已发布的屏幕状态 + 它是否来自无规则命中的
+/// 回退（detect.rs `FALLBACK_RULE_ID`）。回退 idle 是「什么都没认出来」而不是「确认空闲」，
+/// 前端据此把角标从自信的「等你」降级为中性点（T-15），tab 归属等判定仍只看 state。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScreenSight {
+    pub(crate) state: &'static str,
+    pub(crate) fallback: bool,
+}
+
+/// 「运行中 → 空闲/阻塞」的降级转变判定（T-15 高优通道，见 start_screen_detect）。
+/// blocked 与 idle 同属「agent 停下来等人」，都要即时上看板；升级（→ working）多由
+/// 用户自己敲键盘触发，人就在现场，不值得绕过合流/节流。纯函数，便于单测。
+fn is_downgrade(
+    prev: Option<crate::detect::ScreenState>,
+    new: crate::detect::ScreenState,
+) -> bool {
+    prev == Some(crate::detect::ScreenState::Working)
+        && matches!(
+            new,
+            crate::detect::ScreenState::Idle | crate::detect::ScreenState::Blocked
+        )
+}
+
 #[derive(Clone)]
 struct CompletedPty {
     data: Vec<u8>,
@@ -272,6 +297,11 @@ struct AttachState {
     next_subscriber: AtomicU64,
     next_pending: AtomicI64,
     pending: Mutex<HashMap<String, i64>>,
+    /// 看板「正在启动」占位卡的原料：临时负 id → 启动元数据。存活期恰好是「PTY 已起、
+    /// CLI 还没写库」这段窗口（codex 要到首个 turn 才认领）：start_pending 登记，
+    /// 首次 claim 认领 / 启动失败 / PTY 退出三处摘除。session_query 据此把 pending
+    /// 启动合成负 id 占位项合入看板查询（见 pending_placeholder_items）。
+    pending_launches: Mutex<HashMap<i64, PendingLaunch>>,
     /// launch_token → 新建会话时的启动选项**选择 map**（option id → choice id）。
     /// claim 认领时写进 sessions.launch_args——权限模式等选项是启动参数，不落库的话
     /// resume/接管的重启进程会重置回 CLI 默认（实拍反馈）。
@@ -307,6 +337,15 @@ struct AttachState {
 struct PendingApproval {
     request: ApprovalRequest,
     response: mpsc::Sender<ApprovalDecision>,
+}
+
+/// 一次 pending 启动的占位元数据（见 [`AttachState::pending_launches`]）。看板占位卡
+/// 只画得出 provider 图标与工作目录，故只留这三样；started_at 兼作卡片的排序时间。
+#[derive(Debug, Clone)]
+pub(crate) struct PendingLaunch {
+    pub(crate) provider: String,
+    pub(crate) cwd: Option<String>,
+    pub(crate) started_at: i64,
 }
 
 /// broker 凭据级别。鉴权一律 default-deny：[`PtyBroker::token_level`] 解不出级别的
@@ -401,6 +440,7 @@ impl PtyBroker {
                 next_subscriber: AtomicU64::new(1),
                 next_pending: AtomicI64::new(-1),
                 pending: Mutex::new(HashMap::new()),
+                pending_launches: Mutex::new(HashMap::new()),
                 pending_launch_args: Mutex::new(HashMap::new()),
                 pending_lineage: Mutex::new(HashMap::new()),
                 pending_extra_dirs: Mutex::new(HashMap::new()),
@@ -667,7 +707,9 @@ fn escalate_stop(managed: &Arc<ManagedPty>) {
 /// 以及 reader 万一真读到 EOF。收尾**从不等待 reader**；它若永远阻塞，就带着句柄躺着。
 /// 同理**从不无界等锁**：这是「结束必定生效」的最后一档，completed/sessions/emit/写库
 /// 必须无条件执行——锁有界、可能卡死的 ConPTY 释放丢牺牲线程（见 lock_within 的实拍）。
-fn finalize_exit(broker: &PtyBroker, app: &tauri::AppHandle, managed: &Arc<ManagedPty>) {
+/// `forced`：升级链末档的强制收尾（kill 静默无效、等不到真实退出）——事件里带给前端，
+/// 让它把「已强制结束，进程可能仍在」与正常退出区分开。
+fn finalize_exit(broker: &PtyBroker, app: &tauri::AppHandle, managed: &Arc<ManagedPty>, forced: bool) {
     if managed.finalized.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -735,14 +777,17 @@ fn finalize_exit(broker: &PtyBroker, app: &tauri::AppHandle, managed: &Arc<Manag
         if let Ok(mut pending) = broker.attach.pending.lock() {
             pending.retain(|_, id| *id != session_id);
         }
+        // 占位卡同步撤下：启动中的 CLI 退了，「正在启动」不能赖在看板上。
+        if let Ok(mut map) = broker.attach.pending_launches.lock() {
+            map.remove(&session_id);
+        }
         // 未认领的临时会话也签发过 scoped token，随启动失败一起吊销。
         if let Ok(mut tokens) = broker.attach.scoped_tokens.lock() {
             tokens.retain(|_, owner| *owner != session_id);
         }
-        // 负 id（未认领的临时会话）没有库写入，直接发退出事件。
-        if let Some(window) = app.get_webview_window("chat") {
-            let _ = window.emit("pty-exit", PtyExit { session_id, code });
-        }
+        // 负 id（未认领的临时会话）没有库写入，直接发退出事件。app 级 emit：
+        // 事件不绑窗口 label（PTY 事件解耦），监听方按 session_id 自行过滤。
+        let _ = app.emit("pty-exit", PtyExit { session_id, code, forced });
     } else {
         // 托管 PTY 是这个 agent 进程的唯一持有者——它退出，会话就真的结束了。必须主动
         // 收尾：resume 路径已经乐观复活过 DB（prepare_resume），没人回滚的话卡片会一直
@@ -753,9 +798,8 @@ fn finalize_exit(broker: &PtyBroker, app: &tauri::AppHandle, managed: &Arc<Manag
         // pty-exit 先于写库发出：对话窗的解锁（按钮卸载、退出遮罩）只看这个事件，而
         // end_session 在库忙（busy_timeout 3s，双实例并发写时是常态）时会把 emit 拖到
         // 秒级——「结束会话」的 UI 反馈没有理由等一笔迟早会自愈的库写入。
-        if let Some(window) = app.get_webview_window("chat") {
-            let _ = window.emit("pty-exit", PtyExit { session_id, code });
-        }
+        // app 级 emit：不绑窗口 label，监听方按 session_id 过滤。
+        let _ = app.emit("pty-exit", PtyExit { session_id, code, forced });
         match crate::open_store(&crate::db_path()) {
             Ok(store) => {
                 if let Err(error) = store.end_session(session_id, crate::now_ms()) {
@@ -1324,7 +1368,7 @@ impl PtyBroker {
         env: &[(String, String)],
         terminal_size: TerminalSize,
         provider: &str,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         if argv.is_empty() {
             return Err("该 Agent 不支持恢复会话".into());
         }
@@ -1332,9 +1376,11 @@ impl PtyBroker {
         // 杀软扫描时 spawn 可达数秒，而 snapshot/write/resize/stop 都是主线程上的同步
         // Tauri 命令，持锁跨过 spawn 会让它们全部排队——一个会话冷启动卡顿就冻结整应用。
         // 已在运行或已有占位（另一个 start 正在锁外 spawn）→ 按重复启动收敛，与原先
-        // 持锁排队后看到 contains 的语义一致。
+        // 持锁排队后看到 contains 的语义一致。判重结果以 Ok(false) 冒泡给调用方：
+        // 恢复路径靠它区分「真启动了（要秒退探测/开视图）」与「已在跑（只聚焦已有视图）」，
+        // 否则重复恢复会把 reveal 再跑一遍、又开一个镜像标签。
         if !self.begin_start(session_id)? {
-            return Ok(());
+            return Ok(false);
         }
         // panic 兜底：start_spawned 内含 portable-pty 原生调用，它一旦 panic 展开，下面的
         // is_err 分支执行不到——占位靠 guard 的 Drop 摘掉，否则该会话到进程重启都无法再起，
@@ -1350,7 +1396,8 @@ impl PtyBroker {
             // 启动失败清占位，重试才进得来；completed 快照已在 begin_start 摘掉，与旧行为一致。
             self.end_start(session_id);
         }
-        result
+        // Ok 统一映射成 true（本次调用真的启动了进程）；判重的 Ok(false) 在上面已提前返回。
+        result.map(|_| true)
     }
 
     /// 登记「启动中」占位。contains 检查与占位插入在同一锁程内原子完成，两个并发 start
@@ -1566,7 +1613,7 @@ impl PtyBroker {
                     .flatten()
                     .is_some();
                 if exited {
-                    finalize_exit(&waiter_broker, &waiter_app, &waiter);
+                    finalize_exit(&waiter_broker, &waiter_app, &waiter, false);
                     return;
                 }
                 // 「结束会话」的升级链。stop() 只发 TerminateProcess，对卡死在 ConPTY 内核
@@ -1597,8 +1644,9 @@ impl PtyBroker {
                         }
                         // 强制收尾把会话从 UI 摘除（finalize 会 emit pty-exit + 移出
                         // sessions，前端两条感知路径都解锁）；万一 conhost 也杀不掉，
-                        // zombie 带着句柄躺在系统里。
-                        finalize_exit(&waiter_broker, &waiter_app, &waiter);
+                        // zombie 带着句柄躺在系统里——forced=true 让前端如实区分文案，
+                        // 不把「可能还活着」显示成「已结束」。
+                        finalize_exit(&waiter_broker, &waiter_app, &waiter, true);
                         return;
                     }
                 }
@@ -1654,18 +1702,18 @@ impl PtyBroker {
                 }
                 // 只喂 chat 窗正在看的会话（viewed_session）：pty-output 只有那一个消费者，
                 // 别的托管会话的帧发出去也只是被 JS 按 sessionId 过滤丢弃——N 个会话齐跑时
-                // 这些白付的 base64 + WebView2 IPC 正是压垮前端的那部分。不是它就整帧跳过；
-                // 窗口关着同理（base64 白做）。错过的字节由前端切会话时的快照全量补齐。
+                // 这些白付的 base64 + WebView2 IPC 正是压垮前端的那部分。不是它就整帧跳过。
+                // 错过的字节由前端切会话时的快照全量补齐。chat 窗关闭时 viewed_session 由
+                // 关窗钩子清零（window.rs 的 release_desktop_consumers 同处），此处不必再查
+                // 窗口存在性；事件本身 app 级 emit，不绑窗口 label。
                 let session_id = emitter_managed.session_id.load(Ordering::Acquire);
                 if emitter_viewed.load(Ordering::Acquire) == session_id {
-                    if let Some(window) = emitter_app.get_webview_window("chat") {
-                        let payload = PtyOutput {
-                            session_id,
-                            offset,
-                            data: base64::engine::general_purpose::STANDARD.encode(&frame),
-                        };
-                        let _ = window.emit("pty-output", &payload);
-                    }
+                    let payload = PtyOutput {
+                        session_id,
+                        offset,
+                        data: base64::engine::general_purpose::STANDARD.encode(&frame),
+                    };
+                    let _ = emitter_app.emit("pty-output", &payload);
                 }
                 last_emit = std::time::Instant::now();
             }
@@ -1766,7 +1814,7 @@ impl PtyBroker {
                 }
             }
             // reader 退出（EOF/出错）时 emit_tx 随闭包 drop，emitter 发完残余后自行结束。
-            finalize_exit(&broker, &app, &managed);
+            finalize_exit(&broker, &app, &managed, false);
         });
         Ok(())
     }
@@ -1802,6 +1850,17 @@ impl PtyBroker {
             .lock()
             .map_err(|_| LOCK_POISONED)?
             .insert(launch_token.clone(), temp_id);
+        // 占位卡元数据与 token 登记同生：看板从下一次刷新起就能把这次启动画成占位卡。
+        if let Ok(mut map) = self.attach.pending_launches.lock() {
+            map.insert(
+                temp_id,
+                PendingLaunch {
+                    provider: provider.to_string(),
+                    cwd: cwd.map(str::to_string),
+                    started_at: crate::now_ms(),
+                },
+            );
+        }
         // 启动选项随 token 暂存：会话行此刻还不存在（hook 认领时才建），claim 落库。
         if !launch_selections.is_empty() {
             if let Ok(mut map) = self.attach.pending_launch_args.lock() {
@@ -1840,6 +1899,9 @@ impl PtyBroker {
         ) {
             if let Ok(mut pending) = self.attach.pending.lock() {
                 pending.remove(&launch_token);
+            }
+            if let Ok(mut map) = self.attach.pending_launches.lock() {
+                map.remove(&temp_id);
             }
             if let Ok(mut tokens) = self.attach.scoped_tokens.lock() {
                 tokens.retain(|_, owner| *owner != temp_id);
@@ -2002,6 +2064,12 @@ impl PtyBroker {
         } else {
             (Vec::new(), 0, 0)
         };
+        // 外部同步终端（attach 客户端）在线与否随快照带给对话页：这是重开窗口/重对齐时
+        // 的初始值，实时增删由 handle_attach 在订阅表写点上发 pty-external-viewers 事件。
+        let external_viewers = session
+            .as_ref()
+            .and_then(|s| s.subscribers.lock().ok())
+            .is_some_and(|subscribers| !subscribers.is_empty());
         PtySnapshot {
             session_id,
             active: session.is_some(),
@@ -2012,7 +2080,10 @@ impl PtyBroker {
             start_offset,
             end_offset,
             exited: completed.is_some(),
-            exit_code: completed.and_then(|item| item.code),
+            exit_code: completed.as_ref().and_then(|item| item.code),
+            // CLI 拒绝启动的原因只打在 PTY 输出里：尾部可读文本随快照带给对话页
+            // （秒退探测只盖启动后第 1 秒，之后退出的失败否则只剩一句「退出码 X」）。
+            exit_tail: completed.as_ref().map(|item| readable_tail(&item.data, 240)),
             cols,
             rows,
             // 已退出的定格快照不补基线:进程退出时 TUI 自己已经 ?1049l/?1000l 收尾,
@@ -2021,6 +2092,7 @@ impl PtyBroker {
                 .as_ref()
                 .map(|s| ModeTracker::modes_of(s.modes.load(Ordering::Acquire)))
                 .unwrap_or_default(),
+            external_viewers,
         }
     }
 
@@ -2031,6 +2103,18 @@ impl PtyBroker {
         self.sessions
             .lock()
             .map(|sessions| sessions.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// 看板「正在启动」占位卡的原料快照：仍是 pending（已起 PTY、CLI 未写库）的启动
+    /// 及其元数据（临时负 id → provider/cwd/启动时刻）。登记/摘除口径见
+    /// [`AttachState::pending_launches`]——锁中毒按空集降级（占位卡只是增强反馈，
+    /// 不能拖垮看板查询）。
+    pub(crate) fn pending_launches(&self) -> Vec<(i64, PendingLaunch)> {
+        self.attach
+            .pending_launches
+            .lock()
+            .map(|map| map.iter().map(|(id, info)| (*id, info.clone())).collect())
             .unwrap_or_default()
     }
 
@@ -2214,6 +2298,14 @@ impl PtyBroker {
         );
     }
 
+    /// 关窗兜底的无条件清零：chat 窗销毁后它名下的注册整体失效（无 CAS 竞态——新窗
+    /// 的注册只可能发生在新窗挂载之后，先于它的清零抹不掉）。漏清会让 emitter 对一
+    /// 个已不存在的消费者白做 base64 + emit（pty-output 改 app 级 emit 后，emit 侧
+    /// 不再有「窗口不存在」这道闸，清口只能落在关窗这里）。
+    pub(crate) fn reset_viewer(&self) {
+        self.viewed_session.store(0, Ordering::Release);
+    }
+
     /// 该会话此刻是否由 Meowo 的 PTY 持有。
     pub(crate) fn is_managed(&self, session_id: i64) -> bool {
         self.sessions
@@ -2242,15 +2334,34 @@ impl PtyBroker {
             .unwrap_or(0)
     }
 
-    /// 临时 id → 真实会话 id 的绑定结果。**只读不消费**：对话窗口会重复轮询，负 id 期间
-    /// 还可能因 `key={sessionId}` 重挂而再读一次；一次性消费会让其中一方永远等不到真实 id。
-    /// 绑定表随 PTY 退出清理（见 reader 线程），不会无限增长。
+    /// 临时 id → 真实会话 id 的绑定结果。**只读不消费**：对话窗口以 250ms 轮询它，前端
+    /// 重绑终端（临时 id → 真实 id 的平滑切换）也会再查一次确认同一 PTY；一次性消费会
+    /// 让其中一方永远等不到真实 id。绑定表随 PTY 退出清理（见 reader 线程），不会无限增长。
     pub(crate) fn binding(&self, temp_id: i64) -> Option<i64> {
         self.attach
             .bindings
             .lock()
             .ok()
             .and_then(|bindings| bindings.get(&temp_id).copied())
+    }
+
+    /// 外部同步终端（attach 客户端）在线状态推送（`pty-external-viewers` 事件）。
+    /// 对话页据此提示「输入可能交错」（T-14：双视图同写同一 PTY 无互斥）。桌面端
+    /// 快照不是常开轮询通道，订阅表增删那一刻必须主动推；初始值由快照的
+    /// `external_viewers` 字段承担。调用点与订阅表写点同函数（handle_attach），
+    /// 判定与表严格同步。app 级 emit，不绑窗口 label（PTY 事件解耦）：chat 窗不在
+    /// （未开/已关）时事件落空，它再开时会先取快照。
+    fn emit_external_viewers(&self, session: &ManagedPty, online: bool) {
+        let Some(app) = self.attach.app.lock().ok().and_then(|app| app.clone()) else {
+            return;
+        };
+        let _ = app.emit(
+            "pty-external-viewers",
+            ExternalViewersEvent {
+                session_id: session.session_id.load(Ordering::Acquire),
+                online,
+            },
+        );
     }
 
     /// 该会话此刻的外部同步终端（attach 客户端）状态，在线判定与激活目标一次锁内取齐
@@ -2286,17 +2397,24 @@ impl PtyBroker {
         }
     }
 
-    /// 所有托管会话已发布的屏幕状态（sid → "working"|"idle"|"blocked"）。
+    /// 所有托管会话已发布的屏幕状态（sid → [`ScreenSight`]）。
     /// 看板列表 DTO 消费；只含仍在运行且已过启动宽限、有规则集的会话。
-    pub(crate) fn screen_states(&self) -> HashMap<i64, &'static str> {
+    pub(crate) fn screen_states(&self) -> HashMap<i64, ScreenSight> {
         self.sessions
             .lock()
             .map(|sessions| {
                 sessions
                     .iter()
                     .filter_map(|(sid, managed)| {
-                        let state = managed.probe.debounce.lock().ok()?.published()?;
-                        Some((*sid, state.as_str()))
+                        let debounce = managed.probe.debounce.lock().ok()?;
+                        let state = debounce.published()?;
+                        Some((
+                            *sid,
+                            ScreenSight {
+                                state: state.as_str(),
+                                fallback: debounce.published_is_fallback(),
+                            },
+                        ))
                     })
                     .collect()
             })
@@ -2321,6 +2439,12 @@ impl PtyBroker {
     /// 启动屏幕检测节拍线程（幂等）。每 [`DETECT_TICK`] 过一遍所有托管会话：
     /// 无新输出且无待确认降级的会话整轮跳过，空闲时近乎零开销。任何会话状态变化
     /// 都合流成一次看板刷新（emit_board_changed 自带 300ms 合并窗口）。
+    ///
+    /// 例外是「运行中 → 空闲/阻塞」的**降级**转变（T-15）：检测节拍（300ms）+ 防抖
+    /// 确认（≤700ms）之后，再叠 board 合流（300ms）与前端刷新节流（400ms），最坏
+    /// ~1.7s 才落看板——而「agent 停下来等你」恰是角标最该即时的转变。降级转变在
+    /// 合流之外直发 `board-urgent`（前端绕过节流立即重拉），合流的 board-changed
+    /// 照发（侧栏等其它消费者与回声兜底）。
     pub(crate) fn start_screen_detect(&self) {
         if self.detect_started.swap(true, Ordering::AcqRel) {
             return;
@@ -2331,22 +2455,47 @@ impl PtyBroker {
             if broker.shutting_down.load(Ordering::Acquire) {
                 return;
             }
-            let sessions: Vec<Arc<ManagedPty>> = broker
+            let sessions: Vec<(i64, Arc<ManagedPty>)> = broker
                 .sessions
                 .lock()
-                .map(|sessions| sessions.values().cloned().collect())
+                .map(|sessions| {
+                    sessions
+                        .iter()
+                        .map(|(sid, managed)| (*sid, managed.clone()))
+                        .collect()
+                })
                 .unwrap_or_default();
             let now = std::time::Instant::now();
-            let changed = sessions
-                .iter()
-                .filter(|managed| {
-                    let end = managed.output_end.load(Ordering::Acquire);
-                    managed.probe.tick(end, now).is_some()
-                })
-                .count()
-                > 0;
+            let mut changed = false;
+            let mut downgraded: Vec<(i64, crate::detect::ScreenState)> = Vec::new();
+            for (sid, managed) in &sessions {
+                // tick 之前的已发布值：判断这次变化是升级还是降级（tick 返回的仅是转变后状态）。
+                let prev = managed
+                    .probe
+                    .debounce
+                    .lock()
+                    .ok()
+                    .and_then(|debounce| debounce.published());
+                let end = managed.output_end.load(Ordering::Acquire);
+                if let Some(new) = managed.probe.tick(end, now) {
+                    changed = true;
+                    if is_downgrade(prev, new) {
+                        downgraded.push((*sid, new));
+                    }
+                }
+            }
             if changed {
                 if let Some(app) = broker.attach.app.lock().ok().and_then(|app| app.clone()) {
+                    // 高优通道：绕过 BOARD_TX 合流直接 emit（语义见函数文档）。
+                    for (sid, state) in &downgraded {
+                        let _ = app.emit(
+                            "board-urgent",
+                            meowo_protocol::ipc::BoardUrgentEvent {
+                                session_id: *sid,
+                                state: state.as_str().to_string(),
+                            },
+                        );
+                    }
                     crate::watch::emit_board_changed(&app, "screen-state");
                 }
             }
@@ -2813,6 +2962,8 @@ impl PtyBroker {
         // 每次重开外部同步终端都会把它们再代答一遍。订阅之后的实时字节不过滤——
         // 新查询正是 DsrFilter 该答的。
         let backlog = strip_dsr_queries(&backlog);
+        // 订阅已落表（上面的临界区）——对话页的「输入可能交错」提示从现在开始算在线。
+        self.emit_external_viewers(&session, true);
         let mut output = stream.try_clone().map_err(|e| e.to_string())?;
         std::thread::spawn(move || {
             if output.write_all(&backlog).is_ok() {
@@ -2878,6 +3029,10 @@ impl PtyBroker {
         }
         if let Ok(mut subscribers) = session.subscribers.lock() {
             subscribers.retain(|subscriber| subscriber.id != subscriber_id);
+            let online = !subscribers.is_empty();
+            drop(subscribers);
+            // 可能还有别的外部终端在线——推的是「表空没空」，不是「我退出了一个」。
+            self.emit_external_viewers(&session, online);
         }
         match frame_error {
             Some(error) => Err(error),
@@ -3014,6 +3169,11 @@ impl PtyBroker {
         let managed = managed.ok_or("PTY 启动登记超时")?;
         if let Ok(mut bindings) = self.attach.bindings.lock() {
             bindings.insert(temp_id, real_id);
+        }
+        // 占位卡使命达成：真实会话行已由 hook 落库（先于 claim），看板下一次刷新用真实卡
+        // 顶替——元数据此刻摘除，占位与真卡不会同屏并存（前端另有 provider/cwd 对账兜底）。
+        if let Ok(mut map) = self.attach.pending_launches.lock() {
+            map.remove(&temp_id);
         }
         // 新建时的选项选择此刻才有会话行可写：落进 sessions.launch_args（JSON 对象），
         // resume/接管重启进程时经插件声明表翻译回放（见 terminal.rs 的 splice_stored_launch_args）。
@@ -4394,6 +4554,19 @@ mod tests {
         assert_eq!(probe.tick(3, after_grace), None);
     }
 
+    /// 高优通道只接「运行中 → 空闲/阻塞」的降级：升级转变（多是用户自己触发的）与
+    /// 无先前发布值的首发都不该绕过合流/节流。
+    #[test]
+    fn only_working_to_stopped_transitions_are_downgrades() {
+        use crate::detect::ScreenState::{Blocked, Idle, Working};
+        assert!(super::is_downgrade(Some(Working), Idle));
+        assert!(super::is_downgrade(Some(Working), Blocked));
+        assert!(!super::is_downgrade(Some(Idle), Working), "升级不高优");
+        assert!(!super::is_downgrade(Some(Blocked), Working), "升级不高优");
+        assert!(!super::is_downgrade(None, Idle), "首次发布不算降级");
+        assert!(!super::is_downgrade(Some(Idle), Blocked), "非运行中出发不算");
+    }
+
     /// 三态判定与订阅表严格同步：None 误判会新开重复窗口，Legacy/Pid 误判会不开新视图。
     #[test]
     fn external_viewer_state_follows_the_subscriber_table() {
@@ -4541,6 +4714,40 @@ mod tests {
         assert_eq!(
             broker.attach.pending.lock().unwrap().get("launch"),
             Some(&-5)
+        );
+    }
+
+    /// 「正在启动」占位卡元数据的生命周期：start_pending 登记（该路径由集成行为覆盖，
+    /// 这里直接摆好登记后的状态）→ 首次 claim 认领时摘除——真实会话行已由 hook 落库，
+    /// 看板下一次刷新用真卡顶替，占位与真卡不同屏并存。
+    #[test]
+    fn claim_retires_the_starting_placeholder() {
+        let broker = PtyBroker::default();
+        broker
+            .attach
+            .pending
+            .lock()
+            .unwrap()
+            .insert("launch".into(), -5);
+        broker.attach.pending_launches.lock().unwrap().insert(
+            -5,
+            PendingLaunch {
+                provider: "codex".into(),
+                cwd: Some("/tmp/x".into()),
+                started_at: 1,
+            },
+        );
+        broker
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(-5, dummy_managed(-5));
+        assert_eq!(broker.pending_launches().len(), 1);
+        let token = broker.attach.token.clone();
+        broker.handle_claim(&token, "launch", 9, None).unwrap();
+        assert!(
+            broker.pending_launches().is_empty(),
+            "认领后占位卡必须撤下（真实会话行已落库）"
         );
     }
 
@@ -5081,6 +5288,23 @@ mod tests {
         broker.unregister_approval_consumer("consumer-b");
         assert!(matches!(rx.recv().unwrap(), ApprovalDecision::Pass));
         assert!(broker.pending_approval(7).is_none());
+    }
+
+    #[test]
+    fn destroying_chat_window_resets_viewed_session() {
+        // 关窗兜底（reset_viewer）：窗毁后注册整体失效，无条件清零；漏清会让 emitter
+        // 对已不存在的消费者白做 base64 + emit（app 级 emit 后 emit 侧查不到窗口存在性）。
+        let broker = PtyBroker::default();
+        broker.set_viewer(42);
+        assert_eq!(broker.viewed_session.load(Ordering::Acquire), 42);
+        broker.reset_viewer();
+        assert_eq!(broker.viewed_session.load(Ordering::Acquire), 0);
+        // 与 clear_viewer 的分工：CAS 注销只清自己的注册，误清他人会让实时流断掉。
+        broker.set_viewer(7);
+        broker.clear_viewer(8);
+        assert_eq!(broker.viewed_session.load(Ordering::Acquire), 7);
+        broker.clear_viewer(7);
+        assert_eq!(broker.viewed_session.load(Ordering::Acquire), 0);
     }
 
     #[test]

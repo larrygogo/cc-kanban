@@ -16,6 +16,7 @@ import { Switch, Segmented, SwatchPicker, FontSizeSlider } from "./settings/widg
 import { Dropdown } from "./menu";
 import { AccountSection } from "./settings/AccountSection";
 import { NetworkSection } from "./settings/NetworkSection";
+import { applySettingsFilter } from "./settings/searchFilter";
 import { useEscClose } from "../hooks/useEscClose";
 
 const REPO = "github.com/larrygogo/meowo";
@@ -25,6 +26,7 @@ const SITE_URL = "https://meowo.io";
 const openExt = (url: string) => invoke("open_url", { url }).catch(() => {});
 
 type Section = "general" | "sessions" | "appearance" | "network" | "account" | "about";
+const SECTION_ORDER: Section[] = ["general", "sessions", "appearance", "network", "account", "about"];
 
 
 // 打开未连接会话用的终端：按平台给不同选项。WKWebView 的 UA 含 "Mac"/"Win"，与 main.tsx 同步判定一致。
@@ -135,10 +137,12 @@ function GeneralSection() {
   const flashOn = settings?.attention_flash_enabled ?? true;
   const autoUpdateOn = settings?.auto_update_enabled ?? true;
   const chatOn = settings?.chat_enabled ?? true;
+  const clickThroughOn = settings?.click_through_enabled ?? false;
   const toggleNotify = () => patch({ notifications_enabled: !notifyOn });
   const toggleFlash = () => patch({ attention_flash_enabled: !flashOn });
   const toggleAutoUpdate = () => patch({ auto_update_enabled: !autoUpdateOn });
   const toggleChat = () => patch({ chat_enabled: !chatOn });
+  const toggleClickThrough = () => patch({ click_through_enabled: !clickThroughOn });
   return (
     <>
       <div className="row-card">
@@ -190,6 +194,14 @@ function GeneralSection() {
             <div className="row-desc">{t.settings.attentionFlashDesc}</div>
           </div>
           <Switch checked={flashOn} onChange={toggleFlash} label={t.settings.attentionFlash} />
+        </div>}
+        {/* 点击穿透(W-8)仅 Windows 实装(macOS 面板失焦自隐、无此问题),同样按平台显示。 */}
+        {IS_WIN && <div className="row">
+          <div className="row-text">
+            <div className="row-label">{t.settings.clickThrough}</div>
+            <div className="row-desc">{t.settings.clickThroughDesc}</div>
+          </div>
+          <Switch checked={clickThroughOn} onChange={toggleClickThrough} label={t.settings.clickThrough} />
         </div>}
       </div>
       <SettingsError error={patchError} />
@@ -409,6 +421,9 @@ const OPACITY_MAX = 100;
 
 const TERM_FONT_MIN = 10;
 const TERM_FONT_MAX = 18;
+// 回滚缓冲滑杆范围（后端兜底钳到 500–50000，见 settings.rs）。
+const TERM_SCROLLBACK_MIN = 1000;
+const TERM_SCROLLBACK_MAX = 20000;
 const lineHeightOptions = (t: Dict): { value: TerminalLineHeight; label: string }[] => [
   { value: "compact", label: t.settings.lineCompact },
   { value: "normal", label: t.settings.lineNormal },
@@ -423,8 +438,8 @@ function useSliderDraft(commit: (v: number) => void) {
   const [draft, setDraft] = useState<number | null>(null);
   const timer = useRef<number | undefined>(undefined);
   // 待提交的草稿值。键盘方向键路径没有 pointerup,靠 240ms 兜底 timer 提交——若在兜底
-  // 落地前整段卸载(Esc 关设置页/切分区,main-body 带 key={sec}),clearTimeout 会把这次
-  // 调节静默丢掉。卸载时有 pending 就立即 flush,commit 经 ref 取最新闭包。
+  // 落地前整窗卸载(Esc 关设置页),clearTimeout 会把这次调节静默丢掉。卸载时有 pending
+  // 就立即 flush,commit 经 ref 取最新闭包。
   const pendingRef = useRef<number | null>(null);
   const commitRef = useRef(commit);
   commitRef.current = commit;
@@ -464,16 +479,37 @@ function AppearanceSection() {
   const stickerColor = settings?.sticker_color ?? SETTINGS_DEFAULTS.sticker_color;
   const termFont = settings?.terminal_font_size ?? SETTINGS_DEFAULTS.terminal_font_size;
   const termLine = settings?.terminal_line_height ?? SETTINGS_DEFAULTS.terminal_line_height;
+  const termBack = settings?.terminal_scrollback ?? SETTINGS_DEFAULTS.terminal_scrollback;
   // 滑杆草稿（拖动中本地显示，松手才提交）：见 useSliderDraft。
   const opacityDraft = useSliderDraft((v) => void patch({ opacity: v }));
   const termFontDraft = useSliderDraft((v) => void patch({ terminal_font_size: v }));
+  const termBackDraft = useSliderDraft((v) => void patch({ terminal_scrollback: v }));
   const opacityShown = opacityDraft.draft ?? opacity;
   const termFontShown = termFontDraft.draft ?? termFont;
+  const termBackShown = termBackDraft.draft ?? termBack;
   // 钳到 [0,100]：手改 settings.json 为越界值时，避免算出负/超界的 linear-gradient 填充宽度。
   const fill = Math.max(0, Math.min(100, ((opacityShown - OPACITY_MIN) / (OPACITY_MAX - OPACITY_MIN)) * 100));
   const termFill = Math.max(0, Math.min(100, ((termFontShown - TERM_FONT_MIN) / (TERM_FONT_MAX - TERM_FONT_MIN)) * 100));
+  const backFill = Math.max(0, Math.min(100, ((termBackShown - TERM_SCROLLBACK_MIN) / (TERM_SCROLLBACK_MAX - TERM_SCROLLBACK_MIN)) * 100));
   return (
     <>
+      {/* S-5 行旁迷你贴纸预览：不透明度/界面缩放只作用于贴纸窗，设置窗里调等于闭眼调。
+          预览卡实时吃当前值（不透明度含拖动草稿）——底色走 --cc-bg-rgb（主题/贴纸色本窗
+          已套用），缩放只乘预览自己的字号。复用 Onboarding 的 obm-card/obm-dot 造型。 */}
+      <div className="ap-preview" aria-hidden="true">
+        {/* 实拍反馈「这是什么」：示例卡长得太像真会话，补一行自解释标签。 */}
+        <div className="ap-preview-tag">{t.settings.appearancePreviewTag}</div>
+        <div
+          className="obm-card ap-preview-card"
+          style={{ background: `rgba(var(--cc-bg-rgb), ${opacityShown / 100})`, fontSize: `${(12 * uiScale) / 100}px` }}
+        >
+          <span className="obm-dot obm-run" />
+          <div className="ap-preview-text">
+            <div className="ap-preview-title">{t.settings.appearancePreviewTitle}</div>
+            <div className="ap-preview-sub">{t.settings.appearancePreviewSub}</div>
+          </div>
+        </div>
+      </div>
       <div className="row-card">
         <div className="row">
           <div className="row-text">
@@ -553,6 +589,27 @@ function AppearanceSection() {
             <div className="row-desc">{t.settings.termLineHeightDesc}</div>
           </div>
           <Segmented value={termLine} options={lineHeightOptions(t)} onChange={(v) => patch({ terminal_line_height: v })} label={t.settings.termLineHeight} />
+        </div>
+        <div className="row row-col">
+          <div className="row-head">
+            <div className="row-text">
+              <div className="row-label">{t.settings.termScrollback}</div>
+              <div className="row-desc">{t.settings.termScrollbackDesc}</div>
+            </div>
+            <span className="row-val">{termBackShown}</span>
+          </div>
+          <input
+            type="range"
+            className="slider"
+            min={TERM_SCROLLBACK_MIN}
+            max={TERM_SCROLLBACK_MAX}
+            step={500}
+            value={termBackShown}
+            style={{ background: `linear-gradient(90deg, var(--cc-accent) ${backFill}%, var(--cc-border) ${backFill}%)` }}
+            onChange={(e) => termBackDraft.change(Number(e.target.value))}
+            onPointerUp={(e) => termBackDraft.release(Number((e.target as HTMLInputElement).value))}
+            aria-label={t.settings.termScrollback}
+          />
         </div>
       </div>
       <SettingsError error={patchError} />
@@ -675,8 +732,13 @@ export function About() {
       ? s
       : "general";
   });
+  // S-2：访问过的分区保持挂载（hidden 隐藏代替卸载）——此前 main-body 带 key={sec} 整树
+  // 重挂，每次切回账号分区都重发联网配额查询、切回会话分区重拉归档首页。未访问的分区
+  // 仍不挂载：开窗就把配额/agent 名单全查一遍是白付的启动成本。
+  const [visited, setVisited] = useState<ReadonlySet<Section>>(() => new Set([sec]));
   const pickSec = (next: Section) => {
     setSec(next);
+    setVisited((prev) => (prev.has(next) ? prev : new Set(prev).add(next)));
     try { localStorage.setItem("meowo-settings-section", next); } catch { /* 隐私模式禁写 */ }
   };
   const close = () => getCurrentWindow().close().catch(() => {});
@@ -684,32 +746,79 @@ export function About() {
   // 设置窗口也服从自动更新开关；关闭时不做后台检查，用户仍可从「关于」手动打开更新窗口检查。
   const { status, version: newVersion } = useUpdate({ automatic: true });
 
+  // S-1 设置搜索：30+ 设置项零搜索曾让「在贴纸显示配额」这类深埋项无从找起。
+  // 非空查询时挂载全部分区、按行文本过滤（逻辑在 settings/searchFilter.ts，可单测）；
+  // MutationObserver 兜底异步内容（agent 名单/配额加载完成后新出现的行也要被过滤）。
+  const [query, setQuery] = useState("");
+  const searching = query.trim() !== "";
+  const [noHits, setNoHits] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    const navLabels: Record<string, string> = {
+      general: t.settings.nav.general,
+      sessions: t.settings.nav.sessions,
+      appearance: t.settings.nav.appearance,
+      network: t.settings.nav.network,
+      account: t.settings.nav.account,
+      about: t.settings.nav.about,
+    };
+    const apply = () => {
+      const anyVisible = applySettingsFilter(body, query, navLabels);
+      setNoHits(query.trim() !== "" && !anyVisible);
+    };
+    apply();
+    if (!searching) return;
+    const observer = new MutationObserver(apply);
+    observer.observe(body, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
+  }, [query, searching, t]);
+
   return (
     <div className="settings">
       <aside className="side">
         <div className="side-top" data-tauri-drag-region />
+        {/* S-1：设置搜索入口。命中过滤分区与行（见 settings/searchFilter.ts）；
+            输入框里的 Esc 先清词——useEscClose 对输入框让位，不会误关窗。 */}
+        <div className="side-search">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" />
+            <line x1="21" y1="21" x2="16.5" y2="16.5" />
+          </svg>
+          <input
+            value={query}
+            placeholder={t.settings.searchPlaceholder}
+            aria-label={t.settings.searchPlaceholder}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && query) setQuery("");
+            }}
+          />
+        </div>
         <nav className="side-nav">
-          <button className={"nav-item" + (sec === "general" ? " on" : "")} aria-current={sec === "general" ? "page" : undefined} onClick={() => pickSec("general")}>
+          {/* 搜索态点分区 = 清词并跳转（搜索结果已把各分区平铺，点导航即退出搜索）。 */}
+          <button className={"nav-item" + (sec === "general" ? " on" : "")} aria-current={sec === "general" ? "page" : undefined} onClick={() => { setQuery(""); pickSec("general"); }}>
             <IconGear />
             <span>{t.settings.nav.general}</span>
           </button>
-          <button className={"nav-item" + (sec === "sessions" ? " on" : "")} aria-current={sec === "sessions" ? "page" : undefined} onClick={() => pickSec("sessions")}>
+          <button className={"nav-item" + (sec === "sessions" ? " on" : "")} aria-current={sec === "sessions" ? "page" : undefined} onClick={() => { setQuery(""); pickSec("sessions"); }}>
             <IconCards />
             <span>{t.settings.nav.sessions}</span>
           </button>
-          <button className={"nav-item" + (sec === "appearance" ? " on" : "")} aria-current={sec === "appearance" ? "page" : undefined} onClick={() => pickSec("appearance")}>
+          <button className={"nav-item" + (sec === "appearance" ? " on" : "")} aria-current={sec === "appearance" ? "page" : undefined} onClick={() => { setQuery(""); pickSec("appearance"); }}>
             <IconAppearance />
             <span>{t.settings.nav.appearance}</span>
           </button>
-          <button className={"nav-item" + (sec === "network" ? " on" : "")} aria-current={sec === "network" ? "page" : undefined} onClick={() => pickSec("network")}>
+          <button className={"nav-item" + (sec === "network" ? " on" : "")} aria-current={sec === "network" ? "page" : undefined} onClick={() => { setQuery(""); pickSec("network"); }}>
             <IconGlobe />
             <span>{t.settings.nav.network}</span>
           </button>
-          <button className={"nav-item" + (sec === "account" ? " on" : "")} aria-current={sec === "account" ? "page" : undefined} onClick={() => pickSec("account")}>
+          <button className={"nav-item" + (sec === "account" ? " on" : "")} aria-current={sec === "account" ? "page" : undefined} onClick={() => { setQuery(""); pickSec("account"); }}>
             <IconAgent />
             <span>{t.settings.nav.account}</span>
           </button>
-          <button className={"nav-item" + (sec === "about" ? " on" : "")} aria-current={sec === "about" ? "page" : undefined} onClick={() => pickSec("about")}>
+          <button className={"nav-item" + (sec === "about" ? " on" : "")} aria-current={sec === "about" ? "page" : undefined} onClick={() => { setQuery(""); pickSec("about"); }}>
             <IconInfo />
             <span>{t.settings.nav.about}</span>
             {(status === "available" || status === "downloading" || status === "ready") && (
@@ -728,20 +837,27 @@ export function About() {
             </svg>
           </button>
         </div>
-        <div className="main-body" key={sec}>
-          {sec === "general" ? (
-            <GeneralSection />
-          ) : sec === "sessions" ? (
-            <SessionsSection />
-          ) : sec === "appearance" ? (
-            <AppearanceSection />
-          ) : sec === "network" ? (
-            <NetworkSection />
-          ) : sec === "account" ? (
-            <AccountSection />
-          ) : (
-            <AboutSection status={status} newVersion={newVersion} />
-          )}
+        <div className="main-body" ref={bodyRef}>
+          {searching && noHits && <div className="settings-noresults">{t.settings.searchNoResults}</div>}
+          {/* 搜索态挂载全部分区并平铺（data-sec 供过滤识别导航名命中），
+              各分区的行级显隐由 searchFilter 直写 style.display（hidden 归 React 管）。 */}
+          {SECTION_ORDER.filter((s) => searching || visited.has(s)).map((s) => (
+            <div key={s} className="main-sec" data-sec={s} hidden={searching ? false : s !== sec}>
+              {s === "general" ? (
+                <GeneralSection />
+              ) : s === "sessions" ? (
+                <SessionsSection />
+              ) : s === "appearance" ? (
+                <AppearanceSection />
+              ) : s === "network" ? (
+                <NetworkSection />
+              ) : s === "account" ? (
+                <AccountSection />
+              ) : (
+                <AboutSection status={status} newVersion={newVersion} />
+              )}
+            </div>
+          ))}
         </div>
       </main>
     </div>

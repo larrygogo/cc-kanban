@@ -242,16 +242,19 @@ impl AgentPlugin for Gemini {
                     id: "default",
                     label: "Default",
                     args: &[],
+                    risk: false,
                 },
                 LaunchChoice {
                     id: "autoEdit",
                     label: "Auto Edit",
                     args: &["--approval-mode", "auto_edit"],
+                    risk: false,
                 },
                 LaunchChoice {
                     id: "yolo",
                     label: "YOLO",
                     args: &["--yolo"],
+                    risk: true,
                 },
             ],
         }];

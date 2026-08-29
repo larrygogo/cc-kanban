@@ -7,6 +7,7 @@ const api = vi.hoisted(() => ({
   getAccounts: vi.fn(),
   listAgents: vi.fn(),
   installAgent: vi.fn(),
+  cancelInstall: vi.fn(),
   loginAgent: vi.fn(),
   cancelLogin: vi.fn(),
   logoutAgent: vi.fn(),
@@ -21,6 +22,7 @@ const api = vi.hoisted(() => ({
   setRelaySecret: vi.fn(),
   agentPathGap: vi.fn(),
   addAgentToUserPath: vi.fn(),
+  openInstallLog: vi.fn(),
   // 多账号
   listProfiles: vi.fn(),
   createProfile: vi.fn(),
@@ -48,7 +50,10 @@ vi.mock("@tauri-apps/api/event", () => ({
   },
 }));
 const fireDone = (provider: string, ok: boolean, logPath: string | null = null) =>
-  act(() => ev.doneCbs.forEach((cb) => cb({ payload: { provider, ok, code: ok ? 0 : 1, logPath } })));
+  act(() => ev.doneCbs.forEach((cb) => cb({ payload: { provider, ok, code: ok ? 0 : 1, logPath, cancelled: false } })));
+/** 用户取消：后端 cancel_install 代发的 cancelled install-done（S-8）。 */
+const fireCancelled = (provider: string) =>
+  act(() => ev.doneCbs.forEach((cb) => cb({ payload: { provider, ok: false, code: null, logPath: null, cancelled: true } })));
 const fireLogin = (provider: string, outcome: "success" | "cancelled" | "timeout") => {
   const call = [...api.loginAgent.mock.calls].reverse().find(([p]) => p === provider);
   const operationId = call?.[3] ?? `unrelated-${provider}`;
@@ -240,6 +245,24 @@ describe("AccountSection agent 卡", () => {
     expect(screen.getByTestId("agent-install-kimi")).toBeTruthy();
   });
 
+  // 取消安装（S-8）：安装曾是不可中断的黑盒。点取消 → 后端杀进程/丢弃结果并代发
+  // cancelled 的 install-done → 卡片回到「安装」按钮，不按失败展示。
+  it("安装中点「取消安装」：调 cancelInstall，cancelled 事件后回到安装按钮", async () => {
+    api.installAgent.mockResolvedValue(undefined);
+    api.cancelInstall.mockResolvedValue(undefined);
+    render(<AccountSection />);
+    await selectAgent("Kimi Code");
+    fireEvent.click(await screen.findByTestId("agent-install-kimi"));
+    await waitFor(() => expect(screen.getByTestId("agent-installing-kimi")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("agent-install-cancel-kimi"));
+    await waitFor(() => expect(api.cancelInstall).toHaveBeenCalledWith("kimi"));
+    // 后端代发的 cancelled install-done：退出安装中、回到安装按钮（不是失败重试态）
+    fireCancelled("kimi");
+    await waitFor(() => expect(screen.queryByTestId("agent-installing-kimi")).toBeNull());
+    expect(screen.getByTestId("agent-install-kimi")).toBeTruthy();
+    expect(screen.queryByTestId("agent-install-error-kimi")).toBeNull();
+  });
+
   // 安装状态住在页面级（useInstallOperations）：安装动辄一两分钟，用户会切下拉去看别的
   // agent。状态曾住在 keyed 卡片里，切换即卸载 + install-done 监听注销——回来显示「安装」
   // 按钮诱导二次安装，后台那次若失败原因也永久丢失（登录侧早为同一坑做了页面级提升）。
@@ -269,10 +292,10 @@ describe("AccountSection agent 卡", () => {
     await selectAgent("Claude Code");
     await screen.findByTestId("agent-card-claude");
     fireDone("kimi", false, "C:/logs/kimi-install.log");
-    // 切回：失败态还在——重试按钮 + 日志路径提示
+    // 切回：失败态还在——重试按钮 + 可点的日志按钮（完整路径在 tooltip，S-8）
     await selectAgent("Kimi Code");
     expect(await screen.findByTestId("agent-install-kimi")).toBeTruthy();
-    expect(screen.getByText(zh.account.installLogHint("C:/logs/kimi-install.log"))).toBeTruthy();
+    expect(screen.getByTestId("agent-open-log-kimi").getAttribute("data-tip")).toBe("C:/logs/kimi-install.log");
   });
 
   // 已登录的卡片只显示邮箱。此前拼 显示名 · 邮箱 · 组织，个人账号的组织名恰是
@@ -489,7 +512,20 @@ describe("AccountSection agent 卡", () => {
     fireEvent.click(await screen.findByTestId("agent-install-kimi"));
     fireDone("kimi", false, "C:\\Users\\x\\.meowo\\install-kimi.log");
     const log = await screen.findByTestId("agent-install-log-kimi");
-    expect(log.textContent).toContain("install-kimi.log");
+    // 路径不裸文本展示（没法点）：按钮打开日志，完整路径在按钮 tooltip（S-8）。
+    expect(log.querySelector("[data-testid='agent-open-log-kimi']")?.getAttribute("data-tip")).toContain("install-kimi.log");
+  });
+
+  // S-8：日志按钮真的会把日志打开（路径由后端按 provider 重算，前端不传路径）。
+  it("点「打开安装日志」调用 openInstallLog", async () => {
+    api.installAgent.mockResolvedValue(undefined);
+    api.openInstallLog.mockResolvedValue(undefined);
+    render(<AccountSection />);
+    await selectAgent("Kimi Code");
+    fireEvent.click(await screen.findByTestId("agent-install-kimi"));
+    fireDone("kimi", false, "C:\\Users\\x\\.meowo\\install-kimi.log");
+    fireEvent.click(await screen.findByTestId("agent-open-log-kimi"));
+    await waitFor(() => expect(api.openInstallLog).toHaveBeenCalledWith("kimi"));
   });
 
   // 回归：claude 的安装器不写 PATH 也照样 exit 0——「装好了」不等于「终端里敲得出来」。
@@ -500,7 +536,7 @@ describe("AccountSection agent 卡", () => {
     const gap = await screen.findByTestId("agent-path-gap-claude");
     // 提示条刻意低调：正文只留一句「为什么该点」，**完整路径挪进 tooltip**——
     // 这条对多数人是背景噪音（装完就在 PATH 上），横一条长提示会喧宾夺主。
-    expect(gap.getAttribute("title")).toContain(".local\\bin");
+    expect(gap.getAttribute("data-tip")).toContain(".local\\bin");
     expect(gap.textContent).not.toContain(".local\\bin");
 
     fireEvent.click(screen.getByTestId("agent-add-path-claude"));
@@ -623,6 +659,18 @@ describe("AccountSection 登录", () => {
     // 终端可能已被关掉，而后端要 5 分钟才超时。
     await waitFor(() => expect(screen.getByTestId("agent-login-codex").textContent).toBe(zh.account.cancelLogin));
     expect((screen.getByTestId("agent-login-codex") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  /// 等待态零指引曾是实测痛点：不说窗口开在哪个终端、最多等多久，用户对着「等待登录…」干等。
+  it("等待中显示「已在哪个终端打开、最长 5 分钟」", async () => {
+    api.getSettings.mockResolvedValue({ sticker_quota_providers: [], resume_terminal: "wt" });
+    api.loginAgent.mockResolvedValue(undefined);
+    render(<AccountSection />);
+    await selectAgent("Codex");
+    fireEvent.click(await screen.findByTestId("agent-login-codex"));
+    await waitFor(() =>
+      expect(screen.getByTestId("agent-login-error-codex").textContent).toBe(zh.account.loginWaiting("Windows Terminal")),
+    );
   });
 
   it("切换 agent 后仍保留等待中的 operationId，并可用同一 id 取消", async () => {
@@ -996,10 +1044,10 @@ describe("AccountSection 合并进默认账号", () => {
     expect(screen.queryByTestId("profile-menu-claude-__default__-delete")).toBeNull();
   });
 
-  /** 后端拒绝（如有进行中的会话）时错误就地展示，不静默。 */
+  /** 后端拒绝（如有进行中的会话）时错误就地展示，不静默。reason 码（S-9）按当前语言映射。 */
   it("合并失败（后端拒绝）时错误就地展示", async () => {
     twoProfiles();
-    api.mergeProfileIntoDefault.mockRejectedValue("该账号还有 2 个进行中的会话，请先结束这些会话再合并");
+    api.mergeProfileIntoDefault.mockRejectedValue("profile/has-live-sessions: 2");
     render(<AccountSection />);
 
     fireEvent.click(await screen.findByTestId("profile-menu-claude-work"));

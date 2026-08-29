@@ -222,7 +222,7 @@ function ModelPicker({
       <button
         className={`relay-model-refresh${loading ? " loading" : ""}`}
         type="button"
-        title={refreshLabel}
+        data-tip={refreshLabel}
         aria-label={refreshLabel}
         disabled={loading}
         onMouseDown={(e) => e.preventDefault()}

@@ -47,7 +47,8 @@ function FolderIcon() {
   );
 }
 
-/** 独立窗口页（label="new-session"）：新建一个全新会话。成功后 emit 通知主看板弹 toast 并自关。 */
+/** 独立窗口页（label="new-session"）：新建一个全新会话。成功后自关；
+ *  「正在启动」的反馈由看板的负 id 占位卡承担（pending PTY 合成，见 session_query）。 */
 
 const qs = new URLSearchParams(window.location.search);
 const initialCwd = normalizePath(qs.get("cwd") ?? "");
@@ -108,6 +109,9 @@ export function NewSessionPanel({ onClose, prefill }: {
   // 各 provider 当前活跃账号的展示名（null = 默认账号）。非默认账号活跃时在启动按钮旁提示，
   // 防「切过一次账号就忘了，新会话全写进隔离账号」。
   const [activeProfiles, setActiveProfiles] = useState<Record<string, string | null>>({});
+  // relay 启用的 provider → 中转固定的模型。中转的 --model 在 argv 里压轴（terminal.rs），
+  // 面板选的模型静默不生效——model 档置灰并注明固定值，不留「选了却没生效」的坑。
+  const [relayPins, setRelayPins] = useState<Record<string, string>>({});
   const loginOperations = useLoginOperations((event) => {
     const p = event.provider;
     // 登录成功与否是该 provider 的客观事实，与当前选中谁无关。
@@ -145,8 +149,8 @@ export function NewSessionPanel({ onClose, prefill }: {
         // （gemini / opencode），而「查不到行」≠「未登录」——它是「无账号概念，无从谈起」。
         // 曾经把两者混为一谈：查不到 → isLoggedIn(undefined) → false → 亮出登录入口 → 点下去，
         // 后端 `login_argv()` 却是 None，只能报「拉起登录失败」。留 undefined，needLogin 即为 false。
-        getAccounts()
-          .then((rows) => {
+        Promise.all([getAccounts(), getSettings()])
+          .then(([rows, settings]) => {
             const m: Record<string, boolean> = {};
             const ap: Record<string, string | null> = {};
             for (const { id } of list) {
@@ -156,6 +160,14 @@ export function NewSessionPanel({ onClose, prefill }: {
             }
             setLoggedIn(m);
             setActiveProfiles(ap);
+            // relay_enabled 与后端 augment_argv 同一条判定（含密钥已存）；固定值取设置的
+            // 中转模型。enabled 但取不到 model 时宁可不置灰（误锁比漏提示更糟）。
+            const pins: Record<string, string> = {};
+            for (const row of rows) {
+              const rule = settings.relay?.per_agent?.[row.provider as AgentId];
+              if (row.relay_enabled && rule?.model) pins[row.provider] = rule.model;
+            }
+            setRelayPins(pins);
           })
           .catch(() => setLoggedIn(null));
       })
@@ -272,6 +284,8 @@ export function NewSessionPanel({ onClose, prefill }: {
       const extras = extraDirs.filter((d) => pathKey(d) !== pathKey(cwd.trim()));
       await newSession(cwd.trim(), provider, opts, extras);
       saveStoredOpts(provider, opts); // 启动成功才记：失败的组合不该成为下次的默认
+      // 「正在启动」的可见反馈由看板的占位卡承担（后端把 pending PTY 合成负 id 占位项
+      // 合入看板查询，认领出真卡后对账撤下），面板这里启动成功直接自关即可。
       closeWin();
     } catch (e) {
       launchPendingRef.current = false;
@@ -395,7 +409,7 @@ export function NewSessionPanel({ onClose, prefill }: {
             {extraDirs.length > 0 && (
               <div className="ns-extra-list" data-testid="ns-extra-list">
                 {extraDirs.map((d) => (
-                  <span key={d} className="ns-extra-chip" title={d}>
+                  <span key={d} className="ns-extra-chip" data-tip={d}>
                     {d.split(/[\\/]/).filter(Boolean).pop() ?? d}
                     <button
                       type="button"
@@ -419,7 +433,7 @@ export function NewSessionPanel({ onClose, prefill }: {
                     {t.newSession.up}
                   </button>
                   {/* 只显当前目录名:整条路径在窄屏必被截断,反而遮住最有信息量的末段。 */}
-                  <span className="ns-dirbrowse-path" title={browse.path}>
+                  <span className="ns-dirbrowse-path" data-tip={browse.path}>
                     {browse.path
                       ? (browse.path.split(/[\\/]/).filter(Boolean).pop() ?? browse.path)
                       : t.newSession.drives}
@@ -467,7 +481,7 @@ export function NewSessionPanel({ onClose, prefill }: {
                       + (cwdNorm === r ? " is-on" : "")
                       + (extraDirs.some((x) => pathKey(x) === pathKey(r)) ? " is-extra" : "")
                     }
-                    title={supportsExtraDirs ? `${r}\n${t.newSession.extraDirsHint}` : r}
+                    data-tip={supportsExtraDirs ? `${r}\n${t.newSession.extraDirsHint}` : r}
                     onClick={(e) => {
                       // Ctrl/Cmd+点击 = 加为/移出附加目录(与侧栏多选同一手势);普通点击 = 设主目录。
                       if (supportsExtraDirs && (e.ctrlKey || e.metaKey)) {
@@ -526,20 +540,31 @@ export function NewSessionPanel({ onClose, prefill }: {
                   choice 文案：i18n 按 `<option>.<choice>` 取，缺省回退后端的产品词 label。
                   用自绘 Dropdown 而非原生 select：WebView2 的原生下拉跟随系统主题画白底，
                   无视页面 color-scheme（终端下拉当年正因此换掉，见 styles.css 的遗留注释）。 */}
-              {launchOptions.map((option) => (
+              {launchOptions.map((option) => {
+                // relay 启用时 model 档由中转固定（置灰 + 注明，理由见 relayPins）。
+                const pinned = option.id === "model" ? relayPins[provider] : undefined;
+                return (
                 <div key={option.id} className="ns-option" data-testid={"ns-option-" + option.id}>
                   <span className="ns-option-label">{t.newSession.launchOption[option.id] ?? option.id}</span>
                   <Dropdown
                     align="left"
+                    disabled={pinned !== undefined}
                     value={opts[option.id] ?? option.default}
                     options={option.choices.map((choice) => ({
                       value: choice.id,
                       label: t.newSession.launchChoice[`${option.id}.${choice.id}`] ?? choice.label,
+                      // 高风险档（契约 risk=true）警示色 + 副标题，与普通档拉开视觉。
+                      risky: choice.risk,
+                      sub: choice.risk ? t.newSession.riskyChoiceSub : undefined,
                     }))}
                     onChange={(v) => setOpts((m) => ({ ...m, [option.id]: v }))}
                   />
+                  {pinned !== undefined && (
+                    <span className="ns-option-note" data-testid="ns-option-pinned">{t.newSession.relayPinnedModel(pinned)}</span>
+                  )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
           {/* 修复 hook / 登录的按钮都要在桌面拉起终端进程,远程无从操作——按钮隐藏。但警告

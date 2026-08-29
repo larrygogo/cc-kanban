@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 /**
@@ -9,6 +10,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
  * 不会永久隐身。
  *
  * `focus: false` 给贴纸主窗口：它配置了 focus:false（开机自启不能抢焦点），显示时同样不能。
+ *   普通 show() 在 Windows 上会激活窗口抢焦点（W-7），故改走 Rust 的 show_sticker 命令
+ *   （SW_SHOWNOACTIVATE 路径，无声显形）。
  * `enabled: false` 给 macOS 面板模式的贴纸：显隐归 menubar 管，前端不得越权 show。
  * `ready`（默认 true）是**响应式**的额外闸门：贴纸以折叠态启动时要等 snap_collapse
  *   落地再显示——窗口此刻还是 360×440 的默认尺寸，先 show 会闪一帧「大框里挂几个圆点、
@@ -25,8 +28,9 @@ export function useShowWhenReady(opts?: { focus?: boolean; enabled?: boolean; re
       raf2 = requestAnimationFrame(() => {
         try {
           const w = getCurrentWindow();
+          // focus:false（贴纸主窗口）走 Rust 的 no-activate 显示，普通 show 会抢焦点（W-7）。
           // 可选调用兼容测试环境的窗口 mock（往往只 mock 了 close）。
-          void Promise.resolve(w.show?.())
+          void Promise.resolve(focus ? w.show?.() : invoke("show_sticker"))
             .then(() => (focus ? w.setFocus?.() : undefined))
             .catch(() => {});
         } catch {

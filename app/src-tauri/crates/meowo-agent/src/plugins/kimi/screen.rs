@@ -91,4 +91,26 @@ pub(super) static RULES: &[ScreenRule] = &[
         Matcher::BraillePrefixed(&["thinking...", "working...", "using "]),
     )
     .visible(),
+    // 当前版 TUI 的工作状态行：盲文 spinner + `<Agent> Running (…)`（实拍：
+    // `⠴ Explore Agent Running (…) · 72 tools · 30m 38s`）。agent 名不定，只能锚
+    // 「行首盲文 + running (」；盲文前缀本身只在 spinner 行出现，误报面可控。
+    ScreenRule::new(
+        "agent_running_status_working",
+        ScreenState::Working,
+        95,
+        Region::WholeScreen,
+        Matcher::LineRegex(r"^\s*[\u{2800}-\u{28FF}].*\brunning\s*\("),
+    )
+    .visible(),
+    // 当前版 TUI 工作中的月相提示行：`🌘 · Tip: …`。旧规则只认**独立成行**的月相
+    // 字符，新形态是「月相 + 空格 + ·」行首。blocked 规则优先级都在 300+，审批/提问
+    // 面板同屏时不会被这条盖掉。
+    ScreenRule::new(
+        "moon_tip_status_working",
+        ScreenState::Working,
+        94,
+        Region::WholeScreen,
+        Matcher::LineRegex(r"^\s*[🌕🌖🌗🌘🌑🌒🌓🌔]\s+·\s"),
+    )
+    .visible(),
 ];
