@@ -1,7 +1,7 @@
 /**
  * 对话窗的三个弹层（从 ChatWindow.tsx 原样搬出，行为不变）：
  * - RenameModal：重命名会话；
- * - QuickSwitcher：Ctrl/Cmd+K 快速切换器；
+ * - QuickSwitcher：Ctrl/Cmd+K 命令面板（搜会话 + 搜并执行窗口命令）；
  * - ShortcutSheet：? 唤出的快捷键速查表。
  * 三者共用 AppModal 壳（G-3）：Esc 关、Tab 焦点循环、初始焦点、关闭归还焦点、背景 inert。
  */
@@ -59,11 +59,22 @@ export function RenameModal({ initial, onSubmit, onClose, t }: {
   );
 }
 
-/** Ctrl/Cmd+K 快速切换器：搜索 + 键盘导航直达任意会话。会话上百条时侧栏翻页与
- *  滚动都太慢，这是键盘用户的主通道。查询下沉后端 search（与看板/侧栏同一条 LIKE）。 */
-export function QuickSwitcher({ activeId, onPick, onClose }: {
+/** 命令面板的命令条目：扁平一个数组由 ChatWindow 传入（专项明确不加插件化注册、
+ *  不加最近使用排序）。keys 是右侧快捷键提示；没有全局快捷键的命令留空不渲染。 */
+export interface PaletteCommand {
+  id: string;
+  label: string;
+  keys?: string;
+}
+
+/** Ctrl/Cmd+K 命令面板：搜索 + 键盘导航直达任意会话，或搜索并执行窗口内命令
+ *  （U1-14 专项：由「快速切换器」扩展而来，命令全部映射窗口已有动作）。会话查询
+ *  下沉后端 search（与看板/侧栏同一条 LIKE）；命令就个位数条，客户端子串过滤。 */
+export function QuickSwitcher({ activeId, commands, onPick, onCommand, onClose }: {
   activeId: number;
+  commands: PaletteCommand[];
   onPick: (id: number) => void;
+  onCommand: (id: string) => void;
   onClose: () => void;
 }) {
   const t = useT();
@@ -87,9 +98,32 @@ export function QuickSwitcher({ activeId, onPick, onClose }: {
     }, query ? 200 : 0);
     return () => window.clearTimeout(timer);
   }, [query]);
+  // 空查询时命令组全列而非隐藏：命令只有个位数条，全列让「这不只是会话切换器」
+  // 一眼可见（信息 scent），藏起来用户永远不知道还能搜命令。
+  const filteredCommands = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return commands;
+    return commands.filter((cmd) => cmd.label.toLowerCase().includes(q));
+  }, [commands, query]);
   const pick = (id: number) => {
     onClose();
     if (id !== activeId) onPick(id);
+  };
+  // 执行命令与会话跳转同一条收尾路径：先关弹层（AppModal 卸载时把焦点归还给
+  // 打开前的元素，通常是 composer），再执行——命令触发的视图切换不抢这拍焦点。
+  const run = (id: string) => {
+    onClose();
+    onCommand(id);
+  };
+  // 键盘导航的平面索引跨两组：会话组在前（Ctrl+K 的老本行），命令组在后。
+  // 组头小标签只是渲染分隔，不进索引、不参与 ↑↓。
+  const total = rows.length + filteredCommands.length;
+  // 查询变化收窄结果时旧 active 可能越界，渲染与按键统一用收敛后的值。
+  const eff = total > 0 ? Math.min(active, total - 1) : 0;
+  const scrollTo = (index: number) => {
+    // 只在键盘导航时跟滚：mouseEnter 的 setActive 不滚——悬停在半可见项上
+    // 会「滚动↔悬停」互相触发抖起来。jsdom 无 scrollIntoView，可选调用兜底。
+    (listRef.current?.querySelector(`[data-idx="${index}"]`) as HTMLElement | null)?.scrollIntoView?.({ block: "nearest" });
   };
   // 同名项目消歧（与侧栏目录下拉同款，共用 parentSegment）：多个「codebase」并排时
   // 带上上一级目录。
@@ -111,18 +145,29 @@ export function QuickSwitcher({ activeId, onPick, onClose }: {
       onKeyDown={(event) => {
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
           event.preventDefault();
-          if (rows.length === 0) return;
-          const next = (active + (event.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length;
+          if (total === 0) return;
+          const next = (eff + (event.key === "ArrowDown" ? 1 : total - 1)) % total;
           setActive(next);
-          // 只在键盘导航时跟滚：mouseEnter 的 setActive 不滚——悬停在半可见项上
-          // 会「滚动↔悬停」互相触发抖起来。jsdom 无 scrollIntoView，可选调用兜底。
-          (listRef.current?.children[next] as HTMLElement | undefined)?.scrollIntoView?.({ block: "nearest" });
+          scrollTo(next);
+          return;
+        }
+        if (event.key === "Home" || event.key === "End") {
+          event.preventDefault();
+          if (total === 0) return;
+          const next = event.key === "Home" ? 0 : total - 1;
+          setActive(next);
+          scrollTo(next);
           return;
         }
         if (event.key === "Enter" && !event.nativeEvent.isComposing) {
           event.preventDefault();
-          const row = rows[active];
-          if (row) pick(row.session.id);
+          if (eff < rows.length) {
+            const row = rows[eff];
+            if (row) pick(row.session.id);
+          } else {
+            const cmd = filteredCommands[eff - rows.length];
+            if (cmd) run(cmd.id);
+          }
         }
       }}
     >
@@ -139,25 +184,54 @@ export function QuickSwitcher({ activeId, onPick, onClose }: {
         onCompositionEnd={(event) => setQuery(event.currentTarget.value)}
       />
       <div className="chat-switcher-list" ref={listRef} role="listbox" aria-label={t.chat.switcherTitle}>
-        {rows.length === 0 && <div className="chat-switcher-empty">{t.chat.switcherEmpty}</div>}
-        {rows.map((row, index) => {
-          const tone = sessionTone(row.connected, row.session.status, row.pending_review, row.errored, row.busy_subagents, row.screen_state);
-          return (
-            <button
-              type="button"
-              key={row.session.id}
-              role="option"
-              aria-selected={index === active}
-              className={"chat-switcher-item" + (index === active ? " is-active" : "") + (row.session.id === activeId ? " is-current" : "")}
-              onMouseEnter={() => setActive(index)}
-              onClick={() => pick(row.session.id)}
-            >
-              <i className={`chat-sidebar-dot is-${tone}`} aria-hidden="true" />
-              <span className="chat-switcher-name">{row.task_title || t.sticker.waitingFirstInput}</span>
-              <span className="chat-switcher-meta">{metaOf(row)}</span>
-            </button>
-          );
-        })}
+        {total === 0 && <div className="chat-switcher-empty">{t.chat.switcherEmpty}</div>}
+        {rows.length > 0 && (
+          <>
+            <div className="chat-switcher-group" role="presentation">{t.chat.switcherGroupSessions}</div>
+            {rows.map((row, index) => {
+              const tone = sessionTone(row.connected, row.session.status, row.pending_review, row.errored, row.busy_subagents, row.screen_state);
+              return (
+                <button
+                  type="button"
+                  key={row.session.id}
+                  role="option"
+                  aria-selected={index === eff}
+                  data-idx={index}
+                  className={"chat-switcher-item" + (index === eff ? " is-active" : "") + (row.session.id === activeId ? " is-current" : "")}
+                  onMouseEnter={() => setActive(index)}
+                  onClick={() => pick(row.session.id)}
+                >
+                  <i className={`chat-sidebar-dot is-${tone}`} aria-hidden="true" />
+                  <span className="chat-switcher-name">{row.task_title || t.sticker.waitingFirstInput}</span>
+                  <span className="chat-switcher-meta">{metaOf(row)}</span>
+                </button>
+              );
+            })}
+          </>
+        )}
+        {filteredCommands.length > 0 && (
+          <>
+            <div className="chat-switcher-group" role="presentation">{t.chat.switcherGroupCommands}</div>
+            {filteredCommands.map((cmd, i) => {
+              const index = rows.length + i;
+              return (
+                <button
+                  type="button"
+                  key={cmd.id}
+                  role="option"
+                  aria-selected={index === eff}
+                  data-idx={index}
+                  className={"chat-switcher-item" + (index === eff ? " is-active" : "")}
+                  onMouseEnter={() => setActive(index)}
+                  onClick={() => run(cmd.id)}
+                >
+                  <span className="chat-switcher-name">{cmd.label}</span>
+                  {cmd.keys && <kbd className="chat-switcher-keys">{cmd.keys}</kbd>}
+                </button>
+              );
+            })}
+          </>
+        )}
       </div>
     </AppModal>
   );

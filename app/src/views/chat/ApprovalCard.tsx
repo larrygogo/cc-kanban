@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 /// 审批/交互卡的统一外壳。对话页上四类卡——broker 审批(claude hook 劫走的请求)、
 /// 终端命令审批(claude/kimi 屏幕识别)、交互选择器(question/plan)、其他屏幕提示
@@ -9,7 +9,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 /// 写进 PTY——那些差异留在调用方的按钮 onClick 里。动作排布的约定也在这里定死:
 /// 左组(sideActions)放「不作本次决定」的动作(零副作用的仅收起、范围更大的持久放行),
 /// 右组(actions)只放本次的决定(拒绝/允许/确认),与 Esc=拒绝的落点对得上。
-export function ApprovalCard({ title, badge, className, children, sideActions, actions }: {
+export function ApprovalCard({ title, badge, className, children, sideActions, actions, returnFocusTo }: {
   title: string;
   badge?: string;
   className?: string;
@@ -17,6 +17,9 @@ export function ApprovalCard({ title, badge, className, children, sideActions, a
   children?: ReactNode;
   sideActions?: ReactNode;
   actions?: ReactNode;
+  /// 收卡后的焦点归还目标(composer 输入框)。C-9 overlay 后卡片不再是输入框的
+  /// 文档流邻居,浏览器不会自己找回去——拒/答/收起导致卸载时显式归还。
+  returnFocusTo?: RefObject<HTMLElement | null>;
 }) {
   const ref = useRef<HTMLElement>(null);
   // G-16：role=alert 只打断朗读、焦点却进不来，用户听不到也摸不着按钮。改 alertdialog
@@ -28,6 +31,22 @@ export function ApprovalCard({ title, badge, className, children, sideActions, a
     (el.querySelector<HTMLElement>(".chat-approval-actions > button")
       ?? el.querySelector<HTMLElement>(".chat-approval-actions button")
       ?? el.querySelector<HTMLElement>("button"))?.focus();
+  }, []);
+  // 焦点归还用 layout cleanup:被动 effect 的 cleanup 在 DOM 移除后才跑,那时
+  // contains(activeElement) 已失效(焦点先掉回 body);layout cleanup 在移除前执行,
+  // 还能认出「焦点在卡内」。归还本身推迟到宏任务:同一帧挂载的新卡会先接管焦点
+  // (那时 activeElement 已不是 body,不抢),且 compose 的 inert 解锁 effect
+  // (屏幕识别卡在场时锁定 composer)也已跑完。
+  useLayoutEffect(() => {
+    const el = ref.current;
+    return () => {
+      if (!el || !el.contains(document.activeElement)) return;
+      const target = returnFocusTo?.current;
+      window.setTimeout(() => {
+        // 切到终端视图时 composer 同帧卸载(detached),focus 无意义也不生效——跳过。
+        if ((document.activeElement === document.body || document.activeElement == null) && target?.isConnected) target.focus();
+      }, 0);
+    };
   }, []);
   return (
     <section ref={ref} className={"chat-approval" + (className ? ` ${className}` : "")} role="alertdialog" aria-modal="false" aria-label={title}>

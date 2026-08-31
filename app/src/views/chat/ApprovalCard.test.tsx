@@ -1,3 +1,4 @@
+import { useRef, useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -38,6 +39,49 @@ describe("ApprovalCard 外壳(G-16)", () => {
     expect(dialog.getAttribute("aria-modal")).toBe("false");
     // 动作区第一个按钮获焦——role=alert 时代焦点进不来，用户听不到也摸不着。
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "允许一次" }));
+  });
+});
+
+describe("ApprovalCard 焦点归还(C-9 overlay)", () => {
+  // overlay 后卡片不再是 composer 的文档流邻居：收卡卸载时焦点会掉到 body，
+  // 显式归还给 returnFocusTo（composer 输入框）；归还推迟到宏任务，给同帧
+  // 挂载的新卡/其他焦点接管者让路。
+  function Harness() {
+    const target = useRef<HTMLTextAreaElement>(null);
+    const [show, setShow] = useState(true);
+    return (
+      <>
+        <textarea ref={target} aria-label="composer" />
+        {show && (
+          <ApprovalCard
+            title="Agent 请求权限"
+            returnFocusTo={target}
+            actions={<button type="button" onClick={() => setShow(false)}>允许一次</button>}
+          />
+        )}
+      </>
+    );
+  }
+
+  it("焦点留在卡内时卸载，归还 returnFocusTo", async () => {
+    render(<Harness />);
+    // G-16：挂载移焦动作区。
+    fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    await vi.waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByLabelText("composer"));
+    });
+  });
+
+  it("焦点已不在卡内（用户点了别处）时不抢焦点", async () => {
+    render(<Harness />);
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    outside.focus();
+    fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(document.activeElement).toBe(outside);
+    outside.remove();
   });
 });
 

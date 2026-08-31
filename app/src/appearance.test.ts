@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { STICKER_COLORS, STICKER_COLOR_KEYS, stickerBgRgb } from "./appearance";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { STICKER_COLORS, STICKER_COLOR_KEYS, bootAppearance, stickerBgRgb } from "./appearance";
 
 describe("stickerBgRgb", () => {
   it("已知预设按主题取深/浅一套底色 RGB", () => {
@@ -25,5 +25,57 @@ describe("stickerBgRgb", () => {
       expect(p.dark).toMatch(/^\d+, \d+, \d+$/);
       expect(p.light).toMatch(/^\d+, \d+, \d+$/);
     }
+  });
+});
+
+// G-11 后续：--cc-ui 下发面从贴纸窗扩到对话窗（main.tsx 对 main/chat 传 scale:true）。
+// 这里钉住「scale 门控 + settings-changed 热生效」这条通路，防回退成只读缓存不订阅。
+const listenHandlers: Array<(e: { payload: unknown }) => void> = [];
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (_name: string, cb: (e: { payload: unknown }) => void) => {
+    listenHandlers.push(cb);
+    return () => {};
+  }),
+}));
+vi.mock("./api", () => ({
+  getSettings: async () => ({}),
+}));
+
+describe("bootAppearance 的界面缩放（--cc-ui）下发", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    listenHandlers.length = 0;
+    document.documentElement.removeAttribute("style");
+    // jsdom 没有 matchMedia；深色（matches:false）即可，主题不是这里的观察点。
+    window.matchMedia = vi.fn().mockImplementation(() => ({
+      matches: false,
+      addEventListener: () => {},
+    }));
+  });
+  afterEach(() => {
+    document.documentElement.removeAttribute("style");
+    localStorage.clear();
+  });
+
+  it("scale:true（贴纸/对话窗）按缓存值下发 --cc-ui", () => {
+    localStorage.setItem("meowo-appearance", JSON.stringify({ ui_scale: 112 }));
+    bootAppearance({ scale: true });
+    expect(document.documentElement.style.getPropertyValue("--cc-ui")).toBe("1.12");
+  });
+
+  it("scale:false（设置等独立窗）不下发，--cc-ui 保持 CSS 默认 1", () => {
+    localStorage.setItem("meowo-appearance", JSON.stringify({ ui_scale: 112 }));
+    bootAppearance({ scale: false });
+    expect(document.documentElement.style.getPropertyValue("--cc-ui")).toBe("");
+  });
+
+  it("settings-changed 广播到达后 --cc-ui 热更新（与贴纸窗同一通道）", () => {
+    bootAppearance({ scale: true });
+    expect(listenHandlers).toHaveLength(1);
+    listenHandlers[0]({ payload: { ui_scale: 90 } });
+    expect(document.documentElement.style.getPropertyValue("--cc-ui")).toBe("0.9");
+    // 越界值按 settings.rs 的 50–200 钳位（手改 settings.json 的兜底）。
+    listenHandlers[0]({ payload: { ui_scale: 500 } });
+    expect(document.documentElement.style.getPropertyValue("--cc-ui")).toBe("2");
   });
 });

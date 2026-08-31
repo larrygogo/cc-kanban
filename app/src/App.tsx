@@ -125,6 +125,9 @@ export function App() {
     updateStickerWindowState({ pinned: pinnedRef.current });
   }, [applyPinned]);
   const [glow, setGlow] = useState<Edge | null>(null); // 拖拽中靠近边缘的发光提示
+  // W-2：原生吸附预览窗（snap-preview，Rust 侧驱动）是否已接管落点预览。
+  // true 时窗口内缘的 .snap-ghost 退役；预览窗创建失败等情形 payload.native=false，保持 fallback。
+  const [nativePreview, setNativePreview] = useState(false);
   // 展开过渡中（W-4）：为 true 时渲染 .snap-expanding 纯色占位而非看板/缩略条——
   // snap_expand/snap_restore 落地前窗口仍是 28px 细条几何，全量看板此刻渲染会被
   // 压进细条宽度造成布局抖动；尺寸落地（置回 false）后再恢复按 mode 判定。
@@ -160,6 +163,13 @@ export function App() {
     () => stripSessions.filter((l) => !l.archived && l.connected).length,
     [stripSessions]
   );
+
+  // W-2：把缩略条主轴逻辑长度预推给原生预览窗（snap_preview.rs 缓存），拖拽中的 Moved
+  // 处理直接读缓存定位预览条，不在每帧 IPC 热路径上往返。会话数不变时不动。
+  useEffect(() => {
+    if (isMacPanel()) return;
+    invoke("snap_preview_set_extent", { extent: stripExtent(connectedCount) }).catch(() => {});
+  }, [connectedCount]);
 
   const modeRef = useRef(mode);
   modeRef.current = mode;
@@ -678,9 +688,11 @@ export function App() {
   // macOS 面板模式无吸边，不注册此监听器。
   useEffect(() => {
     if (isMacPanel()) return;
-    const un = listen<{ edge: Edge | null }>("snap-changed", (e) => {
+    const un = listen<{ edge: Edge | null; native?: boolean }>("snap-changed", (e) => {
       const d = e.payload.edge;
       lastEdgeRef.current = d;
+      // 旧后端无 native 字段（undefined）按 false 处理 → 维持 .snap-ghost 预览。
+      setNativePreview(e.payload.native === true);
       if (!draggingRef.current) {
         setGlow(null);
         return;
@@ -946,13 +958,14 @@ export function App() {
   const hasUpdate = upStatus === "available" || upStatus === "downloading" || upStatus === "ready";
   // W-2：吸附落点预览的幽灵条主轴长度——与真实折叠条同一份 stripExtent，钳进当前窗口
   // 内缘。候选边判定阈值 20px，此刻窗口内缘与屏幕工作区边缘基本重合，轮廓即落点形状。
+  // 现为 fallback：原生预览窗（snap-preview）接管时不再渲染（见 nativePreview）。
   const ghostLen = glow
     ? Math.min(stripExtent(connectedCount), Math.max(48, (glow === "top" ? window.innerWidth : window.innerHeight) - 16))
     : 0;
   return (
     <div style={{ height: "100%" }}>
       {!isMacPanel() && glow && <div className={"snap-glow snap-glow-" + glow} />}
-      {!isMacPanel() && glow && (
+      {!isMacPanel() && glow && !nativePreview && (
         <div
           aria-hidden="true"
           className={"snap-ghost snap-ghost-" + glow}

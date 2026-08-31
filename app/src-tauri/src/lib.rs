@@ -24,6 +24,7 @@ pub mod proxy;
 mod remote;
 mod settings;
 pub mod snap;
+mod snap_preview;
 mod term_script;
 #[cfg(target_os = "windows")]
 mod wezterm;
@@ -967,6 +968,11 @@ mod win_constrain {
                 }
             }
         } else if msg == WM_EXITSIZEMOVE {
+            // 移动/缩放手势结束：吸附预览条（W-2）兜底隐藏——松手未吸附/取消拖拽时
+            // 候选边可能还停在 Some 而 Moved 不再来，不能指望下一帧 Moved 清。
+            if let Some(app) = APP.get() {
+                crate::snap_preview::hide(app);
+            }
             // 缩放/移动手势结束：若本次确实缩放过（发过 user-resized），通知前端"缩放结束"，
             // 供其按缩放前的吸附状态重新吸回。复位标志，下次拖拽可再次通知。
             use std::sync::atomic::Ordering;
@@ -1178,7 +1184,9 @@ pub fn run() {
                         | tauri_plugin_window_state::StateFlags::VISIBLE
                         | tauri_plugin_window_state::StateFlags::DECORATIONS,
                 ))
-                .with_denylist(&["main"])
+                // snap-preview（W-2 吸附预览条）也排除：位置/显隐由 Moved 处理逐帧驱动，
+                // 插件恢复旧位置只会与定位打架。
+                .with_denylist(&["main", "snap-preview"])
                 .build(),
         )
         .plugin(tauri_plugin_autostart::init(
@@ -1297,6 +1305,8 @@ pub fn run() {
             snap_expand,
             snap_restore,
             unsnap,
+            snap_preview::snap_preview_set_extent,
+            snap_preview::snap_preview_ready,
             cursor_over_window,
             pointer_left_down,
             get_accounts,
@@ -1387,7 +1397,8 @@ pub fn run() {
                 // 限制贴纸不被拖出屏幕（W-16）：钳进「相交面积最大的显示器」工作区——并集
                 // 包围盒在非矩形排布下留「死区」，窗口可被拖进死区整块消失。越界就立刻拉回，
                 // 拖到边缘即停（吸边仍在界内，不受影响）。
-                if let Some(target) = clamp_target_for_drag(win, &works) {
+                let drag_target = clamp_target_for_drag(win, &works);
+                if let Some(target) = drag_target {
                     let (cx, cy) = clamp_xy_to_work(win, target);
                     if (cx, cy) != (win.x, win.y) {
                         let _ = window.set_position(tauri::PhysicalPosition::new(cx, cy));
@@ -1405,12 +1416,45 @@ pub fn run() {
                     let scale = window.scale_factor().unwrap_or(1.0);
                     let threshold = (f64::from(SNAP_THRESHOLD) * scale).round() as i32;
                     let edge = edge_for_rect(win, vwork, threshold);
+                    let changed = {
+                        let mut cache = moved_snap_cache.lock().unwrap();
+                        let changed = cache.last_edge != Some(edge);
+                        if changed {
+                            cache.last_edge = Some(edge);
+                        }
+                        changed
+                    };
+                    // W-2 原生吸附预览窗：候选边存在期间每帧驱动（沿边拖动时预览条位置跟随
+                    // 窗口），边消失的那帧隐藏一次；其余帧不碰预览窗。几何取相交面积最大的
+                    // 显示器工作区（与 snap_collapse 落点同口径）。返回 false = 预览窗不可
+                    // 用（创建失败熔断），前端回退画窗口内缘的 .snap-ghost 虚线框。
+                    let native = if edge.is_some() || changed {
+                        // 预览条只在真实拖拽（左键按下）中显影：启动时的位置恢复、程序化
+                        // set_position 等非拖拽移动同样产生 Moved + 候选边（实测开机恢复
+                        // 到顶边即触发 edge=Some(Top)），不该让预览条在屏边闪现/残留。
+                        let drag_edge = edge.filter(|_| crate::snap::pointer_left_down());
+                        snap_preview::update(
+                            window.app_handle(),
+                            drag_edge,
+                            win,
+                            drag_target.unwrap_or(vwork),
+                            scale,
+                        )
+                    } else {
+                        // 无候选边且非变化帧：预览窗已隐藏，无需再碰；此值不随事件发出。
+                        true
+                    };
                     // W-9：吸附边没变就不重发——拖拽期间逐 Moved emit 是无谓的 IPC 刷屏。
-                    let mut cache = moved_snap_cache.lock().unwrap();
-                    if cache.last_edge != Some(edge) {
-                        cache.last_edge = Some(edge);
-                        let _ = window.emit("snap-changed", SnapPayload { edge });
+                    if changed {
+                        let _ = window.emit("snap-changed", SnapPayload { edge, native });
                     }
+                }
+            }
+            // 贴纸失焦 = 拖拽不可能继续，预览条兜底隐藏（幂等，预览窗未创建时是空操作）。
+            #[cfg(target_os = "windows")]
+            if let tauri::WindowEvent::Focused(false) = event {
+                if window.label() == "main" {
+                    snap_preview::hide(window.app_handle());
                 }
             }
         })
@@ -1982,7 +2026,7 @@ mod tests {
         assert!(!resume_argv_for(None, Some("SID")).is_empty());
     }
     use crate::settings::Settings;
-    use crate::snap::{center_on, clamp_strip_extent, clamp_target_for_drag, clamp_xy_to_work, edge_for_rect, intersection_area, union_bbox, Edge, Rect};
+    use crate::snap::{center_on, clamp_strip_extent, clamp_target_for_drag, clamp_xy_to_work, edge_for_rect, intersection_area, preview_strip_rect, union_bbox, Edge, Rect};
 
     const WORK1: Rect = Rect {
         x: 0,
@@ -2570,6 +2614,38 @@ mod tests {
             h: 400,
         };
         assert_eq!(edge_for_rect(win, work, 20), Some(Edge::Left));
+    }
+
+    // W-2：吸附落点预览条几何——与 snap_collapse 同一套贴边/居中/钳制公式。
+    #[test]
+    fn preview_left_matches_collapse_geometry() {
+        // scale=1：厚度 28；窗口 (y=400,h=400) 中心 600，ext=200 → 条 y=500。
+        let win = Rect { x: 0, y: 400, w: 360, h: 400 };
+        let r = preview_strip_rect(Edge::Left, win, WORK, 200.0, 1.0);
+        assert_eq!(r, Rect { x: 0, y: 500, w: 28, h: 200 });
+    }
+
+    #[test]
+    fn preview_right_and_top() {
+        // 右边：贴工作区右缘 1920-28。
+        let win = Rect { x: 1560, y: 400, w: 360, h: 400 };
+        let r = preview_strip_rect(Edge::Right, win, WORK, 200.0, 1.0);
+        assert_eq!(r, Rect { x: 1920 - 28, y: 500, w: 28, h: 200 });
+        // 顶边：横条，以窗口中心水平居中（x=800+180-150），厚 28。
+        let top_win = Rect { x: 800, y: 0, w: 360, h: 400 };
+        let r = preview_strip_rect(Edge::Top, top_win, WORK, 300.0, 1.0);
+        assert_eq!(r, Rect { x: 800 + 180 - 150, y: 0, w: 300, h: 28 });
+    }
+
+    #[test]
+    fn preview_scale_and_clamp() {
+        // scale=1.5：厚度 42；ext 逻辑 100 → 物理 150，窗口中心即条中心（不位移）。
+        let win = Rect { x: 0, y: 445, w: 540, h: 150 };
+        let r = preview_strip_rect(Edge::Left, win, WORK, 100.0, 1.5);
+        assert_eq!(r, Rect { x: 0, y: 445, w: 42, h: 150 });
+        // 主轴长度钳到工作区高度（W-5 口径），居中结果夹进工作区。
+        let r = preview_strip_rect(Edge::Left, win, WORK, 99999.0, 1.0);
+        assert_eq!(r, Rect { x: 0, y: 0, w: 28, h: 1040 });
     }
 
     // W-16：双屏（左右并排）钳位目标 = 相交面积最大的显示器工作区。

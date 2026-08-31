@@ -665,6 +665,9 @@ describe("ChatWindow", () => {
     // G-16 后是 alertdialog，按角色 + 类名取。
     const trustCard = (await screen.findAllByRole("alertdialog")).find((el) => el.className.includes("chat-approval"));
     expect(trustCard?.textContent).toContain("是否信任此文件夹？");
+    // C-9：卡片渲染在 overlay 层(零高度容器,不占文档流、不下推 composer),
+    // 有卡在场时容器挂 is-active 启用消息列表底部的淡出过渡。
+    expect(trustCard?.closest(".chat-approval-overlay")?.className).toContain("is-active");
     // 卡片在场时 composer 锁定但**不卸载**:textarea 还是同一个节点(草稿不丢),只是禁用。
     expect((screen.getByRole("combobox", { name: "发送消息给 Agent" }) as HTMLTextAreaElement).disabled).toBe(true);
     expect(screen.getByText("PTY 14")).toBeTruthy();
@@ -1290,8 +1293,9 @@ describe("ChatWindow", () => {
     expect(await screen.findByText("下一条")).toBeTruthy();
   });
 
-  /// Ctrl/Cmd+K 快速切换器：会话上百条时侧栏翻页太慢，这是键盘用户的主通道。
-  it("Ctrl+K 打开快速切换器，↑↓ 选择、Enter 切到目标会话", async () => {
+  /// Ctrl/Cmd+K 命令面板：会话上百条时侧栏翻页太慢，这是键盘用户的主通道；
+  /// U1-14 后同层还能搜并执行窗口命令。
+  it("Ctrl+K 打开命令面板，↑↓ 选择、Enter 切到目标会话", async () => {
     window.history.replaceState({}, "", "/?sessionId=7");
     const histories: Record<number, unknown> = {
       7: { sessionId: 7, title: "当前会话", status: "ended", provider: "claude", cwd: null, supported: true, offset: 0, reset: false, pendingReview: null, items: [], archived: false },
@@ -1312,16 +1316,42 @@ describe("ChatWindow", () => {
     // 标题与侧栏条目都叫「当前会话」：等标题栏那颗菜单钮（chat-title-menu 内）出现即可。
     await waitFor(() => expect(screen.getAllByRole("button", { name: /当前会话/ }).length).toBeGreaterThan(0));
     fireEvent.keyDown(window, { key: "k", code: "KeyK", ctrlKey: true });
-    const input = await screen.findByPlaceholderText("搜索并跳转会话（↑↓ 选择，Enter 打开）");
-    // 首屏（空查询）即列出最近会话
+    const input = await screen.findByPlaceholderText(zh.chat.switcherPlaceholder);
+    // 首屏（空查询）即列出最近会话 + 命令组全列（2 会话 + 8 命令）
     const options = await screen.findAllByRole("option");
-    expect(options).toHaveLength(2);
+    expect(options).toHaveLength(10);
+    expect(screen.getByText(zh.chat.switcherGroupCommands)).toBeTruthy();
     // ↓ 移到第二条（目标会话），Enter 切换
     fireEvent.keyDown(input, { key: "ArrowDown" });
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_chat_history", { sessionId: 9, offset: 0 }));
     // 切换器已关闭
-    expect(screen.queryByPlaceholderText("搜索并跳转会话（↑↓ 选择，Enter 打开）")).toBeNull();
+    expect(screen.queryByPlaceholderText(zh.chat.switcherPlaceholder)).toBeNull();
+  });
+
+  /// 命令面板的另一半（U1-14）：命令条目执行窗口已有动作——这里点「收起 / 展开侧栏」，
+  /// 验证 ChatWindow 的派发接线（弹层关闭 + 侧栏真收起）。
+  it("命令面板执行「收起侧栏」命令：关弹层并收起侧栏", async () => {
+    window.history.replaceState({}, "", "/?sessionId=7");
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_chat_history") {
+        return Promise.resolve({ sessionId: 7, title: "当前会话", status: "ended", provider: "claude", cwd: null, supported: true, offset: 0, reset: false, pendingReview: null, items: [], archived: false });
+      }
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      if (command === "get_live_sessions_page") return Promise.resolve([]);
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    await screen.findByRole("button", { name: "收起会话列表" });
+    fireEvent.keyDown(window, { key: "k", code: "KeyK", ctrlKey: true });
+    const input = await screen.findByPlaceholderText(zh.chat.switcherPlaceholder);
+    // 空查询时无会话：active=0 即第一条命令（新建会话）；End 跳到最后一项再往回到侧栏命令，
+    // 直接点击更直给——点击路径与 Enter 共用同一条 run()。
+    fireEvent.click(screen.getByRole("option", { name: new RegExp(zh.chat.shortcutSidebar) }));
+    expect(screen.queryByPlaceholderText(zh.chat.switcherPlaceholder)).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "收起会话列表" })).toBeNull());
+    expect(localStorage.getItem("meowo-chat-sidebar-collapsed")).toBe("1");
+    expect(input).toBeTruthy();
   });
 
   it("collapses the sidebar into a title-bar toggle and restores it", async () => {

@@ -1,7 +1,8 @@
-// 外观（明暗模式 / 不透明度 / 界面密度）的运行时套用。
-// 两个窗口（贴纸 main、设置 about）都在 main.tsx 里 boot：
-//   - 明暗模式 + 不透明度：两窗都套用（不透明度只影响走 --cc-bg 的贴纸/缩略条，设置窗口无副作用）。
-//   - 界面密度（--cc-ui）：仅贴纸窗口套用（设置窗口固定尺寸，不缩放）。
+// 外观（明暗模式 / 不透明度 / 界面缩放）的运行时套用。
+// 各窗口都在 main.tsx 里 boot：
+//   - 明暗模式 + 不透明度：各窗都套用（不透明度只影响走 --cc-bg 的贴纸/缩略条，其余窗口无副作用）。
+//   - 界面缩放（--cc-ui）：贴纸窗与对话窗套用（main.tsx 按 label 传 scale）；设置/引导/更新等
+//     独立窗口不下发——它们的版式按固定密度设计（定尺寸窗口），保持 --cc-ui 恒 1 零回归。
 // 数据源是 ~/.meowo/settings.json，经 get_settings 读取；任一窗口改设置后后端广播
 // settings-changed，这里实时重套用（顺带做了设置窗口里的明暗即时预览）。
 import { listen } from "@tauri-apps/api/event";
@@ -112,7 +113,7 @@ function writeCache(a: Appearance): void {
 /**
  * 启动时调用：先用缓存同步套用（避免浅色用户首屏闪深色），再异步拉真实设置校正，
  * 并订阅 settings-changed 实时套用、prefers-color-scheme 跟随系统。
- * @param opts.scale 是否套用界面密度（仅贴纸窗口传 true）。
+ * @param opts.scale 是否套用界面缩放（贴纸窗与对话窗传 true，其余独立窗口固定密度不传）。
  */
 export function bootAppearance(opts: { scale: boolean }): void {
   scaleEnabled = opts.scale;

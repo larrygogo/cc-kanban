@@ -1,5 +1,9 @@
 //! 吸边/缩略条：贴边判定的纯几何计算，以及折叠/展开/还原/解除吸附等窗口命令。
 
+// app_handle() 来自 Manager trait；仅 Windows 的吸附预览隐藏调用用到，故 cfg 限定。
+#[cfg(target_os = "windows")]
+use tauri::Manager as _;
+
 /// 吸边判定阈值（**逻辑**像素）：窗口边缘距工作区边缘不超过此值即认为贴边。
 /// 调用方（lib.rs 的 Moved 处理）按显示器 scale_factor 换算成物理像素后再比较——
 /// 与 STRIP_W_LOGICAL 同口径，保证不同缩放的屏幕上吸附手感一致。
@@ -180,6 +184,9 @@ pub(crate) fn pull_on_screen(window: &tauri::WebviewWindow, force: bool) {
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct SnapPayload {
     pub edge: Option<Edge>,
+    /// 原生吸附预览窗（W-2，snap_preview 模块）是否已接管落点预览。
+    /// false = 预览窗不可用（创建失败等），前端回退画窗口内缘的 .snap-ghost 虚线框。
+    pub native: bool,
 }
 
 /// 竖条物理宽度：逻辑宽度 * 显示器缩放，至少 1px。
@@ -282,6 +289,51 @@ pub(crate) fn clamp_strip_extent(ext: i32, work_axis: i32) -> i32 {
     ext.clamp(1, work_axis.max(1))
 }
 
+/// 吸附落点预览条的几何（物理像素，W-2 原生预览窗）：与 snap_collapse 同一套
+/// 贴边/交叉轴居中/主轴钳制公式——预览条画在哪，松手后缩略条就落在哪。
+/// `work` 取窗口相交面积最大的显示器工作区（与 snap_collapse 的 window_monitor 口径一致），
+/// `extent_logical` 是前端按内容给出的缩略条主轴逻辑长度。纯函数，便于单测。
+/// cfg 限定：消费方只有 Windows 的 snap_preview 与单测；macOS 下裸编译会被
+/// CI 的 -D warnings 当死代码报错（snap_layout.rs 有同类前车之鉴）。
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn preview_strip_rect(
+    edge: Edge,
+    win: Rect,
+    work: Rect,
+    extent_logical: f64,
+    scale: f64,
+) -> Rect {
+    let strip = strip_width_phys(scale);
+    let ext = ((extent_logical.clamp(1.0, SIZE_MAX_LOGICAL) * scale).round() as i32).max(1);
+    let ext = clamp_strip_extent(
+        ext,
+        match edge {
+            Edge::Left | Edge::Right => work.h,
+            Edge::Top => work.w,
+        },
+    );
+    match edge {
+        Edge::Left => Rect {
+            x: work.x,
+            y: center_on(win.y, win.h, ext, work.y, work.h),
+            w: strip,
+            h: ext,
+        },
+        Edge::Right => Rect {
+            x: work.x + work.w - strip,
+            y: center_on(win.y, win.h, ext, work.y, work.h),
+            w: strip,
+            h: ext,
+        },
+        Edge::Top => Rect {
+            x: center_on(win.x, win.w, ext, work.x, work.w),
+            y: work.y,
+            w: ext,
+            h: strip,
+        },
+    }
+}
+
 /// 折叠成缩略条：贴到指定边，左/右为竖条、顶为横条。交叉轴以原窗口中心对齐
 /// （吸顶=水平居中，吸左/右=垂直居中）。`extent` 是沿条主轴的逻辑长度，由前端按内容给出。
 #[tauri::command]
@@ -290,6 +342,9 @@ pub(crate) fn snap_collapse(
     edge: Edge,
     extent: f64,
 ) -> Result<(), String> {
+    // W-2：吸附落地，原生预览条（若在显影）随之消失。
+    #[cfg(target_os = "windows")]
+    crate::snap_preview::hide(window.app_handle());
     let extent = extent.clamp(1.0, SIZE_MAX_LOGICAL); // 钳上界，防 *scale 后 f64→i32 回绕
     let m = window_monitor(&window)?;
     let wa = m.work_area();
@@ -401,6 +456,9 @@ pub(crate) fn snap_restore(
     height: f64,
     pinned: bool,
 ) -> Result<(), String> {
+    // W-2：还原落地，原生预览条（若在显影）随之消失。
+    #[cfg(target_os = "windows")]
+    crate::snap_preview::hide(window.app_handle());
     // 与 snap_collapse/snap_expand 一致地钳制上界，防异常大值(settings.json 被改坏)经 set_size 设出极端窗口。
     let (width, height) = (
         width.clamp(1.0, SIZE_MAX_LOGICAL),
@@ -426,6 +484,9 @@ pub(crate) fn snap_restore(
 /// 解除后窗口即普通浮动窗口，再拖到屏幕边缘仍会被吸附逻辑重新吸附。
 #[tauri::command]
 pub(crate) fn unsnap(window: tauri::WebviewWindow, pinned: bool) -> Result<(), String> {
+    // W-2：解除吸附落地，原生预览条（若在显影）随之消失。
+    #[cfg(target_os = "windows")]
+    crate::snap_preview::hide(window.app_handle());
     window.set_resizable(true).map_err(|e| e.to_string())?;
     window
         .set_min_size(Some(tauri::LogicalSize::new(STICKER_MIN_W, STICKER_MIN_H)))

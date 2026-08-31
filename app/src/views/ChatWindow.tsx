@@ -29,7 +29,7 @@ import { parseUserText } from "./chat/localCommand";
 import { TodoPanel } from "./chat/TodoPanel";
 import { QuestionPanels } from "./chat/QuestionPanels";
 import { ChatTitleMenu, ChatTodoMenu, type TodoPanelRow } from "./chat/TitleMenus";
-import { QuickSwitcher, RenameModal, ShortcutSheet } from "./chat/WindowModals";
+import { QuickSwitcher, RenameModal, ShortcutSheet, type PaletteCommand } from "./chat/WindowModals";
 import { isBackgroundShell, isSubagentDelegation } from "./chat/shared";
 import { Transcript } from "./chat/Transcript";
 import { ChatSidebar } from "./ChatSidebar";
@@ -1053,17 +1053,21 @@ export function ChatWindow() {
   const sidebarSearchRef = useRef<HTMLInputElement | null>(null);
   const sidebarVisibleRef = useRef(sidebarVisible);
   sidebarVisibleRef.current = sidebarVisible;
+  // Ctrl+F 与命令面板的「聚焦搜索」走同一动作：收起时先展开（窄窗开抽屉）再聚焦，
+  // 收起→展开要过一拍渲染搜索框才挂得上。
+  const focusSidebarSearch = () => {
+    if (!sidebarVisibleRef.current) toggleSidebarRef.current();
+    requestAnimationFrame(() => {
+      sidebarSearchRef.current?.focus();
+      sidebarSearchRef.current?.select();
+    });
+  };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey || e.code !== "KeyF") return;
       if (document.activeElement?.closest(".managed-terminal")) return;
       e.preventDefault();
-      if (!sidebarVisibleRef.current) toggleSidebarRef.current();
-      // 收起→展开要过一拍渲染搜索框才挂得上。
-      requestAnimationFrame(() => {
-        sidebarSearchRef.current?.focus();
-        sidebarSearchRef.current?.select();
-      });
+      focusSidebarSearch();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -1116,7 +1120,7 @@ export function ChatWindow() {
       }
     }
   }, [sessionId]);
-  // Ctrl/Cmd+K 快速切换器（QuickSwitcher）。
+  // Ctrl/Cmd+K 命令面板（QuickSwitcher：搜会话 + 搜并执行窗口命令，U1-14 专项）。
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // ? 打开快捷键速查表（输入框内的 ? 是正文，不拦）。
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -2061,6 +2065,31 @@ export function ChatWindow() {
     stickToBottom(el);
   };
   const close = () => getCurrentWindow().close().catch(() => {});
+  // Ctrl+K 命令面板的命令清单（U1-14）：每条都映射到窗口已有动作，不发明新能力。
+  // 扁平一个数组，按直觉频率排序：新建/切视图/侧栏/搜索在前，速查表与设置殿后。
+  const paletteCommands: PaletteCommand[] = [
+    { id: "new-session", label: t.chat.shortcutNewSession, keys: "Ctrl+N" },
+    { id: "view-chat", label: t.chat.cmdViewChat, keys: "Ctrl+1" },
+    { id: "view-terminal", label: t.chat.cmdViewTerminal, keys: "Ctrl+2" },
+    { id: "toggle-sidebar", label: t.chat.shortcutSidebar, keys: "Ctrl+B" },
+    { id: "focus-search", label: t.chat.shortcutSearch, keys: "Ctrl+F" },
+    { id: "jump-latest", label: t.chat.jumpLatest },
+    { id: "show-shortcuts", label: t.chat.cmdShowShortcuts, keys: "?" },
+    { id: "open-settings", label: t.sticker.openSettings },
+  ];
+  const runPaletteCommand = (id: string) => {
+    switch (id) {
+      case "new-session": void openNewSessionWindow().catch(() => {}); break;
+      case "view-chat": rememberViewPref("chat"); setView("chat"); break;
+      case "view-terminal": rememberViewPref("terminal"); setView("terminal"); break;
+      case "toggle-sidebar": toggleSidebarRef.current(); break;
+      case "focus-search": focusSidebarSearch(); break;
+      // 终端视图下对话滚动区只是 hidden 未卸载，跳底仍是有效动作。
+      case "jump-latest": jumpToLatest(); break;
+      case "show-shortcuts": setShortcutsOpen(true); break;
+      case "open-settings": void invoke("open_settings").catch(() => {}); break;
+    }
+  };
   /// 发送类动作的公共守卫:sending 置位/清错 → 终端占用检查 → 确保可写终端 → 执行 body,
   /// 统一 catch/收尾。sendText/sendWithClipboardImages/changeMode 三个入口共用——门控语义
   /// (新增不可写原因、needsTakeover 复位时机)只需改这一处,不会漏出某条不检查占用的路径。
@@ -3010,6 +3039,16 @@ export function ChatWindow() {
     ?? commandOptions.find((option) => /^(?:no|reject)\b/i.test(option.label.trim()));
   const commandAllowOnce = commandOptions.find((option) => /^(?:yes|approve once|approve)$/i.test(option.label.trim())) ?? commandOptions[0];
   const commandRemember = commandOptions.find((option) => option !== commandDeny && option !== commandAllowOnce);
+  // C-9：overlay 层是否有卡在场(供 wrapper 挂 is-active,消息列表底部淡出过渡随之启停)。
+  // 条件镜像下方六处渲染分支:屏幕识别三卡互斥(commandAttention 解析不出详情时一张都不出,
+  // 见卡片 2 的 commandApproval 判空),题面两形态互斥,三类之间可并存(overlay 内纵向堆叠)。
+  const hasOverlayCard = view === "chat" && Boolean(
+    interactiveAttention
+    || (commandAttention && commandApproval)
+    || (terminalAttention && !commandAttention && !interactiveAttention)
+    || (structuredQuestions.length > 0 && !terminalAttention && !approval)
+    || (!terminalAttention && (approval || (!brokerOwnsReview && history?.pendingReview && history?.ptyManaged !== false))),
+  );
   // 屏幕菜单/审批「一次性作答」的在途去重(对应 broker 审批的 resolvingApproval):写 PTY
   // 到卡片随 .then 收起之间有窗口,期间极快双击会把 option.input 落键两次——命令审批场景
   // 等于替用户答两次。只锁**会收卡的终止动作**,多选勾选(卡片留驻)的连点不受影响。
@@ -3442,11 +3481,17 @@ export function ChatWindow() {
           <button type="button" className="chat-send-takeover" onClick={dismissUndo}>{t.chat.slashMenuDismiss}</button>
         </div>
       )}
-      {/* ── 审批/交互卡:统一走 ApprovalCard 外壳(标题/徽章/正文/左右动作组一套视觉),
-          同屏最多一张——交互选择器、命令审批、其他屏幕提示、broker 审批四种来源互斥。
+      {/* ── 审批/题面 overlay(C-9 彻底零位移):六类卡统一走 ApprovalCard 外壳(标题/徽章/
+          正文/左右动作组一套视觉),全部渲染进这个零高度容器——容器自身不占文档流
+          (flex 子项 height:0),卡片经 justify-content:flex-end 从锚点向上溢出,
+          悬浮在 composer 上方,出现时不再下推 composer;多张并存时纵向堆叠,
+          DOM 顺序即视觉顺序(屏幕识别三卡互斥 → 题面两形态互斥 → broker 审批,
+          与旧文档流方案同序,最新的最靠近 composer)。
           「仅收起」不向 PTY 写任何字节:识别是启发式的,误报/过期的卡必须有不产生
           副作用的出口(同屏有签名去重不会复弹;真提示仍在终端页等)。 ── */}
+      <div className={"chat-approval-overlay" + (hasOverlayCard ? " is-active" : "")}>
       {view === "chat" && interactiveAttention && <ApprovalCard
+        returnFocusTo={promptInputRef}
         className="chat-screen-approval"
         title={history?.pendingReview === "plan" ? t.chat.planTitle : t.chat.questionTitle}
         badge={history?.pendingReview === "plan" ? t.chat.approvalPending : t.chat.questionPending}
@@ -3478,6 +3523,7 @@ export function ChatWindow() {
         ))}
       </ApprovalCard>}
       {view === "chat" && commandAttention && commandApproval && <ApprovalCard
+        returnFocusTo={promptInputRef}
         className="chat-screen-approval"
         title={t.chat.approvalTitle}
         badge={t.chat.approvalPending}
@@ -3512,6 +3558,7 @@ export function ChatWindow() {
         />}
       </ApprovalCard>}
       {view === "chat" && terminalAttention && !commandAttention && !interactiveAttention && <ApprovalCard
+        returnFocusTo={promptInputRef}
         className="chat-screen-approval"
         title={terminalAttention.id === "claude:long-session-resume"
           ? t.chat.longSessionPromptTitle
@@ -3557,56 +3604,12 @@ export function ChatWindow() {
           ))}
         </div>}
       </ApprovalCard>}
-      {terminalMounted && (
-        <div className={`chat-terminal-pane${view !== "terminal" ? " is-background" : ""}`} aria-hidden={view !== "terminal"}>
-          {/* broker 审批横幅——只给「hook 阻塞期间 TUI 不显示权限框」的 provider 挂
-              （permission_prompt_races_hook=false，如 codex/未取证者）：那种终端视图下
-              用户什么都看不到，agent 干等到 300s 超时，须领回对话页。claude 相反：官方
-              hooks 文档明载 TUI 权限框与 hook 并行竞速（实测同现），授权框就在眼前，
-              横幅只会误导，不挂。屏幕识别类提示（TUI 上真有表单的）同理不挂。 */}
-          {view === "terminal" && approval && !chatUi?.permission_prompt_races_hook && (
-            <div className="chat-terminal-approval" role="status">
-              <span>{t.chat.terminalApprovalBanner}{approvalTimedOut ? ` · ${t.chat.approvalTimedOut}` : approvalCountdown ? ` · ${approvalCountdown}` : ""}</span>
-              <button type="button" onClick={() => setView("chat")}>{t.chat.terminalApprovalGo}</button>
-            </div>
-          )}
-          <ManagedTerminal
-            // 不换 key:临时 id→真实 id 的重绑与换会话都由组件内部 sessionChangedRef
-            // 处理(同 PTY 平滑续接 / 异会话复位),换 key 会整只重挂 xterm、首屏清空重画。
-            sessionId={sessionId}
-            status={history?.status}
-            cwd={cwd}
-            // 停滞检测豁免:broker 审批/hook 落库的待批/屏幕识别的表单/结构化题面,任一
-            // 在场都说明 TUI 静止是「在等人」——回合没结束 status 仍 running,不能报僵死。
-            reviewPending={Boolean(approval || history?.pendingReview || terminalAttention || structuredQuestion)}
-            visible={view === "terminal"}
-            background={history?.background ?? false}
-            resumeOptions={resumeOptions}
-            takeoverExtra={resumePermissionPicker}
-            // 后台会话的按键注定无效。第一下就把用户领到对话页——那里的输入框走 daemon 的
-            // 送话通道，是真能用的。原先的做法是让他打完一整句再弹错误，等于白打。
-            onBackgroundInput={() => {
-              setView("chat");
-              setSendError(t.chat.sendBackgroundKeysMovedYou);
-            }}
-            attentionMarkers={chatUi?.startup_attention_markers ?? EMPTY_MARKERS}
-            interactivePrompt={terminalInteractivePrompt}
-            expectMenu={menuWatching}
-            grammar={attentionGrammar}
-            newlineInput={chatUi?.newline_input ?? null}
-            onAttention={revealTerminalAttention}
-            rearmRef={terminalRearmRef}
-            gridRef={terminalGridRef}
-            // T-14：外部视图在线初值（快照回报）；实时增删走 pty-external-viewers 事件。
-            onExternalViewers={setExternalViewersOnline}
-          />
-        </div>
-      )}
       {/* AskUserQuestion 的作答卡（broker 挂起代答）：表单尚未渲染，卡片就是作答面——
           多选/多问题/自定义输入全部可答，提交后答案经 hook 直达模型。刻意没有「仅收起」：
           收起等于让 hook 干等到 300s 超时（与 broker 审批卡同理），出口只有提交与
           「去终端作答」（交还终端表单）。 */}
       {view === "chat" && structuredQuestions.length > 0 && !terminalAttention && !approval && questionAnswerable && <ApprovalCard
+        returnFocusTo={promptInputRef}
         className="chat-screen-approval"
         title={t.chat.questionTitle}
         badge={questionTimedOut ? t.chat.approvalTimedOut : questionCountdown ? `${t.chat.questionPending} · ${questionCountdown}` : t.chat.questionPending}
@@ -3629,6 +3632,7 @@ export function ChatWindow() {
           （interactiveAttention 接管后此卡退场）；全无选项的纯开放问题没得点，走
           「去终端作答」。旧 reporter/降级（挂起超时）场景都落在这里。 */}
       {view === "chat" && structuredQuestions.length > 0 && !terminalAttention && !approval && !questionAnswerable && <ApprovalCard
+        returnFocusTo={promptInputRef}
         className="chat-screen-approval"
         title={t.chat.questionTitle}
         badge={t.chat.questionPending}
@@ -3661,6 +3665,7 @@ export function ChatWindow() {
           「打开终端」的卡,和不弹相比只多一次打扰。ptyManaged 用严格 === false
           (与 composerGated 同哲学):DTO 必填,信号缺失只可能是错配,退回旧路径。 */}
       {view === "chat" && !terminalAttention && (approval || (!brokerOwnsReview && history?.pendingReview && history?.ptyManaged !== false)) && <ApprovalCard
+        returnFocusTo={promptInputRef}
         title={approval ? t.chat.approvalTitle : history?.pendingReview === "question" ? t.chat.questionTitle : history?.pendingReview === "plan" ? t.chat.planTitle : t.chat.approvalTitle}
         // broker 审批 300s 超时回落终端处理——徽章带剩余时间，让「卡片会过期」这件事可见；
         // 归零后切「已超时」态，事件到达收卡前不留定格的 0:00。
@@ -3716,6 +3721,52 @@ export function ChatWindow() {
         {/* 降级分支仅托管会话可达(渲染条件已含 ptyManaged),文案恒为「正在读取终端」。 */}
         </> : <span>{t.chat.approvalReadingTerminal}</span>}
       </ApprovalCard>}
+      </div>
+      {terminalMounted && (
+        <div className={`chat-terminal-pane${view !== "terminal" ? " is-background" : ""}`} aria-hidden={view !== "terminal"}>
+          {/* broker 审批横幅——只给「hook 阻塞期间 TUI 不显示权限框」的 provider 挂
+              （permission_prompt_races_hook=false，如 codex/未取证者）：那种终端视图下
+              用户什么都看不到，agent 干等到 300s 超时，须领回对话页。claude 相反：官方
+              hooks 文档明载 TUI 权限框与 hook 并行竞速（实测同现），授权框就在眼前，
+              横幅只会误导，不挂。屏幕识别类提示（TUI 上真有表单的）同理不挂。 */}
+          {view === "terminal" && approval && !chatUi?.permission_prompt_races_hook && (
+            <div className="chat-terminal-approval" role="status">
+              <span>{t.chat.terminalApprovalBanner}{approvalTimedOut ? ` · ${t.chat.approvalTimedOut}` : approvalCountdown ? ` · ${approvalCountdown}` : ""}</span>
+              <button type="button" onClick={() => setView("chat")}>{t.chat.terminalApprovalGo}</button>
+            </div>
+          )}
+          <ManagedTerminal
+            // 不换 key:临时 id→真实 id 的重绑与换会话都由组件内部 sessionChangedRef
+            // 处理(同 PTY 平滑续接 / 异会话复位),换 key 会整只重挂 xterm、首屏清空重画。
+            sessionId={sessionId}
+            status={history?.status}
+            cwd={cwd}
+            // 停滞检测豁免:broker 审批/hook 落库的待批/屏幕识别的表单/结构化题面,任一
+            // 在场都说明 TUI 静止是「在等人」——回合没结束 status 仍 running,不能报僵死。
+            reviewPending={Boolean(approval || history?.pendingReview || terminalAttention || structuredQuestion)}
+            visible={view === "terminal"}
+            background={history?.background ?? false}
+            resumeOptions={resumeOptions}
+            takeoverExtra={resumePermissionPicker}
+            // 后台会话的按键注定无效。第一下就把用户领到对话页——那里的输入框走 daemon 的
+            // 送话通道，是真能用的。原先的做法是让他打完一整句再弹错误，等于白打。
+            onBackgroundInput={() => {
+              setView("chat");
+              setSendError(t.chat.sendBackgroundKeysMovedYou);
+            }}
+            attentionMarkers={chatUi?.startup_attention_markers ?? EMPTY_MARKERS}
+            interactivePrompt={terminalInteractivePrompt}
+            expectMenu={menuWatching}
+            grammar={attentionGrammar}
+            newlineInput={chatUi?.newline_input ?? null}
+            onAttention={revealTerminalAttention}
+            rearmRef={terminalRearmRef}
+            gridRef={terminalGridRef}
+            // T-14：外部视图在线初值（快照回报）；实时增删走 pty-external-viewers 事件。
+            onExternalViewers={setExternalViewersOnline}
+          />
+        </div>
+      )}
       {/* sessionId=0(远程未选会话)没有可发送的对象,composer 整体不渲染。 */}
       {view === "chat" && sessionId !== 0 && <footer ref={composeRef} className={"chat-compose" + (composerLocked ? " is-locked" : "")}>
         {/* T-14：外部终端连着同一 PTY 时输入无互斥——先把「可能交错」说在 composer
@@ -4391,7 +4442,9 @@ export function ChatWindow() {
       {switcherOpen && (
         <QuickSwitcher
           activeId={sessionId}
+          commands={paletteCommands}
           onPick={(id) => resetTo(id)}
+          onCommand={runPaletteCommand}
           onClose={() => setSwitcherOpen(false)}
         />
       )}

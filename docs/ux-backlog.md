@@ -53,6 +53,11 @@
 > - 小遗留：user-resize-end 重吸附失败回滚落 normal（语义不同于 onExpand/recall 的
 >   回原态）；Dropdown typeahead 补四条单测；AccountSection patchError 行补 × 关闭；
 >   S-2 搜索态挂载账号分区的配额扇出写注释闭环为有意取舍。
+> 同日专项轮（四个结构性专项全部落地）：C-9 审批/题面卡改零位移 overlay
+> （零高度锚定 + returnFocusTo 焦点归还）、G-11 尾（--cc-ui 下发对话窗，
+> 定值逐面归阶梯）、W-2 原生吸附预览窗（snap-preview 原生窗，Windows 实拍）、
+> U1-14 尾（Ctrl+K 扩成命令面板，会话+命令双组混合过滤）。至此交互 backlog
+> 无开放项；剩「Windows MSIX 打包专项」与 macOS 实拍验证两个环境依赖项。
 
 ## 〇、横切主题（先读这节）
 
@@ -111,7 +116,7 @@
 | U1-11 | 缩略条不可拖（无 `data-tauri-drag-region`），README 承诺的「拖离恢复」做不到；引导也完全没教吸边 | `CollapsedStrip.tsx:59-72`、`zh.ts:704-713` | 缩略条加拖拽区（拖动即 `snap_restore`）；引导补「贴边收纳」一步 | 已修（缩略条可拖离恢复；引导「窗口与设置」步按平台追加吸边要点） |
 | U1-12 | 归档无撤销：菜单相邻误点后卡片瞬间消失，恢复入口藏在设置深处；归档失败也零提示（重命名/便签失败有 focusNotice） | `Sticker.tsx:866-872`、`CardContextMenu.tsx:101-108` | 原位留 3s「已归档 · 撤销」行；补 archiveFailed 文案 | 已修 |
 | U1-13 | 单次轮询失败整屏换成错误行（items 还在 state 里却被盖住），650ms 一发的 IPC 抖动就闪白屏 | `ChatWindow.tsx:1039-1041,2106` | failed 降级为顶部细横幅，连续 N 次才升整屏 | 已修 |
-| U1-14 | 侧栏无搜索（看板有，`getLiveSessionsPage` 已支持 search 位），会话上百条只能滚动翻页找 | `ChatSidebar.tsx:366,731-742` | 接入 search 参数，或做 Ctrl+K 命令面板 | 已修（侧栏搜索框 + Ctrl/Cmd+F 聚焦，下沉后端 search 通道；Ctrl+K 命令面板另议） |
+| U1-14 | 侧栏无搜索（看板有，`getLiveSessionsPage` 已支持 search 位），会话上百条只能滚动翻页找 | `ChatSidebar.tsx:366,731-742` | 接入 search 参数，或做 Ctrl+K 命令面板 | 已修（侧栏搜索框 + Ctrl/Cmd+F 聚焦，下沉后端 search 通道；2026-08-31 Ctrl+K 命令面板落地：QuickSwitcher 扩展为会话+命令双组混合过滤，8 条命令扁平数组派发既有动作，跨组平面索引键盘导航，速查表文案同步） |
 | U1-15 | 新建面板启动选项零记忆（换 agent 即清空；恢复路径反而有持久化）；工作目录不预填 | `NewSessionPanel.tsx:70,162,339` vs `api.ts:244-251` | `{provider→选择}` 存 settings 回填；无 prefill 时默认 `recent[0]` | 已修 |
 | U1-16 | 切回终端 tab 无条件下发 resize（后端同值也照发），TUI 每次全屏重绘 | `ManagedTerminal.tsx:666-679`、`pty.rs:1331-1350` | 前后端各加同值短路 | 已修（回归修补：以前「切回即回底」是全屏重绘的副作用，短路后上翻的视口停在原地——实拍「终端没有回到底部」。现切回可见与进程退出写提示后均显式 `scrollToBottom()`，测试钉住） |
 | U1-17 | 首帧占位 ≠ 真实默认 ×4：menuMode(`context`→`button`)×2、sticker_style(`elevated`→`flat`)、opacity(94→100)，每次开窗闪一下；`About.tsx` 的 `??` 字面量盖掉了写对的 `SETTINGS_DEFAULTS` | `Sticker.tsx:181`、`ChatSidebar.tsx:476`、`About.tsx:398-400`、`state.ts:11` | 统一读 `SETTINGS_DEFAULTS`；加「与 Rust `Settings::default()` 逐字段一致」的单测 | 已修 |
@@ -162,7 +167,7 @@
 | C-6 | Ctrl+Enter 打断并发送的提示挂点被删成孤儿文案，用户发现不了 | `ChatWindow.tsx:2680-2684`、`zh.ts:294` | 已修（tip 挂到发送圆钮 data-tip：运行中且有草稿时显示；stopMode 仍显示打断提示） |
 | C-7 | 草稿只在内存 Map，关窗即丢（附件反而落盘了） | `ChatWindow.tsx:538,949-983` | 已修（按 sessionId 落 localStorage：400ms 防抖、LRU 保 20 条、旧格式幂等迁移） |
 | C-8 | 一敲键盘「接管」按钮随 sendError 一起消失，needsTakeover 还悬着 | `ChatWindow.tsx:2450,2702-2714` | 已修（横幅显隐挂 `sendError \|\| needsTakeover`，文本清空时回落接管文案，按钮只挂 needsTakeover） |
-| C-9 | 审批卡插入文档流下推 composer，「允许一次」深色主按钮与拒绝仅隔 8px，`rm -rf` 与 `ls` 同视觉权重 | `styles.css:3343-3399`、`ChatWindow.tsx:2357-2360` | 已修（180ms 高度渐开动画防跳变；危险命令启发式 `isRiskyCommand` → 允许钮红色警示；拒绝/允许间距 8→16px。彻底零位移的 overlay 方案未做） |
+| C-9 | 审批卡插入文档流下推 composer，「允许一次」深色主按钮与拒绝仅隔 8px，`rm -rf` 与 `ls` 同视觉权重 | `styles.css:3343-3399`、`ChatWindow.tsx:2357-2360` | 已修（180ms 高度渐开动画防跳变；危险命令启发式 `isRiskyCommand` → 允许钮红色警示；拒绝/允许间距 8→16px。2026-08-31 彻底零位移落地：六张卡收进 `.chat-approval-overlay`——零高度 flex 子项向上溢出锚定 composer 顶缘，不占文档流；卡片限高 min(70vh,560px) + copy 内部滚动，覆盖消息区处铺 72px 渐变过渡；ApprovalCard 加 returnFocusTo（layout cleanup 判焦点、宏任务双重守卫归还）；终端横幅 U1-23 不受影响） |
 | C-10 | 审批提交失败空 catch 完全静默；长命令详情嵌套两层滚动无展开/复制 | `ChatWindow.tsx:1861-1863`、`styles.css:3346,3378` | 已修（失败按 requestId 写卡内错误行 role=alert；`ApprovalCommandDetail` 提供展开全部/复制命令） |
 | C-11 | 多问题/多选题渲染成 tab 却不能卡内作答，只给「去终端」 | `ChatWindow.tsx:1910-1911,2314` | 已修（单问题多选此前已落地；本轮经调查聚焦题可从屏文题面反查（matchFocusedQuestion，空白归一子串 + 歧义放弃），queuedAnswers 升级按问题 keyed，只落聚焦题答案、认不出一字不写） |
 | C-12 | 切会话整屏清空 + 全屏加载文案三段跳；外部切换时侧栏不 scrollIntoView 当前项 | `ChatWindow.tsx:972-976,2105`、`ChatSidebar.tsx:633` | 已修（骨架屏气泡条 + loading 超 150ms 才显示；activeId 变化 scrollIntoView block:nearest） |
@@ -220,7 +225,7 @@
 | # | 问题 | 位置 | 建议 |
 |---|---|---|---|
 | W-1 | 吸附阈值 20 物理像素（150% 缩放下等效 13 逻辑像素），高 DPI 手感随机；条厚度却按逻辑值乘 scale，两处口径不一 | `snap.rs:5,150-152` | 已修（阈值按 scale_factor 换算，与 STRIP_W_LOGICAL 同口径） |
-| W-2 | 吸附预览只有窗口自身 4px 发光条，无落点预览 | `App.tsx:705`、`styles.css:1003-1015` | 已修（候选边出现时画 `.snap-ghost` 虚线幽灵条：28px 厚度与真实缩略条一致、主轴按 stripExtent 计算。画在窗口内缘而非屏边悬浮窗——原生预览窗留作后续） |
+| W-2 | 吸附预览只有窗口自身 4px 发光条，无落点预览 | `App.tsx:705`、`styles.css:1003-1015` | 已修（候选边出现时画 `.snap-ghost` 虚线幽灵条：28px 厚度与真实缩略条一致、主轴按 stripExtent 计算。2026-08-31 原生预览窗落地：label=snap-preview 的透明置顶免焦点窗，几何由 snap.rs 纯函数 `preview_strip_rect` 与 snap_collapse 同公式计算；Moved 处理器每帧驱动显隐/跟随，左键按下门控防程序化移动误闪，READY 握手防首帧白框，事件泵内同步建窗会卡死故走子线程懒建；建窗失败熔断回退 ghost；松手/失焦/吸附落地四处幂等 hide。Windows 实拍验证，截图在 target-verify/tmp/） |
 | W-3 | 展开态点一下拖拽条（不移动）即意外折叠（陈旧 lastEdgeRef） | `App.tsx:557-558,462-484` | 已修（松手时位移 < 4px 视为纯点击，不做吸附/还原判定） |
 | W-4 | 折叠态启动闪「细条内容装在 360×440 大框」；展开过渡期看板在 28px 宽窗口内布局抖动 | `App.tsx:157-162,663-667`、`useShowWhenReady.ts:20-22` | 已修（折叠启动闪帧此前已消除；本轮展开过渡期渲染 `.snap-expanding` 纯色占位，snap_expand/snap_restore 落地后才挂载看板，悬停偷看与找回两条路径都覆盖） |
 | W-5 | 缩略条主轴无上限（60 会话超 1080p 工作区，溢出被裁无提示）；DPI/显示器变化不重算 | `App.tsx:55-57`、`snap.rs:251`、`CollapsedStrip.tsx:47-54` | 已修（按工作区主轴换算容量、溢出折「+N」徽章；onScaleChanged 重跑 snap_collapse；后端 clamp_strip_extent 兜底） |
@@ -252,7 +257,7 @@
 | G-8 | 动效零 token：13 个时长值、3 个缓动散落，同类元素有的渐变有的瞬变 | `styles.css` 全文 | 已修（--dur-fast/base/slow 三档 token，45 处 transition 收敛；0.4s 长淡入与具名动画保留） |
 | G-9 | 用量读数屏文字四种主题组合全部 <4.5:1（最低 3.28）——绕过已校准 token 写死 alpha；7 处文本再叠 opacity 击穿基线（最低 2.81） | `styles.css:441-449,1728,3731` 等 | 已修（用量读数回 --cc-text-dim 保留雕刻 text-shadow；6 处文本 opacity 叠加删除） |
 | G-10 | 终端页强制深色的变量覆盖漏整个状态色族（浅色用户切终端页 err/warn 只有 3.3-4:1）；flat 主题逐条硬抄已漏 `.run-mask`（flat+浅色下运行卡片是纯黑块） | `styles.css:3785-3809,2287-2363,597-604` | 已修（--ind-face token：.stk-ind 与 .run-mask 同底色，flat+浅色不再有纯黑块；浅面徽标配色整组压暗一档、文字改白。近似色留视觉验证轮微调） |
-| G-11 | 「密度」实为字号缩放且只作用于贴纸窗（设置文案与 token 注释两张皮）；`--sp-*`/`--fs-*` 全定值，46 处 calc 之外的间距不缩放致版式失衡；`.stk-ind`/`.cstrip-*`/`.tip` 等完全不吃密度 | `appearance.ts:78-80`、`styles.css:26,85-105` | 已修（--sp/--fs 阶梯整梯乘 --cc-ui，非贴纸窗恒 1 零回归；.stk-ind/.run-core/.ring-stop/.sdot/.needs-error/.ctx-menu 一并参数化；设置项改名「界面缩放」并注明只作用于贴纸窗。--cc-ui 下发给 chat 窗口仍待做；.cstrip-* 刻意不缩放——细条厚度固定，点放大会溢出） |
+| G-11 | 「密度」实为字号缩放且只作用于贴纸窗（设置文案与 token 注释两张皮）；`--sp-*`/`--fs-*` 全定值，46 处 calc 之外的间距不缩放致版式失衡；`.stk-ind`/`.cstrip-*`/`.tip` 等完全不吃密度 | `appearance.ts:78-80`、`styles.css:26,85-105` | 已修（--sp/--fs 阶梯整梯乘 --cc-ui，非贴纸窗恒 1 零回归；.stk-ind/.run-core/.ring-stop/.sdot/.needs-error/.ctx-menu 一并参数化；设置项改名「界面缩放」。2026-08-31：--cc-ui 已下发对话窗（bootAppearance scale 门控含 chat 窗，同一热生效通道；对话窗 calc 外定值逐面归阶梯或注释封口，xterm 字号走 terminal_font_size 不吃 --cc-ui；.chat-compose-hint 补 ellipsis 兜底）。设置/引导等定尺寸窗口刻意保持恒 1；.cstrip-* 刻意不缩放——细条厚度固定，点放大会溢出） |
 | G-12 | 英文约 2.2× 宽无省略保护：`.stab`/`.seg-btn` nowrap 无 overflow 处理，窄窗+英文+大密度直接溢出 | `styles.css:293-309,1918-1937` | 已修（tab 文字包 `.stab-label` 吃 ellipsis；`.seg` 允许 shrink；`.seg-btn` 补 min-width:0 + ellipsis） |
 | G-13 | 零 Intl：24 小时制硬编码、英文月日顺序错、相对时间手拼 | `AccountSection.tsx:64-90`、`helpers.ts:14-21` | 已修（fmtAgo 走 Intl.RelativeTimeFormat 随界面语言；fmtWaited「已等待 X」时长语义刻意保留字典） |
 | G-14 | 「本周」实为「近 7 天」，与日历应用语义不同 | `ChatSidebar.tsx:95-110` | 已修（文案已是「近 7 天」/ Last 7 days） |

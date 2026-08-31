@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { App } from "./App";
 import { TooltipLayer } from "./Tooltip";
+import { SnapPreview } from "./views/SnapPreview";
 import { lockdownInProduction, suppressNativeFind } from "./devtools-guard";
 import { installInputModality } from "./input-modality";
 import { bootAppearance } from "./appearance";
@@ -60,8 +61,8 @@ const label = (() => {
   }
 })();
 
-// 套用外观设置（明暗/不透明度各窗都套；界面密度仅贴纸窗口）。
-bootAppearance({ scale: label === "main" });
+// 套用外观设置（明暗/不透明度各窗都套；界面缩放下发贴纸窗与对话窗）。
+bootAppearance({ scale: label === "main" || label === "chat" });
 
 // 渲染前先探测宿主平台：isMacPanel 等同步判定在首帧与各 effect 中即正确，
 // 消除「effect 跑在探测 resolve 前、guard 固化为 false」的竞态。
@@ -73,6 +74,9 @@ void detectHostOs().then(() => {
         <React.Suspense fallback={null}>
           {label === "about" ? (
             <About />
+          ) : label === "snap-preview" ? (
+            // W-2 吸附落点预览条（Windows）：极简单色块，静态引入不拆 chunk。
+            <SnapPreview />
           ) : label === "updater" ? (
             <Updater />
           ) : label === "new-session" ? (
