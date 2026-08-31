@@ -511,6 +511,9 @@ pub(crate) fn chat_window_in_view(app: &tauri::AppHandle) -> bool {
 /// 显示但不激活：Windows 用 SW_SHOWNOACTIVATE（普通 show 会激活并抢焦点）。
 /// 其余平台退化为普通 show——macOS 上显示非激活 App 的窗口本就不跨应用抢焦点
 /// （激活策略未变），够用。
+///
+/// Windows 上原生 `ShowWindow` 之后**必须**再补一次 `window.show()` 同步 tao 的标志位，
+/// 否则贴纸会在后续某次窗口标志变更时凭空消失，详见函数内注释。
 fn show_window_no_activate(window: &tauri::WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
@@ -519,6 +522,19 @@ fn show_window_no_activate(window: &tauri::WebviewWindow) {
             unsafe {
                 ShowWindow(handle.0 as _, SW_SHOWNOACTIVATE);
             }
+            // 裸 ShowWindow 绕过了 tao 的 WindowFlags：VISIBLE 位只在 `set_visible` 里维护，
+            // tao 从不监听 WM_SHOWWINDOW 回填，于是它一直以为贴纸是隐藏的。而
+            // `WindowFlags::apply_diff` 末尾有一句**无条件**的「新标志里没有 VISIBLE 就
+            // ShowWindow(SW_HIDE)」——此后任何改窗口标志的调用都会顺手把贴纸藏掉：
+            // snap_expand/snap_collapse/snap_restore/unsnap 的 `set_resizable`、
+            // `set_always_on_top`、点击穿透的 `set_ignore_cursor_events` 全在此列。
+            // 实拍症状：折叠条上悬停等偷看展开（snap_expand 第一句就是 set_resizable(true)），
+            // 贴纸整个不见——它 skipTaskbar + transparent，任务栏也没入口，只能托盘「找回
+            // 贴纸」；而找回走的 `recall_center` 里正好有一句 tauri 的 `show()`，把 VISIBLE
+            // 补上后当次会话就不再复现（「有时候才出现」的由来）。
+            // 补这一次 show() 把标志对齐：窗口此刻已可见，且贴纸建窗时 focused:false 让 tao 的
+            // MARKER_DONT_FOCUS 常驻，apply_diff 里同样走 SW_SHOWNOACTIVATE，不抢焦点（W-7）。
+            let _ = window.show();
             return;
         }
     }
