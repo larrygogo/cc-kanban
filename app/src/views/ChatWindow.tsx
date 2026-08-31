@@ -24,7 +24,8 @@ import { useApprovalChannel } from "./chat/useApprovalChannel";
 import { useModelPresets } from "./chat/useModelPresets";
 import { ContextMeter } from "./chat/ContextMeter";
 import { GitDiffView } from "./chat/GitDiffView";
-import { ImageRef } from "./chat/Message";
+import { ImageRef, splitUserText } from "./chat/Message";
+import { parseUserText } from "./chat/localCommand";
 import { TodoPanel } from "./chat/TodoPanel";
 import { QuestionPanels } from "./chat/QuestionPanels";
 import { ChatTitleMenu, ChatTodoMenu, type TodoPanelRow } from "./chat/TitleMenus";
@@ -512,10 +513,14 @@ export function ChatWindow() {
   const failStreakRef = useRef(0);
   // 是否贴在底部（followRef 的渲染镜像）：驱动「回到最新」悬浮钮显隐。
   const [atBottom, setAtBottom] = useState(true);
+  // 悬浮钮未读徽章的计数快照：脱离底部那一刻的时间线长度（null = 正贴底/无须计数）。
+  const awayCountRef = useRef<number | null>(null);
   // 首读裁剪掉的更早消息：hasMore 只在首读那一发为 true，轮询会把它带回 false，
   // 所以单独存一份状态，别直接读 history.hasMore（提示会闪一下就没）。
   const [hasEarlier, setHasEarlier] = useState(false);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
+  // 「加载更早」的失败提示：此前 catch 是空块，失败了按钮只是默默复原，像没点上。
+  const [earlierError, setEarlierError] = useState(false);
   // 新建会话（负数临时 id）落在用户偏好的视图上：对话页此时渲染「启动中」占位，
   // 发送链路（writeManagedTerminal）对临时 id 本就可用。已有会话恒从对话页进。
   const [view, setViewState] = useState<"chat" | "terminal">(
@@ -701,7 +706,7 @@ export function ChatWindow() {
   // useApprovalChannel.ts;本组件保留「回应」侧——queuedAnswers 的排队作答（点选的答案
   // 先记下,等屏幕识别确认表单在屏后才落键,绝不向未确认就绪的表单盲写）与 decideApproval。
   const {
-    approval, setApproval, approvalCountdown,
+    approval, setApproval, approvalCountdown, approvalTimedOut,
     structuredQuestion, setStructuredQuestion,
     approvalAwaitingIds, setApprovalAwaitingIds,
     brokerOwnsReview, setBrokerOwnsReview,
@@ -1038,10 +1043,47 @@ export function ChatWindow() {
     });
   };
   // 窗口级快捷键（均带 Ctrl/Cmd，不与输入冲突）：B=收展侧栏，1/2=对话/终端视图，
-  // N=新建会话。Ctrl+F 聚焦侧栏搜索在 ChatSidebar 内注册；Esc 语义各归其主（审批/菜单/弹层）。
+  // N=新建会话，F=聚焦侧栏搜索（监听就在下方）；Esc 语义各归其主（审批/菜单/弹层）。
   // 此前整个对话窗除 Esc 外零快捷键，收侧栏、切视图、新建全要鼠标。
   const toggleSidebarRef = useRef(toggleSidebar);
   toggleSidebarRef.current = toggleSidebar;
+  // Ctrl/Cmd+F 聚焦侧栏搜索框。监听曾挂在 ChatSidebar 内——侧栏一收起组件就卸载，
+  // 快捷键静默失效。收起着时先展开（窄窗开抽屉）再聚焦；终端视图内让位（焦点在
+  // xterm 里时 Ctrl+F 是终端搜索，见速查表底注）。
+  const sidebarSearchRef = useRef<HTMLInputElement | null>(null);
+  const sidebarVisibleRef = useRef(sidebarVisible);
+  sidebarVisibleRef.current = sidebarVisible;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.code !== "KeyF") return;
+      if (document.activeElement?.closest(".managed-terminal")) return;
+      e.preventDefault();
+      if (!sidebarVisibleRef.current) toggleSidebarRef.current();
+      // 收起→展开要过一拍渲染搜索框才挂得上。
+      requestAnimationFrame(() => {
+        sidebarSearchRef.current?.focus();
+        sidebarSearchRef.current?.select();
+      });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  // 窄窗浮窗侧栏（抽屉）开着期间注册 Esc 层收抽屉：此前只有 scrim 点外关，
+  // 键盘用户没有出口。走 escLayers 统一栈，窗口级「Esc=拒绝审批」自动让位。
+  useEffect(() => {
+    if (!narrow || !overlaySidebar) return;
+    const popLayer = pushEscLayer();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      e.preventDefault();
+      setOverlaySidebar(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      popLayer();
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [narrow, overlaySidebar]);
   // 侧栏回调的稳定引用:ChatSidebar 已 memo,内联箭头函数每次击键都换新引用会让 memo
   // 失效——composer 每个字符都重建整张会话列表(上百条 item)就是这么来的。
   const collapseSidebar = useCallback(() => toggleSidebarRef.current(), []);
@@ -1423,7 +1465,17 @@ export function ChatWindow() {
   const userHistory = useMemo(
     () => items
       .filter((item) => item.type === "user_text" && !isHandoffInjectedPrompt(item.text))
-      .map((item) => (item as { text: string }).text),
+      .map((item) => {
+        // 召回的是「要再编辑的正文」，不是落盘原文：附件指令头、[Image: source: …] 路径
+        // 原文塞回输入框既脏又会二次误发。与气泡渲染同一条链路（parseUserText →
+        // splitUserText），口径永不漂移。
+        const { body, images } = splitUserText(parseUserText((item as { text: string }).text).text);
+        if (body) return body;
+        // 纯图片消息正文为空：退回文件名占位——路径任何形式都不进输入框（同 Message 的
+        // 「路径不上屏」纪律）。
+        return images.map((image) => image.path.split(/[\\/]/).pop() ?? "").filter(Boolean).join(" ");
+      })
+      .filter((text) => text.length > 0),
     [items],
   );
   useEffect(() => { historyNavRef.current = null; }, [sessionId]);
@@ -1627,6 +1679,8 @@ export function ChatWindow() {
     setBrokerOwnsReview(false);
     setHasEarlier(false);
     setLoadingEarlier(false);
+    setEarlierError(false);
+    awayCountRef.current = null; // 未读徽章按会话归零（旧会话的快照对新会话无意义）
     positionedRef.current = false;
     followRef.current = true;
     // 切会话一律保持当前视图：用户在终端就显示终端，在对话就显示对话。负 id（尚未
@@ -1850,6 +1904,10 @@ export function ChatWindow() {
     const totalSeconds = Math.floor(left / 1000);
     return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, "0")}`;
   })();
+  // 与审批倒计时同一课（useApprovalChannel 的 approvalTimedOut）：归零切「已超时」态，
+  // 卡片要等后端降级事件才收，定格 0:00 像 bug。
+  const questionTimedOut = !!structuredQuestion?.answerable && !!questionSeenRef.current
+    && questionNow - questionSeenRef.current.at >= QUESTION_TIMEOUT_MS;
   // 「问题已了结」的收卡信号：判定逻辑见 observeTranscriptForDismiss。
   //
   // 计数**必须**读独立累积的 items state，不能读 history.offset/history.items——那两个
@@ -1940,6 +1998,7 @@ export function ChatWindow() {
     if (loadingEarlier || busyRef.current) return;
     busyRef.current = true;
     setLoadingEarlier(true);
+    setEarlierError(false);
     const el = scrollRef.current;
     const prevHeight = el?.scrollHeight ?? 0;
     const prevTop = el?.scrollTop ?? 0;
@@ -1948,7 +2007,11 @@ export function ChatWindow() {
       if (activeSessionRef.current !== sessionId) return;
       // 前插：本屏是现有头部之前的一段。两条 reduce 接缝处的相邻去重（同戳同文 user_text
       // 等）由 reduceChatEvents 的既有规则顺带处理。
-      setItems((prev) => reduceChatEvents(reduceChatEvents([], page.items, true), prev, false));
+      // 与轮询共用 busyRef，此处 items 闭包就是当前值，可以先算合并结果再一次性落。
+      const merged = reduceChatEvents(reduceChatEvents([], page.items, true), items, false);
+      setItems(merged);
+      // 前插的是旧消息，不算未读：未读快照同步抬高，否则「加载更早」会把徽章灌大。
+      if (awayCountRef.current !== null) awayCountRef.current += merged.length - items.length;
       earliestRef.current = page.earliest;
       setHasEarlier(page.hasMore);
       // 跳过一次自动吸底，否则用户会被弹回最新消息。
@@ -1968,7 +2031,9 @@ export function ChatWindow() {
         setAtBottom(at);
       });
     } catch {
-      // 失败不清空已有消息：保留提示让用户可以再点一次。
+      // 失败不清空已有消息：按钮复原可再点，旁边挂一行错误文案说清刚才失败了
+      // （此前静默吞掉，用户只能以为是自己没点上）。
+      setEarlierError(true);
     } finally {
       busyRef.current = false;
       setLoadingEarlier(false);
@@ -1980,6 +2045,9 @@ export function ChatWindow() {
     if (!el) return;
     const at = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     followRef.current = at;
+    // 脱离底部的瞬间记下时间线长度快照，贴回底部即清：悬浮钮的未读徽章由差值派生。
+    if (at) awayCountRef.current = null;
+    else if (awayCountRef.current === null) awayCountRef.current = timelineItems.length;
     // 驱动「回到最新」悬浮钮的显隐；同值短路避免滚动过程反复重渲染。
     setAtBottom((prev) => (prev === at ? prev : at));
   };
@@ -1988,6 +2056,7 @@ export function ChatWindow() {
     const el = scrollRef.current;
     if (!el) return;
     followRef.current = true;
+    awayCountRef.current = null; // 跳底 = 已读，未读计数清零
     setAtBottom(true);
     stickToBottom(el);
   };
@@ -3132,6 +3201,12 @@ export function ChatWindow() {
     </button>
   );
 
+  // 「回到最新」悬浮钮的未读数：脱离底部时的时间线长度为快照，之后追加的算未读
+  // （前插的「加载更早」不算——快照在 loadEarlier 里同步抬高）。
+  const unseenCount = !atBottom && awayCountRef.current !== null
+    ? Math.max(0, timelineItems.length - awayCountRef.current)
+    : 0;
+
   return (
     <div className={"chat-window" + (view === "terminal" ? " is-terminal" : "")}>
       <DevBadge />
@@ -3163,6 +3238,7 @@ export function ChatWindow() {
               activeId={sessionId}
               approvalAwaitingIds={approvalAwaitingIds}
               visibleOrderRef={sidebarOrderRef}
+              searchInputRef={sidebarSearchRef}
               onSelect={selectFromOverlay}
               onCollapse={closeOverlaySidebar}
             />
@@ -3174,6 +3250,7 @@ export function ChatWindow() {
         activeId={sessionId}
         approvalAwaitingIds={approvalAwaitingIds}
         visibleOrderRef={sidebarOrderRef}
+        searchInputRef={sidebarSearchRef}
         onSelect={resetTo}
         onCollapse={collapseSidebar}
       />}
@@ -3292,6 +3369,8 @@ export function ChatWindow() {
                 <button type="button" onClick={() => void loadEarlier()} disabled={loadingEarlier}>
                   {loadingEarlier ? t.chat.loadingEarlier : t.chat.loadEarlier}
                 </button>
+                {/* 失败不静默：按钮本身即重试，旁边这句负责说清「刚才是失败了」。 */}
+                {earlierError && <span className="chat-send-error" role="status">{t.chat.loadEarlierFailed}</span>}
               </div>
             )}
             {/* 跨 provider 接续的新会话：前序历史没取到时的来历注脚（取到后由段间
@@ -3300,10 +3379,12 @@ export function ChatWindow() {
               <div className="chat-empty is-note">{t.chat.handoffContinued}</div>
             )}
             <Transcript sessionId={sessionId} items={timelineItems} />
-            {/* 上翻后回到底部的悬浮出口：sticky 钉在滚动视口底缘，贴底时不渲染。 */}
+            {/* 上翻后回到底部的悬浮出口：sticky 钉在滚动视口底缘，贴底时不渲染。
+                附带未读计数——用户据此判断「值不值得现在跳下去」。 */}
             {!atBottom && (
               <button type="button" className="chat-jump-latest" onClick={jumpToLatest}>
                 <ChevronDownIcon />{t.chat.jumpLatest}
+                {unseenCount > 0 && <span className="chat-jump-latest-count">{unseenCount > 99 ? "99+" : unseenCount}</span>}
               </button>
             )}
           </>}
@@ -3485,7 +3566,7 @@ export function ChatWindow() {
               横幅只会误导，不挂。屏幕识别类提示（TUI 上真有表单的）同理不挂。 */}
           {view === "terminal" && approval && !chatUi?.permission_prompt_races_hook && (
             <div className="chat-terminal-approval" role="status">
-              <span>{t.chat.terminalApprovalBanner}{approvalCountdown ? ` · ${approvalCountdown}` : ""}</span>
+              <span>{t.chat.terminalApprovalBanner}{approvalTimedOut ? ` · ${t.chat.approvalTimedOut}` : approvalCountdown ? ` · ${approvalCountdown}` : ""}</span>
               <button type="button" onClick={() => setView("chat")}>{t.chat.terminalApprovalGo}</button>
             </div>
           )}
@@ -3528,7 +3609,7 @@ export function ChatWindow() {
       {view === "chat" && structuredQuestions.length > 0 && !terminalAttention && !approval && questionAnswerable && <ApprovalCard
         className="chat-screen-approval"
         title={t.chat.questionTitle}
-        badge={questionCountdown ? `${t.chat.questionPending} · ${questionCountdown}` : t.chat.questionPending}
+        badge={questionTimedOut ? t.chat.approvalTimedOut : questionCountdown ? `${t.chat.questionPending} · ${questionCountdown}` : t.chat.questionPending}
         actions={<>
           <button type="button" disabled={resolvingApproval} onClick={() => void sendQuestionToTerminal()}>{t.chat.answerInTerminal}</button>
           <button type="button" className="is-allow" disabled={resolvingApproval || !answerBody} onClick={() => void submitQuestionAnswers()}>{t.chat.submitAnswer}</button>
@@ -3581,8 +3662,15 @@ export function ChatWindow() {
           (与 composerGated 同哲学):DTO 必填,信号缺失只可能是错配,退回旧路径。 */}
       {view === "chat" && !terminalAttention && (approval || (!brokerOwnsReview && history?.pendingReview && history?.ptyManaged !== false)) && <ApprovalCard
         title={approval ? t.chat.approvalTitle : history?.pendingReview === "question" ? t.chat.questionTitle : history?.pendingReview === "plan" ? t.chat.planTitle : t.chat.approvalTitle}
-        // broker 审批 300s 超时回落终端处理——徽章带剩余时间，让「卡片会过期」这件事可见。
-        badge={approval && approvalCountdown ? `${t.chat.approvalPending} · ${approvalCountdown}` : t.chat.approvalPending}
+        // broker 审批 300s 超时回落终端处理——徽章带剩余时间，让「卡片会过期」这件事可见；
+        // 归零后切「已超时」态，事件到达收卡前不留定格的 0:00。
+        badge={approval
+          ? approvalTimedOut
+            ? t.chat.approvalTimedOut
+            : approvalCountdown
+              ? `${t.chat.approvalPending} · ${approvalCountdown}`
+              : t.chat.approvalPending
+          : t.chat.approvalPending}
         sideActions={approval
           /* `?? []`：类型上字段恒在（DTO 保证），但旧后端/新前端错配时负载可能缺它——
              一个可选按钮组不值得让整个 ChatWindow 白屏。
@@ -4210,8 +4298,10 @@ export function ChatWindow() {
             textarea 的 onChange），但外部进程还活着，接管入口不能跟着一起消失——此前
             一敲键盘「接管」按钮就没了，needsTakeover 还悬着。错误文本被清掉时回落到
             接管原因本身。 */}
-        {(sendError || needsTakeover) && <div className="chat-send-error" role="alert">
-          <span>{sendError || t.chat.sendNeedsTakeover}</span>
+        {(sendError || needsTakeover) && <div className="chat-send-error">
+          {/* role=alert 只罩文本部分：alert 容器内嵌交互按钮会让读屏把按钮一并当通报
+              内容播报（G-16 同款教训），动作按钮留在容器里但在 alert 外。 */}
+          <span role="alert">{sendError || t.chat.sendNeedsTakeover}</span>
           {/* 会话确实活在外部终端里：就地给接管入口。此前这里只有一句「请切到终端页接管」，
               用户得自己跨页找按钮，回来还要重打一遍刚才的消息。 */}
           {needsTakeover && <>
@@ -4258,6 +4348,20 @@ export function ChatWindow() {
             role="separator"
             aria-orientation="vertical"
             aria-label={t.chat.diffResize}
+            // separator 是 WAI-ARIA 的可聚焦部件：只给鼠标拖拽等于键盘用户调不了宽度。
+            // ← 变宽、→ 变窄（柄在面板左侧，与拖拽方向一致），步进 24px。
+            tabIndex={0}
+            aria-valuenow={Math.round(diffWidth)}
+            aria-valuemin={DIFF_PANEL_MIN_WIDTH}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              const body = event.currentTarget.parentElement;
+              const maxWidth = body ? Math.max(DIFF_PANEL_MIN_WIDTH, body.getBoundingClientRect().width - 360) : Number.MAX_SAFE_INTEGER;
+              const next = Math.min(Math.max(diffWidth + (event.key === "ArrowLeft" ? 24 : -24), DIFF_PANEL_MIN_WIDTH), maxWidth);
+              setDiffWidth(next);
+              localStorage.setItem(DIFF_WIDTH_KEY, String(Math.round(next)));
+            }}
             onPointerDown={startDiffResize}
           />
           <GitDiffView

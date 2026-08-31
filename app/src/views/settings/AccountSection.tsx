@@ -254,6 +254,8 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
         : null;
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [logoutMsg, setLogoutMsg] = useState<string | null>(null);
+  // 成功/失败共用 logoutMsg：成功语义不能渲染在错误红（.agent-install-error）上。
+  const [logoutOk, setLogoutOk] = useState(false);
   // API Key 登录：输入区开合 + 输入值 + 保存中 + 错误。key 不落任何前端持久化，提交即清。
   const [apiKeyOpen, setApiKeyOpen] = useState(false);
   const [apiKeyValue, setApiKeyValue] = useState("");
@@ -387,9 +389,11 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
   const startLogout = async () => {
     setLogoutBusy(true);
     setLogoutMsg(null);
+    setLogoutOk(false);
     try {
       await logoutAgent(provider);
       setLogoutMsg(t.account.loggedOut);
+      setLogoutOk(true);
       onLoggedIn();
     } catch (e) {
       setLogoutMsg(t.account.logoutFailed(formatBackendError(e, t.locale)));
@@ -660,7 +664,7 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
       )}
 
       {logoutMsg && (
-        <div className="provider-card-body agent-install-error" data-testid={"agent-logout-error-" + provider}>
+        <div className={"provider-card-body " + (logoutOk ? "agent-path-msg" : "agent-install-error")} data-testid={"agent-logout-error-" + provider}>
           {logoutMsg}
         </div>
       )}
@@ -1084,6 +1088,8 @@ export function AccountSection() {
   const [agents, setAgents] = useState<AgentDescriptor[] | null>(null);
   // 首次名单查询失败标记：null + 失败曾直接渲染整页空白，分不清「没装任何 agent」和「坏了」。
   const [agentsError, setAgentsError] = useState(false);
+  // 账号数据（getAccounts）首读失败标记：失败曾静默，已登录会显示成「未登录」。
+  const [accountsError, setAccountsError] = useState(false);
   const installed = agents === null ? null : new Set(agents.filter((a) => a.installed).map((a) => a.id));
   // 重查 agent 名单（安装态会变）。挂载、窗口聚焦、后台安装成功各处复用。
   const refreshInstalled = () => {
@@ -1103,6 +1109,7 @@ export function AccountSection() {
       refreshInstalled();
       getAccounts()
         .then((ps) => {
+          setAccountsError(false); // 聚焦重试成功即撤掉加载失败横幅
           setPayloads(ps);
           setUsageMap((m) => {
             const next = { ...m };
@@ -1155,6 +1162,7 @@ export function AccountSection() {
   const loadAccounts = () => {
     getAccounts()
       .then((ps) => {
+        setAccountsError(false);
         setPayloads(ps);
         // 用缓存 usage 预填
         const initial: Record<string, ProviderUsage> = {};
@@ -1165,7 +1173,8 @@ export function AccountSection() {
         ps.filter((p) => p.account != null && p.usage_supported && !p.relay_enabled)
           .forEach((p) => doRefresh(p.provider));
       })
-      .catch(() => {});
+      // 失败不能静默：缓存 payloads 为空时卡片会把已登录显示成「未登录」。
+      .catch(() => setAccountsError(true));
   };
   // 挂在 AccountSection 而不是 keyed ProviderCard 内：切换下拉项不会遗失仍在后端等待的 operationId。
   const loginOperations = useLoginOperations((event) => {
@@ -1228,6 +1237,15 @@ export function AccountSection() {
   // 顶部下拉切换 + 仅渲染选中的那一张卡（每张卡按 installed/payload 自渲染未装/未登录/已登录三态）。
   return (
     <>
+      {/* 账号数据首读失败的细横幅：不替换卡片内容（卡片按缓存/空态照常渲染），只给重试入口。 */}
+      {accountsError && (
+        <div className="sec-hint proxy-err" role="alert">
+          {t.account.accountsLoadFailed}
+          <button type="button" className="provider-card-action" style={{ marginLeft: 8 }} onClick={loadAccounts}>
+            {t.sticker.retry}
+          </button>
+        </div>
+      )}
       <div className="account-agent-switch">
         <Dropdown
           value={eff}

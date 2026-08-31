@@ -72,7 +72,8 @@ function HeroWindow() {
         <span className="obm-tray-ico">
           <img src={logoUrl} width={16} height={16} alt="" />
         </span>
-        <span className="obm-tray-badge">2</span>
+        {/* 数字角标仅 macOS 菜单栏有（W-10：Windows 托盘不实现角标），Windows 上画了是在教不存在的东西。 */}
+        {IS_MAC && <span className="obm-tray-badge">2</span>}
       </div>
       <div className="obm-panel obm-panel-pinned">
         <MiniCard variant="run" wide />

@@ -128,6 +128,35 @@ describe("NewSessionPanel (独立窗口)", () => {
     expect(closeMock).not.toHaveBeenCalled();
   });
 
+  it("目录输入框 Enter 直接启动，但 IME 合成中的 Enter 不启动（拼音选词误触）", async () => {
+    api.newSession.mockResolvedValue(undefined);
+    render(<NewSessionPanel />);
+    const input = await screen.findByTestId("ns-dir");
+    fireEvent.change(input, { target: { value: "C:/proj" } });
+    // 输入法按 Enter 提交候选时先触发 keydown，放行会用半截路径误启动。
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    expect(api.newSession).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter", isComposing: false });
+    await waitFor(() => expect(api.newSession).toHaveBeenCalledWith("C:/proj", "claude", {}, []));
+  });
+
+  it("启动失败后编辑目录/换 agent 清掉旧错误：错误不滞留到下一次动作", async () => {
+    api.newSession.mockRejectedValue("启动终端失败");
+    render(<NewSessionPanel />);
+    const input = await screen.findByTestId("ns-dir");
+    fireEvent.change(input, { target: { value: "C:/proj" } });
+    fireEvent.click(screen.getByTestId("ns-launch"));
+    expect((await screen.findByTestId("ns-error")).textContent).toContain("启动终端失败");
+    // 编辑目录：旧错误随输入失效。
+    fireEvent.change(input, { target: { value: "C:/proj2" } });
+    expect(screen.queryByTestId("ns-error")).toBeNull();
+    // 再失败一次，换 agent 同样清（不同 agent 的错误对新选择不成立）。
+    fireEvent.click(screen.getByTestId("ns-launch"));
+    expect((await screen.findByTestId("ns-error")).textContent).toContain("启动终端失败");
+    fireEvent.click(await screen.findByTestId("ns-agent-codex"));
+    expect(screen.queryByTestId("ns-error")).toBeNull();
+  });
+
   it("agent 选择只列已装的", async () => {
     api.listAgents.mockResolvedValue(descriptors(["claude", "codex"]));
     render(<NewSessionPanel />);
@@ -481,5 +510,14 @@ describe("远程目录浏览", () => {
     fireEvent.click(within(browser).getByText(zh.newSession.pickHere));
     expect(screen.queryByTestId("ns-dirbrowse")).toBeNull();
     expect((screen.getByTestId("ns-dir") as HTMLInputElement).value).toBe("C:\\repo");
+  });
+
+  it("两级列目录都失败时报错可见（此前纯静默，点了「浏览」像卡死）", async () => {
+    (globalThis as Record<string, unknown>).__MEOWO_REMOTE__ = true;
+    api.listSubdirectories.mockRejectedValue("权限拒绝");
+    render(<NewSessionPanel />);
+    fireEvent.click(await screen.findByText(zh.newSession.browse));
+    // browse 面板没打开,browseError 的展示位不渲染——借主错误行说出来。
+    expect((await screen.findByTestId("ns-error")).textContent).toContain("权限拒绝");
   });
 });

@@ -216,7 +216,18 @@ function ModelPicker({
             else { commit(); setOpen(false); }
             e.currentTarget.blur();
           }
-          if (e.key === "Escape") { setOpen(false); setActiveIdx(-1); e.currentTarget.blur(); }
+          if (e.key === "Escape") {
+            // 必须 preventDefault：React 合成事件先于 window 冒泡监听（useEscClose），
+            // 不吃掉的话它会看到 defaultPrevented=false 把整扇设置窗关掉。也不能 blur——
+            // blur 后 activeElement 变 body，useEscClose 的输入框让位守卫同样失效。
+            e.preventDefault();
+            if (open) {
+              // 菜单开着：只收菜单，焦点留在输入框。
+              setOpen(false);
+              setActiveIdx(-1);
+            }
+            // 菜单已关：什么都不做——保持聚焦，useEscClose 的输入框守卫自然让位。
+          }
         }}
       />
       <button
@@ -529,7 +540,7 @@ function RelayAccessSupported({ agent, settings, patch, capability }: {
           </div>
         </>
       )}
-      {err && <div className="row-desc proxy-err">{t.relay.saveFailed(err)}</div>}
+      {err && <div className="row-desc proxy-err" role="alert">{t.relay.saveFailed(err)}</div>}
     </div>
   );
 }

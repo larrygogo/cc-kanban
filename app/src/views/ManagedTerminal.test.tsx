@@ -304,6 +304,7 @@ describe("ManagedTerminal", () => {
 
   it("终端搜索无匹配时显示提示;WebGL 构造失败静默回退不炸组件", async () => {
     searchFindNext.mockReturnValue(false);
+    searchFindPrevious.mockReturnValue(false);
     invoke.mockImplementation((command: string) => {
       if (command === "managed_terminal_snapshot") return Promise.resolve(noPty);
       return Promise.resolve();
@@ -316,6 +317,31 @@ describe("ManagedTerminal", () => {
     const input = await screen.findByPlaceholderText("搜索终端输出");
     fireEvent.change(input, { target: { value: "nowhere" } });
     expect(await screen.findByText("无匹配")).toBeTruthy();
+    // 两头都落空才是真正的无匹配:Enter(非 incremental)的回绕尝试也不能把它救活。
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(await screen.findByText("无匹配")).toBeTruthy();
+  });
+
+  it("终端搜索到底后按 Enter 自动回绕并提示「已回绕」,与无匹配可区分", async () => {
+    // findNext 落空、findPrevious 命中 = 尾部之上确有匹配,只是光标已在最后一条之后。
+    searchFindNext.mockReturnValue(false);
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(noPty);
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    await waitFor(() => expect(keyHandler.current).toBeTruthy());
+    const key = (init: Partial<KeyboardEvent> & { type: string; code: string }) => init as KeyboardEvent;
+    keyHandler.current!(key({ type: "keydown", code: "KeyF", ctrlKey: true }));
+    const input = await screen.findByPlaceholderText("搜索终端输出");
+    // 逐字期(incremental)不回绕:输入中的落空大概率是「还没打完」,回绕跳动反而吓人。
+    fireEvent.change(input, { target: { value: "error" } });
+    expect(await screen.findByText("无匹配")).toBeTruthy();
+    // Enter(非 incremental)落空 → 自动反向找一次,命中则提示「已回绕」而不是「无匹配」。
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(await screen.findByText("已到末尾，回绕到第一个匹配")).toBeTruthy();
+    expect(screen.queryByText("无匹配")).toBeNull();
+    expect(searchFindPrevious).toHaveBeenCalledWith("error");
   });
 
   it("链接走终端惯例：Ctrl/Cmd+点击经 open_link 打开，普通点击不动", async () => {
@@ -391,7 +417,7 @@ describe("ManagedTerminal", () => {
     expect(links).toBeUndefined();
   });
 
-  it("假死横幅给「结束并恢复」(T-5):确认后先 stop 再 start,一步走完此前两步", async () => {
+  it("假死横幅给「结束并恢复」(T-5):确认后先 stop、等本会话 pty-exit 再 start,一步走完此前两步", async () => {
     // 停滞判定靠 30s 阈值 + 5s 节拍,fake timers(含 Date)把时间直接推过去。
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     try {
@@ -409,13 +435,47 @@ describe("ManagedTerminal", () => {
       expect(button).toBeTruthy();
       invoke.mockClear();
       fireEvent.click(button!);
-      // confirm → stop_managed_terminal → start_managed_terminal 全链路(微任务串)。
+      // confirm → stop 完成;但 start 必须等本会话的 pty-exit:broker.stop 只发 kill 就返回,
+      // 真正收尾在 waiter 升级链,此刻立即 start 会撞在将死的旧 PTY 上(外部占用误报 /
+      // begin_start 判重被吞,3s 后 pty-exit 到达再弹一次退出封面)。
       await act(async () => {});
       const calls = invoke.mock.calls.map((c) => c[0]);
       expect(calls).toContain("confirm_dialog");
       expect(calls).toContain("stop_managed_terminal");
-      expect(calls).toContain("start_managed_terminal");
-      expect(calls.indexOf("stop_managed_terminal")).toBeLessThan(calls.indexOf("start_managed_terminal"));
+      expect(calls).not.toContain("start_managed_terminal");
+      // pty-exit 到达(旧进程真正退出) → 这才 start。
+      await act(async () => {
+        eventHandlers.get("pty-exit")!({ payload: { sessionId: 163, code: null } });
+      });
+      const after = invoke.mock.calls.map((c) => c[0]);
+      expect(after).toContain("start_managed_terminal");
+      expect(after.indexOf("stop_managed_terminal")).toBeLessThan(after.indexOf("start_managed_terminal"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("「结束并恢复」等 pty-exit 有超时兜底:事件真丢了也照 start,不把用户钉死在横幅上", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    try {
+      invoke.mockImplementation((command: string) => {
+        if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true });
+        if (command === "confirm_dialog") return Promise.resolve(confirmAnswer.ok);
+        return Promise.resolve();
+      });
+      render(<ManagedTerminal sessionId={163} status="running" />);
+      await act(async () => {});
+      await act(async () => { vi.advanceTimersByTime(36_000); });
+      const button = screen.queryByRole("button", { name: "结束并恢复" });
+      expect(button).toBeTruthy();
+      invoke.mockClear();
+      fireEvent.click(button!);
+      await act(async () => {});
+      expect(invoke.mock.calls.map((c) => c[0])).toContain("stop_managed_terminal");
+      expect(invoke.mock.calls.map((c) => c[0])).not.toContain("start_managed_terminal");
+      // pty-exit 始终不到达:4s 兜底(升级链末档 3s + 1s 余量)后仍 start 一次。
+      await act(async () => { vi.advanceTimersByTime(4_100); });
+      expect(invoke.mock.calls.map((c) => c[0])).toContain("start_managed_terminal");
     } finally {
       vi.useRealTimers();
     }
@@ -571,6 +631,18 @@ describe("ManagedTerminal", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("attach_background_session", { sessionId: 163 }));
   });
 
+  /// 后台会话接上旁路后 active=true，但它并未被 Meowo 托管——attach_in_external_terminal
+  /// 的 ensure_attachable 必然报「该会话尚未由 Meowo 接管」。挂着必错的按钮是误导。
+  it("后台会话接上旁路后不出「在外部终端同步打开」按钮", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2 });
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" background />);
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: "在外部终端同步打开" })).toBeNull();
+  });
+
   /// 拿到退出码才是真的结束了：那时既要说结束，也不该再给重接按钮。
   it("后台 worker 真的退出后说已结束，且收起重接按钮", async () => {
     invoke.mockImplementation((command: string) => {
@@ -633,7 +705,21 @@ describe("ManagedTerminal", () => {
     scrollToBottomSpy.mockReset();
     eventHandlers.get("pty-exit")!({ payload: { sessionId: 163, code: 0 } });
     await waitFor(() => expect(scrollToBottomSpy).toHaveBeenCalled());
-    expect(write.mock.calls.some(([data]) => typeof data === "string" && data.includes("process exited"))).toBe(true);
+    // 退出提示行走 i18n（zh 基准字典），保持宿主注解形态。
+    expect(write.mock.calls.some(([data]) => typeof data === "string" && data.includes("[Meowo：进程已退出（0）]"))).toBe(true);
+  });
+
+  it("正常退出（码 0）卡片用中性描边（is-clean）且文案不标退出码，与异常退出区分", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") {
+        return Promise.resolve({ ...noPty, exited: true, exitCode: 0 });
+      }
+      return Promise.resolve();
+    });
+    const { container } = render(<ManagedTerminal sessionId={163} status="ended" />);
+    await waitFor(() => expect(container.querySelector(".managed-terminal-exit-card.is-clean")).toBeTruthy());
+    // 码 0 是常态不是异常：不再标「（退出码 0）」。
+    expect(screen.getByText(/Agent 进程已退出，上方保留了终端输出/)).toBeTruthy();
   });
 
   it("shows the initializing cover until the managed PTY produces its first output", async () => {
@@ -896,6 +982,25 @@ describe("ManagedTerminal", () => {
     fireEvent.click(menuItems()[1]);
     await waitFor(() => expect(pasteSpy).toHaveBeenCalledWith("from-clipboard"));
     expect(document.querySelector(".ctx-menu")).toBeNull();
+  });
+
+  it("右键粘贴:剪贴板无文本(如截图位图)时回退发 ^V,读剪贴板失败要可见(P2-4)", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2 });
+      if (command === "clipboard_text") return Promise.resolve(null);
+      return Promise.resolve();
+    });
+    pasteSpy.mockClear();
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    const host = document.querySelector(".managed-terminal-host")!;
+    await screen.findByRole("button", { name: "在外部终端同步打开" });
+    const menuItems = () => Array.from(document.querySelectorAll<HTMLButtonElement>(".ctx-menu .ctx-item"));
+    // 无文本可粘:不发空 paste,回退 ^V 让 TUI 自己读系统剪贴板(claude 贴图通路,
+    // 与键盘路径的 pasteImageFallback 同语义)。
+    fireEvent.contextMenu(host);
+    fireEvent.click(menuItems()[1]);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 163, data: "\x16" }));
+    expect(pasteSpy).not.toHaveBeenCalled();
   });
 
   it("右键菜单(U0-11):全选走 terminal.selectAll,搜索打开终端内搜索条", async () => {

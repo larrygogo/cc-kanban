@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useT } from "../../i18n";
 import type { QuestionAnswerDraft, StructuredQuestion } from "./askUserQuestion";
 
@@ -36,6 +36,25 @@ export function QuestionPanels(props: QuestionPanelsProps) {
   useEffect(() => { setActive(0); }, [items]);
   const index = Math.min(active, items.length - 1);
   const item = items[index];
+  // tab 条的 roving tabindex：整组只占一个 Tab 停靠点，←/→/Home/End 换页签并自动激活
+  // （与点击同语义——焦点到了内容没换，比不换焦点更迷惑）。id 前缀按实例隔离。
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const idPrefix = useId();
+  const onTabsKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const tabs = Array.from(tabsRef.current?.querySelectorAll<HTMLElement>('[role="tab"]') ?? []);
+    if (tabs.length === 0) return;
+    const at = tabs.indexOf(document.activeElement as HTMLElement);
+    if (at < 0) return;
+    const next = e.key === "ArrowRight" ? (at + 1) % tabs.length
+      : e.key === "ArrowLeft" ? (at - 1 + tabs.length) % tabs.length
+      : e.key === "Home" ? 0
+      : e.key === "End" ? tabs.length - 1
+      : null;
+    if (next === null) return;
+    e.preventDefault();
+    setActive(next);
+    tabs[next]?.focus();
+  };
   if (!item) return null;
   const answered = (question: number) => {
     if (props.mode === "answer") {
@@ -49,13 +68,16 @@ export function QuestionPanels(props: QuestionPanelsProps) {
   return (
     <>
       {items.length > 1 && (
-        <div className="chat-question-tabs" role="tablist">
+        <div className="chat-question-tabs" role="tablist" aria-label={t.chat.questionTitle} ref={tabsRef} onKeyDown={onTabsKeyDown}>
           {items.map((question, tabIndex) => (
             <button
               key={tabIndex}
               type="button"
               role="tab"
+              id={`${idPrefix}-tab-${tabIndex}`}
               aria-selected={tabIndex === index}
+              aria-controls={`${idPrefix}-panel`}
+              tabIndex={tabIndex === index ? 0 : -1}
               className={tabIndex === index ? "is-active" : ""}
               onClick={() => setActive(tabIndex)}
             >
@@ -65,7 +87,11 @@ export function QuestionPanels(props: QuestionPanelsProps) {
           ))}
         </div>
       )}
-      <div className="chat-question-panel">
+      <div
+        className="chat-question-panel"
+        // 只渲染当前题的面板：多问题时它是 tablist 的 tabpanel，单问题时这两个属性无害。
+        {...(items.length > 1 ? { role: "tabpanel", id: `${idPrefix}-panel`, "aria-labelledby": `${idPrefix}-tab-${index}` } : {})}
+      >
         {item.question && <span className="chat-approval-prewrap">{item.header ? `${item.header} · ${item.question}` : item.question}</span>}
         {props.mode === "answer" ? (
           <>

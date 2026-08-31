@@ -803,7 +803,12 @@ function ChangesView({ cwd, summary }: { cwd: string; summary: GitDiffSummaryDto
         className="chat-diff-search"
         placeholder={t.chat.diffSearchPlaceholder}
         value={search}
-        onChange={(event) => setSearch(event.target.value)}
+        // IME 合成守卫：与侧栏搜索框同款，拼音中间态不下发。
+        onChange={(event) => {
+          if ((event.nativeEvent as InputEvent).isComposing) return;
+          setSearch(event.target.value);
+        }}
+        onCompositionEnd={(event) => setSearch(event.currentTarget.value)}
       />
       <div className="chat-diff-tree">{renderTree(tree, 0)}</div>
       {ctxMenu && (
@@ -1205,7 +1210,12 @@ function FilesView({ cwd }: { cwd: string }) {
         className="chat-diff-search"
         placeholder={t.chat.diffSearchFilesPlaceholder}
         value={search}
-        onChange={(event) => setSearch(event.target.value)}
+        // IME 合成守卫：与侧栏搜索框同款，拼音中间态不下发。
+        onChange={(event) => {
+          if ((event.nativeEvent as InputEvent).isComposing) return;
+          setSearch(event.target.value);
+        }}
+        onCompositionEnd={(event) => setSearch(event.currentTarget.value)}
       />
       {searchActive ? searchView : <div className="chat-diff-tree">{renderDir("", 0)}</div>}
       {ctxMenu && (

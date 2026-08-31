@@ -26,8 +26,9 @@ const ATTACHMENT_INSTRUCTION_HEADERS = new Set(
 );
 
 /** 把用户文本拆成「正文（去掉图片引用行）+ 图片路径列表」。图片不混排在文字里：
- *  气泡是「说的话」，图片是附件，各归各的（正文里的 [Image #N] 指代照旧保留）。 */
-function splitUserText(text: string): { body: string; images: { path: string; key: string }[] } {
+ *  气泡是「说的话」，图片是附件，各归各的（正文里的 [Image #N] 指代照旧保留）。
+ *  导出给 ChatWindow 的 ↑ 召回复用：召回只回填正文，口径必须与气泡渲染一致。 */
+export function splitUserText(text: string): { body: string; images: { path: string; key: string }[] } {
   const matches = [...text.matchAll(IMAGE_REF)];
   const images = matches.map((match, index) => ({ path: match[1].trim(), key: `${match.index}:${index}` }));
   // 无图片引用也不能早退：CLI 会把附件行「- <路径>」里的图片路径吃掉、转成独立

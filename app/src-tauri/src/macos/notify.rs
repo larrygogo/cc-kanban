@@ -115,8 +115,24 @@ fn handle_response(center: &UNUserNotificationCenter, response: &UNNotificationR
     // UNUserNotificationCenter 同样不给单条移除之外的语义，removeAllDeliveredNotifications
     // 整体清空对"会话等待/出错"这类瞬时提醒正合适）。
     center.removeAllDeliveredNotifications();
+    // 整清连坐抹掉其它仍挂审批/阻塞会话的通知，而它们的去重指纹已写进 watch 侧
+    // map、状态不变就不会再弹——入口永久丢失。置位让下一轮 liveness 给仍在等待的补发
+    // （见 watch.rs RESET_DECISION_RENOTIFY）。
+    crate::watch::request_decision_renotify();
     if let Some((session_id, pid)) = job {
         std::thread::spawn(move || route_click(session_id, pid));
+    } else if let Some((app, _)) = CLICK_CONTEXT.get() {
+        // JOBS 是进程内存表（重启后通知中心的残留通知、或满 64 整体清空都查不到路由
+        // 参数）：落空不能静默丢弃这次点击——回退打开对话窗/召回面板，与 W-14
+        // 「定位失败回退打开对话窗」同一纪律。设置文件是 IO，放子线程读。
+        let app = app.clone();
+        std::thread::spawn(move || {
+            if crate::settings::load_settings().chat_enabled {
+                crate::window::open_latest_chat_window(&app);
+            } else {
+                crate::macos::panel::recall_panel(&app);
+            }
+        });
     }
 }
 

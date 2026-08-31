@@ -5,6 +5,9 @@ import { cancelUpdateDownload, checkUpdate, downloadUpdate, getSettings, install
 // "unknown"：本会话从未检查过（自动更新被关掉）。不能用 "latest" 顶替——那会让
 // 「关于」页在从未联网确认的情况下显示「已是最新版本」，恰恰误导了最需要手动确认的用户。
 export type UpdateStatus = "checking" | "unknown" | "latest" | "available" | "downloading" | "ready" | "error";
+// error 的来源：检查/下载/安装三态文案与重试动作各不相同（下载失败可重新下载、安装失败
+// 重试安装，都不必重新检查），此前三态混用一句「检查更新失败」。
+export type UpdateErrorKind = "check" | "download" | "install";
 
 /// 检查更新；对外暴露状态/版本/更新说明/进度，以及下载、安装和手动重检操作。
 /// 非 Tauri 环境（测试/浏览器）或网络失败一律降级为 error，不抛错。
@@ -19,11 +22,14 @@ export function useUpdate(options: { automatic?: boolean; delayMs?: number } = {
   const [notes, setNotes] = useState<string | null>(null);
   // null = 总大小未知（响应无 Content-Length），UI 显示不带百分比的「下载中…」。
   const [progress, setProgress] = useState<number | null>(0);
+  // status==="error" 时的来源（见 UpdateErrorKind）；离开 error 态即清。
+  const [errorKind, setErrorKind] = useState<UpdateErrorKind | null>(null);
   const checkedRef = useRef(false);
 
   // 返回本次检查的结果状态（调用方拿结果不能依赖异步 state）。
   const recheck = useCallback(async (): Promise<UpdateStatus> => {
     setStatus("checking");
+    setErrorKind(null);
     checkedRef.current = false;
     try {
       const up = await checkUpdate();
@@ -39,6 +45,7 @@ export function useUpdate(options: { automatic?: boolean; delayMs?: number } = {
       return "latest";
     } catch {
       checkedRef.current = false;
+      setErrorKind("check");
       setStatus("error");
       return "error";
     }
@@ -47,11 +54,13 @@ export function useUpdate(options: { automatic?: boolean; delayMs?: number } = {
   const download = useCallback(async () => {
     if (!checkedRef.current) return;
     setStatus("downloading");
+    setErrorKind(null);
     setProgress(0);
     try {
       setStatus(await downloadUpdate());
     } catch (err) {
       console.error("[update] 下载失败：", err);
+      setErrorKind("download");
       setStatus("error");
     }
   }, []);
@@ -73,6 +82,7 @@ export function useUpdate(options: { automatic?: boolean; delayMs?: number } = {
       await relaunch();
     } catch (err) {
       console.error("[update] 安装失败：", err);
+      setErrorKind("install");
       setStatus("error");
     }
   }, []);
@@ -106,6 +116,7 @@ export function useUpdate(options: { automatic?: boolean; delayMs?: number } = {
     }));
     register(listen("update-download-failed", () => {
       if (disposed) return;
+      setErrorKind("download");
       setStatus("error");
     }));
     register(listen("update-download-cancelled", () => {
@@ -179,5 +190,5 @@ export function useUpdate(options: { automatic?: boolean; delayMs?: number } = {
     };
   }, [automatic, delayMs, download, recheck]);
 
-  return { status, version, notes, progress, download, cancelDownload, install, recheck };
+  return { status, version, notes, progress, errorKind, download, cancelDownload, install, recheck };
 }

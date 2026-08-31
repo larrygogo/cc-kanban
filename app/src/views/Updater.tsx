@@ -24,7 +24,7 @@ export function Updater() {
   const t = useT();
   // 窗口以 visible:false 创建（window.rs），首帧渲染后再显示，消除打开瞬间的白框闪烁。
   useShowWhenReady();
-  const { status, version, notes, progress, download, cancelDownload, install, recheck } = useUpdate();
+  const { status, version, notes, progress, errorKind, download, cancelDownload, install, recheck } = useUpdate();
   const [current, setCurrent] = useState("");
   useEffect(() => {
     getVersion().then(setCurrent).catch(() => {});
@@ -112,25 +112,40 @@ export function Updater() {
           </div>
         </div>
 
-        {status === "checking" && <div className="up-status">{t.updater.checking}</div>}
+        {status === "checking" && <div className="up-status" role="status">{t.updater.checking}</div>}
 
         {status === "latest" && (
           <>
-            <div className="up-status">{t.updater.latest}</div>
+            <div className="up-status" role="status">{t.updater.latest}</div>
             <button className="sbtn" onClick={() => void recheck()}>{t.updater.recheck}</button>
           </>
         )}
 
         {status === "error" && (
           <>
-            <div className="up-status up-err">{t.updater.error}</div>
-            <button className="sbtn" onClick={() => void recheck()}>{t.updater.retry}</button>
+            {/* role="status"：状态切换对读屏用户不可见，需 live region 播报。 */}
+            <div className="up-status up-err" role="status">
+              {errorKind === "download"
+                ? t.updater.downloadFailed
+                : errorKind === "install"
+                  ? t.updater.installFailed
+                  : t.updater.error}
+            </div>
+            {/* 重试动作按来源分：下载失败直接重下（checkedRef 仍在，不必重新检查），
+                安装失败重走安装确认，只有检查失败才 recheck。 */}
+            {errorKind === "download" ? (
+              <button className="sbtn" onClick={() => void download()}>{t.updater.redownload}</button>
+            ) : errorKind === "install" ? (
+              <button className="sbtn" disabled={installing} onClick={() => void restartAndInstall()}>{t.updater.retryInstall}</button>
+            ) : (
+              <button className="sbtn" onClick={() => void recheck()}>{t.updater.retry}</button>
+            )}
           </>
         )}
 
         {(status === "available" || status === "downloading" || status === "ready") && (
           <>
-            <div className="up-status up-new">{t.updater.found(version ?? "")}</div>
+            <div className="up-status up-new" role="status">{t.updater.found(version ?? "")}</div>
             {notes && (
               <div className="up-notes">
                 <div className="up-notes-title">{t.updater.notes}</div>
@@ -146,6 +161,7 @@ export function Updater() {
                 <div
                   className={"up-prog" + (progress == null ? " up-prog-indet" : "")}
                   role="progressbar"
+                  aria-label={t.updater.downloading}
                   aria-valuemin={0}
                   aria-valuemax={100}
                   aria-valuenow={progress == null ? undefined : Math.round(progress)}
@@ -161,7 +177,7 @@ export function Updater() {
               </div>
             ) : (
               <>
-                <div className="up-status">{t.updater.ready}</div>
+                <div className="up-status" role="status">{t.updater.ready}</div>
                 <div className="up-hint">{t.updater.readyHint}</div>
                 {/* 「稍后」语义化关窗：此前关窗是唯一的推迟方式，但右上角 ✕ 读不出
                     「更新还在、随时可装」——并排给出两条路，主次分明。 */}

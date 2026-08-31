@@ -25,6 +25,7 @@ type MenuPos = { top?: number; bottom?: number; left?: number; right?: number; w
  *
  * 键盘模型：**roving focus**（与 SwatchPicker 的 roving tabindex 同族，全项目统一这一种）：
  * ↑/↓ 在菜单项间循环移动 DOM 焦点，Home/End 跳首尾，Enter/Space 激活焦点项；
+ * 可打印字符按前缀跳项（typeahead，300ms 内连续击键拼前缀），替代原生 select 的首字母跳转；
  * 焦点还在触发钮上时 ↓ 落到当前选中项（无选中则首项）、↑ 落末项。
  * 菜单打开本身不抢焦点（点击打开后焦点留在触发钮），第一根方向键才进菜单。
  */
@@ -109,6 +110,9 @@ export function useMenuPopup({
 
   const toggle = () => setOpen(!open);
 
+  // typeahead 缓冲：300ms 内的连续击键拼成前缀，超时重开。
+  const typeaheadRef = useRef({ buf: "", at: 0 });
+
   // 方向键导航，挂在容器上（事件从触发钮或菜单项冒泡上来）。roving focus：直接搬 DOM 焦点
   // 而不是 aria-activedescendant——菜单里没有输入框，焦点落在哪项，Enter/Space 就激活哪项。
   const onKeyDown = (e: ReactKeyboardEvent) => {
@@ -131,6 +135,20 @@ export function useMenuPopup({
       e.preventDefault();
       (document.activeElement as HTMLElement).click();
       return;
+    } else if (e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // 可打印字符 typeahead：菜单里没有输入框，击键只能用来跳项。从焦点下一项起循环找——
+      // 重复敲同一字母就在同首字母的几项间轮转。空格除外：它在上面是激活键，
+      // 且焦点还在触发钮上时要留给按钮的原生空格行为，不能吞。
+      const now = Date.now();
+      const buf = now - typeaheadRef.current.at <= 300 ? typeaheadRef.current.buf + e.key : e.key;
+      typeaheadRef.current = { buf, at: now };
+      const needle = buf.toLowerCase();
+      const from = cur >= 0 ? cur + 1 : 0;
+      for (let i = 0; i < items.length; i++) {
+        const idx = (from + i) % items.length;
+        if ((items[idx].textContent ?? "").trim().toLowerCase().startsWith(needle)) { next = idx; break; }
+      }
+      if (next === null) return;
     } else {
       return;
     }

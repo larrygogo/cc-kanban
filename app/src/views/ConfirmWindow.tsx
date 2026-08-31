@@ -1,7 +1,7 @@
 /// 确认对话框小窗(label `confirm-<id>`,由后端 confirm.rs 创建)。无边框,整卡可拖拽
 /// (原生窗口拖动,可拖出主窗边界);内容经命令取回而不是 URL 参数(任意语言文本免转义)。
 /// Esc = 取消;默认焦点在取消上,Enter 顺手一按不该通过破坏性动作。
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
@@ -18,6 +18,7 @@ export function ConfirmWindow() {
   const t = useT();
   const [payload, setPayload] = useState<Payload | null>(null);
   const messageRef = useRef<HTMLSpanElement>(null);
+  const titleId = useId();
   // 非 Tauri 环境(测试/浏览器预览)getCurrentWindow 在渲染期就会抛:id 置 null,
   // 组件渲染空壳并跳过所有窗口调用(与下方 fit 的降级同一口径),不能整棵树崩掉。
   const id = (() => {
@@ -107,10 +108,12 @@ export function ConfirmWindow() {
   }, [id]);
   if (!payload) return null;
   return (
-    <div className="app-confirm is-window" data-tauri-drag-region>
-      <strong data-tauri-drag-region>{payload.title}</strong>
-      <p data-tauri-drag-region>
-        <span ref={messageRef} data-tauri-drag-region>{payload.message}</span>
+    // alertdialog：确认框是打断式询问，读屏需要立刻播报；正文常含账号名/路径，
+    // 摘掉 drag-region 让文本可选中复制（卡片 padding 与标题栏已够拖拽）。
+    <div className="app-confirm is-window" role="alertdialog" aria-labelledby={titleId} data-tauri-drag-region>
+      <strong id={titleId} data-tauri-drag-region>{payload.title}</strong>
+      <p>
+        <span ref={messageRef}>{payload.message}</span>
       </p>
       <div className="app-confirm-actions">
         <button type="button" autoFocus onClick={() => decide(false)}>{t.dialog.cancel}</button>

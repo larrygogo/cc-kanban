@@ -36,10 +36,16 @@ export const ENTRIES: ErrorEntry[] = [
   { m: "PTY 已结束", exact: true, zh: "会话终端已结束", en: "The session terminal has ended" },
   { m: "PTY 输入通道已关闭", exact: true, zh: "会话终端已结束", en: "The session terminal has ended" },
   { m: "单次 PTY 输入过大", exact: true, zh: "输入内容过大", en: "Input too large" },
+  // pty.rs 的 INPUT_BACKLOGGED / RESIZE_BUSY 常量:attach 循环把它们当临时状态跳帧,
+  // 但 broker 直返调用方时会落到 UI——不进映射的话英文界面降级出中文原文。
+  { m: "Agent 未在读取输入，输入已积压，请稍后重试", exact: true, en: "The agent isn't reading input; input has backed up — try again in a moment" },
+  { m: "PTY 尺寸通道忙（可能已僵死），本次调整跳过", exact: true, en: "The PTY resize channel is busy (possibly wedged); this resize was skipped" },
   { m: "原会话仍在运行，未重新打开", exact: true, zh: "原会话仍在运行，未重新打开", en: "The original session is still running; nothing was reopened" },
   { m: "无法结束原会话进程", exact: true, zh: "无法结束原会话进程", en: "Couldn't stop the original session process" },
   { m: "会话进程已变化，请刷新后重试", exact: true, zh: "会话进程已变化，请刷新后重试", en: "The session process changed; refresh and retry" },
-  { m: "会话仍在外部终端运行", zh: "会话仍在外部终端运行", en: "The session is still running in an external terminal" },
+  // tail:后缀有两种——「请先在终端页选择接管」(terminal.rs)与「不能重复接管」(managed_terminal.rs),
+  // 都是可执行指引,裁掉就只剩一句干巴巴的现状陈述。
+  { m: "会话仍在外部终端运行", tail: true, zh: "会话仍在外部终端运行", en: "The session is still running in an external terminal" },
   { m: "外部终端已在线，但没能带到前台，请手动切换", exact: true, zh: "外部终端已在线，但没能带到前台，请手动切换", en: "External terminal is online but couldn't be focused; switch manually" },
   { m: "打开外部同步终端失败", zh: "打开外部终端失败", en: "Couldn't open the external terminal" },
   { m: "打开外部终端失败", zh: "无法打开外部终端", en: "Couldn't open the external terminal" },
@@ -123,6 +129,8 @@ export const ENTRIES: ErrorEntry[] = [
   { m: "中转地址必须以 http:// 或 https:// 开头", anywhere: true, en: "Relay URL must start with http:// or https://" },
   { m: "中转地址格式无效", anywhere: true, en: "Invalid relay URL" },
   { m: "中转地址缺少主机名", anywhere: true, en: "Relay URL is missing a host" },
+  // validate_http_url 的明文守卫:被「{id} 的{e}」包在句中,anywhere 够中;整句作 m,无 tail 可带。
+  { m: "http:// 明文地址仅允许本机回环（127.0.0.1、::1、localhost），远程中转请改用 https://", anywhere: true, en: "Plain http:// relay URLs are loopback-only (127.0.0.1, ::1, localhost); use https:// for remote relays" },
   { m: "中转地址与已保存的中转配置不一致", anywhere: true, zh: "中转地址与已保存的配置不一致，请先保存中转地址", en: "Relay URL doesn't match the saved relay config; save the relay URL first" },
   { m: "中转模型不能为空", anywhere: true, en: "Relay model can't be empty" },
   // 覆盖「请先保存中转密钥」与「请先保存 {id} 的中转密钥」两种形态。
@@ -140,6 +148,8 @@ export const ENTRIES: ErrorEntry[] = [
   { m: "已选「自定义代理」，但代理地址为空", exact: true, zh: "已选自定义代理，请填写代理地址", en: "Custom proxy selected — enter a proxy address" },
   { m: "代理地址为空", exact: true, zh: "代理地址为空", en: "Proxy address is empty" },
   { m: "代理地址不能含空格", exact: true, zh: "代理地址不能含空格", en: "Proxy address can't contain spaces" },
+  // tail 带上「{scheme}」与可用协议列表,排障信息不丢(同「代理端口无效」的处理)。
+  { m: "不支持的代理协议", tail: true, zh: "不支持的代理协议", en: "Unsupported proxy protocol" },
   { m: "代理地址缺少主机", exact: true, zh: "代理地址缺少主机", en: "Proxy address is missing a host" },
   { m: "代理端口无效", tail: true, zh: "代理端口无效", en: "Invalid proxy port" },
   { m: "代理地址无效", tail: true, zh: "代理地址无效", en: "Invalid proxy address" },

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { LiveSession } from "../api";
 import { useT } from "../i18n";
-import { cardTone } from "./sticker/helpers";
+import { cardTone, toneConfidence } from "./sticker/helpers";
 
 type Item = LiveSession & { connected: boolean };
 type Edge = "left" | "right" | "top";
@@ -129,7 +129,11 @@ export function CollapsedStrip({
             // 漏掉 pending_review/screen_state，待审批会话被画成绿色运行点。
             // items 已过滤 connected，不会出现 offline。
             const tone = cardTone(l);
-            const cls = tone === "error"
+            // 置信度分层也与卡片同源（toneConfidence，P2-4）：assumed（无屏幕检测、回落
+            // DB status）降透明度、fallback（屏幕兜底 idle）换中性色——曾只画 tone，
+            // 条上的点读不出「按记录推断」与「实时判定」的区别。
+            const confidence = toneConfidence(l, tone);
+            const cls = (tone === "error"
               ? "cstrip-error"
               : tone === "pending"
               ? "cstrip-pending"
@@ -137,7 +141,7 @@ export function CollapsedStrip({
               ? "cstrip-running"
               : tone === "waiting"
               ? "cstrip-waiting"
-              : "cstrip-on";
+              : "cstrip-on") + (confidence ? ` is-${confidence}` : "");
             const status = tone === "error"
               ? t.sticker.sessionError
               : tone === "pending"
@@ -147,12 +151,23 @@ export function CollapsedStrip({
               : tone === "waiting"
               ? t.badge.waiting
               : t.sticker.online;
+            // 弱化判定不配「自信」文案（与卡片徽标同口径，P2-11）：assumed 标「推断」，
+            // fallback 直接说「按记录推断，可能不是最新」。
+            const statusText = confidence === "assumed"
+              ? t.sticker.badgeAssumed(status)
+              : confidence === "fallback"
+              ? t.sticker.assumedState
+              : status;
+            const label = `${l.task_title || t.sticker.waitingFirstInput} · ${statusText}`;
             return (
               <span
                 key={l.session.id}
                 className={"cstrip-dot " + cls}
                 role="img"
-                aria-label={`${l.task_title || t.sticker.waitingFirstInput} · ${status}`}
+                aria-label={label}
+                // 悬停提示与 aria-label 同文案（P2-5）：此前只有屏幕阅读器能读出状态，
+                // 鼠标用户悬停无任何提示（+N 徽章反而有 data-tip）。
+                data-tip={label}
                 data-tauri-drag-region
               />
             );

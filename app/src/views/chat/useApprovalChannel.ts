@@ -69,6 +69,10 @@ export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setVi
     const totalSeconds = Math.floor(left / 1000);
     return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, "0")}`;
   })();
+  // 归零后徽章切「已超时」态而不是定格 0:00：卡片还在是因为后端的回落结算事件
+  // （pending-approval-cleared）尚未到达，定格的 0:00 读不出「正在回落终端处理」这层。
+  const approvalTimedOut = !!approval && !!approvalSeenRef.current
+    && approvalNow - approvalSeenRef.current.at >= APPROVAL_TIMEOUT_MS;
   // AskUserQuestion 的结构化题面（broker 自动放行后经 interactive-question 事件直达）。
   const [structuredQuestion, setStructuredQuestion] = useState<PendingApproval | null>(null);
   // 非当前会话的待授权请求：侧边栏亮徽标召唤用户自己过去。注意后端 **会** 为 broker 接管的
@@ -278,7 +282,7 @@ export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setVi
   }, [sessionId]);
 
   return {
-    approval, setApproval, approvalCountdown,
+    approval, setApproval, approvalCountdown, approvalTimedOut,
     structuredQuestion, setStructuredQuestion,
     approvalAwaitingIds, setApprovalAwaitingIds,
     brokerOwnsReview, setBrokerOwnsReview,

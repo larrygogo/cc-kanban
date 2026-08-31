@@ -20,6 +20,8 @@ export function Switch({ checked, onChange, disabled, label }: { checked: boolea
 }
 
 // 一排互斥的分段按钮（外观模式 / 界面密度）：语义上是单选，用 radiogroup/radio。
+// roving tabindex + 方向键导航与 SwatchPicker 同款（radiogroup 的键盘规约：
+// 只有选中项在 Tab 序里，方向键移动即选中）。
 export function Segmented<T extends string | number>({
   value,
   options,
@@ -33,14 +35,35 @@ export function Segmented<T extends string | number>({
 }) {
   return (
     <div className="seg" role="radiogroup" aria-label={label}>
-      {options.map((o) => (
+      {options.map((o, i) => (
         <button
           type="button"
           role="radio"
           aria-checked={o.value === value}
+          tabIndex={o.value === value ? 0 : -1}
           key={String(o.value)}
           className={"seg-btn" + (o.value === value ? " on" : "")}
           onClick={() => onChange(o.value)}
+          onKeyDown={(e) => {
+            const handledKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", " ", "Enter"];
+            if (!handledKeys.includes(e.key)) return;
+            e.preventDefault();
+
+            const next =
+              e.key === "Home"
+                ? 0
+                : e.key === "End"
+                  ? options.length - 1
+                  : e.key === "ArrowLeft" || e.key === "ArrowUp"
+                    ? (i - 1 + options.length) % options.length
+                    : (i + 1) % options.length;
+
+            const opt = options[next];
+            if (opt) onChange(opt.value);
+
+            const radios = Array.from(e.currentTarget.parentElement?.querySelectorAll<HTMLElement>("[role=radio]") ?? []);
+            radios[next]?.focus();
+          }}
         >
           {o.label}
         </button>
@@ -121,15 +144,37 @@ export function FontSizeSlider({
         <div className="dslider-knob-wrap">
           <div className="dslider-knob" style={{ left: `${(index / (options.length - 1)) * 100}%` }} />
         </div>
-        {options.map((o) => (
+        {options.map((o, i) => (
           <button
             key={o.value}
             type="button"
             role="radio"
             aria-checked={o.value === value}
+            tabIndex={o.value === value ? 0 : -1}
             className="dslider-point"
             aria-label={o.label}
             onClick={() => onChange(o.value)}
+            onKeyDown={(e) => {
+              // 与 Segmented/SwatchPicker 同款：radiogroup 内方向键移动即选中。
+              const handledKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", " ", "Enter"];
+              if (!handledKeys.includes(e.key)) return;
+              e.preventDefault();
+
+              const next =
+                e.key === "Home"
+                  ? 0
+                  : e.key === "End"
+                    ? options.length - 1
+                    : e.key === "ArrowLeft" || e.key === "ArrowUp"
+                      ? (i - 1 + options.length) % options.length
+                      : (i + 1) % options.length;
+
+              const opt = options[next];
+              if (opt) onChange(opt.value);
+
+              const radios = Array.from(e.currentTarget.parentElement?.querySelectorAll<HTMLElement>("[role=radio]") ?? []);
+              radios[next]?.focus();
+            }}
           />
         ))}
       </div>

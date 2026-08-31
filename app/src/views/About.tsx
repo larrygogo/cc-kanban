@@ -9,6 +9,8 @@ import { fmtAgo } from "./sticker/helpers";
 import { useUpdate, type UpdateStatus } from "../useUpdate";
 import { useShowWhenReady } from "../useShowWhenReady";
 import { languageOptions, useT } from "../i18n";
+import { formatBackendError } from "../i18n/errors";
+import { appConfirm } from "../confirm";
 import logoUrl from "../../src-tauri/icons/128x128.png";
 import type { Dict } from "../i18n/zh";
 import { SETTINGS_DEFAULTS, useSettingsState } from "./settings/state";
@@ -23,7 +25,7 @@ const REPO = "github.com/larrygogo/meowo";
 const REPO_URL = "https://github.com/larrygogo/meowo";
 const SITE = "meowo.io";
 const SITE_URL = "https://meowo.io";
-const openExt = (url: string) => invoke("open_url", { url }).catch(() => {});
+const openExt = (url: string) => invoke("open_url", { url }).catch((e) => console.error("[about] 打开链接失败：", url, e));
 
 type Section = "general" | "sessions" | "appearance" | "network" | "account" | "about";
 const SECTION_ORDER: Section[] = ["general", "sessions", "appearance", "network", "account", "about"];
@@ -111,17 +113,34 @@ function IconGlobe() {
 
 
 /** 设置保存失败的统一错误行：patch 失败时开关会被回读「弹回去」，没有这一行用户
- *  只能看到界面自己变回去、零解释（S-3——曾只有网络分区把错误显示了出来）。 */
-function SettingsError({ error }: { error: string | null }) {
+ *  只能看到界面自己变回去、零解释（S-3——曾只有网络分区把错误显示了出来）。
+ *  常驻错误加关闭 ×：错误不会自己消失（下一次成功才清），用户看完得有办法关掉。
+ *  渲染点兜底过一遍 formatBackendError（产出端 state.ts 已格式化，这里是幂等双保险）。 */
+function SettingsError({ error, onDismiss }: { error: string | null; onDismiss: () => void }) {
+  const t = useT();
   if (!error) return null;
-  return <div className="sec-hint proxy-err" role="alert">{error}</div>;
+  return (
+    <div className="sec-hint proxy-err" role="alert">
+      {formatBackendError(error, t.locale)}
+      <button
+        type="button"
+        aria-label={t.settings.close}
+        style={{ appearance: "none", background: "none", border: "none", padding: 0, marginLeft: 6, font: "inherit", color: "inherit", cursor: "pointer" }}
+        onClick={onDismiss}
+      >
+        ×
+      </button>
+    </div>
+  );
 }
 
 // 通用：应用级设置（语言、自启、更新、通知）。会话与卡片的行为在 SessionsSection。
 function GeneralSection() {
   const t = useT();
   const [autostart, setAutostart] = useState(false);
-  const [settings, patch, patchError] = useSettingsState();
+  // autostart 是独立 invoke（不走 patch）：失败曾静默回滚，开关弹回去零解释。
+  const [autostartErr, setAutostartErr] = useState(false);
+  const [settings, patch, patchError, clearPatchError] = useSettingsState();
   // dev 下开机自启会注册调试二进制(开机连不上 dev server → 白屏)，故禁用此开关，仅安装版可用。
   const autostartDisabled = import.meta.env.DEV;
   useEffect(() => {
@@ -131,7 +150,11 @@ function GeneralSection() {
     if (autostartDisabled) return;
     const next = !autostart;
     setAutostart(next);
-    invoke("set_autostart", { enabled: next }).catch(() => setAutostart(!next));
+    setAutostartErr(false);
+    invoke("set_autostart", { enabled: next }).catch(() => {
+      setAutostart(!next);
+      setAutostartErr(true);
+    });
   };
   const notifyOn = settings?.notifications_enabled ?? true;
   const flashOn = settings?.attention_flash_enabled ?? true;
@@ -204,7 +227,8 @@ function GeneralSection() {
           <Switch checked={clickThroughOn} onChange={toggleClickThrough} label={t.settings.clickThrough} />
         </div>}
       </div>
-      <SettingsError error={patchError} />
+      {autostartErr && <div className="sec-hint proxy-err" role="alert">{t.settings.autostartFailed}</div>}
+      <SettingsError error={patchError} onDismiss={clearPatchError} />
     </>
   );
 }
@@ -212,7 +236,7 @@ function GeneralSection() {
 // 会话：新建/打开/归档等会话行为，外加看板卡片的展示与交互（独立成第二张卡）。
 function SessionsSection() {
   const t = useT();
-  const [settings, patch, patchError] = useSettingsState();
+  const [settings, patch, patchError, clearPatchError] = useSettingsState();
   const [availTerms, setAvailTerms] = useState<ResumeTerminal[] | null>(null);
   const [agents, setAgents] = useState<AgentDescriptor[]>([]);
   const availAgents = agents.filter((a) => a.installed).map((a) => a.id);
@@ -323,7 +347,7 @@ function SessionsSection() {
           />
         </div>
       </div>
-      <SettingsError error={patchError} />
+      <SettingsError error={patchError} onDismiss={clearPatchError} />
       <ArchivedSessions />
     </>
   );
@@ -341,11 +365,17 @@ function ArchivedSessions() {
   const [items, setItems] = useState<LiveSession[] | null>(null);
   const [cursor, setCursor] = useState<PageCursor | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  // 首载失败标记：此前 catch 里 setItems(prev ?? []) 把失败伪装成空态，
+  // 用户分不清「没有归档」和「没加载出来」。
+  const [loadFailed, setLoadFailed] = useState(false);
+  // 放回看板失败标记：乐观移除后重取首页会把该项拉回，但失败本身也要有一行提示。
+  const [actionFailed, setActionFailed] = useState(false);
   const loadPage = useCallback((after: PageCursor | null) => {
     setLoadingMore(true);
     getLiveSessionsPage("archived", null, after, ARCHIVED_PAGE)
       .then((page) => {
         setCursor(page.next_cursor);
+        if (after === null) setLoadFailed(false);
         setItems((prev) => {
           // 首页替换、翻页按 id 去重追加（翻页间归档集可能被并发改动）。
           if (after === null || prev === null) return page.items;
@@ -353,21 +383,36 @@ function ArchivedSessions() {
           return [...prev, ...page.items.filter((s) => !seen.has(s.session.id))];
         });
       })
-      .catch(() => setItems((prev) => prev ?? []))
+      .catch(() => {
+        if (after === null) setLoadFailed(true);
+        setItems((prev) => prev ?? []);
+      })
       .finally(() => setLoadingMore(false));
   }, []);
   useEffect(() => loadPage(null), [loadPage]);
   const unarchive = (id: number) => {
     // 乐观移除；失败重取首页拉回（与看板同款语义）。看板经 board-changed 自行刷新。
+    setActionFailed(false);
     setItems((prev) => prev?.filter((s) => s.session.id !== id) ?? prev);
-    void setArchived(id, false).catch(() => loadPage(null));
+    void setArchived(id, false).catch(() => {
+      setActionFailed(true);
+      loadPage(null);
+    });
   };
   return (
     <>
       {/* 标题在卡片外——放卡片里像一个可交互的设置项（用户实拍反馈），这里是列表的分组标题。 */}
       <div className="sec-caption">{t.settings.archivedSessions}</div>
       <div className="row-card">
-        {items !== null && items.length === 0 && (
+        {loadFailed && (
+          <div className="archived-empty" role="alert">
+            {t.settings.archivedLoadFailed}
+            <button type="button" className="sbtn" style={{ marginLeft: 8 }} onClick={() => loadPage(null)}>
+              {t.sticker.retry}
+            </button>
+          </div>
+        )}
+        {!loadFailed && items !== null && items.length === 0 && (
           <div className="archived-empty">{t.settings.archivedEmpty}</div>
         )}
         {/* 限高内滚：归档可能积上百条，撑满整个设置页会把后面的设置项挤没。 */}
@@ -396,6 +441,7 @@ function ArchivedSessions() {
           )}
         </div>
       </div>
+      {actionFailed && <div className="sec-hint proxy-err" role="alert">{t.settings.unarchiveFailed}</div>}
     </>
   );
 }
@@ -469,7 +515,7 @@ function useSliderDraft(commit: (v: number) => void) {
 
 function AppearanceSection() {
   const t = useT();
-  const [settings, patch, patchError] = useSettingsState();
+  const [settings, patch, patchError, clearPatchError] = useSettingsState();
   // 占位一律读 SETTINGS_DEFAULTS：曾在此手写 `?? 94` / `?? "elevated"` 字面量，与真实默认
   // （settings.rs：100 / "flat"）不符——设置页每次打开都先高亮错误档位再跳正确值。
   const theme = settings?.theme ?? SETTINGS_DEFAULTS.theme;
@@ -612,7 +658,7 @@ function AppearanceSection() {
           />
         </div>
       </div>
-      <SettingsError error={patchError} />
+      <SettingsError error={patchError} onDismiss={clearPatchError} />
       <div className="sec-hint">{t.settings.appearanceHint}</div>
     </>
   );
@@ -635,7 +681,11 @@ function AboutSection({
   // 「检查更新」与「更新到 vX」都直接打开更新窗口——检查/下载/安装全在那边完成并可视反馈
   // （内联 recheck 在检查失败时界面毫无动静）。本节的后台检查只驱动按钮文案与导航角标。
   // 旧的 trigger-update/update-failed 跨窗口协议已废除：曾因两窗状态分歧把按钮锁死在「更新中…」。
-  const openUpdater = () => invoke("open_update_window").catch(() => {});
+  const openUpdater = () => invoke("open_update_window").catch((e) => {
+    // 点了「检查更新」毫无反应是最糟的失败：console 留线索 + 兜底错误框（S-14 范式）。
+    console.error("[about] 打开更新窗口失败：", e);
+    void appConfirm(formatBackendError(e, t.locale), { title: t.about.checkUpdate });
+  });
   const hasUpdate = status === "available" || status === "downloading" || status === "ready";
   const updateBtn =
     hasUpdate
@@ -689,7 +739,7 @@ function AboutSection({
             <div className="row-label">{t.about.guide}</div>
             <div className="row-desc">{t.onboarding.welcome.title}</div>
           </div>
-          <button className="sbtn" onClick={() => void invoke("open_onboarding").catch(() => {})}>
+          <button className="sbtn" onClick={() => void invoke("open_onboarding").catch((e) => console.error("[about] 打开引导窗口失败：", e))}>
             {t.about.open}
           </button>
         </div>
@@ -790,9 +840,20 @@ export function About() {
             value={query}
             placeholder={t.settings.searchPlaceholder}
             aria-label={t.settings.searchPlaceholder}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              // IME 组词中的中间态（拼音串）不触发过滤：未提交的组词会把设置行滤没。
+              // 受控输入在 composition 期间不会被 React 回填，组词过程不受影响。
+              if ((e.nativeEvent as InputEvent).isComposing) return;
+              setQuery(e.target.value);
+            }}
             onKeyDown={(e) => {
-              if (e.key === "Escape" && query) setQuery("");
+              if (e.key !== "Escape") return;
+              if (query) {
+                setQuery("");
+              } else {
+                // 空词时 Esc 是死键（useEscClose 对输入框让位）：交还焦点，让它放行关窗。
+                e.currentTarget.blur();
+              }
             }}
           />
         </div>

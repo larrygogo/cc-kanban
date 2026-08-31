@@ -331,14 +331,42 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       .catch((e) => setError(formatBackendError(e, t.locale)))
       .finally(() => setStopping(false));
   };
-  // 假死横幅的「结束并恢复」:结束与重启两步合一(此前只有「结束会话」,重启入口在退出
-  // 封面上,用户得自己找——而文案里写的就是「点结束会话再重启」)。确认取消(false)即不动;
-  // 重启失败由 start() 自己的错误通道呈现。start 在下方声明,点击时早已就绪。
+  // 「结束并恢复」里 stop 与 start 之间必须等本会话的 pty-exit:broker.stop() 只发 kill
+  // 就返回(Windows 上 portable-pty 的 kill 恒 Ok 不代表进程真死,见 pty.rs stop 注释),
+  // 真正收尾靠 waiter 升级链(1s 杀树、3s 强制 finalize),pty-exit 才是「旧进程没了」的
+  // 权威信号。不等它就 start 会撞在将死的旧 PTY 上:要么被「会话仍在外部终端运行」拦下
+  // (语义还是错的),要么 begin_start 判重 Ok(false) 被吞——前端对着将死快照 setActive,
+  // 3s 后 pty-exit 到达再弹一次退出封面(T-5 复查)。超时兜底仍 start 一次:事件真丢了
+  // 不该把用户钉死在横幅上(升级链末档 3s,留 1s 余量)。
+  const RESTART_EXIT_WAIT_MS = 4_000;
+  const waitForExit = () => new Promise<void>((resolve) => {
+    let unlisten: (() => void) | undefined;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      unlisten?.();
+      resolve();
+    };
+    const timer = window.setTimeout(finish, RESTART_EXIT_WAIT_MS);
+    void listen<ExitEvent>("pty-exit", ({ payload }) => {
+      if (payload.sessionId !== sessionId) return;
+      window.clearTimeout(timer);
+      finish();
+    }).then((un) => {
+      // finish 先于注册完成(超时/极快退出)时立刻注销,不留野监听器。
+      unlisten = un;
+      if (done) un();
+    });
+  });
+  // 假死/初始化超时横幅的「结束并恢复」:结束与重启两步合一(此前只有「结束会话」,重启
+  // 入口在退出封面上,用户得自己找——而文案里写的就是「点结束会话再重启」)。确认取消
+  // (false)即不动;重启失败由 start() 自己的错误通道呈现。start 在下方声明,点击时早已就绪。
   const restartFromBanner = () => {
     if (stopping) return;
     setStopping(true);
     void confirmStopSession(sessionId, { title: t.chat.endSession, message: t.chat.endSessionConfirm })
-      .then((stopped) => (stopped ? start() : undefined))
+      .then((stopped) => (stopped ? waitForExit().then(() => start()) : undefined))
       .catch((e) => setError(formatBackendError(e, t.locale)))
       .finally(() => setStopping(false));
   };
@@ -359,19 +387,31 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   const copySelectionRef = useRef<(() => void) | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMiss, setSearchMiss] = useState(false);
+  // 回绕提示:addon-search 的 findNext/findPrevious 不回绕,到底/到顶落空与「根本没匹配」
+  // 此前都是同一句「无匹配」,用户不知道是该回头还是真没有。落空时自动朝反方向找一次,
+  // 找到了就明说「已回绕」;两头都落空才是真正的无匹配。
+  const [searchWrapped, setSearchWrapped] = useState<"next" | "prev" | null>(null);
   const runSearch = (query: string, direction: "next" | "prev", incremental = false) => {
     const addon = searchAddonRef.current;
-    if (!addon || !query) { setSearchMiss(false); return; }
+    if (!addon || !query) { setSearchMiss(false); setSearchWrapped(null); return; }
     // incremental:逐字输入时在当前选区上扩展匹配,而不是每敲一个字往后跳一个命中。
-    const found = direction === "next"
+    // 逐字期不回绕:输入中的落空大概率是「还没打完」,回绕跳动反而吓人。
+    let found = direction === "next"
       ? addon.findNext(query, { incremental })
       : addon.findPrevious(query, { incremental });
+    let wrapped: "next" | "prev" | null = null;
+    if (!found && !incremental) {
+      found = direction === "next" ? addon.findPrevious(query) : addon.findNext(query);
+      if (found) wrapped = direction;
+    }
     setSearchMiss(!found);
+    setSearchWrapped(wrapped);
   };
   const closeSearch = () => {
     setSearchOpen(false);
     setSearchQuery("");
     setSearchMiss(false);
+    setSearchWrapped(null);
     // 清掉命中选区,焦点还给终端——搜索完下一步几乎总是回去打字。
     terminalRef.current?.clearSelection();
     terminalRef.current?.focus();
@@ -1082,7 +1122,8 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       // (只写进 xterm,不涉 PTY);备用屏 1049 不动——最后一帧正是用户要看的内容。
       terminal.write(MOUSE_MODES_OFF);
       // 写完滚底：视口若停在上翻位置，退出提示行（和叠在其上的接管卡片语境）都在屏外。
-      terminal.write(`\r\n\x1b[90m[Meowo: process exited${payload.code == null ? "" : ` (${payload.code})`}]\x1b[0m\r\n`, () => terminal.scrollToBottom());
+      // 提示行走 i18n（保持 ANSI 灰色素描样式：它是宿主注解，不是 agent 输出）。
+      terminal.write(`\r\n\x1b[90m${t.chat.terminalExitedInline(payload.code)}\x1b[0m\r\n`, () => terminal.scrollToBottom());
     };
     // 回放基线:回放起点之前的内容已随 backlog 淘汰丢失,其中最要命的是 TUI 启动时
     // 只发一次的模式开关——硬件光标 `?25l`(claude/kimi 启动即发、此后自绘光标,不藏会
@@ -1617,6 +1658,9 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
           {searchMiss && searchQuery.length > 0 && (
             <span className="term-search-miss" role="status">{t.chat.termSearchNoMatch}</span>
           )}
+          {!searchMiss && searchWrapped && searchQuery.length > 0 && (
+            <span className="term-search-miss" role="status">{t.chat.termSearchWrapped(searchWrapped)}</span>
+          )}
           <button type="button" className="term-search-btn" aria-label={t.chat.termSearchPrev} data-tip={t.chat.termSearchPrev} onClick={() => runSearch(searchQuery, "prev")}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6" /></svg>
           </button>
@@ -1644,9 +1688,15 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
             const terminal = terminalRef.current;
             if (!terminal) return;
             void clipboardText().then((text) => {
-              if (text) terminal.paste(text);
+              if (text) {
+                terminal.paste(text);
+              } else {
+                // 剪贴板没有文本（典型：截图位图）：回退发 ^V 让 TUI 自己读系统剪贴板
+                // （claude 的 [Image #N] 贴图），与键盘路径 pasteImageFallback 同语义。
+                void writeManagedTerminal(sessionIdRef.current, "\x16").catch((e) => setError(formatBackendError(e, t.locale)));
+              }
               terminal.focus();
-            }).catch(() => {});
+            }).catch((e) => setError(formatBackendError(e, t.locale))); // 读剪贴板失败必须可见，不许静默吞掉
           }}
           onSelectAll={() => {
             terminalRef.current?.selectAll();
@@ -1669,7 +1719,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
         // 用户以为「接管的框不见了」（实拍反馈）。其余状态（未启动/外部占用/旁路没接上）
         // 没有画面可看，维持整屏遮罩居中。
         <div className={"managed-terminal-cover" + (exitCode !== undefined ? " is-exited" : "")}>
-          <div className={exitCode !== undefined ? "managed-terminal-exit-card" : "managed-terminal-cover-inner"}>
+          <div className={exitCode !== undefined ? "managed-terminal-exit-card" + (exitCode === 0 ? " is-clean" : "") : "managed-terminal-cover-inner"}>
           {/* 后台会话的「没画面」有两种截然不同的成因，此前一律说成「已结束」：worker 明明
               还在跑、只是旁路没接上时，那句话是错的，而且不给任何出路。只有拿到退出码
               （worker 真的退了）才说结束，否则说「没接上」并给一次重接。 */}
@@ -1697,11 +1747,13 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
           </div>
         </div>
       )}
-      {active && (
+      {active && !background && (
         <div className="managed-terminal-actions">
           {/* 结束会话的入口在标题栏(ChatWindow 的「结束会话」),这里不再放一份——
               曾并存过「结束终端」按钮,同一条 confirmStopSession 流程双入口徒增困惑。
-              后端刻意让 attach 失败可见（不静默回退 GUI），前端吞掉就前功尽弃。 */}
+              后端刻意让 attach 失败可见（不静默回退 GUI），前端吞掉就前功尽弃。
+              后台会话不接这个按钮:它只接上了旁路(bgpty),并未被 Meowo 托管,
+              ensure_attachable 必然报「该会话尚未由 Meowo 接管」——挂着必错的按钮是误导。 */}
           <button type="button" onClick={() => { setError(""); void openAttachedTerminal(sessionId).catch((e) => setError(formatBackendError(e, t.locale))); }}>{t.chat.terminalAttach}</button>
         </div>
       )}
@@ -1735,9 +1787,16 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       )}
       {active && initTimedOut && !stalled && !error && (
         // 初始化 25s 仍无可见输出:撤遮罩后的黑屏必须有解释与出口,不能让用户对着
-        // 一片黑猜。真画面到达自动收(markPainted),也可手动收。
+        // 一片黑猜。真画面到达自动收(markPainted),也可手动收。「结束并恢复」与假死
+        // 横幅对齐(黑屏再等下去多半也是僵死,一步到位少一次往返);临时负 id 会话
+        // (pending 占位)尚未有真 PTY,start 对它不可用,按钮隐藏。
         <div className="managed-terminal-error is-stalled" role="alert">
           <span>{t.chat.terminalInitTimeout}</span>
+          {sessionId > 0 && (
+            <button type="button" disabled={stopping} onClick={restartFromBanner}>
+              {stopping ? t.chat.terminalStopping : t.chat.endAndResume}
+            </button>
+          )}
           <button type="button" disabled={stopping} onClick={stopFromBanner}>
             {stopping ? t.chat.terminalStopping : t.chat.endSession}
           </button>

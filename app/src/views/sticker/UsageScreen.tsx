@@ -1,6 +1,7 @@
 // 底栏「凹陷小屏」用量读数：每个开启配额的 provider 一个图标标签，点选后显示其用量泳道。
 import { useState } from "react";
 import { agentAssets, tintStyle } from "../../providers";
+import { useAgents } from "../../useAgents";
 import { useT } from "../../i18n";
 import type { ProviderUsage, UsageLane } from "../../api";
 import { USAGE_KEY } from "./types";
@@ -46,6 +47,9 @@ export function UsageScreen({
   usageMap: Record<string, ProviderUsage>;
 }) {
   const t = useT();
+  // provider 图标标签的可访问名/悬停提示（P2-7）：按钮内容只有品牌 SVG，
+  // 没有名字屏幕阅读器读不出、鼠标悬停无提示。展示名与卡片徽标同源（后端下发名单）。
+  const { name: agentNameOf } = useAgents();
   // 用户偏好选中的 provider（持久化：折叠/展开重挂后记住；若不在当前活跃列表中则退回第一个）
   const [selectedPref, setSelectedPref] = useState<string>(() => localStorage.getItem(USAGE_KEY) ?? "");
   const pick = (p: string) => {
@@ -85,6 +89,7 @@ export function UsageScreen({
       <div className="stk-utabs">
         {activeProviders.map((p) => {
           const { Icon } = agentAssets(p);
+          const label = agentNameOf(p);
           return (
             <button
               key={p}
@@ -92,6 +97,8 @@ export function UsageScreen({
               className={"stk-utab" + (p === selected ? " on" : "")}
               style={tintStyle(p)}
               aria-pressed={p === selected}
+              aria-label={label}
+              data-tip={label}
               onClick={() => pick(p)}
             >
               <Icon />

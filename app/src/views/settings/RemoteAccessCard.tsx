@@ -41,7 +41,8 @@ function PortInput({ value, onCommit }: { value: number; onCommit: (port: number
 
 export function RemoteAccessCard() {
   const t = useT();
-  const [settings, patch] = useSettingsState();
+  // patchError 与兄弟分区同款：开关/端口落盘被拒时不能静默回滚（开关自己弹回去零解释）。
+  const [settings, patch, patchError] = useSettingsState();
   const [info, setInfo] = useState<RemoteAccessInfo | null>(null);
   const [selectedIp, setSelectedIp] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -138,6 +139,14 @@ export function RemoteAccessCard() {
         </div>
         <Dropdown value={bind} options={bindOptions} onChange={changeBind} />
       </div>
+
+      {patchError && (
+        <div className="row">
+          <div className="row-text">
+            <div className="proxy-err" role="alert">{patchError}</div>
+          </div>
+        </div>
+      )}
 
       {info?.lastError && (
         <div className="row">

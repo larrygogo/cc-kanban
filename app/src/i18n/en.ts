@@ -7,10 +7,11 @@ export const en: Dict = {
   tabs: { all: "All", waiting: "Waiting", running: "Running" },
   time: {
     now: "now",
-    waitedNow: "just started waiting",
-    waitedMin: (m) => `waiting ${m} min`,
-    waitedHour: (h) => `waiting ${h} hr`,
-    waitedDay: (d) => `waiting ${d} d`,
+    // 独立状态行(贴纸卡片的等待时长,非句中片段),首字母大写起句。
+    waitedNow: "Just started waiting",
+    waitedMin: (m) => `Waiting ${m} min`,
+    waitedHour: (h) => `Waiting ${h} hr`,
+    waitedDay: (d) => `Waiting ${d} d`,
   },
   badge: {
     waiting: "Waiting for input",
@@ -46,6 +47,9 @@ export const en: Dict = {
     online: "Online",
     // Weakened-badge tip for external sessions without screen detection (T-15).
     assumedState: "Inferred from session records, may be stale",
+    // Hover/screen-reader text of the weakened badge (P2-11): the wrapper suppresses the
+    // inner RunBadge's confident wording and appends an "inferred" suffix.
+    badgeAssumed: (what: string) => `${what} (inferred)`,
     openSession: "Open session",
     resumeSession: "Resume session",
     cardResumeTip: "Click to resume — this restarts the CLI process",
@@ -203,6 +207,8 @@ export const en: Dict = {
     pickSession: "Pick a session from the sidebar",
     loadEarlier: "Load earlier messages",
     loadingEarlier: "Loading…",
+    // "Load earlier" failure line (the catch used to be silent — the button just reset).
+    loadEarlierFailed: "Could not load earlier messages — try again",
     loadError: "Could not read the conversation. Retrying…",
     // Sync interrupted (C-18): only after consecutive IPC poll failures — it means the
     // window lost its channel to the backend, NOT that the agent process died (that is
@@ -230,6 +236,8 @@ export const en: Dict = {
     termSearchPrev: "Previous",
     termSearchNext: "Next",
     termSearchNoMatch: "No matches",
+    // Wrap-around hint (distinct from "No matches": addon-search does not wrap, so a miss at the end ≠ absent).
+    termSearchWrapped: (direction) => (direction === "next" ? "Reached the end; wrapped to the first match" : "Reached the start; wrapped to the last match"),
     codeCopy: "Copy",
     codeCopied: "Copied",
     questionExpired: "The question card timed out and closed; keep answering on the Terminal tab",
@@ -301,6 +309,9 @@ export const en: Dict = {
     deny: "Deny",
     denyConfirmEsc: "Press Esc again to deny",
     approvalClearedNotice: "This approval was handled elsewhere or timed out. Check the terminal to continue.",
+    // Between countdown zero and the backend's settlement event: show this instead of a frozen 0:00.
+    // Shared by the approval card and the question card (same fall-back-to-terminal semantics).
+    approvalTimedOut: "Timed out — falling back to the terminal",
     openTerminal: "Open terminal",
     close: "Close",
     renameSave: "Save",
@@ -321,9 +332,11 @@ export const en: Dict = {
     terminalTakeoverConfirm: "This stops the process in the external terminal and continues the session here.",
     terminalStarting: "Starting terminal…",
     terminalInitializing: "Initializing Agent…",
-    terminalExited: (code: number | null) => `The Agent exited${code == null ? "" : ` with code ${code}`}; its terminal output is preserved above`,
+    terminalExited: (code: number | null) => `The Agent exited${code == null || code === 0 ? "" : ` with code ${code}`}; its terminal output is preserved above`,
     // Forced finalize (last resort when kill silently failed): session detached, but the process may still linger.
     terminalExitedForced: (code: number | null) => `Force-ended${code == null ? "" : ` (exit code ${code})`} — the process did not exit cleanly and may still be lingering; its terminal output is preserved above`,
+    // Exit note written into the terminal screen (host annotation; gray ANSI styling lives in ManagedTerminal's applyExit).
+    terminalExitedInline: (code: number | null) => `[Meowo: process exited${code == null ? "" : ` (${code})`}]`,
     terminalStopping: "Stopping…",
     endSession: "End session",
     endAndResume: "End & resume",
@@ -440,6 +453,8 @@ export const en: Dict = {
     sidebarExpand: "Expand session list",
     sidebarEmpty: "No sessions yet",
     sidebarEmptyDir: "No sessions in this folder",
+    // Dedicated empty state for the archived view — "No sessions yet" would read as data loss.
+    sidebarEmptyArchived: "No archived sessions",
     sidebarSearch: "Search title / repo…",
     sidebarSearchClear: "Clear search",
     searchTranscripts: "Search conversation content",
@@ -453,6 +468,10 @@ export const en: Dict = {
     dropToTerminal: "Drop to insert path",
     sidebarEmptySearch: "No matching sessions",
     sidebarLoading: "Loading sessions…",
+    // First-load failure row (P1-1): never degrade to the empty state — a backend fault
+    // must not read as "all sessions gone".
+    sidebarLoadFailed: "Could not load sessions",
+    sidebarRetry: "Retry",
     sidebarDirAll: "All folders",
     sidebarShowIdle: (n: number) => `Show ${n} not running`,
     sidebarHideIdle: "Hide not running",
@@ -572,11 +591,14 @@ export const en: Dict = {
     archivedSessions: "Archived sessions",
     archivedEmpty: "No archived sessions",
     archivedLoadMore: "Load more",
+    archivedLoadFailed: "Couldn't load archived sessions",
+    unarchiveFailed: "Couldn't move it back to the board. Try again shortly.",
     cardsGroup: "Cards",
     updateTag: "Update",
     close: "Close",
     autostart: "Launch at login",
     autostartDesc: "Starts automatically when the system boots",
+    autostartFailed: "Couldn't toggle launch at login. Try again",
     notify: "Desktop notifications",
     notifyDesc: "Notify when a session needs your reply or errors out",
     attentionFlash: "Taskbar alert",
@@ -775,6 +797,7 @@ export const en: Dict = {
     loggingOut: "Signing out…",
     loggedOut: "Signed out. Sessions and settings kept.",
     logoutFailed: (e: string) => `Could not sign out: ${e}`,
+    accountsLoadFailed: "Couldn't load account info",
     install: "Install",
     installHint: "Install to view account and quota. Downloads components online — usually a minute or two",
     installing: "Installing…",
@@ -835,6 +858,11 @@ export const en: Dict = {
     restartHint: "Downloads don't interrupt your work. Installing restarts Meowo and interrupts managed sessions.",
     error: "Update check failed. Check your network and try again",
     retry: "Retry",
+    // Download/install failures get their own copy and retry action (P1-4).
+    downloadFailed: "Download failed. Check your network and try again",
+    redownload: "Download again",
+    installFailed: "Installation failed. Try again",
+    retryInstall: "Retry install",
     recheck: "Check again",
     later: "Later",
     fullChangelog: "View full changelog",

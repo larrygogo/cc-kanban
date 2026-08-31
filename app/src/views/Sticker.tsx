@@ -37,7 +37,7 @@ import { useAgents } from "../useAgents";
 import { useT } from "../i18n";
 import { formatBackendError } from "../i18n/errors";
 import { type Item, type Tab, TAB_KEYS, PIN_KEY, UNNAMED_SESSION_SENTINEL } from "./sticker/types";
-import { cardTone, editorKeyDown, fmtAgo, fmtWaited, useStarred, match } from "./sticker/helpers";
+import { cardTone, editorKeyDown, fmtAgo, fmtWaited, useStarred, match, toneConfidence } from "./sticker/helpers";
 import {
   CheckIcon,
   ChatIcon,
@@ -147,6 +147,7 @@ export function Sticker({
   onSearchChange,
   onArchiveOptimistic,
   onArchiveFailed,
+  onArchiveUndo,
   initialLoading,
   loadError,
   onRetry,
@@ -170,6 +171,8 @@ export function Sticker({
   onArchiveOptimistic?: (sessionId: number) => void;
   /** 归档请求失败：父层需回滚上面的乐观更新。 */
   onArchiveFailed?: () => void;
+  /** 撤销归档成功：父层需整窗重查（增量刷新捞不回被摘掉的旧会话，P1-1）。 */
+  onArchiveUndo?: () => void;
   /** 冷启动首次加载中：true 时显示加载占位而非假空态。 */
   initialLoading?: boolean;
   /** 首页加载失败：显示「加载失败 + 重试」而非「还没有会话」。 */
@@ -471,16 +474,23 @@ export function Sticker({
       if (e.key !== "Escape" || e.defaultPrevented) return;
       const active = document.activeElement;
       if (active instanceof HTMLElement && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) return;
+      // 消费即 preventDefault：偷看展开态的「Esc=收回看板」（App）据此让位——
+      // 同一按键不能既关 toast 又把看板收走。
       if (focusNotice) {
+        e.preventDefault();
         setFocusNotice(null);
         return;
       }
       if (archivedToasts.length > 0) {
         // 清最新一条(与视觉栈顶一致),再按 Esc 逐条收。
+        e.preventDefault();
         setArchivedToasts((cur) => cur.slice(0, -1));
         return;
       }
-      if (searchOpen) closeSearch();
+      if (searchOpen) {
+        e.preventDefault();
+        closeSearch();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -639,11 +649,14 @@ export function Sticker({
       .catch((err) => setFocusNotice({ ...focusNotice, busy: false, kind: "failed", detail: formatBackendError(err, t.locale) }));
   };
 
-  // 撤销归档:把会话捞回来（后端 board-changed 会让卡片自己回来）。toast 状态声明
-  // 在窗口级快捷键 effect 之前（见 archivedToasts）。
+  // 撤销归档:把会话捞回来。成功后必须让父层整窗重查（P1-1）：被撤回的会话
+  // last_event_at 没变、排不进首页，归档时又被乐观摘掉不在 prev 尾部——
+  // board-changed 的「首页权威 + 按 id 保留」增量刷新两条路都捞不回它。
+  // toast 状态声明在窗口级快捷键 effect 之前（见 archivedToasts）。
   const undoArchiveToast = (key: number, item: Item) => {
     setArchivedToasts((cur) => cur.filter((toast) => toast.key !== key));
     setArchived(item.session.id, false)
+      .then(() => onArchiveUndo?.())
       .catch(() => setFocusNotice({ kind: "failed", item, detail: t.sticker.archiveFailed }));
   };
 
@@ -715,11 +728,31 @@ export function Sticker({
 
   // 切 tab / 搜索词变化：滚动回顶。旧 scrollTop 留着会让新列表直接落在中段
   // （或被夹到底部），观感像切换失败。用 key 比对避免其它重渲染误触发。
+  // 例外（P2-6）：同 tab 清空搜索时 App 走缓存恢复搜索前的列表（unsearchedItemsRef），
+  // 滚动位置随列表一起恢复而不是回顶——否则「清一下搜索」就把用户已浏览的窗口没收了。
+  const preSearchScrollRef = useRef<{ tab: Tab; offset: number } | null>(null);
   const viewKeyRef = useRef(`${tab}\0${q.trim()}`);
   useEffect(() => {
     const key = `${tab}\0${q.trim()}`;
-    if (viewKeyRef.current === key) return;
+    const prevKey = viewKeyRef.current;
+    if (prevKey === key) return;
     viewKeyRef.current = key;
+    const sep = prevKey.indexOf("\0");
+    const sameTab = prevKey.slice(0, sep) === tab;
+    const prevQ = prevKey.slice(sep + 1);
+    const query = q.trim();
+    // 进入搜索：记下当前滚动位置，供清空搜索时恢复。
+    if (sameTab && !prevQ && query) {
+      preSearchScrollRef.current = { tab, offset: scrollRef.current?.scrollTop ?? 0 };
+    }
+    // 同 tab 清空搜索：恢复进入搜索前的滚动位置（此刻列表已是 App 缓存恢复的原列表）。
+    if (sameTab && prevQ && !query && preSearchScrollRef.current?.tab === tab) {
+      const offset = preSearchScrollRef.current.offset;
+      preSearchScrollRef.current = null;
+      virtualizer.scrollToOffset(offset);
+      return;
+    }
+    if (!sameTab) preSearchScrollRef.current = null; // 换 tab 后旧记录失效
     virtualizer.scrollToOffset(0);
   }, [tab, q, virtualizer]);
 
@@ -961,7 +994,16 @@ export function Sticker({
                 // roving tabindex：三个 tab 只占一个 Tab 停靠点，方向键在 tab 间搬焦点。
                 tabIndex={tab === k ? 0 : -1}
                 className={"stab " + (tab === k ? "stab-on" : "")}
-                onClick={() => pick(k)}
+                onClick={() => {
+                  // 点击当前已选中的 tab：回顶（P2-9）。此前是静默空操作——「点了没反应」。
+                  // 键盘路径（上方 Home/End/方向键）不走这里：roving 焦点与选中态可能不同步，
+                  // pick 必须照常上报（B-12 回归测试钉住了这一点）。
+                  if (k === tab) {
+                    virtualizer.scrollToOffset(0);
+                    return;
+                  }
+                  pick(k);
+                }}
               >
                 {/* 文字包一层 span：flex 容器的裸文本节点吃不到 text-overflow，
                     窄窗 + 英文长词时由 .stab-label 省略号截断（G-12）。 */}
@@ -1034,7 +1076,7 @@ export function Sticker({
                     <div className="stk-card is-starting" data-testid="stk-starting-card">
                       <div className="stk-top">
                         <span className="stk-ind">
-                          <span className="sdot sdot-on stk-starting-dot" data-tip={t.sticker.startingTip} />
+                          <span className="sdot sdot-on stk-starting-dot" role="img" aria-label={t.sticker.startingTip} data-tip={t.sticker.startingTip} />
                         </span>
                         <div className="stk-top-body">
                           <div className="stk-line1">
@@ -1076,34 +1118,46 @@ export function Sticker({
                 ? (l.last_ai_text ?? l.preview)
                 : null;
               const subTitle = l.errored ? l.error_raw ?? undefined : sub ?? undefined;
-              // 状态判定统一走 cardTone（与折叠缩略条同一口径，优先级说明见 helpers.ts）。
+              // 状态判定统一走 cardTone、置信度统一走 toneConfidence（与折叠缩略条同一口径，
+              // 优先级与弱化语义说明见 helpers.ts）。
               const tone = cardTone(l);
-              // T-15 两层「角标不自信」的区分：
-              // - 无屏幕检测的会话（外部终端里跑的、外库卡）：角标回落 DB status——hook
-              //   事件驱动的滞后快照，与托管会话的 300ms 级实时角标同呈现会让用户误以为
-              //   同样可信，弱化样式区分。
-              // - 屏幕检测走了 fallback（什么规则都没命中、回退 idle）：是「认不出来」
-              //   而不是「确认空闲」，角标从自信的「等你」降级为中性灰点。
-              const assumedBadge = l.connected && l.screen_state == null && (tone === "running" || tone === "waiting");
-              const fallbackIdle = tone === "waiting" && l.screen_state === "idle" && l.screen_assumed === true;
+              const confidence = toneConfidence(l, tone);
+              const assumedBadge = confidence === "assumed";
+              const fallbackIdle = confidence === "fallback";
+              // assumed 分支的弱化文案（P2-11）：screen_state==null 的回落判定是「按记录
+              // 推断」，悬停/读屏不能再读到内层 RunBadge 确定的「运行中/等待输入」。
+              const assumedWhat = tone === "waiting" ? t.badge.waiting : t.badge.running;
+              const assumedLabel = t.sticker.badgeAssumed(
+                l.context_pct != null ? t.badge.full(assumedWhat, l.context_pct) : assumedWhat
+              );
               const indicator = tone === "offline" ? (
-                <span className="ring-stop" data-tip={t.sticker.stopped} />
+                <span className="ring-stop" role="img" aria-label={t.sticker.stopped} data-tip={t.sticker.stopped} />
               ) : tone === "error" ? (
-                <span className="needs-error" data-tip={l.error_raw ?? t.sticker.sessionError} />
+                <span className="needs-error" role="img" aria-label={l.error_raw ?? t.sticker.sessionError} data-tip={l.error_raw ?? t.sticker.sessionError} />
               ) : tone === "pending" ? (
                 <RunBadge pct={l.context_pct} tone="pending" />
               ) : fallbackIdle ? (
-                <span className="sdot sdot-off" data-tip={t.sticker.assumedState} />
+                <span className="sdot sdot-off" role="img" aria-label={t.sticker.assumedState} data-tip={t.sticker.assumedState} />
               ) : tone === "running" ? (
-                assumedBadge
-                  ? <span className="stk-badge-assumed"><RunBadge pct={l.context_pct} /></span>
-                  : <RunBadge pct={l.context_pct} />
+                assumedBadge ? (
+                  <span className="stk-badge-assumed" role="img" aria-label={assumedLabel} data-tip={assumedLabel}>
+                    {/* 内层 aria-hidden + pointer-events:none（CSS）：悬停/读屏只见包层的
+                        弱化文案，内层 RunBadge 的「自信」tip/aria 被压制（P2-11）。 */}
+                    <span className="stk-badge-assumed-inner" aria-hidden="true"><RunBadge pct={l.context_pct} /></span>
+                  </span>
+                ) : (
+                  <RunBadge pct={l.context_pct} />
+                )
               ) : tone === "waiting" ? (
-                assumedBadge
-                  ? <span className="stk-badge-assumed"><RunBadge pct={l.context_pct} tone="waiting" /></span>
-                  : <RunBadge pct={l.context_pct} tone="waiting" />
+                assumedBadge ? (
+                  <span className="stk-badge-assumed" role="img" aria-label={assumedLabel} data-tip={assumedLabel}>
+                    <span className="stk-badge-assumed-inner" aria-hidden="true"><RunBadge pct={l.context_pct} tone="waiting" /></span>
+                  </span>
+                ) : (
+                  <RunBadge pct={l.context_pct} tone="waiting" />
+                )
               ) : (
-                <span className="sdot sdot-on" data-tip={t.sticker.online} />
+                <span className="sdot sdot-on" role="img" aria-label={t.sticker.online} data-tip={t.sticker.online} />
               );
               return (
                 <div
@@ -1453,44 +1507,28 @@ export function Sticker({
           onClose={() => setCtxMenu(null)}
         />
       )}
-      {focusNotice && focusNotice.kind !== "focused" && (
-        <div className="stk-focus-toast" role="status" onClick={(e) => e.stopPropagation()}>
-          {/* 成功回执（opened）不带告警标记，与归档 toast 同一呈现原则。 */}
-          {focusNotice.kind !== "opened" && <span className="stk-focus-mark" aria-hidden="true">!</span>}
-          <div className="stk-focus-body">
-            <span className="stk-focus-text">{focusNoticeText}</span>
-            <div className="stk-focus-actions">
-              {(["host_focused", "unsupported_terminal", "alive_but_not_found", "process_ended"] as FocusNoticeKind[]).includes(focusNotice.kind) && (
-                <button type="button" className="stk-focus-btn" disabled={focusNotice.busy} onClick={() => void reopenNoticeSession()}>
-                  {focusNotice.busy
-                    ? t.sticker.reopening
-                    : focusNotice.kind === "process_ended"
-                    ? t.sticker.reopen
-                    : t.sticker.reopenSupported}
-                </button>
-              )}
-              {/* TCC 自动化权限被拒（仅 macOS 会产生该结果）：直达系统设置对应页，
-                  不再只丢一句「请允许」让用户自己翻。 */}
-              {focusNotice.kind === "permission_denied" && (
-                <button type="button" className="stk-focus-btn" onClick={() => { invoke("open_automation_settings").catch(() => {}); }}>
-                  {t.sticker.openSystemSettings}
-                </button>
-              )}
-            </div>
-          </div>
-          <button
-            type="button"
-            className="stk-focus-close"
-            aria-label={t.sticker.dismiss}
-            onClick={() => setFocusNotice(null)}
-          >
-            <XIcon />
-          </button>
-        </div>
-      )}
-      {/* 归档撤销 toast:逐条渲染(见 pushArchivedToast),连续归档时各自的撤销窗口互不相吞。 */}
-      {archivedToasts.length > 0 && (
+      {/* toast 统一纵向堆叠（P1-2）：focusNotice / 归档撤销 / 首启导入提示曾各自锚在
+          同一 bottom，同屏互压（focusNotice 被压在撤销栈下不可见）。收敛进同一栈容器：
+          导入/撤销叠在上，焦点提示贴底（原位）。栈内 .stk-focus-toast 由 CSS 改静态流。 */}
+      {(importNotice !== null || archivedToasts.length > 0 || (focusNotice && focusNotice.kind !== "focused")) && (
         <div className="stk-archive-toasts">
+          {/* 首启导入提示 toast（S-12，见 importNotice）：一次性，10s 自动消失或手动关。 */}
+          {importNotice !== null && (
+            <div className="stk-focus-toast is-archive" role="status" data-testid="stk-import-toast">
+              <div className="stk-focus-body">
+                <span className="stk-focus-text">{t.sticker.importNotice(importNotice)}</span>
+              </div>
+              <button
+                type="button"
+                className="stk-focus-close"
+                aria-label={t.sticker.dismiss}
+                onClick={() => setImportNotice(null)}
+              >
+                <XIcon />
+              </button>
+            </div>
+          )}
+          {/* 归档撤销 toast:逐条渲染(见 pushArchivedToast),连续归档时各自的撤销窗口互不相吞。 */}
           {archivedToasts.map(({ key, item }) => (
             <div className="stk-focus-toast is-archive" role="status" key={key}>
               <div className="stk-focus-body">
@@ -1515,24 +1553,41 @@ export function Sticker({
               </button>
             </div>
           ))}
-        </div>
-      )}
-      {/* 首启导入提示 toast（S-12，见 importNotice）：一次性，10s 自动消失或手动关。 */}
-      {importNotice !== null && (
-        <div className="stk-archive-toasts">
-          <div className="stk-focus-toast is-archive" role="status" data-testid="stk-import-toast">
-            <div className="stk-focus-body">
-              <span className="stk-focus-text">{t.sticker.importNotice(importNotice)}</span>
+          {focusNotice && focusNotice.kind !== "focused" && (
+            <div className="stk-focus-toast" role="status" onClick={(e) => e.stopPropagation()}>
+              {/* 成功回执（opened）不带告警标记，与归档 toast 同一呈现原则。 */}
+              {focusNotice.kind !== "opened" && <span className="stk-focus-mark" aria-hidden="true">!</span>}
+              <div className="stk-focus-body">
+                <span className="stk-focus-text">{focusNoticeText}</span>
+                <div className="stk-focus-actions">
+                  {(["host_focused", "unsupported_terminal", "alive_but_not_found", "process_ended"] as FocusNoticeKind[]).includes(focusNotice.kind) && (
+                    <button type="button" className="stk-focus-btn" disabled={focusNotice.busy} onClick={() => void reopenNoticeSession()}>
+                      {focusNotice.busy
+                        ? t.sticker.reopening
+                        : focusNotice.kind === "process_ended"
+                        ? t.sticker.reopen
+                        : t.sticker.reopenSupported}
+                    </button>
+                  )}
+                  {/* TCC 自动化权限被拒（仅 macOS 会产生该结果）：直达系统设置对应页，
+                      不再只丢一句「请允许」让用户自己翻。 */}
+                  {focusNotice.kind === "permission_denied" && (
+                    <button type="button" className="stk-focus-btn" onClick={() => { invoke("open_automation_settings").catch(() => {}); }}>
+                      {t.sticker.openSystemSettings}
+                    </button>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="stk-focus-close"
+                aria-label={t.sticker.dismiss}
+                onClick={() => setFocusNotice(null)}
+              >
+                <XIcon />
+              </button>
             </div>
-            <button
-              type="button"
-              className="stk-focus-close"
-              aria-label={t.sticker.dismiss}
-              onClick={() => setImportNotice(null)}
-            >
-              <XIcon />
-            </button>
-          </div>
+          )}
         </div>
       )}
       {/* 底栏:用量(左) + 搜索/设置/固定(右)聚为一处;搜索激活时整条变输入框。 */}
@@ -1583,14 +1638,16 @@ export function Sticker({
               <button
                 type="button"
                 className="stk-act"
-                data-tip={t.newSession.newButton}
+                // 快捷键零可发现性曾是盲区（P2-8）：Ctrl/Cmd+N 新建已注册（见窗口级快捷键），
+                // tip 里说出来。修饰键按平台显示（mac 是 ⌘）。
+                data-tip={`${t.newSession.newButton} · ${isMacPanel() ? "⌘" : "Ctrl+"}N`}
                 aria-label={t.newSession.newButton}
                 data-testid="bar-new"
                 onClick={() => openNewSessionWindow().catch(() => {})}
               >
                 <PlusIcon />
               </button>
-              <button type="button" className="stk-act" data-tip={t.sticker.search} aria-label={t.sticker.search} onClick={() => setSearchOpen(true)}>
+              <button type="button" className="stk-act" data-tip={`${t.sticker.search} · ${isMacPanel() ? "⌘" : "Ctrl+"}F`} aria-label={t.sticker.search} onClick={() => setSearchOpen(true)}>
                 <SearchIcon />
               </button>
               {/* 齿轮恒开设置：此前有更新时整颗按钮被改成更新入口——更新可以挂好几天，

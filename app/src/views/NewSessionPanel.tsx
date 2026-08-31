@@ -268,8 +268,10 @@ export function NewSessionPanel({ onClose, prefill }: {
     } catch {
       try {
         setBrowse(await listSubdirectories());
-      } catch {
-        /* 保持手输 */
+      } catch (e) {
+        // 两级都失败时 browse 仍为 null、browseError 的展示位(浏览面板内)根本不会渲染,
+        // 必须借主错误行说出来——否则点了「浏览」毫无反应,与断链/卡死无从区分。
+        setError(formatBackendError(e, t.locale));
       }
     }
   }
@@ -387,9 +389,10 @@ export function NewSessionPanel({ onClose, prefill }: {
                 data-testid="ns-dir"
                 value={cwd}
                 placeholder={t.newSession.dirPlaceholder}
-                onChange={(e) => setCwd(e.target.value)}
+                onChange={(e) => { setCwd(e.target.value); setError(null); }}
                 // Enter 直接启动（launch 内部对空目录/busy 有守卫），与账号页 API Key 输入框同规。
-                onKeyDown={(e) => { if (e.key === "Enter") void launch(); }}
+                // IME 合成守卫：拼音按 Enter 提交候选时先触发 keydown，放行会用半截路径误启动。
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void launch(); }}
               />
               {/* 桌面走系统目录对话框(plugin-dialog);远程在浏览器里弹不起来,换页内浏览器。 */}
               {!remoteUi() ? (
@@ -522,7 +525,7 @@ export function NewSessionPanel({ onClose, prefill }: {
                     type="button"
                     data-testid={"ns-agent-" + p}
                     className={"ns-agent" + (provider === p ? " is-on" : "")}
-                    onClick={() => setProvider(p)}
+                    onClick={() => { setProvider(p); setError(null); }}
                   >
                     {/* currentColor 绘制的徽标（claude）要由容器补品牌色，只染图标不染文字。 */}
                     <span className="ns-agent-mark" style={tintStyle(p)}>

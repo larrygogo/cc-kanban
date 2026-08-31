@@ -24,6 +24,22 @@
 > T-12 尾（pending PTY 占位卡）、C-11 尾（按题 keyed 作答）、W-15 尾（UNUserNotificationCenter）、
 > G-13、U1-28 全部落地；另有实拍迭代：B-1 状态槽形态统一、子任务面板逐分支、
 > Claude 图标选择器误伤、缩略条 pin 标记撤除。macOS 侧改动均靠 CI 验证。
+> 2026-08-31 新一轮六面复审 + 六路并行修复（64 条新发现，62 修 2 缓）：
+> 共同模式是上轮「策略级」修复的相邻路径漏网——
+> ① 修复覆盖面：撤销归档缺整窗重查（B-6）、收回守卫不认键盘焦点（U1-10）、
+> 缩略条缺置信度分层（T-15）、弱化徽标 tooltip 未弱化、侧栏 ⋯/题面 tablist/IME 守卫/
+> hover:none 兜底/role=alert 内嵌按钮等「主面修了副本没跟上」一批；
+> ② 弹层纪律：LineagePopover 与 ModelPicker 两个自绘弹层未接 escLayers/useDismissable，
+> 各带一个 Esc 误拒/误关窗洞；toast 三渲三锚点互压收敛为统一栈；
+> ③ 异步链衔接：「结束并恢复」改为等 pty-exit 再 start（ConPTY 僵死场景）、
+> 通知连坐清空后决策版指纹重置补发（W-13 内部矛盾）、倒计时归零切超时态；
+> ④ 三态容器混用：侧栏/归档区首载失败伪装空态、登出成功穿错误红、更新失败三态分文案；
+> ⑤ 错误本地化：settings 保存链接上 formatBackendError、errors.ts 补 INPUT_BACKLOGGED/
+> RESIZE_BUSY/proxy scheme/relay 明文守卫四条 + 外部终端条开 tail；
+> ⑥ useSettingsState 写队列提为模块级共享（S-2 常驻分区叠加出的跨实例写-写竞态）；
+> ⑦ 确认窗底色改 --cc-window-bg（低不透明度下幽灵窗）、托盘单击折叠态走 recall_sticker。
+> 缓办两条：Windows 跨重启通知死点击（需启动解析 COM 激活参数）、macOS 通知授权拒绝的
+> 设置页可见性（macOS-only 需实拍）。macOS notify.rs 改动本轮仍靠 CI 编译背书。
 
 ## 〇、横切主题（先读这节）
 

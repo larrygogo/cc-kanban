@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type UIEvent } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MutableRefObject, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { pickAndAddExtraDir, confirmStopSession, getLiveSessionsPage, getSessionLineage, openNewSessionWindow, openProjectDir, recentCwds, renameSession, searchChatTranscripts, sessionTone, setArchived, setSessionNote, type CardMenuMode, type LineageEntry, type LiveSession, type SessionTone, type TranscriptSearchHit } from "../api";
 import { remoteUi } from "../remoteMode";
@@ -9,8 +9,9 @@ import { agentAssets, tintStyle } from "../providers";
 import { folderName, parentSegment, pathKey } from "../paths";
 import { useMenuPopup } from "./menu";
 import { useAgents } from "../useAgents";
+import { useDismissable } from "../hooks/useDismissable";
 import { CardContextMenu } from "./sticker/CardContextMenu";
-import { editorKeyDown, useStarred } from "./sticker/helpers";
+import { editorKeyDown, fmtAgo, fmtWaited, useStarred } from "./sticker/helpers";
 import { UNNAMED_SESSION_SENTINEL } from "./sticker/types";
 import { CheckIcon, ChevronDownIcon, MoreIcon, NoteIcon, TopIcon } from "./sticker/icons";
 import { useT } from "../i18n";
@@ -51,8 +52,11 @@ const TONE_RANK: Record<SessionTone, number> = {
 type DirGroup = { key: string; cwd: string | null; label: string; items: LiveSession[] };
 
 /** 接续链弹层：列出跨 provider 切换链上的各段（provider 图标 + 模型 + 起始日期），
- *  尾段标「当前」，点旧段回看。定位/关闭纪律与 CardContextMenu 同款：fixed + 视口钳位、
- *  点外关闭（click 捕获相拦截，防顺手触发卡片点击）、Escape 关闭。 */
+ *  尾段标「当前」，点旧段回看。定位与 CardContextMenu 同款：fixed + 视口钳位；
+ *  关闭语义走 useDismissable（全项目同一份）：点外关且拦截这次点击（防顺手触发条目
+ *  点击切走会话）、Esc 关且 preventDefault（不标记的话同一次按键会冒泡到窗口级
+ *  「Esc=拒绝审批」，收弹层顺带武装了拒绝）、侧栏滚动/窗口缩放也关（fixed 坐标在
+ *  打开时一次测量，滚动后即错位）。 */
 function LineagePopover({ x, y, entries, onPick, onClose }: {
   x: number;
   y: number;
@@ -72,24 +76,35 @@ function LineagePopover({ x, y, entries, onPick, onClose }: {
       top: Math.max(pad, Math.min(y, window.innerHeight - el.offsetHeight - pad)),
     });
   }, [x, y]);
-  useEffect(() => {
-    const clickAway = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) {
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    const key = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    document.addEventListener("click", clickAway, true);
-    document.addEventListener("keydown", key);
-    return () => {
-      document.removeEventListener("click", clickAway, true);
-      document.removeEventListener("keydown", key);
-    };
-  }, [onClose]);
+  useDismissable(ref, {
+    onClose,
+    outsideEvent: "click",
+    interceptOutsideClick: true,
+    closeOnResize: true,
+    closeOnScroll: true,
+  });
+  // 挂载即聚焦首项 + ↑↓/Home/End 在条目间搬焦点（roving，与 useMenuPopup 同款）：
+  // 此前弹层对键盘用户完全不可达——打开了也不知道焦点在哪。
+  useLayoutEffect(() => {
+    ref.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+  }, []);
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(ref.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+    if (items.length === 0) return;
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    if (at < 0) return;
+    const next = e.key === "ArrowDown" ? (at + 1) % items.length
+      : e.key === "ArrowUp" ? (at - 1 + items.length) % items.length
+      : e.key === "Home" ? 0
+      : e.key === "End" ? items.length - 1
+      : null;
+    if (next === null) return;
+    e.preventDefault();
+    items[next]?.focus();
+  };
   const last = entries[entries.length - 1];
   return (
-    <div ref={ref} className="dd-menu chat-sidebar-lineage-menu" role="menu" style={{ position: "fixed", left: pos.left, top: pos.top }}>
+    <div ref={ref} className="dd-menu chat-sidebar-lineage-menu" role="menu" style={{ position: "fixed", left: pos.left, top: pos.top }} onKeyDown={onKeyDown}>
       {entries.map((entry) => {
         const { Icon } = agentAssets(entry.provider);
         const current = entry === last;
@@ -186,7 +201,7 @@ const STATE_GROUP_ORDER: SessionTone[] = ["error", "pending", "waiting", "runnin
 function groupByState(items: LiveSession[], t: Dict): DirGroup[] {
   const map = new Map<SessionTone, LiveSession[]>();
   for (const item of items) {
-    const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored, item.busy_subagents);
+    const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored, item.busy_subagents, item.screen_state);
     const bucket = map.get(tone);
     if (bucket) bucket.push(item);
     else map.set(tone, [item]);
@@ -374,7 +389,7 @@ function readFolded(): Set<string> {
  * 子树跟着全量重建；父层回调已换稳定引用（resetTo/collapseSidebar 等）配合生效。
  */
 export const ChatSidebar = memo(ChatSidebarImpl);
-function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSelect, onCollapse }: {
+function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, searchInputRef, onSelect, onCollapse }: {
   activeId: number;
   /** 有待授权请求的非当前会话：靠这里的徽标召唤用户。后端 **会** 为 broker 接管的审批把
    *  窗口切到目标会话（见 pty.rs 的 ensure_approval_window），这里是切换竞态与
@@ -383,12 +398,18 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
   /** 当前显示顺序的镜像（父层归档跳转用）：归档当前会话后跳「用户看到的下一条」，
    *  两个归档入口（标题菜单/侧栏菜单）取序自此一致。卸载时清空，父层退回后端现查。 */
   visibleOrderRef?: MutableRefObject<number[]>;
+  /** 搜索框句柄交给父层：Ctrl/Cmd+F 监听在 ChatWindow（侧栏收起后它仍要能把人带回来）。 */
+  searchInputRef?: MutableRefObject<HTMLInputElement | null>;
   onSelect: (id: number) => void;
   onCollapse: () => void;
 }) {
   const t = useT();
   // null = 首次加载尚未完成：与「真空」区分，避免首帧误闪「暂无会话」。
   const [sessions, setSessions] = useState<LiveSession[] | null>(null);
+  // 首载失败（sessions 仍是 null）不是「暂无会话」：记失败态渲染可重试的错误行，
+  // 否则后端故障会被读成「会话全没了」。已有列表时的刷新失败不进此态（保留现状，
+  // 下一轮 board-changed 再试）。
+  const [loadFailed, setLoadFailed] = useState(false);
   // 接续链弹层（跨 provider 切换的回看入口）：点链徽标时惰性取链上各段。
   const [lineageMenu, setLineageMenu] = useState<{ x: number; y: number; entries: LineageEntry[] } | null>(null);
   // 翻页用「从头取 limit 条」而不是游标续传：整段重取让 board-changed 刷新走同一条
@@ -462,7 +483,6 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
   // 一个每渲染同步的镜像 ref(本仓 xxxRef.current = xxx 惯例),回包时与它比即可。
   const searchLiveRef = useRef(search);
   searchLiveRef.current = search;
-  const searchInputRef = useRef<HTMLInputElement>(null);
   // 对话内容全文搜索(显式动作):LIKE 只覆盖标题/目录/便签/最近往来,正文要靠后端扫
   // transcript 文件——点「搜索对话内容」才发,不随击键。结果与词绑定,词一变即作废。
   const [deepHits, setDeepHits] = useState<TranscriptSearchHit[] | null>(null);
@@ -502,6 +522,7 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
         if (archivedViewRef.current !== arch) return;
         if ((searchRef.current.trim() || null) !== q) return;
         setReachedEnd(page.next_cursor === null);
+        if (mode === "refresh") setLoadFailed(false);
         // 行级结构共享(与看板共用 reconcileRows):board-changed 多为空转刷新,不做这层的话
         // 每 400ms 就是「整表重取 + 重建几百个卡片元素 + 全表 DOM reconcile」,而侧栏没有
         // 虚拟化、几百条全在 DOM 里。命中时整表引用不变,setState 直接短路。
@@ -521,8 +542,10 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
         // 翻页失败：limit 退回上一页的量。不退的话 loading 行永远挂着、重滚也发不出
         // 请求（limit 已被抬高，唯一能救场的只剩恰好路过的 board-changed）。
         if (mode === "grow") setLimit((n) => Math.max(PAGE_LIMIT, n - PAGE_LIMIT));
-        // 首载失败降级为空列表（显示「暂无会话」），而不是永远停在加载占位。
-        setSessions((s) => s ?? []);
+        // 首载失败保留 sessions === null 并进失败态（渲染「加载失败·重试」）：
+        // 降级成空列表会把「后端故障」读成「会话全没了」；已有列表时的刷新失败
+        // 保留现状即可，下一轮 board-changed 会再试。
+        if (mode === "refresh") setLoadFailed(true);
       })
       .finally(() => {
         if (mode === "grow") {
@@ -599,6 +622,8 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
     setLimit(PAGE_LIMIT);
     setReachedEnd(false);
     setSessions(null);
+    // 换数据源即回到首载语义：失败态一并清零，否则新条件的首载会先闪一行旧错误。
+    setLoadFailed(false);
     // 在途的 grow 归属上一个目录:它的响应已被 search 守卫丢弃,这里把闸门也放开,
     // 否则新目录要等那个作废的请求 settle 才能翻页。
     growingRef.current = false;
@@ -616,6 +641,8 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
     setLimit(PAGE_LIMIT);
     setReachedEnd(false);
     setSessions(null);
+    // 换数据源即回到首载语义：失败态一并清零，否则新条件的首载会先闪一行旧错误。
+    setLoadFailed(false);
     growingRef.current = false;
     setGrowing(false);
     void loadRef.current("refresh");
@@ -642,19 +669,8 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
     return () => window.clearTimeout(timer);
   }, [search]);
 
-  // Ctrl/Cmd+F 聚焦搜索框（终端视图内让位——焦点在 xterm 里时用户多半想找终端内容，
-  // 抢过来只会打断；终端自己的搜索是后续项）。
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.code !== "KeyF") return;
-      if (document.activeElement?.closest(".managed-terminal")) return;
-      e.preventDefault();
-      searchInputRef.current?.focus();
-      searchInputRef.current?.select();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  // Ctrl/Cmd+F 聚焦搜索框的监听在 ChatWindow（侧栏收起时本组件整体卸载，挂在这里的
+  // 快捷键会跟着静默失效）；本组件只把搜索框句柄经 searchInputRef 交出去。
 
   // 会话操作菜单:与看板卡片是同一个 CardContextMenu、同一批动作(置顶/便签/重命名/归档/
   // 新建会话/打开目录/结束会话)。两处共用一个组件是刻意的——菜单项一旦各写一份,迟早
@@ -880,7 +896,7 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
     let approval = 0, waiting = 0, error = 0;
     for (const item of ordered) {
       if (approvalAwaitingIds.has(item.session.id)) approval += 1;
-      const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored, item.busy_subagents);
+      const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored, item.busy_subagents, item.screen_state);
       if (tone === "waiting") waiting += 1;
       else if (tone === "error") error += 1;
     }
@@ -895,7 +911,7 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
     // 与对话窗标题栏同一套口径(sessionTone,含 errored——贴纸的错误优先级由此
     // 对齐,不再出现「贴纸报错、侧栏亮绿点」)。offline/ended 不加点——图标置灰
     // (is-off)已表达「不活跃」,再叠一个灰点是噪声。
-    const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored, item.busy_subagents);
+    const tone = sessionTone(item.connected, item.session.status, item.pending_review, item.errored, item.busy_subagents, item.screen_state);
     const showDot = tone === "running" || tone === "pending" || tone === "waiting" || tone === "error";
     // 待授权徽标优先于状态点：授权在等用户决策，比「在跑/待处理」都紧急；
     // 且不依附 connected——离线会话恢复的 agent 同样可能来要权限。
@@ -912,8 +928,8 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
         tabIndex={item.session.id === tabbableId ? 0 : -1}
         className={"chat-sidebar-item" + (item.session.id === activeId ? " is-active" : "") + (selectedIds.has(item.session.id) ? " is-checked" : "")}
         aria-current={item.session.id === activeId ? "true" : undefined}
-        aria-selected={selectedIds.size > 0 ? selectedIds.has(item.session.id) : undefined}
-        data-tip={item.task_title}
+        // 多选态是切换语义，用 aria-pressed：aria-selected 对 role=button 无效（读屏收不到）。
+        aria-pressed={selectedIds.size > 0 ? selectedIds.has(item.session.id) : undefined}
         onClick={(event) => {
           // 编辑态下点条目只用于收起编辑器，不切会话（输入框自身已 stopPropagation）。
           if (editing || noting) { setEditingId(null); setNotingId(null); return; }
@@ -967,8 +983,10 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
               )}
               {/* 标题必须包成自己的 span：.chat-sidebar-name 是 flex 容器（要排星标），
                   裸文本节点是匿名 flex item，容器上的 text-overflow 对它不生效——
-                  长标题会溢出而不出省略号（实拍反馈）。 */}
-              <span className="chat-sidebar-name-text">{item.task_title || t.sticker.waitingFirstInput}</span>
+                  长标题会溢出而不出省略号（实拍反馈）。
+                  data-tip 也收窄到这里：挂整行容器时，悬到 ⋯ 按钮/目录行也弹标题（与
+                  看板 U1-1 同口径）。 */}
+              <span className="chat-sidebar-name-text" data-tip={item.task_title || undefined}>{item.task_title || t.sticker.waitingFirstInput}</span>
               {/* 跨 provider 接续链徽标：点开列出链上各段（回看旧引擎的对话）。 */}
               {item.predecessor_id != null && (
                 <button
@@ -989,10 +1007,12 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
               )}
             </span>
           )}
-          {/* 目录行 = 目录名 + 附加目录标(+N,与贴纸卡同款)同排——两者曾是纵排容器里
-              的块级兄弟,+N 会掉到下一行(用户实拍)。按目录分组时目录名让位组头,但
-              +N 照显(组头只写主仓,跨仓信息组头没有)。 */}
-          {!noting && ((dir && groupMode !== "dir") || (item.extra_dirs?.length ?? 0) > 0) && (
+          {/* 目录行 = 目录名 + 附加目录标(+N,与贴纸卡同款) + 最后活跃时间同排——前两者曾是
+              纵排容器里的块级兄弟,+N 会掉到下一行(用户实拍)。按目录分组时目录名让位组头,但
+              +N 照显(组头只写主仓,跨仓信息组头没有);时间恒显——此前条目完全没有时间信息,
+              「哪条是刚才动的」只能靠猜。waiting 态改「已等待 X」警示色(与看板 B-3 同款,
+              fmtWaited 复用 sticker/helpers):等待时长是召唤信号,「X 前」读不出急迫。 */}
+          {!noting && (
             <span className="chat-sidebar-metaline">
               {dir && groupMode !== "dir" && <span className="chat-sidebar-meta" data-tip={item.cwd ?? undefined}>{dir}</span>}
               {(item.extra_dirs?.length ?? 0) > 0 && (
@@ -1002,6 +1022,13 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
                   data-tip={[item.cwd, ...item.extra_dirs].filter(Boolean).join(" · ")}
                 >
                   +{item.extra_dirs.length}
+                </span>
+              )}
+              {/* 旧库/合成数据可能缺 last_event_at：NaN 会让 Intl.RelativeTimeFormat 直接
+                  抛 RangeError 炸掉整棵侧栏，缺失时宁可不显示。 */}
+              {Number.isFinite(item.session.last_event_at) && (
+                <span className={"chat-sidebar-meta chat-sidebar-time" + (tone === "waiting" ? " is-waited" : "")}>
+                  {tone === "waiting" ? fmtWaited(item.session.last_event_at, t) : fmtAgo(item.session.last_event_at, t)}
                 </span>
               )}
             </span>
@@ -1043,6 +1070,9 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
           <button
             type="button"
             className="chat-sidebar-item-menu"
+            // 不占 Tab 停靠点：上百条会话每条一个 Tab 站等于列表无法 traverse。键盘路径
+            // 由 CardContextMenu 承担（条目右键/聚焦后菜单挂载即聚焦首项）。
+            tabIndex={-1}
             aria-label={t.sticker.cardMenu}
             onClick={(event) => {
               event.stopPropagation(); // 点菜单不切会话
@@ -1108,7 +1138,7 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
       {/* 会话搜索（Ctrl/Cmd+F 聚焦）：标题/仓库名下沉后端 LIKE，与看板同一条通道。 */}
       <div className="chat-sidebar-search">
         <input
-          ref={searchInputRef}
+          ref={(el) => { if (searchInputRef) searchInputRef.current = el; }}
           value={search}
           placeholder={t.chat.sidebarSearch}
           aria-label={t.chat.sidebarSearch}
@@ -1155,10 +1185,22 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
           next?.focus();
         }}
       >
-        {sessions === null && <div className="chat-sidebar-empty">{t.chat.sidebarLoading}</div>}
+        {sessions === null && loadFailed && (
+          /* 首载失败：不是「暂无会话」。给重试出口——load 的失败路径已把 limit 等状态
+             留在首页口径，直接重发 refresh 即可。 */
+          <div className="chat-sidebar-empty is-error">
+            {t.chat.sidebarLoadFailed}
+            <button
+              type="button"
+              className="chat-sidebar-retry"
+              onClick={() => { setLoadFailed(false); void loadRef.current("refresh"); }}
+            >{t.chat.sidebarRetry}</button>
+          </div>
+        )}
+        {sessions === null && !loadFailed && <div className="chat-sidebar-empty">{t.chat.sidebarLoading}</div>}
         {sessions !== null && sessions.length === 0 && (
           <div className="chat-sidebar-empty">
-            {search.trim() ? t.chat.sidebarEmptySearch : dirFilter ? t.chat.sidebarEmptyDir : t.chat.sidebarEmpty}
+            {search.trim() ? t.chat.sidebarEmptySearch : dirFilter ? t.chat.sidebarEmptyDir : archivedView ? t.chat.sidebarEmptyArchived : t.chat.sidebarEmpty}
           </div>
         )}
         {groups
@@ -1167,7 +1209,7 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, onSel
               // 组头汇总点:折起来时它是这一组唯一的状态出口,取组内最强的召唤。
               const approval = group.items.some((item) => approvalAwaitingIds.has(item.session.id));
               const tone = group.items
-                .map((item) => sessionTone(item.connected, item.session.status, item.pending_review, item.errored, item.busy_subagents))
+                .map((item) => sessionTone(item.connected, item.session.status, item.pending_review, item.errored, item.busy_subagents, item.screen_state))
                 .reduce<SessionTone | null>((best, cur) => (best && TONE_RANK[best] >= TONE_RANK[cur] ? best : cur), null);
               const showDot = !!tone && TONE_RANK[tone] > 0;
               // 「未运行」= 已断开，且不是当前打开的这条，也不是置顶的那些——正开着的会话

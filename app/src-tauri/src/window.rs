@@ -888,6 +888,10 @@ pub(crate) fn apply_language(app: &tauri::AppHandle, lang: &str, chat_enabled: b
     }
     // chat 窗口的标题由前端随会话状态动态维护（ChatWindow 的 setTitle effect），
     // 这里不再按语言重设——两处写同一标题会互相覆盖。
+    // Windows 托盘 tooltip 含本地化文案，但 watch 侧只在计数变化时重发：置位 dirty
+    // 让下一轮 liveness 强制刷新，否则旧语言一直挂到下次计数变化。
+    #[cfg(target_os = "windows")]
+    crate::watch::mark_tray_tooltip_dirty();
 }
 
 /// dev 构建的托盘角标：右下角叠一枚琥珀圆点，带深色描边与抗锯齿边缘——托盘图标
@@ -1035,6 +1039,9 @@ pub(crate) fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 /// 托盘左键开合主界面（贴纸窗）：可见且聚焦 → 隐藏；可见未聚焦 → 聚焦（用户在找它）；
 /// 隐藏/最小化 → 显示并聚焦。贴纸 skipTaskbar，藏起来后任务栏没有入口，左键必须可逆，
 /// 不能像旧行为（左键只开对话窗）那样把「找回贴纸」只留在右键菜单深处。
+/// 折叠态例外：吸附成贴边细条时窗口仍「可见」却几乎不持焦，落进聚焦分支等于给
+/// skipTaskbar 的 28px 细条赋焦、屏幕零可见变化——改走 recall_sticker 展开带到眼前，
+/// 与「单击 = 开合主界面」语义自洽。
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn toggle_main_window(app: &tauri::AppHandle) {
     let Some(w) = app.get_webview_window("main") else {
@@ -1047,6 +1054,9 @@ pub(crate) fn toggle_main_window(app: &tauri::AppHandle) {
         let _ = w.set_focus();
     } else if w.is_focused().unwrap_or(false) {
         let _ = w.hide();
+    } else if crate::settings::load_settings().sticker_window.snap_edge.is_some() {
+        // 调用点已在托盘单击消抖子线程，读设置文件不堵消息泵（同双击分支的线程纪律）。
+        recall_sticker(app);
     } else {
         let _ = w.set_focus();
     }

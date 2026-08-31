@@ -50,6 +50,8 @@ export const zh = {
     online: "在线",
     // 无屏幕检测的外部会话，状态点回落 DB status 时的弱化 tip（T-15：与实时判定区分）。
     assumedState: "按会话记录推断，可能不是最新",
+    // 弱化徽标的 hover/读屏文案（P2-11）：包层压制内层 RunBadge 的「自信」文案，附「推断」后缀。
+    badgeAssumed: (what: string) => `${what}（推断）`,
     // 落点由设置 sessionOpenIn 决定（对话窗口 / 外部终端），故不在文案里写死「终端」。
     openSession: "打开会话",
     resumeSession: "恢复会话",
@@ -216,6 +218,8 @@ export const zh = {
     pickSession: "从侧栏选择一个会话",
     loadEarlier: "加载更早的对话",
     loadingEarlier: "正在加载…",
+    // 「加载更早」失败行（此前 catch 静默吞掉，按钮只是默默复原）。
+    loadEarlierFailed: "加载更早的对话失败，请重试",
     loadError: "读取对话失败，正在重试",
     // 同步中断（C-18）：轮询 IPC 连续失败才单列——它只说「窗口与后端的通道断了」，
     // 与状态徽标里的「已断开」（agent 进程没了）是两种事实，措辞故意分开。
@@ -244,6 +248,9 @@ export const zh = {
     termSearchPrev: "上一个",
     termSearchNext: "下一个",
     termSearchNoMatch: "无匹配",
+    // 到底/到顶后自动回绕的提示（与「无匹配」区分：addon-search 不回绕，落空≠没有）。
+    // 显式标注 string：字面量联合会让 en 的译文类型对不上（Dict = typeof zh）。
+    termSearchWrapped: (direction: "next" | "prev"): string => (direction === "next" ? "已到末尾，回绕到第一个匹配" : "已到开头，回绕到最后一个匹配"),
     codeCopy: "复制",
     codeCopied: "已复制",
     questionExpired: "提问卡已超时收起，可到终端页继续作答",
@@ -318,6 +325,9 @@ export const zh = {
     denyConfirmEsc: "再按 Esc 确认拒绝",
     // 审批卡被别处结算/超时收卡时的去向说明——凭空消失像 bug。
     approvalClearedNotice: "该审批已在别处处理或已超时，如需继续请查看终端",
+    // 倒计时归零到后端结算事件到达之间的一拍空窗：徽章切这句，不留定格的 0:00。
+    // 审批卡与题面卡共用（回落语义相同）。
+    approvalTimedOut: "已超时，回落终端处理中",
     openTerminal: "打开终端",
     close: "关闭",
     renameSave: "保存",
@@ -339,9 +349,12 @@ export const zh = {
     terminalTakeoverConfirm: "将结束外部终端里的进程，在这里继续会话。",
     terminalStarting: "正在启动终端…",
     terminalInitializing: "正在初始化 Agent…",
-    terminalExited: (code: number | null) => `Agent 进程已退出${code == null ? "" : `（退出码 ${code}）`}，上方保留了终端输出`,
+    // 正常退出（码 0）不标退出码：那是常态不是异常，退出卡片描边同规（ManagedTerminal is-clean）。
+    terminalExited: (code: number | null) => `Agent 进程已退出${code == null || code === 0 ? "" : `（退出码 ${code}）`}，上方保留了终端输出`,
     // 强制收尾（kill 对卡死进程静默无效后的末档）：会话已摘除，但进程可能仍在系统里。
     terminalExitedForced: (code: number | null) => `已强制结束${code == null ? "" : `（退出码 ${code}）`}——进程未能正常退出，可能仍在后台残留，上方保留了终端输出`,
+    // 写进终端画面的退出提示行（宿主注解，灰色素描样式在 ManagedTerminal 的 applyExit）。
+    terminalExitedInline: (code: number | null) => `[Meowo：进程已退出${code == null ? "" : `（${code}）`}]`,
     terminalStopping: "正在结束…",
     endSession: "结束会话",
     endAndResume: "结束并恢复",
@@ -464,6 +477,8 @@ export const zh = {
     sidebarExpand: "展开会话列表",
     sidebarEmpty: "暂无会话",
     sidebarEmptyDir: "该目录下暂无会话",
+    // 已归档视图的专属空态：沿用「暂无会话」会把「没归档过」读成「会话全没了」。
+    sidebarEmptyArchived: "没有已归档的会话",
     sidebarSearch: "搜索标题 / 仓库…",
     sidebarSearchClear: "清空搜索",
     sidebarEmptySearch: "没有匹配的会话",
@@ -480,6 +495,9 @@ export const zh = {
     dropToAttach: "松开以添加附件",
     dropToTerminal: "松开以插入路径",
     sidebarLoading: "正在加载会话…",
+    // 首载失败的独立错误行（P1-1）：不降级成「暂无会话」，故障不能被读成「会话全没了」。
+    sidebarLoadFailed: "加载会话失败",
+    sidebarRetry: "重试",
     sidebarDirAll: "全部目录",
     sidebarShowIdle: (n: number) => `显示 ${n} 个未运行会话`,
     sidebarHideIdle: "收起未运行会话",
@@ -612,11 +630,14 @@ export const zh = {
     archivedSessions: "已归档会话",
     archivedEmpty: "暂无已归档会话",
     archivedLoadMore: "加载更多",
+    archivedLoadFailed: "已归档会话加载失败",
+    unarchiveFailed: "放回看板失败，请稍后再试",
     cardsGroup: "卡片",
     updateTag: "新版本",
     close: "关闭",
     autostart: "开机自启",
     autostartDesc: "系统开机后自动启动",
+    autostartFailed: "开机自启设置失败，请重试",
     notify: "桌面通知",
     notifyDesc: "会话需要你回复或出错时弹系统通知",
     attentionFlash: "任务栏提醒",
@@ -820,6 +841,7 @@ export const zh = {
     loggingOut: "退出中…",
     loggedOut: "已退出登录，会话与配置保留",
     logoutFailed: (e: string) => `退出登录失败：${e}`,
+    accountsLoadFailed: "账号信息加载失败",
     install: "安装",
     // 预下载体量说明（S-8）：装之前说清要联网下载、大致耗时，不再点了才知道要下东西。
     installHint: "安装后即可查看账号与配额；需联网下载组件，通常一两分钟",
@@ -891,6 +913,11 @@ export const zh = {
     restartHint: "下载不影响当前工作。安装需重启，托管中的会话会中断。",
     error: "检查更新失败，请检查网络后重试",
     retry: "重试",
+    // 下载/安装失败各有专属文案与重试动作（P1-4：此前三态混用上面这一句）。
+    downloadFailed: "下载失败，请检查网络后重试",
+    redownload: "重新下载",
+    installFailed: "安装失败，请重试",
+    retryInstall: "重试安装",
     recheck: "重新检查",
     later: "稍后",
     fullChangelog: "查看完整更新日志",

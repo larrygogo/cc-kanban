@@ -19,6 +19,7 @@ import { useShowWhenReady } from "./useShowWhenReady";
 import { isMacPanel } from "./platform";
 import { reconcileRows, sameRefs, type RowCache as SharedRowCache } from "./rowCache";
 import { reconcilePendings, type PendingRegistry } from "./views/sticker/pending";
+import { pushEscLayer } from "./escLayers";
 import {
   initStickerWindowState,
   normalSize,
@@ -451,6 +452,14 @@ export function App() {
     refresh();
   }, [refresh]);
 
+  // 撤销归档同样要整窗重查（P1-1）：被撤回的会话 last_event_at 没变、排不进首页，
+  // 归档时又被乐观摘掉、不在 prev 尾部——「首页权威 + 按 id 保留」的增量刷新两条路都
+  // 捞不回它，等 board-changed 的常规刷新只会让它永远缺席。
+  const onArchiveUndo = useCallback(() => {
+    fullRefreshOnceRef.current = true;
+    refresh();
+  }, [refresh]);
+
   // 记住当前窗口位置（物理像素）：window-state 插件已不再管 main（lib.rs denylist），
   // 位置随拖拽落点/找回居中等时机经这里原子落盘进 settings（W-17）。
   const persistPosition = useCallback(() => {
@@ -472,6 +481,9 @@ export function App() {
     const recall = async () => {
       if (modeRef.current !== "normal") {
         const { w, h } = normalSize();
+        // 失败回滚要回到的原值（P2-13）：snap_restore 没落地时窗口仍贴着边。
+        const prevMode = modeRef.current;
+        const prevEdge = edgeRef.current;
         updateStickerWindowState({ snap_edge: null });
         setEdge(null);
         // 先铺过渡占位（W-4）：窗口此刻还是细条几何，直接渲染看板会压出布局抖动。
@@ -481,6 +493,8 @@ export function App() {
           await invoke("snap_restore", { width: w, height: h, pinned: pinnedRef.current });
         } catch (err) {
           console.error("[recall] snap_restore 失败：", err);
+          setEdge(prevEdge);
+          setMode(prevMode);
         } finally {
           setExpanding(false);
         }
@@ -790,7 +804,14 @@ export function App() {
           try {
             await doCollapse(s.snap_edge);
           } catch (err) {
+            // 沿用折叠失败（P2-13）：窗口还是大框几何，前端不能停在 collapsed——
+            // 回退 normal 并按记住的正常尺寸还原，别让前端态与窗口几何脱节。
             console.error("[snap] 启动沿用折叠失败：", err);
+            setEdge(null);
+            setMode("normal");
+            const { w, h } = normalSize();
+            invoke("snap_restore", { width: w, height: h, pinned: s.pinned })
+              .catch((e2) => console.error("[snap] 启动回退正常尺寸失败：", e2));
           }
         } else {
           const { w, h } = normalSize();
@@ -826,7 +847,11 @@ export function App() {
     setExpanding(true);
     setMode("expanded");
     invoke("snap_expand", { edge: e, width: w, height: h })
-      .catch((err) => console.error("[snap] snap_expand 失败：", err))
+      .catch((err) => {
+        // 失败回滚（P2-13）：窗口仍是细条几何，前端态不能停在 expanded 假装展开了。
+        console.error("[snap] snap_expand 失败：", err);
+        setMode("collapsed");
+      })
       .finally(() => setExpanding(false));
   }, []);
 
@@ -840,12 +865,13 @@ export function App() {
         outCount = 0;
         return;
       }
-      // 交互保护：搜索框/编辑器有焦点、或菜单开着时不自动收回。键盘输入时手常不在鼠标上，
-      // 光标停在窗外 ~360ms 就折叠 = Sticker 卸载，编辑中的草稿与搜索状态全部丢失。
+      // 交互保护：看板已全面键盘可达（卡片 roving / tablist / 底栏按钮 / toast 动作钮），
+      // 焦点停在 .sticker 容器内任何元素上都视为「人还在操作」——键盘用户的光标本就常停在
+      // 窗外，~360ms 收走看板会把焦点丢到 body、浏览/编辑上下文全丢。焦点在 body（无焦点）
+      // 不挡收回；.ctx-menu 双保险（菜单在 .sticker 内，closest 已覆盖，此处防未来 portal 化）。
       const active = document.activeElement;
       const interacting =
-        (active instanceof HTMLElement
-          && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable))
+        (active instanceof HTMLElement && active.closest(".sticker") != null)
         || document.querySelector(".ctx-menu") != null;
       if (interacting) {
         outCount = 0;
@@ -867,6 +893,33 @@ export function App() {
         .catch(() => {});
     }, 180);
     return () => window.clearInterval(id);
+  }, [mode, doCollapse]);
+
+  // 偷看展开的键盘出口（P2-12）：收回此前只有「光标移出窗外」一条路，键盘用户光标
+  // 本就常停在窗外，没有 Esc 只能干等轮询。与鼠标移出同入口（doCollapse → collapsed）。
+  // 注册 Esc 层（escLayers）：展开的看板本身就是一层浮层，注册期间全局 Esc 动作让位。
+  // 本监听挂在 window、注册晚于 Sticker 自己的 Esc 回退链（关 toast/搜索会先消费并
+  // preventDefault），同一按键不会既关 toast 又收看板。
+  useEffect(() => {
+    if (isMacPanel() || mode !== "expanded") return;
+    const popLayer = pushEscLayer();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      // 输入框/编辑器里的 Esc 让位给它们自己的处理（关搜索框、取消编辑）。
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) return;
+      const d = edgeRef.current;
+      if (!d) return;
+      e.preventDefault();
+      doCollapse(d)
+        .then(() => setMode("collapsed"))
+        .catch((err) => console.error("[snap] Esc 收回竖条失败：", err));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      popLayer();
+      window.removeEventListener("keydown", onKey);
+    };
   }, [mode, doCollapse]);
 
   // W-17：settings 几何读取 + 折叠/还原落地前不渲染任何内容（窗口此刻还是默认几何且隐藏，
@@ -914,6 +967,7 @@ export function App() {
         onSearchChange={changeSearch}
         onArchiveOptimistic={onArchiveOptimistic}
         onArchiveFailed={onArchiveFailed}
+        onArchiveUndo={onArchiveUndo}
         initialLoading={initialLoading}
         loadError={loadError}
         onRetry={retryLoad}

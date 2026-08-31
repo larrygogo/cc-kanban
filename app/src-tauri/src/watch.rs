@@ -13,6 +13,7 @@ use meowo_store::Store;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -565,6 +566,31 @@ pub(crate) fn decision_toast(kind: NotifyKind) -> bool {
     matches!(kind, NotifyKind::Pending | NotifyKind::Blocked)
 }
 
+/// 通知点击会把本应用已投递的 toast 整清（winrt 不支持按 tag 单条移除，macOS 侧
+/// removeAllDeliveredNotifications 同样整清），连坐抹掉其它仍挂审批/阻塞会话的入口；
+/// 而它们的指纹已写进 notified_pending/notified_blocked，状态不变就不会再弹——入口
+/// 永久丢失。点击侧置位，liveness 下一轮消费：清掉决策类去重指纹，仍在等待的会话
+/// 按 prev=None 自然补发一条（已解决的走指纹 None 分支自清，不会误弹）。
+/// 不做成跨线程共享 map：liveness 线程是 map 的唯一写者，一个 AtomicBool 单次交接足够。
+static RESET_DECISION_RENOTIFY: AtomicBool = AtomicBool::new(false);
+
+/// 见 RESET_DECISION_RENOTIFY。仅 Windows/macOS 的通知点击路径调用。
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+pub(crate) fn request_decision_renotify() {
+    RESET_DECISION_RENOTIFY.store(true, Ordering::Relaxed);
+}
+
+/// Windows 托盘 tooltip 文案带本地化字符串：切语言后计数不变时下面的 last_tray 缓存
+/// 不会重发，旧语言一直挂到下次计数变化。apply_language 置位，liveness 下一轮强制重发。
+#[cfg(target_os = "windows")]
+static TRAY_TOOLTIP_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// 见 TRAY_TOOLTIP_DIRTY。
+#[cfg(target_os = "windows")]
+pub(crate) fn mark_tray_tooltip_dirty() {
+    TRAY_TOOLTIP_DIRTY.store(true, Ordering::Relaxed);
+}
+
 /// 屏幕检测「blocked」的通知指纹——托管会话的 agent 在屏幕上挂着审批/提问 UI 等人。
 ///
 /// 存在意义是补 hook 的盲区：DB 的 `pending_review` 由 hook 事件驱动，bash 权限弹窗、
@@ -634,6 +660,9 @@ pub(crate) fn show_session_notification(
                 // 点击后 toast 不会自动从"通知中心"消失（Windows 设计如此），主动清掉本应用
                 // 的历史通知。回调线程由 OS 经 COM 投递、已初始化 WinRT，可直接调 History。
                 clear_delivered_toasts(&activate_app_id);
+                // 整清连坐抹掉其它仍挂审批/阻塞会话的决策版 toast：重置去重指纹，
+                // 下一轮 liveness 给仍在等待的会话补发入口（见 RESET_DECISION_RENOTIFY）。
+                request_decision_renotify();
                 // 托管会话的 PTY 归 Meowo，进程组里没有可见终端窗口，focus_session_terminal
                 // 必然落空——点击应该打开对话窗口并落在该会话上（点击是明确意图，切会话正合适）。
                 if click_app
@@ -846,6 +875,12 @@ pub(crate) fn spawn_liveness_watch(
                     .try_state::<crate::AppState>()
                     .map(|state| state.ptys.viewed_session_ids())
                     .unwrap_or_default();
+                // 通知点击整清了已投递 toast（见 RESET_DECISION_RENOTIFY）：决策类指纹
+                // 重置后再扫，仍在等待审批/阻塞的会话本轮按 prev=None 补发入口。
+                if RESET_DECISION_RENOTIFY.swap(false, Ordering::Relaxed) {
+                    notified_pending.clear();
+                    notified_blocked.clear();
+                }
                 for mut s in store
                     .live_sessions(Some("all"), None, None, None, 1000)
                     .unwrap_or_default()
@@ -1088,9 +1123,14 @@ pub(crate) fn spawn_liveness_watch(
                 // Windows：把摘要写到托盘悬浮提示，鼠标移到托盘一眼可见，不必打开窗口。
                 // 图标本身不做角标——数字徽章/圆点两轮迭代都被实拍否掉，回到发布版原样。
                 #[cfg(target_os = "windows")]
-                if last_tray != Some((tray_running, tray_waiting)) {
-                    update_tray_tooltip(&app, tray_running, tray_waiting, lang);
-                    last_tray = Some((tray_running, tray_waiting));
+                {
+                    // 切语言后 apply_language 置位 dirty：tooltip 含本地化文案，
+                    // 计数不变也得强制重发一次（见 TRAY_TOOLTIP_DIRTY）。
+                    let dirty = TRAY_TOOLTIP_DIRTY.swap(false, Ordering::Relaxed);
+                    if dirty || last_tray != Some((tray_running, tray_waiting)) {
+                        update_tray_tooltip(&app, tray_running, tray_waiting, lang);
+                        last_tray = Some((tray_running, tray_waiting));
+                    }
                 }
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 let _ = (tray_running, tray_waiting);
