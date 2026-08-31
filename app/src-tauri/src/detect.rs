@@ -826,6 +826,30 @@ mod tests {
         );
     }
 
+    /// 月相**紧贴**状态词（实拍 `🌗Working...`，swarm 模式常驻）：两条旧月相规则一条
+    /// 要求月相独占整行、一条要求「月相 空格 · 空格」，这种形态两头不沾，整块正在干活
+    /// 的屏因此落进 fallback idle——看板上顶着「认不出」的中性灰点，tab 还被归进
+    /// 「待交互」（2026-08-31 实拍回归）。
+    #[test]
+    fn kimi_moon_glued_status_line_is_working() {
+        let s = snap(&["  output", "\u{1F317}Working...  \u{2500}\u{2500}\u{2500}\u{2500}"]);
+        assert_eq!(
+            state_of(evaluate("kimi", &s)),
+            Some((ScreenState::Working, "moon_word_status_working"))
+        );
+    }
+
+    /// 反向钉子：新规则靠**状态词白名单**从严。月相是普通 emoji，正文里出现一个不能
+    /// 把「等你输入」谎报成在跑——放宽成「月相开头的任意行」就会踩这个坑。
+    #[test]
+    fn kimi_moon_in_prose_is_not_working() {
+        let s = snap(&["  \u{1F317} 月相只是正文里提了一句", "  nothing pending"]);
+        assert_eq!(
+            state_of(evaluate("kimi", &s)),
+            Some((ScreenState::Idle, FALLBACK_RULE_ID))
+        );
+    }
+
     #[test]
     fn kimi_falls_back_to_idle() {
         let s = snap(&["  plain output", "  nothing pending"]);

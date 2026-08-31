@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { activityTone } from "./activity";
 import { appConfirm } from "./confirm";
 import type { AgentDescriptor as AgentDescriptorDto } from "./generated/contracts/AgentDescriptor";
 import type { ChatUi as ChatUiDto } from "./generated/contracts/ChatUi";
@@ -292,16 +293,26 @@ export type FocusSessionResult =
   | "unsupported_terminal"
   | "process_ended";
 
+// 活动态阶梯住在 ./activity（无依赖模块，看板侧同源消费）。这里转出一份，历史调用点
+// 从 ./api 取它也仍然成立。
+export { activityTone };
+
 export type SessionTone = "running" | "pending" | "waiting" | "offline" | "ended" | "error";
-export function sessionTone(connected: boolean, status?: string, pendingReview?: unknown, errored?: boolean, busySubagents?: number): SessionTone {
-  if (status === "ended" && !connected) return "ended";
-  if (!connected) return "offline";
+export function sessionTone(
+  connected: boolean,
+  status?: string,
+  pendingReview?: unknown,
+  errored?: boolean,
+  busySubagents?: number,
+  screenState?: string | null,
+): SessionTone {
+  if (!connected) return status === "ended" ? "ended" : "offline";
   if (errored) return "error";
-  if (pendingReview) return "pending";
-  if (status === "running") return "running";
-  // 主回合停了但后台子任务还在跑:不是「等你输入」——没有要输入的东西,工作还在进行。
-  // 与后端 tab_class 的 background_busy 同口径(LiveSession.busy_subagents,transcript 分析)。
-  return busySubagents && busySubagents > 0 ? "running" : "waiting";
+  const activity = activityTone({ status, pendingReview, screenState, busySubagents });
+  if (activity) return activity;
+  // 阶梯没结论:已 ended(PTY 还挂着才算连着)如实归「已结束」,别再画成等你输入;
+  // 其余按「在等你」兜底——连着又说不出在干嘛,最可能就是停在提示符上。
+  return status === "ended" ? "ended" : "waiting";
 }
 
 export type ManagedTerminalSnapshot = ManagedTerminalSnapshotDto;

@@ -454,9 +454,12 @@ impl Store {
     ///
     /// `status != 'ended'` 这一条不能省。写侧已把它做成不变量（set_pending_review 带
     /// `status <> 'ended'` 守卫，生命周期边界也都清 pending_review），但旧版本数据库仍可能
-    /// 存在「ended + pending_review」残留；查询必须防御这类历史数据，否则会把已结束会话捞进来。它们绝无可能算进
-    /// running/waiting（`session_connected` 对 ended 恒为 false），但会让候选集合随历史增长
-    /// 而膨胀，白白拖着 app 层逐条判活——本该是个「只有活跃会话」的小集合。
+    /// 存在「ended + pending_review」残留；查询必须防御这类历史数据，否则会把已结束会话捞进来。
+    ///
+    /// 注意 `session_connected` 对 ended **不是**恒 false——托管 PTY 还活着就判在线（恢复
+    /// 窗口期的兜底）。所以「ended 不进角标」这件事是**这条谓词**在守，而不是判活顺手排除
+    /// 的；列表侧 running/waiting 的 SQL 带着逐字相同的谓词，两端才同视野。真正会被屏幕
+    /// 状态抬进 tab 的那一类（ended + 残留 idle 屏）另由 app 层的 `tab_class` 挡住。
     ///
     /// ping（健康探测）会话即便连着也不会出现在列表里（enrich 无条件丢弃），这里同样
     /// 剔除，否则 running/waiting 角标会数出一条用户在列表里找不到的会话。

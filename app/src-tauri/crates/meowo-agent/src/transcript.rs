@@ -258,6 +258,45 @@ pub trait TranscriptParser: Send {
     fn to_info(&self) -> TranscriptInfo;
 }
 
+/// 把 assistant 正文清洗成卡片预览：合并所有空白为单空格、按**字符**截断到 ~180。
+/// 单次遍历完成「折叠空白 + 计数截断」，命中上限即提前返回——大消息不再整条 collapse/分配。
+///
+/// 住在共享层而不是某个插件里：卡片预览的形制（长度、空白折叠）是**看板的**约定，
+/// 不是哪一家 agent 的；kimi 的解析器也要产出同形状的预览，让它反向依赖 claude 插件
+/// 就把「加 agent 只动 plugins/」的纪律破了。
+pub(crate) fn preview_text(s: &str) -> Option<String> {
+    const MAX: usize = 180;
+    let mut out = String::new();
+    let mut count = 0usize; // out 中的字符数
+    let mut pending_space = false; // 词间是否有待补的单空格（行首/行尾不补）
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if count > 0 {
+                pending_space = true;
+            }
+            continue;
+        }
+        // 写入该非空白字符（连同可能的前导空格）前先判断是否会超限。
+        let need = if pending_space { 2 } else { 1 };
+        if count + need > MAX {
+            out.push('…');
+            return Some(out);
+        }
+        if pending_space {
+            out.push(' ');
+            count += 1;
+            pending_space = false;
+        }
+        out.push(ch);
+        count += 1;
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 /// 只提供 GUI 对话、不参与标题/错误/上下文分析的 transcript 共用空解析器。
 pub(crate) struct ChatOnlyParser;
 

@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use crate::transcript::ChatItem;
 use crate::transcript::{
-    ChatOnlyParser, SubagentOutcome, SubagentRef, SubagentSpec, SubagentStream, TranscriptEvent,
-    TranscriptParser, TranscriptSpec,
+    preview_text, SubagentOutcome, SubagentRef, SubagentSpec, SubagentStream, TranscriptEvent,
+    TranscriptInfo, TranscriptParser, TranscriptSpec,
 };
 
 fn chat_id(prefix: &str, line: &str) -> String {
@@ -834,7 +834,7 @@ pub static KIMI_TRANSCRIPT: KimiTranscript = KimiTranscript;
 
 impl TranscriptSpec for KimiTranscript {
     fn new_parser(&self) -> Box<dyn TranscriptParser> {
-        Box::new(ChatOnlyParser)
+        Box::new(KimiParser::default())
     }
 
     fn resolve_transcript_path(
@@ -903,7 +903,57 @@ impl TranscriptSpec for KimiTranscript {
     }
 
     fn supports_analysis(&self) -> bool {
-        false
+        true
+    }
+}
+
+/// kimi 的看板分析解析器：目前只产**卡片预览**（最近一条 AI 正文）。
+///
+/// 为什么非要有它：kimi 的 Stop hook 不带 AI 正文（见模块头），`last_ai_text` 要等一轮
+/// 结束才落库——于是整个「正在干活」的时段里，卡片的 AI 动态行是空的，而同屏的 claude
+/// 卡片都有（实拍：一条跑了五分钟的 kimi 卡只有「你」那一行）。看板的预览兜底走的正是
+/// 这条分析路径，此前 `supports_analysis` 关着，兜底根本没接上。
+///
+/// 其余字段留空是**故意**的，不是没写完：
+/// - `title` / `error`：kimi 的标题由 hook 落库，wire 里也没有 claude 那套 synthetic 错误
+///   标记，硬猜只会误标红。
+/// - `busy_subagents`：那是给「主回合停了但后台还在跑」用的。kimi 的 `AgentSwarm` 是主
+///   agent 阻塞等结果，委派期间主回合本就是 working，不存在这个错判窗口。
+#[derive(Default)]
+struct KimiParser {
+    /// 正在累积的那条 assistant 消息的事件 id。kimi 的正文按 `content.part` 逐块落盘，
+    /// 同一条消息的块共享 id——换 id 即换消息，从头累积。
+    chunk_id: Option<String>,
+    text: String,
+}
+
+impl TranscriptParser for KimiParser {
+    fn fold_line(&mut self, line: &str) {
+        // 廉价预筛：AI 正文块只可能来自 `content.part` 事件，其余行不值得整行 serde 解析
+        // （wire.jsonl 里工具调用/结果占绝大多数，且看板每轮轮询都要 fold 增量）。
+        // kimi 若改了事件名，这里会**静默**失效——预览为空时先来核对这个字面量。
+        if !line.contains("content.part") {
+            return;
+        }
+        for event in parse_events(line, None) {
+            let (id, text) = match event {
+                TranscriptEvent::AssistantChunk { id, text, .. }
+                | TranscriptEvent::AssistantMessage { id, text, .. } => (id, text),
+                _ => continue,
+            };
+            if self.chunk_id.as_deref() != Some(id.as_str()) {
+                self.chunk_id = Some(id);
+                self.text.clear();
+            }
+            self.text.push_str(&text);
+        }
+    }
+
+    fn to_info(&self) -> TranscriptInfo {
+        TranscriptInfo {
+            preview: preview_text(&self.text),
+            ..TranscriptInfo::default()
+        }
     }
 }
 
@@ -1307,6 +1357,42 @@ impl crate::caps::TelemetryCap for KimiTelemetry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 看板卡片的 AI 动态行（`preview`）。kimi 的 Stop hook 不带正文，跑动期间 DB 的
+    /// `last_ai_text` 一直是空——预览兜底就是这条分析路径，`supports_analysis` 关着时
+    /// 整个时段的卡片只有「你」那一行（实拍）。
+    #[test]
+    fn parser_previews_the_latest_assistant_text() {
+        let part = |uuid: &str, kind: &str, field: &str, text: &str| {
+            format!(
+                r#"{{"type":"context.append_loop_event","time":1,"event":{{"type":"content.part","uuid":"{uuid}","part":{{"type":"{kind}","{field}":"{text}"}}}}}}"#
+            )
+        };
+        let mut parser = KimiParser::default();
+        // think 是思考过程，不是正文——聊天窗口展示它，卡片预览不该被它顶掉。
+        parser.fold_line(&part("a", "think", "think", "内心戏"));
+        assert_eq!(parser.to_info().preview, None);
+        // 同一条消息按块落盘（uuid 相同）→ 拼起来。
+        parser.fold_line(&part("b", "text", "text", "先看"));
+        parser.fold_line(&part("b", "text", "text", "一下现状"));
+        assert_eq!(parser.to_info().preview.as_deref(), Some("先看一下现状"));
+        // 换 uuid = 换一条消息，从头累积，不与上一条串味。
+        parser.fold_line(&part("c", "text", "text", "改完了"));
+        assert_eq!(parser.to_info().preview.as_deref(), Some("改完了"));
+    }
+
+    /// 预筛的钉子：正文只可能来自 `content.part`，其余行整行跳过（wire.jsonl 里工具
+    /// 调用/结果占绝大多数，看板每轮轮询都要 fold 增量）。kimi 改了事件名就会**静默**
+    /// 失效，这条测试连同 `fold_line` 里的注释一起把那个字面量钉住。
+    #[test]
+    fn parser_skips_lines_that_cannot_carry_text() {
+        let mut parser = KimiParser::default();
+        parser.fold_line(r#"{"type":"turn.prompt","time":1,"input":"帮我看看"}"#);
+        parser.fold_line(
+            r#"{"type":"context.append_loop_event","time":2,"event":{"type":"tool.call","uuid":"t","name":"Read","input":{}}}"#,
+        );
+        assert_eq!(parser.to_info().preview, None);
+    }
 
     /// 造一份 kimi 会话骨架：`agents/main/wire.jsonl` + 若干子 agent 侧车，返回主流路径。
     fn kimi_session(tag: &str, main_lines: &str, sidecars: &[(&str, String)]) -> PathBuf {

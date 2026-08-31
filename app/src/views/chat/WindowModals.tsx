@@ -141,7 +141,7 @@ export function QuickSwitcher({ activeId, onPick, onClose }: {
       <div className="chat-switcher-list" ref={listRef} role="listbox" aria-label={t.chat.switcherTitle}>
         {rows.length === 0 && <div className="chat-switcher-empty">{t.chat.switcherEmpty}</div>}
         {rows.map((row, index) => {
-          const tone = sessionTone(row.connected, row.session.status, row.pending_review, row.errored, row.busy_subagents);
+          const tone = sessionTone(row.connected, row.session.status, row.pending_review, row.errored, row.busy_subagents, row.screen_state);
           return (
             <button
               type="button"

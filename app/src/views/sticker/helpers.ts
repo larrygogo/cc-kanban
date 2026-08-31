@@ -1,6 +1,7 @@
 // 贴纸看板的纯逻辑 helper：行内编辑键盘处理、相对时间、置顶持久化、tab 过滤。
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { Dict } from "../../i18n/zh";
+import { activityTone } from "../../activity";
 import { STAR_KEY, type Item, type Tab } from "./types";
 
 export const editorKeyDown =
@@ -95,25 +96,17 @@ export function useStarred(): { starred: Set<string>; toggleStar: (ccSessionId: 
   return { starred, toggleStar };
 }
 
-/** 连接中会话的活动态阶梯——卡片状态环（cardTone）与 tab 归属（match）的**共同地基**，
- *  与后端 session_query.rs 的 tab_class 同序同源：
- *  审批/屏幕 blocked > 屏幕 working/idle > DB status。
- *  屏幕检测（screen_state，仅托管会话有值）优先于 DB status：DB 的 running 由 hook 事件
- *  驱动，agent 在屏幕上弹出审批/提问时它还停在上一个事件；屏幕状态 300ms 级实时。
- *  pending_review（broker 正压着的审批）仍最优先——那是事实源。
- *  环与 tab 曾各看各的（环吃屏幕、tab 只看 status）：一条 status=running 而屏幕已 idle
- *  的会话顶着黄环（等你）待在「运行中」tab 里，用户以为状态坏了（实拍反馈）——
- *  阶梯必须住在这一处，环和 tab 共用。 */
+/** 卡片状态环（cardTone）与 tab 归属（match）读活动态的入口——阶梯本身住在
+ *  `api.ts` 的 [`activityTone`]，与对话窗侧栏的 `sessionTone`、后端
+ *  `session_query.rs` 的 tab_class 共用同一份判定（三处曾各有一套，见那里的注释）。
+ *  这里只负责把看板的 `Item` 摊平成阶梯认识的字段。 */
 function activity(l: Item): "pending" | "running" | "waiting" | null {
-  if (l.pending_review || l.screen_state === "blocked") return "pending";
-  if (l.screen_state === "working") return "running";
-  // 屏幕 idle / DB waiting 只说明**主回合**停了——后台子任务还在跑时是「运行中」,
-  // 不该催人(与后端 tab_class 的 background_busy 同口径,原料同为 busy_subagents)。
-  const busy = (l.busy_subagents ?? 0) > 0;
-  if (l.screen_state === "idle") return busy ? "running" : "waiting";
-  if (l.session.status === "running") return "running";
-  if (l.session.status === "waiting") return busy ? "running" : "waiting";
-  return null;
+  return activityTone({
+    status: l.session.status,
+    pendingReview: l.pending_review,
+    screenState: l.screen_state,
+    busySubagents: l.busy_subagents,
+  });
 }
 
 /** 卡片状态徽标的统一口径（看板卡片指示器与折叠缩略条共用的单点判定）。
@@ -121,12 +114,26 @@ function activity(l: Item): "pending" | "running" | "waiting" | null {
  *  「有人在等你」的信号被抹掉（评审发现）——判定必须住在这一处。
  *  注：tone 只回答「画成哪一档」，不回答「这个判定有多可信」——角标的两层不自信
  *  区分（无 screen_state 回落 DB status 的弱化、fallback idle 降中性点，T-15）
- *  是呈现层的事，住在 Sticker 的指示器渲染处，不进本函数（tab 归属等判定不消费它）。 */
+ *  由下方的 toneConfidence 回答（tab 归属等判定不消费它，呈现层才消费）。 */
 export type CardTone = "offline" | "error" | "pending" | "running" | "waiting" | "on";
 export function cardTone(l: Item): CardTone {
   if (!l.connected) return "offline";
   if (l.errored) return "error";
   return activity(l) ?? "on";
+}
+
+/** 徽标置信度（T-15 的两层「不自信」）：tone 只回答「画成哪一档」，本函数回答
+ *  「这个判定有多可信」。卡片徽标（Sticker）与缩略条状态点（CollapsedStrip）共用
+ *  这一处判定——条上曾只看 tone，弱化口径与卡片漂移。
+ *  - "assumed"：无屏幕检测（screen_state==null）的会话（外部终端、外库卡），tone
+ *    回落 DB status——hook 事件驱动的滞后快照，弱化呈现（卡片半透明徽标/条点降透明度）。
+ *  - "fallback"：屏幕检测走了兜底（什么规则都没命中、回退 idle 判 waiting）——是
+ *   「认不出来」而不是「确认空闲」，降中性灰点。
+ *  tone 由 cardTone 算出后传入，避免重复计算。 */
+export function toneConfidence(l: Item, tone: CardTone): "assumed" | "fallback" | null {
+  if (tone === "waiting" && l.screen_state === "idle" && l.screen_assumed === true) return "fallback";
+  if (l.connected && l.screen_state == null && (tone === "running" || tone === "waiting")) return "assumed";
+  return null;
 }
 
 export function match(tab: Tab, l: Item): boolean {

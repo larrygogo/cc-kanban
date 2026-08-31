@@ -8,8 +8,8 @@
 #[cfg(test)]
 use crate::transcript::ChatItem;
 use crate::transcript::{
-    SubagentOutcome, SubagentRef, SubagentSpec, SubagentStream, TranscriptEvent, TranscriptInfo,
-    TranscriptParser, TranscriptSpec, TurnError,
+    preview_text, SubagentOutcome, SubagentRef, SubagentSpec, SubagentStream, TranscriptEvent,
+    TranscriptInfo, TranscriptParser, TranscriptSpec, TurnError,
 };
 use std::path::{Path, PathBuf};
 
@@ -477,41 +477,6 @@ fn parse_chat_items(line: &str) -> Vec<ChatItem> {
 const CONTEXT_WINDOW: u64 = 200_000;
 
 // ═══ 解析：JSONL 逐行 fold ═══
-
-/// 把 assistant 正文清洗成卡片预览：合并所有空白为单空格、按**字符**截断到 ~180。
-/// 单次遍历完成「折叠空白 + 计数截断」，命中上限即提前返回——大消息不再整条 collapse/分配。
-pub(crate) fn preview_text(s: &str) -> Option<String> {
-    const MAX: usize = 180;
-    let mut out = String::new();
-    let mut count = 0usize; // out 中的字符数
-    let mut pending_space = false; // 词间是否有待补的单空格（行首/行尾不补）
-    for ch in s.chars() {
-        if ch.is_whitespace() {
-            if count > 0 {
-                pending_space = true;
-            }
-            continue;
-        }
-        // 写入该非空白字符（连同可能的前导空格）前先判断是否会超限。
-        let need = if pending_space { 2 } else { 1 };
-        if count + need > MAX {
-            out.push('…');
-            return Some(out);
-        }
-        if pending_space {
-            out.push(' ');
-            count += 1;
-            pending_space = false;
-        }
-        out.push(ch);
-        count += 1;
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
-}
 
 /// 把 assistant 正文归类为「回合错误」短标签；非错误返回 None。
 /// `synthetic` = 该消息的 model 为 `<synthetic>`——CC 对「非模型产出的系统插入文案」的

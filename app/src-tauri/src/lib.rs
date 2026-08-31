@@ -2130,6 +2130,32 @@ mod tests {
         assert_eq!(tab_class(false, "running", None, Some("idle"), || false), None);
     }
 
+    /// 已 ended 的会话不被**留在屏幕上的最后一屏**抬进「待交互」。
+    /// 实拍：一个只活了 19 秒、一句话没说的空会话结束后 PTY 没回收，connected 靠 PTY
+    /// 存活兜底成 true，屏幕规则对着残留画面回退 idle，于是它顶着黄环在等待区躺了 12
+    /// 分钟。恢复窗口期（DB 还挂旧 ended、PTY 里已经在跑）由上面那条 working 用例守着，
+    /// 两者的分界就是「有没有可见证据」。
+    #[test]
+    fn tab_class_ended_session_is_not_revived_by_a_stale_idle_screen() {
+        assert_eq!(tab_class(true, "ended", None, Some("idle"), || false), None);
+        // 后台子任务的兜底也救不回它：会话都结束了，没有「还在干活」这回事。
+        assert_eq!(tab_class(true, "ended", None, Some("idle"), || true), None);
+        // 但真压着的审批仍要人处理——那是事实源，不是屏幕的推断。
+        assert_eq!(
+            tab_class(true, "ended", Some("approval"), Some("idle"), || false),
+            Some("waiting")
+        );
+        // 恢复窗口期不受影响：有可见证据的 working/blocked 照旧生效。
+        assert_eq!(
+            tab_class(true, "ended", None, Some("working"), || false),
+            Some("running")
+        );
+        assert_eq!(
+            tab_class(true, "ended", None, Some("blocked"), || false),
+            Some("waiting")
+        );
+    }
+
     /// 主回合停了(DB waiting / 屏幕 idle)但后台子任务还在跑 → 归「运行中」,不催人。
     /// 实拍反馈:委派了后台审查 agent 的会话在等待区躺了半小时,其实一直在干活。
     /// 但真要人的信号(审批/屏幕 blocked)不被后台忙碌掩盖——批准不点,后台跑完也白等。

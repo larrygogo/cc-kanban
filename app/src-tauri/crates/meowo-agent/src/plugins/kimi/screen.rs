@@ -113,4 +113,22 @@ pub(super) static RULES: &[ScreenRule] = &[
         Matcher::LineRegex(r"^\s*[🌕🌖🌗🌘🌑🌒🌓🌔]\s+·\s"),
     )
     .visible(),
+    // 月相**紧贴**状态词的工作行：实拍 `🌗Working...`（swarm 模式下常驻整块工作屏）。
+    // 上面两条月相规则一条要求月相独占整行、一条要求「月相 空格 · 空格」，紧贴形态两
+    // 头不沾——整块正在干活的屏落进 fallback idle，角标被降成「认不出」的中性灰点、
+    // tab 归属还掉进「待交互」（2026-08-31 实拍回归）。
+    //
+    // 从严的地方在**状态词白名单**：不放宽成「月相开头的任意行」。月相是普通 emoji，
+    // AI 正文里出现一个就会把等你输入的会话谎报成在跑——那正是 fallback idle 想避免
+    // 的反方向失准。
+    ScreenRule::new(
+        "moon_word_status_working",
+        ScreenState::Working,
+        93,
+        Region::WholeScreen,
+        Matcher::LineRegex(
+            r"^\s*[🌕🌖🌗🌘🌑🌒🌓🌔]\s*(?:·\s*)?(?:working|thinking|using|running|compacting)\b",
+        ),
+    )
+    .visible(),
 ];

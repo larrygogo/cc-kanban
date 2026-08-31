@@ -717,6 +717,14 @@ pub(crate) fn tab_class(
     if pending_review.is_some() {
         return Some("waiting");
     }
+    // 已 ended 的会话，屏幕上**留着的最后一屏**不能替它抢答「等你」。恢复窗口期（DB 还
+    // 挂着旧 ended、PTY 里其实已经在跑）靠下面的 working/blocked 兜底仍然成立——那两档
+    // 是**有可见证据**的判定；idle 不是证据，它恰恰是「一条规则都没命中」的回退值。
+    // 不排除它，一个早就结束的空会话就会顶着黄环挂进「待交互」催人（实拍：19 秒的空会话
+    // 在等待区躺了 12 分钟，PTY 没回收就一直算在线）。
+    if status == "ended" && screen_state == Some("idle") {
+        return None;
+    }
     // 屏幕检测（300ms 级实时）优先于 DB status（hook 事件驱动、天然滞后）：
     // blocked = 屏幕上挂着审批/提问，是真要人，后台再忙也得等交互。
     // idle / DB waiting 只说明**主回合**停了——后台子任务还在独立干活时，把会话标成
