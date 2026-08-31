@@ -3072,6 +3072,16 @@ impl PtyBroker {
         // 好好的 PTY 报「PTY 会话未运行」。锁序 sessions → bindings 仅此一处嵌套，
         // 反向（持 bindings 再拿 sessions）没有持有者。
         if let Ok(mut bindings) = self.attach.bindings.lock() {
+            // 顺带把已指向 from_id 的条目改指 to_id（路径压缩）：同一个 PTY 可以换代
+            // 多次（temp → A → B → C），留成链的话 lookup 只翻一跳就落到中间那个早已
+            // 不存在的 id 上，等于没修。压缩后每条都直指当前键，一跳到底。
+            // 退出清理（finalize_exit 按 real == session_id 摘条目）也才扫得干净——
+            // 链式的中间条目谁都清不掉，会一直烂在表里。
+            for real in bindings.values_mut() {
+                if *real == from_id {
+                    *real = to_id;
+                }
+            }
             bindings.insert(from_id, to_id);
         }
         Ok(Some(managed))
@@ -4042,6 +4052,20 @@ mod tests {
         assert_eq!(managed.session_id.load(Ordering::Acquire), 88);
         assert_eq!(broker.binding(-5), Some(88), "绑定应与换绑同时可见");
         assert!(broker.snapshot(-5, 0).active, "旧 id 拉快照仍要看到活着的终端");
+    }
+
+    /// 回归：同一个 PTY 换代多次（temp → A → B）后,最初的临时 id 和中间那代真实 id
+    /// 都要能一跳翻译到当前 id。留成链的话 lookup 只翻一跳,落到早已不存在的中间 id 上。
+    #[test]
+    fn repeated_rebinds_compress_instead_of_chaining() {
+        let broker = PtyBroker::default();
+        broker.sessions.lock().unwrap().insert(-7, dummy_managed(-7));
+        broker.try_claim_rebind(-7, 10).unwrap().expect("首次认领");
+        broker.try_claim_rebind(10, 20).unwrap().expect("/clear 换代");
+        assert_eq!(broker.binding(-7), Some(20), "临时 id 直指当前会话");
+        assert_eq!(broker.binding(10), Some(20), "上一代真实 id 同样直指当前");
+        assert!(broker.snapshot(-7, 0).active);
+        assert!(broker.snapshot(10, 0).active);
     }
 
     /// 升级第二档：补刀 kill；pid 未知时跳过杀树，不 panic 不阻塞。
