@@ -1067,7 +1067,7 @@ export function AccountSection() {
   const t = useT();
   // 读取/写入应用设置（用于贴纸配额开关）。patchError 与其它分区同款：保存被拒时
   // 开关会被回读弹回去，必须有一行说明（S-3）。
-  const [settings, patchSettings, patchError] = useSettingsState();
+  const [settings, patchSettings, patchError, clearPatchError] = useSettingsState();
   // 顶部下拉选中的 agent id。模型一多，全部竖排要滚半天——改为一次只看一张卡。
   // 记进 localStorage，跨次打开设置页仍停在上次那个。
   const [selectedAgent, setSelectedAgent] = useState<string | null>(() => {
@@ -1294,7 +1294,21 @@ export function AccountSection() {
         onToggleQuota={() => toggleQuotaProvider(cur.id)}
         usageRefreshedAt={usageRefreshedAt[cur.id] ?? null}
       />
-      {patchError && <div className="sec-hint proxy-err" role="alert">{patchError}</div>}
+      {patchError && (
+        <div className="sec-hint proxy-err" role="alert">
+          {patchError}
+          {/* 同款内联 ×（About.tsx SettingsError）：错误不会自己消失（下一次成功才清），
+              用户看完得有办法关掉；复用 useSettingsState 的 clearError 通道。 */}
+          <button
+            type="button"
+            aria-label={t.settings.close}
+            style={{ appearance: "none", background: "none", border: "none", padding: 0, marginLeft: 6, font: "inherit", color: "inherit", cursor: "pointer" }}
+            onClick={clearPatchError}
+          >
+            ×
+          </button>
+        </div>
+      )}
     </>
   );
 }

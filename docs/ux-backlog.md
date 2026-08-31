@@ -40,6 +40,19 @@
 > ⑦ 确认窗底色改 --cc-window-bg（低不透明度下幽灵窗）、托盘单击折叠态走 recall_sticker。
 > 缓办两条：Windows 跨重启通知死点击（需启动解析 COM 激活参数）、macOS 通知授权拒绝的
 > 设置页可见性（macOS-only 需实拍）。macOS notify.rs 改动本轮仍靠 CI 编译背书。
+> 同日尾轮（两条缓办收口 + 小遗留一批）：
+> - Windows 死点击：调研确认 tauri-winrt-notification 0.7.2 的 toast XML 无 launch 属性、
+>   无 COM activator API，跨进程激活需 sparse package/MSIX 身份（打包形态专项，暂不立项）。
+>   落「启动清场」：clear_dead_toasts_at_startup 在 liveness 启动前整清上一进程残留
+>   （dev 借用 PowerShell AUMID 故跳过）；补发无需新增——首轮扫描对 pending/blocked
+>   不播种，第二轮 prev=None 自然重弹（U0-5 机制）。
+> - macOS 授权可见性：notification_authorization_status / open_notification_settings
+>   两条命令（getNotificationSettings 异步回调 + spawn_blocking 等待；直达系统设置走
+>   T-6 同款 spawn_detached open）；设置页通知开关旁 denied 时给「已在系统设置中关闭 ·
+>   打开系统设置」行，前端 IS_MAC 门控查询。cfg(macos) 靠 CI 编译。
+> - 小遗留：user-resize-end 重吸附失败回滚落 normal（语义不同于 onExpand/recall 的
+>   回原态）；Dropdown typeahead 补四条单测；AccountSection patchError 行补 × 关闭；
+>   S-2 搜索态挂载账号分区的配额扇出写注释闭环为有意取舍。
 
 ## 〇、横切主题（先读这节）
 

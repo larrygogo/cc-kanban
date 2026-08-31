@@ -157,6 +157,16 @@ function GeneralSection() {
     });
   };
   const notifyOn = settings?.notifications_enabled ?? true;
+  // macOS 系统层通知授权：被用户在系统设置拒绝后通知静默不弹，而本开关照常可开——
+  // 挂载时查一次（IS_MAC 门控，非 macOS 无此命令也不发 invoke），denied 时在开关旁给
+  // 「打开系统设置」直达（T-6 permission_denied 同款范式）。
+  const [sysNotifyDenied, setSysNotifyDenied] = useState(false);
+  useEffect(() => {
+    if (!IS_MAC) return;
+    invoke<string>("notification_authorization_status")
+      .then((s) => setSysNotifyDenied(s === "denied"))
+      .catch(() => {});
+  }, []);
   const flashOn = settings?.attention_flash_enabled ?? true;
   const autoUpdateOn = settings?.auto_update_enabled ?? true;
   const chatOn = settings?.chat_enabled ?? true;
@@ -210,6 +220,17 @@ function GeneralSection() {
           </div>
           <Switch checked={notifyOn} onChange={toggleNotify} label={t.settings.notify} />
         </div>
+        {/* 系统层授权被拒时，应用内开关再开也是静默——必须在此处可见并给出直达入口。 */}
+        {IS_MAC && sysNotifyDenied && (
+          <div className="row">
+            <div className="row-text">
+              <div className="row-desc">{t.settings.notifySystemDenied}</div>
+            </div>
+            <button type="button" className="sbtn" onClick={() => { invoke("open_notification_settings").catch(() => {}); }}>
+              {t.settings.openSystemSettings}
+            </button>
+          </div>
+        )}
         {/* 任务栏闪烁仅 Windows 有效(macOS 由菜单栏徽章承担同一职责),别的平台不显示无效开关。 */}
         {IS_WIN && <div className="row">
           <div className="row-text">
@@ -901,7 +922,10 @@ export function About() {
         <div className="main-body" ref={bodyRef}>
           {searching && noHits && <div className="settings-noresults">{t.settings.searchNoResults}</div>}
           {/* 搜索态挂载全部分区并平铺（data-sec 供过滤识别导航名命中），
-              各分区的行级显隐由 searchFilter 直写 style.display（hidden 归 React 管）。 */}
+              各分区的行级显隐由 searchFilter 直写 style.display（hidden 归 React 管）。
+              代价：连带挂载 AccountSection 会触发配额联网扇出——这是 S-2「未访问不挂载」
+              与搜索可达性之间的有意取舍：搜索必须能命中未访问分区的行，就只能全挂。
+              不是遗漏，勿当 bug「修」掉。 */}
           {SECTION_ORDER.filter((s) => searching || visited.has(s)).map((s) => (
             <div key={s} className="main-sec" data-sec={s} hidden={searching ? false : s !== sec}>
               {s === "general" ? (

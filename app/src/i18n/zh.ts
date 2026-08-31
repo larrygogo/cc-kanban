@@ -640,6 +640,9 @@ export const zh = {
     autostartFailed: "开机自启设置失败，请重试",
     notify: "桌面通知",
     notifyDesc: "会话需要你回复或出错时弹系统通知",
+    // macOS 系统层授权被拒时的开关旁提示（见 About.tsx GeneralSection）。
+    notifySystemDenied: "已在系统设置中关闭",
+    openSystemSettings: "打开系统设置",
     attentionFlash: "任务栏提醒",
     attentionFlashDesc: "有会话需要关注时高亮任务栏图标；独立于「桌面通知」，关闭通知后仍会生效",
     clickThrough: "点击穿透",

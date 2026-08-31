@@ -656,9 +656,15 @@ export function App() {
       const { w, h } = normalSize();
       setEdge(e);
       setMode("expanded");
-      invoke("snap_expand", { edge: e, width: w, height: h }).catch((err) =>
-        console.error("[snap] 缩放后重新吸附失败：", err)
-      );
+      invoke("snap_expand", { edge: e, width: w, height: h }).catch((err) => {
+        // 失败回滚（同 onExpand/recall 的 P2-13），但落点语义不同：那两处失败时窗口仍是
+        // 细条/贴边几何，回滚是「恢复原吸附」；此处窗口已是缩放后的普通浮窗，没有原吸附
+        // 可回，只能落 normal 态——否则前端停在 expanded 而窗口实际浮着，两者脱节。
+        console.error("[snap] 缩放后重新吸附失败：", err);
+        setEdge(null);
+        setMode("normal");
+        updateStickerWindowState({ snap_edge: null });
+      });
     });
     return () => {
       unStart.then((f) => f());

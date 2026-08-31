@@ -1248,6 +1248,10 @@ pub fn run() {
             restart_session_supported,
             open_project_dir,
             open_automation_settings,
+            #[cfg(target_os = "macos")]
+            macos::notify::notification_authorization_status,
+            #[cfg(target_os = "macos")]
+            macos::notify::open_notification_settings,
             git_diff_summary,
             git_file_diff,
             list_dir_entries,
@@ -1513,6 +1517,10 @@ pub fn run() {
             // 对话页的 transcript 文件监听（C-14 push 通道）：独立于 board 合流直发
             // chat-transcript，对话窗据此提前拉增量，定时轮询只作最终兜底。
             spawn_transcript_watcher(app.handle().clone(), path.clone());
+            // 跨重启通知清场：上一进程残留的 toast 全是死链接（on_activated 是进程内闭包），
+            // 在 liveness 补发新 toast 之前整清，保证通知中心里每条都可点（详见函数注释）。
+            #[cfg(target_os = "windows")]
+            watch::clear_dead_toasts_at_startup(app.handle());
             spawn_liveness_watch(app.handle().clone(), path.clone(), tx_cache.clone());
             spawn_first_import(app.handle().clone(), path.clone());
             // %TEMP%\meowo-paste / meowo-handoff 没有任何 OS 侧回收（Windows 不清 %TEMP%），

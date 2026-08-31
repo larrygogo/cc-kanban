@@ -601,6 +601,9 @@ export const en: Dict = {
     autostartFailed: "Couldn't toggle launch at login. Try again",
     notify: "Desktop notifications",
     notifyDesc: "Notify when a session needs your reply or errors out",
+    // macOS 系统层授权被拒时的开关旁提示（见 About.tsx GeneralSection）。
+    notifySystemDenied: "Turned off in System Settings",
+    openSystemSettings: "Open System Settings",
     attentionFlash: "Taskbar alert",
     attentionFlashDesc: "Highlight the taskbar icon when a session needs attention; independent of desktop notifications, so it still works with notifications off",
     clickThrough: "Click-through",

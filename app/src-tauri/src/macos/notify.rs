@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 
@@ -8,10 +9,10 @@ use objc2::runtime::{Bool, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread};
 use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+    UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
     UNNotificationDefaultActionIdentifier, UNNotificationPresentationOptions,
-    UNNotificationRequest, UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter,
-    UNUserNotificationCenterDelegate,
+    UNNotificationRequest, UNNotificationResponse, UNNotificationSettings, UNNotificationSound,
+    UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
 use tauri::{AppHandle, Manager};
 
@@ -182,6 +183,47 @@ pub fn init(app: &AppHandle) {
         UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
         &auth_handler,
     );
+}
+
+/// 系统通知授权状态查询（设置页「桌面通知」开关旁的提示用）：授权被用户在系统设置
+/// 拒绝后通知静默不弹，应用内开关照常可开，前端需要一个发现系统层状态的入口。
+/// 返回 "granted" / "denied" / "notDetermined"；provisional/ephemeral 归 granted
+/// （系统层仍会投递，只是默认不打扰）。
+#[tauri::command]
+pub async fn notification_authorization_status() -> Result<String, String> {
+    let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
+    let center = UNUserNotificationCenter::currentNotificationCenter();
+    // getNotificationSettings 是异步回调式 API（与 init 里授权请求同一模型）；回调在
+    // 系统内部队列触发，mpsc + blocking 池等待不卡主线程。
+    let handler: RcBlock<dyn Fn(NonNull<UNNotificationSettings>)> =
+        RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
+            // SAFETY: completion handler 契约保证 settings 非空且指向有效对象。
+            let status = unsafe { settings.as_ref() }.authorizationStatus();
+            let mapped = if status == UNAuthorizationStatus::Denied {
+                "denied"
+            } else if status == UNAuthorizationStatus::NotDetermined {
+                "notDetermined"
+            } else {
+                "granted"
+            };
+            let _ = tx.send(mapped);
+        });
+    center.getNotificationSettingsWithCompletionHandler(&handler);
+    tauri::async_runtime::spawn_blocking(move || rx.recv())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+        .map(str::to_owned)
+}
+
+/// 直达「系统设置 → 通知」页（设置页授权被拒提示的按钮动作）。与 terminal.rs
+/// open_automation_settings 同款范式：spawn `open` 打开系统设置 URL，不再只丢一句
+/// 「请去系统设置开启」让用户自己翻。
+#[tauri::command]
+pub fn open_notification_settings() -> Result<(), String> {
+    crate::fsutil::spawn_detached(std::process::Command::new("open").arg(
+        "x-apple.systempreferences:com.apple.preference.notifications",
+    ))
 }
 
 /// 投递一条通知（非阻塞）。调度到主线程执行：UNUserNotificationCenter 文档允许任意线程

@@ -731,6 +731,26 @@ fn clear_delivered_toasts(app_id: &str) {
     }
 }
 
+/// 启动清场（lib.rs setup 调用）：toast 的 on_activated 是 show 时注册的进程内闭包，
+/// 进程退出后通知中心里残留的 Meowo toast 全部变死链接（点了毫无反应）。单实例插件
+/// 保证走到启动即旧进程已死，此刻残留的每条都是死的——整清掉，保证用户看到的通知
+/// 都可点。仍在等待审批/阻塞的会话无需在这里显式补发：liveness 首轮对决策类指纹
+/// 不播种（见 spawn_liveness_watch 文档），第二轮会自然重弹可点的新 toast。
+///
+/// 为什么不走「点击拉起新进程」：tauri-winrt-notification 0.7 生成的 toast XML 没有
+/// launch 属性、也不支持注册跨进程 COM activator——后者要 shortcut 的
+/// ToastActivatorCLSID + 进程外 COM 服务器，属打包形态（MSIX/sparse package）变更，
+/// 超出代码侧能修的范围。
+/// dev 构建跳过：dev 借用 PowerShell 的 AUMID 弹 toast，清场会误伤 PowerShell 自己
+/// 的通知历史。
+#[cfg(target_os = "windows")]
+pub(crate) fn clear_dead_toasts_at_startup(app: &tauri::AppHandle) {
+    if tauri::is_dev() {
+        return;
+    }
+    clear_delivered_toasts(&app.config().identifier);
+}
+
 #[cfg(target_os = "macos")]
 // 参数数量超限（11 个）是现有设计需要；重构签名风险大，暂以 allow 豁免。
 #[allow(clippy::too_many_arguments)]

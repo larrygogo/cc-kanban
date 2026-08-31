@@ -11,10 +11,14 @@ const options = [
   { value: "c", label: "方案 C" },
 ];
 
-function renderDropdown(onChange: (v: string) => void = () => {}) {
+function renderDropdown(
+  onChange: (v: string) => void = () => {},
+  opts = options,
+  initial = "b",
+) {
   function Host() {
-    const [v, setV] = useState("b");
-    return <Dropdown value={v} options={options} onChange={(x) => { setV(x); onChange(x); }} />;
+    const [v, setV] = useState(initial);
+    return <Dropdown value={v} options={opts} onChange={(x) => { setV(x); onChange(x); }} />;
   }
   render(<Host />);
 }
@@ -118,6 +122,72 @@ describe("Dropdown（统一菜单 primitive）", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("option")).toBeNull();
     expect(document.activeElement).toBe(screen.getByTestId("outside"));
+  });
+});
+
+describe("Dropdown typeahead（可打印字符跳项）", () => {
+  const latin = [
+    { value: "backup", label: "Backup" },
+    { value: "batch", label: "Batch" },
+    { value: "beta", label: "Beta" },
+  ];
+
+  afterEach(() => vi.useRealTimers());
+
+  it("单字母跳转：按 label 首字母循环匹配，从焦点下一项起找", () => {
+    renderDropdown(() => {}, latin, "backup");
+    const btn = screen.getByRole("button");
+    fireEvent.click(btn);
+    const container = btn.parentElement as HTMLElement;
+    // 焦点还在触发钮（不在菜单项上）：从头找，b → 首个 B 开头项
+    fireEvent.keyDown(container, { key: "b" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Backup" }));
+  });
+
+  it("同首字母多选项轮转：缓冲超时（>300ms）后重敲同字母跳到下一个", () => {
+    vi.useFakeTimers();
+    renderDropdown(() => {}, latin, "backup");
+    const btn = screen.getByRole("button");
+    fireEvent.click(btn);
+    const container = btn.parentElement as HTMLElement;
+    fireEvent.keyDown(container, { key: "b" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Backup" }));
+    // 300ms 窗口内重敲会拼成 "bb"（无匹配），轮转发生在缓冲超时重开之后
+    vi.advanceTimersByTime(301);
+    fireEvent.keyDown(container, { key: "b" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Batch" }));
+    vi.advanceTimersByTime(301);
+    fireEvent.keyDown(container, { key: "b" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Beta" }));
+    // 到底后循环回首个匹配项
+    vi.advanceTimersByTime(301);
+    fireEvent.keyDown(container, { key: "b" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Backup" }));
+  });
+
+  it("300ms 内连续击键拼前缀：跨前缀收窄到唯一匹配项", () => {
+    vi.useFakeTimers();
+    renderDropdown(() => {}, latin, "backup");
+    const btn = screen.getByRole("button");
+    fireEvent.click(btn);
+    const container = btn.parentElement as HTMLElement;
+    fireEvent.keyDown(container, { key: "b" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Backup" }));
+    // 窗口内再敲 e：缓冲拼成 "be"，跳过同样 B 开头的 Backup/Batch，命中 Beta
+    vi.advanceTimersByTime(100);
+    fireEvent.keyDown(container, { key: "e" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Beta" }));
+  });
+
+  it("无匹配时焦点不动", () => {
+    renderDropdown(() => {}, latin, "backup");
+    const btn = screen.getByRole("button");
+    fireEvent.click(btn);
+    const container = btn.parentElement as HTMLElement;
+    fireEvent.keyDown(container, { key: "ArrowDown" }); // → 当前选中项 Backup
+    const focused = document.activeElement;
+    fireEvent.keyDown(container, { key: "z" });
+    expect(document.activeElement).toBe(focused);
   });
 });
 
