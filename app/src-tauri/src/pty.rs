@@ -1920,17 +1920,43 @@ impl PtyBroker {
         Ok(temp_id)
     }
 
-    pub(crate) fn write(&self, session_id: i64, data: &[u8]) -> Result<(), String> {
-        if data.len() > 64 * 1024 {
-            return Err("单次 PTY 输入过大".into());
-        }
-        let session = self
+    /// 按 id 取登记中的 PTY——直查落空时用绑定表翻译一次再取。`Ok(None)` = 确实没有
+    /// 这个会话；`Err` = 锁中毒（与「没有」不是一回事，调用方照旧区分对待）。
+    ///
+    /// 临时负 id 在 SessionStart 认领时被 [`Self::try_claim_rebind`] 换成真实 id——同一个
+    /// PTY，只换映射键——而对话窗要等 250ms 的 binding 轮询才跟上。那段窗口里按的键、拉的
+    /// 快照都还带着旧 id：不翻译就会对着一个活得好好的终端报「PTY 会话未运行」，而画面
+    /// 照旧留在屏上（未知会话的快照返回空增量，前端不清屏），用户看到的就是「终端明明在，
+    /// 却说没在运行」。实拍过：新建会话后立刻打字，认领落地那一瞬的按键全数报错。
+    /// attach 握手早有同款翻译（见 [`Self::handle_attach`]），这里补齐其余入口。
+    ///
+    /// 直查优先：换绑窗口罕见，每次按键、每轮快照不为它多拿一把 bindings 锁。
+    fn lookup(&self, session_id: i64) -> Result<Option<Arc<ManagedPty>>, String> {
+        let direct = self
             .sessions
             .lock()
             .map_err(|_| LOCK_POISONED)?
             .get(&session_id)
-            .cloned()
-            .ok_or("PTY 会话未运行")?;
+            .cloned();
+        if direct.is_some() {
+            return Ok(direct);
+        }
+        let Some(real_id) = self.binding(session_id) else {
+            return Ok(None);
+        };
+        Ok(self
+            .sessions
+            .lock()
+            .map_err(|_| LOCK_POISONED)?
+            .get(&real_id)
+            .cloned())
+    }
+
+    pub(crate) fn write(&self, session_id: i64, data: &[u8]) -> Result<(), String> {
+        if data.len() > 64 * 1024 {
+            return Err("单次 PTY 输入过大".into());
+        }
+        let session = self.lookup(session_id)?.ok_or("PTY 会话未运行")?;
         // 有界等待入队，绝不直接写管道（理由见 ManagedPty::input_tx）。到点仍满说明
         // 子进程长时间不读 stdin（挂死/被暂停），报错比无限阻塞调用线程诚实。
         match offer_with_deadline(
@@ -1953,22 +1979,15 @@ impl PtyBroker {
     /// 快照里也带同一个值，但快照要把整个 backlog 编码重传，不能拿来轮询。
     pub(crate) fn grid(&self, session_id: i64) -> (u16, u16) {
         let packed = self
-            .sessions
-            .lock()
+            .lookup(session_id)
             .ok()
-            .and_then(|sessions| sessions.get(&session_id).cloned())
+            .flatten()
             .map_or(0, |session| session.last_size.load(Ordering::Acquire));
         unpack_size(packed)
     }
 
     pub(crate) fn resize(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
-        let session = self
-            .sessions
-            .lock()
-            .map_err(|_| LOCK_POISONED)?
-            .get(&session_id)
-            .cloned()
-            .ok_or("PTY 会话未运行")?;
+        let session = self.lookup(session_id)?.ok_or("PTY 会话未运行")?;
         let clamped = size(cols, rows);
         // 同值短路：前端切视图/attach 客户端并存时会重复下发同一尺寸，每次都过
         // master.resize = 一发 SIGWINCH（TUI 整屏重排）+ 扫描位点清零，纯浪费还闪屏。
@@ -2008,11 +2027,7 @@ impl PtyBroker {
     /// （会话换了/被重置）时退化为空增量，**不会**自动回退成全量。调用方一律按响应里的
     /// start_offset/end_offset 对齐，并在重启 PTY 后把自己的 since 归零。
     pub(crate) fn snapshot(&self, session_id: i64, since: u64) -> PtySnapshot {
-        let session = self
-            .sessions
-            .lock()
-            .ok()
-            .and_then(|sessions| sessions.get(&session_id).cloned());
+        let session = self.lookup(session_id).ok().flatten();
         let active = session.as_ref().and_then(|s| {
             // 临界区内只做区间计算与切片拷贝：逐字节遍历整个 ring 会阻塞 PTY reader 线程写入。
             s.backlog.lock().ok().map(|b| {
@@ -2127,13 +2142,7 @@ impl PtyBroker {
     }
 
     pub(crate) fn stop(&self, session_id: i64) -> Result<(), String> {
-        let session = self
-            .sessions
-            .lock()
-            .map_err(|_| LOCK_POISONED)?
-            .get(&session_id)
-            .cloned()
-            .ok_or("PTY 会话未运行")?;
+        let session = self.lookup(session_id)?.ok_or("PTY 会话未运行")?;
         // 先落时间戳再 kill：即使 kill 无效（见下），waiter 的升级链也已武装，收尾有保证。
         // get_or_insert：重复点击不重置计时，否则连点会把升级一直往后推。
         if let Ok(mut at) = session.stop_requested_at.lock() {
@@ -3058,6 +3067,23 @@ impl PtyBroker {
         };
         managed.session_id.store(to_id, Ordering::Release);
         sessions.insert(to_id, managed.clone());
+        // 绑定在同一锁程内落表，换绑对外才真的没有空窗：先摘键、等出了锁再写绑定的话，
+        // 中间那一瞬旧 id 既查不到会话、也翻译不出新 id，[`Self::lookup`] 会对着一个活得
+        // 好好的 PTY 报「PTY 会话未运行」。锁序 sessions → bindings 仅此一处嵌套，
+        // 反向（持 bindings 再拿 sessions）没有持有者。
+        if let Ok(mut bindings) = self.attach.bindings.lock() {
+            // 顺带把已指向 from_id 的条目改指 to_id（路径压缩）：同一个 PTY 可以换代
+            // 多次（temp → A → B → C），留成链的话 lookup 只翻一跳就落到中间那个早已
+            // 不存在的 id 上，等于没修。压缩后每条都直指当前键，一跳到底。
+            // 退出清理（finalize_exit 按 real == session_id 摘条目）也才扫得干净——
+            // 链式的中间条目谁都清不掉，会一直烂在表里。
+            for real in bindings.values_mut() {
+                if *real == from_id {
+                    *real = to_id;
+                }
+            }
+            bindings.insert(from_id, to_id);
+        }
         Ok(Some(managed))
     }
 
@@ -3987,6 +4013,59 @@ mod tests {
         // 重复点击不重置计时，否则连点会把升级一直往后推。
         assert!(broker.stop(7).is_ok());
         assert_eq!(managed.stop_requested_at.lock().unwrap().unwrap(), first);
+    }
+
+    /// 回归：临时负 id 被 SessionStart 认领换绑成真实 id 后（同一个 PTY 只换映射键），
+    /// 仍拿着旧 id 的调用方——对话窗要等 250ms 的 binding 轮询才跟上——不得被当成
+    /// 「会话不存在」。实拍过：新建会话后立刻打字，认领落地那一瞬的按键全数报
+    /// 「会话终端未在运行」，而终端画面好端端留在屏上。
+    #[test]
+    fn stale_temp_id_still_reaches_the_rebound_pty() {
+        let broker = PtyBroker::default();
+        let managed = dummy_managed(64);
+        broker.sessions.lock().unwrap().insert(64, managed.clone());
+        broker.attach.bindings.lock().unwrap().insert(-3, 64);
+        // 快照：认领前后画面不能断档（active 掉成 false，前端就以为终端没了）。
+        assert!(broker.snapshot(-3, 0).active);
+        // 按键：找得到会话就不该再是「未运行」；假会话没有 writer 线程，止步于通道已关闭。
+        assert_eq!(broker.write(-3, b"hi").unwrap_err(), "PTY 输入通道已关闭");
+        // 网格自愈按旧 id 也要查得到真实尺寸，否则 TUI 停在占位宽度。
+        managed.last_size.store(pack_size(100, 30), Ordering::Release);
+        assert_eq!(broker.grid(-3), (100, 30));
+        // 结束会话同理，旧 id 一样要落到真 PTY 上。
+        assert!(broker.stop(-3).is_ok());
+        // 没有绑定的陌生 id 仍老实报「未运行」——翻译是补漏，不是兜底遮蔽。
+        assert_eq!(broker.write(-9, b"hi").unwrap_err(), "PTY 会话未运行");
+        assert!(!broker.snapshot(-9, 0).active);
+    }
+
+    /// 回归：换绑必须连同绑定一起对外可见。曾经是「先摘键、出锁后再写 bindings」，
+    /// 那一瞬旧 id 两头落空，按键照样报「会话终端未在运行」。
+    #[test]
+    fn claim_rebind_publishes_the_binding_inside_the_same_lock() {
+        let broker = PtyBroker::default();
+        broker.sessions.lock().unwrap().insert(-5, dummy_managed(-5));
+        let managed = broker
+            .try_claim_rebind(-5, 88)
+            .expect("锁未中毒")
+            .expect("临时 id 已登记，应换绑成功");
+        assert_eq!(managed.session_id.load(Ordering::Acquire), 88);
+        assert_eq!(broker.binding(-5), Some(88), "绑定应与换绑同时可见");
+        assert!(broker.snapshot(-5, 0).active, "旧 id 拉快照仍要看到活着的终端");
+    }
+
+    /// 回归：同一个 PTY 换代多次（temp → A → B）后,最初的临时 id 和中间那代真实 id
+    /// 都要能一跳翻译到当前 id。留成链的话 lookup 只翻一跳,落到早已不存在的中间 id 上。
+    #[test]
+    fn repeated_rebinds_compress_instead_of_chaining() {
+        let broker = PtyBroker::default();
+        broker.sessions.lock().unwrap().insert(-7, dummy_managed(-7));
+        broker.try_claim_rebind(-7, 10).unwrap().expect("首次认领");
+        broker.try_claim_rebind(10, 20).unwrap().expect("/clear 换代");
+        assert_eq!(broker.binding(-7), Some(20), "临时 id 直指当前会话");
+        assert_eq!(broker.binding(10), Some(20), "上一代真实 id 同样直指当前");
+        assert!(broker.snapshot(-7, 0).active);
+        assert!(broker.snapshot(10, 0).active);
     }
 
     /// 升级第二档：补刀 kill；pid 未知时跳过杀树，不 panic 不阻塞。
