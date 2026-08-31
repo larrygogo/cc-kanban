@@ -18,6 +18,19 @@ spawn 子进程;0.5.x 整应用偶发未响应于主线程写 ConPTY 管道)。
 - 对话窗的 PTY 实时输出必须经 emitter 合帧线程发送,不得在 reader 里逐 chunk
   emit(重输出时每秒数百条事件会打满主线程事件循环与 WebView2 IPC)。
 
+## 窗口显隐不得绕过 tauri API(Windows)
+
+Windows 上用裸 `ShowWindow` 显示 tauri 窗口(如贴纸首显要的 `SW_SHOWNOACTIVATE`)会让
+tao 的 `WindowFlags::VISIBLE` **永久失同步**——该位只在 `set_visible` 里维护,tao 从不
+监听 `WM_SHOWWINDOW` 回填。而 `WindowFlags::apply_diff` 末尾有一句无条件的「新标志里
+没有 VISIBLE 就 `ShowWindow(SW_HIDE)`」:此后**任何**改窗口标志的调用都会顺手把窗口藏掉
+(`set_resizable` / `set_always_on_top` / `set_ignore_cursor_events` / `unminimize` …),
+而贴纸 skipTaskbar + transparent,藏了就只剩托盘能找回。
+
+故:裸 `ShowWindow` 之后必须补一次 `window.show()` 对齐标志(见 `show_window_no_activate`)。
+`focused:false` 的窗口不必怕它抢焦点——tao 的 `MARKER_DONT_FOCUS` 常驻,`show()` 同样走
+`SW_SHOWNOACTIVATE`。`is_visible()` 读的也是这个标志位,不是 `IsWindowVisible`。
+
 ## 平台专属代码的验证
 
 `src/macos/**` 与其它 `#[cfg(target_os = "macos")]` 分支在 Windows 开发机上**根本不编译**——
