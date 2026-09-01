@@ -1098,15 +1098,25 @@ const FULL_READ_CAP: u64 = 512 * 1024;
 /// 大文件时：头部读这么多取模型（config.update 在文件靠前），尾部读这么多取最近 AI 正文。
 const HEAD_BYTES: u64 = 16 * 1024;
 const TAIL_BYTES: u64 = 256 * 1024;
+/// 重建待办时从尾部向前回溯的块数上限（每块 TAIL_BYTES，合计至多 1MB）。
+/// 长会话里最后一次 TodoList 可能落在尾部窗口外，不回溯就重建不出；但不设上限
+/// 等于变相全量读，正是 FULL_READ_CAP 要防的，故回溯也要有界。
+const BACKTRACK_CHUNKS: u64 = 4;
 
-/// 读文件 [offset, offset+len) 字节为 lossy UTF-8（边界处的半截行交给 parse_wire 跳过）。
-fn read_range(path: &Path, offset: u64, len: u64) -> Option<String> {
+/// 读文件 [offset, offset+len) 的原始字节。回溯扫描要按块拼接——若先逐块 lossy
+/// 成 String 再拼，跨界的多字节 UTF-8 字符会被切碎。
+fn read_range_bytes(path: &Path, offset: u64, len: u64) -> Option<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
     f.seek(SeekFrom::Start(offset)).ok()?;
     let mut buf = Vec::with_capacity(len.min(TAIL_BYTES) as usize);
     f.take(len).read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    Some(buf)
+}
+
+/// 读文件 [offset, offset+len) 字节为 lossy UTF-8（边界处的半截行交给 parse_wire 跳过）。
+fn read_range(path: &Path, offset: u64, len: u64) -> Option<String> {
+    read_range_bytes(path, offset, len).map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 /// 读某 kimi 会话的 wire.jsonl 并解析（定位失败/读失败返回 None）。
@@ -1251,20 +1261,44 @@ pub fn parse_todos(content: &str) -> Option<Vec<crate::caps::TodoSnapshot>> {
     last
 }
 
-/// 读某 kimi 会话当前的待办快照。整读上限内全读；超限只读尾部——待办是整份覆盖写的，
-/// 最后一次调用必然在尾部。
+/// 读某 kimi 会话当前的待办快照。整读上限内全读；超限从尾部按块回溯找最后一次
+/// TodoList（见 [`read_todos_from_wire`]）。
 pub fn read_todos(session_id: &str) -> Option<Vec<crate::caps::TodoSnapshot>> {
     let wire = session_dir(session_id)?
         .join("agents")
         .join("main")
         .join("wire.jsonl");
-    let size = std::fs::metadata(&wire).ok()?.len();
-    let text = if size <= FULL_READ_CAP {
-        std::fs::read_to_string(&wire).ok()?
-    } else {
-        read_range(&wire, size.saturating_sub(TAIL_BYTES), TAIL_BYTES)?
-    };
-    parse_todos(&text)
+    read_todos_from_wire(&wire)
+}
+
+/// 从 wire.jsonl 文件重建待办快照。小文件全读；大文件只读尾部窗口不够——长会话里
+/// 最后一次 TodoList 可能落在窗口外（之后只有正文/工具行），只读尾部会让重建变 no-op、
+/// 陈旧清单继续挂。故从尾部按块（TAIL_BYTES 步进）向前回溯，找到含 TodoList 的最近一块
+/// 即停；最多 BACKTRACK_CHUNKS 块，仍找不到就维持现状（None，不拿空清单覆盖 DB）。
+/// 块边界可能切行：新块按**字节**拼在已扫区域前再整体解析，跨界行自然拼回完整；
+/// 最早块的首行可能仍是半截，与 read_range 既有约定相同——半截行 JSON 解析失败被跳过。
+fn read_todos_from_wire(wire: &Path) -> Option<Vec<crate::caps::TodoSnapshot>> {
+    let size = std::fs::metadata(wire).ok()?.len();
+    if size <= FULL_READ_CAP {
+        return parse_todos(&std::fs::read_to_string(wire).ok()?);
+    }
+    let mut scanned: Vec<u8> = Vec::new();
+    let mut start = size;
+    for _ in 0..BACKTRACK_CHUNKS {
+        let chunk_start = start.saturating_sub(TAIL_BYTES);
+        let mut chunk = read_range_bytes(wire, chunk_start, start - chunk_start)?;
+        chunk.extend_from_slice(&scanned);
+        scanned = chunk;
+        start = chunk_start;
+        if let Some(todos) = parse_todos(&String::from_utf8_lossy(&scanned)) {
+            return Some(todos);
+        }
+        // 已到文件头仍没找到：再回溯也没有新内容了。
+        if start == 0 {
+            break;
+        }
+    }
+    None
 }
 
 pub fn read_context(session_id: &str) -> Option<crate::caps::ContextUsage> {
@@ -1561,6 +1595,96 @@ mod tests {
         assert_eq!(todos[0].content, "（未命名事项）");
         assert_eq!(todos[0].status, "done");
         assert_eq!(todos[1].content, "有标题");
+    }
+
+    /// 造大 wire 的填充行：合法 JSON、不含 "TodoList"，只负责把文件垫过 FULL_READ_CAP。
+    fn pad_wire(mut s: String, target: usize) -> String {
+        let line = format!(
+            "{{\"type\":\"context.append_loop_event\",\"event\":{{\"type\":\"content.part\",\"part\":{{\"type\":\"text\",\"text\":\"{}\"}}}}}}\n",
+            "x".repeat(4096)
+        );
+        while s.len() < target {
+            s.push_str(&line);
+        }
+        s
+    }
+
+    fn todo_line(title: &str, status: &str) -> String {
+        format!(
+            r#"{{"type":"context.append_loop_event","event":{{"type":"tool.call","name":"TodoList","args":{{"todos":[{{"title":"{title}","status":"{status}"}}]}}}}}}"#
+        )
+    }
+
+    /// 回归（长会话）：wire 超 FULL_READ_CAP 且最后一次 TodoList 落在尾部窗口之外时，
+    /// 重建不能是 no-op——从尾部按块回溯，找到最近一次快照即停。
+    #[test]
+    fn read_todos_backtracks_past_tail_window_for_last_snapshot() {
+        let dir = std::env::temp_dir().join(format!("meowo-kimi-todos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wire = dir.join("wire.jsonl");
+        // TodoList 在文件开头，之后垫 ~700KB 正文：超 FULL_READ_CAP，且距尾 700KB > TAIL_BYTES，
+        // 修复前只读尾部 256KB 根本看不到它，打开对话窗的重建是 no-op。
+        std::fs::write(
+            &wire,
+            pad_wire(
+                format!("{}\n", todo_line("窗口外的旧待办", "done")),
+                700 * 1024,
+            ),
+        )
+        .unwrap();
+        let todos = read_todos_from_wire(&wire).expect("应回溯找到窗口外的 TodoList");
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].content, "窗口外的旧待办");
+        assert_eq!(todos[0].status, "done");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回溯不破坏「取最后一次」语义：尾部窗口里有更新的快照时，不能被更靠前的旧快照顶掉。
+    #[test]
+    fn read_todos_prefers_newest_snapshot_when_backtracking() {
+        let dir = std::env::temp_dir().join(format!("meowo-kimi-todos-newest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wire = dir.join("wire.jsonl");
+        let mut s = pad_wire(
+            format!("{}\n", todo_line("旧的", "pending")),
+            600 * 1024,
+        );
+        s.push_str(&todo_line("新的", "in_progress"));
+        s.push('\n');
+        std::fs::write(&wire, s).unwrap();
+        let todos = read_todos_from_wire(&wire).expect("应读到待办快照");
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].content, "新的");
+        assert_eq!(todos[0].status, "in_progress");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 大文件里完全没有 TodoList → None（「读不到」不等于「清单为空」，上层保持 DB 现状）；
+    /// TodoList 在回溯上限（BACKTRACK_CHUNKS 块）之外 → 同样 None，不为找它变相全量读。
+    #[test]
+    fn read_todos_none_when_missing_or_beyond_backtrack_limit() {
+        let dir = std::env::temp_dir().join(format!("meowo-kimi-todos-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let no_todos = dir.join("wire-none.jsonl");
+        std::fs::write(&no_todos, pad_wire(String::new(), 700 * 1024)).unwrap();
+        assert!(read_todos_from_wire(&no_todos).is_none());
+
+        // 1.3MB > FULL_READ_CAP + BACKTRACK_CHUNKS × TAIL_BYTES：TodoList 在回溯可达范围之外。
+        let too_far = dir.join("wire-far.jsonl");
+        std::fs::write(
+            &too_far,
+            pad_wire(
+                format!("{}\n", todo_line("太远的", "done")),
+                1_300_000,
+            ),
+        )
+        .unwrap();
+        assert!(read_todos_from_wire(&too_far).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
