@@ -209,6 +209,11 @@ pub async fn notification_authorization_status() -> Result<String, String> {
             let _ = tx.send(mapped);
         });
     center.getNotificationSettingsWithCompletionHandler(&handler);
+    // handler/center 都不是 Send，而 tauri 命令的 future 必须 Send——API 会 copy
+    // 回调 block（标准 Block 语义，调用后即由系统持有），center 是进程级单例，
+    // 两个引用在 await 前放下即可，不影响回调触发。
+    drop(handler);
+    drop(center);
     tauri::async_runtime::spawn_blocking(move || rx.recv())
         .await
         .map_err(|e| e.to_string())?

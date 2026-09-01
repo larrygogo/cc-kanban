@@ -71,7 +71,7 @@ mod imp {
             })
             .unwrap_or("");
         // 固定字面量（{:?} 产出合法 JS 字符串），无注入面。
-        let _ = w.eval(&format!("document.body.dataset.edge={value:?}"));
+        let _ = w.eval(format!("document.body.dataset.edge={value:?}"));
         *pushed = Some(edge);
     }
 
@@ -130,7 +130,7 @@ mod imp {
         if let Ok(h) = w.hwnd() {
             unsafe {
                 SetWindowPos(
-                    h.0 as *mut std::ffi::c_void,
+                    h.0,
                     HWND_TOPMOST,
                     0,
                     0,

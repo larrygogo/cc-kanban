@@ -186,13 +186,10 @@ fn watch(pty: &mut Pty, secs: u64) -> Vec<u8> {
     let start = Instant::now();
     let end = start + Duration::from_secs(secs);
     while Instant::now() < end {
-        match pty.rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(c) => {
-                eprintln!("[watch] +{}B @{:?}", c.len(), start.elapsed());
-                answer_queries(pty, &c, "watch");
-                out.extend_from_slice(&c);
-            }
-            Err(_) => {}
+        if let Ok(c) = pty.rx.recv_timeout(Duration::from_millis(500)) {
+            eprintln!("[watch] +{}B @{:?}", c.len(), start.elapsed());
+            answer_queries(pty, &c, "watch");
+            out.extend_from_slice(&c);
         }
     }
     out
