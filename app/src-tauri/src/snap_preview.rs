@@ -17,7 +17,10 @@ const LABEL: &str = "snap-preview";
 mod imp {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    use tauri::Manager;
+    use tauri::{Emitter, Manager};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
 
     use super::LABEL;
     use crate::snap::{Edge, Rect};
@@ -38,6 +41,10 @@ mod imp {
     /// 最近一次 update 算出的预览条几何（物理像素）：建窗子线程在建好后应用它——
     /// 建窗是异步的，建好那一刻的几何只能从这里拿。
     static LATEST_RECT: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
+
+    /// 最近一次候选边：建窗失败重发 snap-changed 时要用——Moved 只在边**变化**时
+    /// emit（W-9），不重发的话失败的那次拖拽整段无预览（ghost 已被 native=true 收起）。
+    static LAST_EDGE: std::sync::Mutex<Option<Edge>> = std::sync::Mutex::new(None);
 
     pub fn set_extent(extent: f64) {
         EXTENT_BITS.store(
@@ -65,6 +72,23 @@ mod imp {
         // 页面就绪前不 show（防白帧）；已可见时重复 show 是无谓的 SetWindowPos，跳过。
         if READY.load(Ordering::Relaxed) && !w.is_visible().unwrap_or(false) {
             let _ = w.show();
+        }
+        // 抬到置顶带最上层：贴纸被拖动时是**激活的**置顶窗，预览窗 focused(false) 永不
+        // 激活，z 序沉在贴纸之下——候选边与窗口重叠时预览条被盖住（实拍：「ghost 在
+        // 贴纸下面」）。每帧落位后重新 SetWindowPos(TOPMOST) 抬回；NOACTIVATE 保拖拽
+        // 循环不丢焦点（焦点易主会让 OS 提前结束拖动，见 create_window 注释）。
+        if let Ok(h) = w.hwnd() {
+            unsafe {
+                SetWindowPos(
+                    h.0 as *mut std::ffi::c_void,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
         }
     }
 
@@ -103,6 +127,11 @@ mod imp {
             Err(e) => {
                 eprintln!("[snap-preview] 创建预览窗失败，本次运行回退 .snap-ghost: {e}");
                 BROKEN.store(true, Ordering::Relaxed);
+                // 本次候选边出现时 update 已返回 true、前端收起了 ghost——Moved 只在
+                // 边变化时重发 snap-changed（W-9），不主动补一发的话这次拖拽整段无预览。
+                // 立刻以 native=false 重发，前端当次拖拽即回退窗口内缘 ghost。
+                let edge = *LAST_EDGE.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = app.emit("snap-changed", crate::snap::SnapPayload { edge, native: false });
             }
         }
         CREATING.store(false, Ordering::Relaxed);
@@ -132,9 +161,11 @@ mod imp {
         scale: f64,
     ) -> bool {
         let Some(edge) = edge else {
+            *LAST_EDGE.lock().unwrap_or_else(|e| e.into_inner()) = None;
             hide(app);
             return !BROKEN.load(Ordering::Relaxed);
         };
+        *LAST_EDGE.lock().unwrap_or_else(|e| e.into_inner()) = Some(edge);
         WANT_VISIBLE.store(true, Ordering::Relaxed);
         let r = crate::snap::preview_strip_rect(edge, win, work, extent_logical(), scale);
         *LATEST_RECT.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
@@ -143,8 +174,8 @@ mod imp {
         } else if !BROKEN.load(Ordering::Relaxed) && !CREATING.swap(true, Ordering::Relaxed) {
             // 首次出现候选边：起子线程懒建窗（不能在 Moved 回调里同步 build，见
             // create_window 注释）。建好前的几十~几百毫秒没有原生条——返回 true 让
-            // 前端也收起 ghost（避免建好后双预览并存）；若建窗失败（BROKEN），下一次
-            // 候选边变化帧会以 native=false 通知前端回退 ghost。
+            // 前端也收起 ghost（避免建好后双预览并存）；若建窗失败（BROKEN），create_window
+            // 会立刻重发 native=false 让前端当次拖拽即回退 ghost（见那里的注释）。
             let app = app.clone();
             std::thread::spawn(move || create_window(app));
         }
