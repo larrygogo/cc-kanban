@@ -84,10 +84,16 @@ describe("ChatWindow 远程门控", () => {
   it("远程态:新建会话事件选中临时 id(启动中占位),binding 认领后落到真会话", async () => {
     markRemoteUi();
     // 无 ?sessionId、无存储恢复 → sessionId=0 空态(用户实拍反馈的落点)。
+    // 认领结果挂进我们手里的 deferred:负 id 生效的那一拍 resolve() 就发出(挂载即
+    // void resolve(),不等 250ms 节拍),mock 若立即兑现,占位「会话正在启动…」只在
+    // 相邻两次 commit 之间存在,waitFor 首拍经常抓不到——全量跑高负载下 flake 过。
+    // 挂起认领把占位钉成稳态,断言后再放行,占位/认领两段时序各自确定。
+    let releaseClaim: ((id: number) => void) | undefined;
+    const claim = new Promise<number>((resolve) => { releaseClaim = resolve; });
     invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       // 临时 id -3 认领成真 id 7(T-13 binding 轮询通道,managed_terminal_binding 在远程白名单)。
       if (command === "managed_terminal_binding") {
-        return Promise.resolve((args?.sessionId as number) === -3 ? 7 : null);
+        return (args?.sessionId as number) === -3 ? claim : Promise.resolve(null);
       }
       return runningSessionImpl(command, args);
     });
@@ -99,7 +105,8 @@ describe("ChatWindow 远程门控", () => {
     await waitFor(() => expect(screen.getByText("会话正在启动…")).toBeTruthy());
     expect(screen.queryByText("从侧栏选择一个会话")).toBeNull();
 
-    // 认领(250ms 轮询)后原地重绑:加载真会话历史,空态/占位都退场。
+    // 放行认领:原地重绑成真会话,空态/占位都退场。
+    releaseClaim!(7);
     await waitFor(() => expect(screen.getByText("门控用例")).toBeTruthy(), { timeout: 3000 });
     expect(screen.queryByText("会话正在启动…")).toBeNull();
   });
