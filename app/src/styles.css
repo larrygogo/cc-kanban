@@ -892,9 +892,11 @@ button.stab {
 /* 在线空闲=绿环绿芯（红绿灯语言，与侧栏/缩略条一致）；压暗一档与「在跑」的呼吸绿区分。 */
 .sdot-on { border-color: var(--cc-ok-vivid); opacity: 0.55; }
 .sdot-on::before { background: var(--cc-ok-vivid); }
-/* 无屏幕检测的会话角标回落 DB status（滞后快照，T-15）：弱化呈现，与托管会话的
-   实时角标区分——用户不该把「按记录推断」读成「实时判定」。 */
-.stk-badge-assumed { display: inline-flex; opacity: 0.45; }
+/* 无屏幕检测的会话角标回落 DB status（滞后快照，T-15）：「按记录推断 ≠ 实时判定」的
+   区分只走文案层（包层的「…（推断）」tip/aria，P2-11），不再降透明度——实拍反馈：
+   外部打开的会话被降亮度读成了「不可用/已断开」。包层保留是为了压住内层 RunBadge 的
+   自信 tip（见下）。 */
+.stk-badge-assumed { display: inline-flex; }
 /* 弱化徽标的视觉内层（P2-11）：pointer-events 关掉后悬停命中的是包层——
    tooltip/读屏都只见包层的「…（推断）」，内层 RunBadge 的「自信」tip 被压制。 */
 .stk-badge-assumed-inner { display: inline-flex; pointer-events: none; }
@@ -1139,9 +1141,9 @@ button.stab {
 .cstrip-pending { background: var(--cc-warn-vivid); animation: cstrip-pulse 1.8s ease-in-out infinite; }
 .cstrip-error { background: var(--cc-err-vivid); }
 /* 置信度分层（P2-4，与卡片徽标同口径，判定见 helpers 的 toneConfidence）：
-   assumed=无屏幕检测、回落 DB status 的滞后快照——降透明度，同卡片 .stk-badge-assumed；
+   assumed=无屏幕检测、回落 DB status 的滞后快照——区分只走 tooltip 文案（实拍反馈
+   不降透明度，同卡片 .stk-badge-assumed）；
    fallback=屏幕兜底 idle（「认不出来」而非「确认空闲」）——降中性色，同卡片 sdot-off。 */
-.cstrip-dot.is-assumed { opacity: 0.45; }
 .cstrip-dot.is-fallback { background: var(--cc-text-faint); animation: none; }
 @keyframes cstrip-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 /* W-5 溢出徽章：主轴放不下的会话折成末尾「+N」，小一号字号以适配 28px 条厚。 */

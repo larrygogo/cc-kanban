@@ -113,8 +113,9 @@ function activity(l: Item): "pending" | "running" | "waiting" | null {
  *  缩略条曾自写一套只看 status 的映射，待审批会话在条上被画成绿色运行点、
  *  「有人在等你」的信号被抹掉（评审发现）——判定必须住在这一处。
  *  注：tone 只回答「画成哪一档」，不回答「这个判定有多可信」——角标的两层不自信
- *  区分（无 screen_state 回落 DB status 的弱化、fallback idle 降中性点，T-15）
- *  由下方的 toneConfidence 回答（tab 归属等判定不消费它，呈现层才消费）。 */
+ *  区分（无 screen_state 回落 DB status 的 assumed、fallback idle 降中性点，T-15）
+ *  由下方的 toneConfidence 回答（tab 归属等判定不消费它，呈现层才消费）。
+ *  assumed 的区分只走文案层，不降透明度（实拍反馈，见 toneConfidence 注释）。 */
 export type CardTone = "offline" | "error" | "pending" | "running" | "waiting" | "on";
 export function cardTone(l: Item): CardTone {
   if (!l.connected) return "offline";
@@ -126,7 +127,9 @@ export function cardTone(l: Item): CardTone {
  *  「这个判定有多可信」。卡片徽标（Sticker）与缩略条状态点（CollapsedStrip）共用
  *  这一处判定——条上曾只看 tone，弱化口径与卡片漂移。
  *  - "assumed"：无屏幕检测（screen_state==null）的会话（外部终端、外库卡），tone
- *    回落 DB status——hook 事件驱动的滞后快照，弱化呈现（卡片半透明徽标/条点降透明度）。
+ *    回落 DB status——hook 事件驱动的滞后快照。「按记录推断 ≠ 实时判定」的区分只走
+ *    文案层（卡片包层/条点的「（推断）」tip），不降透明度——实拍反馈：外部打开的
+ *    会话被降亮度读成了「不可用/已断开」。
  *  - "fallback"：屏幕检测走了兜底（什么规则都没命中、回退 idle 判 waiting）——是
  *   「认不出来」而不是「确认空闲」，降中性灰点。
  *  tone 由 cardTone 算出后传入，避免重复计算。 */

@@ -130,8 +130,9 @@ export function CollapsedStrip({
             // items 已过滤 connected，不会出现 offline。
             const tone = cardTone(l);
             // 置信度分层也与卡片同源（toneConfidence，P2-4）：assumed（无屏幕检测、回落
-            // DB status）降透明度、fallback（屏幕兜底 idle）换中性色——曾只画 tone，
-            // 条上的点读不出「按记录推断」与「实时判定」的区别。
+            // DB status）只在 tooltip 文案标「推断」（实拍反馈不降透明度）、fallback（屏幕
+            // 兜底 idle）换中性色——曾只画 tone，条上的点读不出「按记录推断」与「实时判定」
+            // 的区别。
             const confidence = toneConfidence(l, tone);
             const cls = (tone === "error"
               ? "cstrip-error"
