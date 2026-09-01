@@ -1188,7 +1188,8 @@ button.stab {
 .snap-ghost-top { top: 0; left: 50%; transform: translateX(-50%); height: 28px; border-radius: 0 0 var(--r-lg) var(--r-lg); }
 
 /* W-2 原生吸附预览条（Windows，snap-preview 窗口的全部内容）：与 .snap-ghost 同色系
-   （虚线描边 + accent 浅底 + 同步呼吸）。独立顶层窗口无法按候选边只圆单侧，四边统一圆角。
+   （虚线描边 + accent 浅底 + 同步呼吸）。圆角按候选边与真实缩略条同形态（.cstrip-{edge}
+   同款）——贴屏边的一侧直角、自由侧圆角；当前边由 Rust 经 body[data-edge] 逐帧推送。
    该窗由 Rust 逐帧定位到屏幕边缘、点击穿透；本元素只管填满窗口并呈现主题色。 */
 .snap-preview-bar {
   width: 100%;
@@ -1199,6 +1200,9 @@ button.stab {
   border-radius: var(--r-lg);
   animation: snap-glow-pulse 0.9s ease-in-out infinite;
 }
+body[data-edge="top"] .snap-preview-bar { border-radius: 0 0 var(--r-lg) var(--r-lg); }
+body[data-edge="left"] .snap-preview-bar { border-radius: 0 var(--r-lg) var(--r-lg) 0; }
+body[data-edge="right"] .snap-preview-bar { border-radius: var(--r-lg) 0 0 var(--r-lg); }
 
 /* W-4：展开过渡占位——snap_expand/snap_restore 落地前窗口仍是 28px 细条几何，全量看板
    此刻渲染会被压进细条宽度造成布局抖动；先铺一块与贴纸同底色/边框/圆角的纯色块

@@ -50,6 +50,30 @@ mod imp {
     /// 最近一次候选边：建窗失败重发 snap-changed 时要用——Moved 只在边**变化**时
     /// emit（W-9），不重发的话失败的那次拖拽整段无预览（ghost 已被 native=true 收起）。
     static LAST_EDGE: std::sync::Mutex<Option<Edge>> = std::sync::Mutex::new(None);
+    /// 预览页 body[data-edge] 当前值（外层 None = 尚未推过）。候选边变化才推——
+    /// 每帧 eval 是无谓的 IPC 刷屏；页面重载后 on_ready 强制重推（dataset 随文档丢失）。
+    static PUSHED_EDGE: std::sync::Mutex<Option<Option<Edge>>> = std::sync::Mutex::new(None);
+
+    /// 把当前候选边推到预览页：圆角按边与真实缩略条同形态（贴屏边一侧直角、自由侧
+    /// 圆角，对照 styles.css 的 .cstrip-top/left/right——预览曾是四边统一圆角，贴边
+    /// 那侧被实拍指出「贴边的那侧应该没有圆角」）。
+    fn push_edge(w: &tauri::WebviewWindow, force: bool) {
+        let edge = *LAST_EDGE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pushed = PUSHED_EDGE.lock().unwrap_or_else(|e| e.into_inner());
+        if !force && *pushed == Some(edge) {
+            return;
+        }
+        let value = edge
+            .map(|e| match e {
+                Edge::Left => "left",
+                Edge::Right => "right",
+                Edge::Top => "top",
+            })
+            .unwrap_or("");
+        // 固定字面量（{:?} 产出合法 JS 字符串），无注入面。
+        let _ = w.eval(&format!("document.body.dataset.edge={value:?}"));
+        *pushed = Some(edge);
+    }
 
     pub fn set_extent(extent: f64) {
         EXTENT_BITS.store(
@@ -84,6 +108,8 @@ mod imp {
             return;
         }
         READY.store(true, Ordering::Relaxed);
+        // 页面（重）挂载后 dataset 全新：强制重推边缘形态，圆角才能按边生效。
+        push_edge(window, true);
         if WANT_VISIBLE.load(Ordering::Relaxed) {
             let _ = window.show();
         }
@@ -114,6 +140,8 @@ mod imp {
                 );
             }
         }
+        // 圆角跟随候选边（贴边侧直角）：边变化才推，见 push_edge 注释。
+        push_edge(w, false);
     }
 
     /// 建窗子线程：同步 build 绝不能跑在 Moved 事件回调里（实测 on_window_event 内
