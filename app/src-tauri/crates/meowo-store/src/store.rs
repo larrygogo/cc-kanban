@@ -1839,12 +1839,60 @@ fn strip_image_markers(s: &str) -> String {
     result
 }
 
-/// 清洗 prompt：剔除图片标记 + 折叠空白 + 去首尾空白。
+/// 清洗 prompt：剔除附件注入指令 + <system>…</system> 段 + 图片标记 + 折叠空白 + 去首尾空白。
 fn sanitize_prompt(s: &str) -> String {
-    strip_image_markers(s)
+    strip_image_markers(&strip_system_segments(&strip_attachment_instruction(s)))
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// meowo 自己的附件注入（promptWithAttachments → i18n attachmentInstruction，zh/en 两文）：
+/// hook 的 prompt 原样携带它，首条 prompt 命名出的标题/最近消息就成了指令头（实拍：
+/// 发图会话标题「请读取并结合以下本地附件完成任务…」）。指令头行与紧随的「- <路径>」
+/// 清单行一并剔除。前缀匹配刻意放宽——改 i18n 文案后半句不必同步这里，改前半句必须同步。
+fn strip_attachment_instruction(s: &str) -> String {
+    const HEADERS: [&str; 2] = [
+        "请读取并结合以下本地附件完成任务",
+        "Read the following local attachments",
+    ];
+    let mut out = String::with_capacity(s.len());
+    let mut skip_list = false;
+    for line in s.lines() {
+        if HEADERS.iter().any(|h| line.trim_start().starts_with(h)) {
+            skip_list = true;
+            continue;
+        }
+        if skip_list && line.trim_start().starts_with('-') {
+            continue;
+        }
+        skip_list = false;
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// kimi 系 harness 给附图 prompt 前置的 `<system>…</system>` 注记（如「Image compressed
+/// to fit model limits…」）不是用户写的内容——hook 的 prompt 字段原样带着它，不做剔除
+/// 的话首条 prompt 命名出的标题/最近消息就是这行系统噪音（实拍：发图会话标题被它占满）。
+/// 未闭合（不该发生）时不做丢弃，原样保留剩余——宁可漏剥，不可误吃用户文本。
+fn strip_system_segments(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("<system>") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("</system>") {
+            Some(end) => rest = &rest[start + end + "</system>".len()..],
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// 无 todo -> todo；有 in_progress 或部分完成 -> doing；全 completed -> done。

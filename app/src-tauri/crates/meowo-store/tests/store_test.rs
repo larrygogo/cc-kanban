@@ -373,6 +373,73 @@ fn image_only_prompt_keeps_placeholder_title() {
     assert_eq!(t.current_activity, None);
 }
 
+
+/// kimi 附图 prompt 的前置 `<system>…</system>` 注记不是用户文本——不进标题（实拍：
+/// 发图会话标题曾是「<system>Image compressed to fit model limits: origina…」）。
+#[test]
+fn system_segment_is_stripped_from_title() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, tid) = store.start_session(pid, "cc-sys", 200).unwrap();
+    store
+        .on_user_prompt(
+            sid,
+            "<system>Image compressed to fit model limits: original image 1089x228 → 512x107</system>
+测试一下",
+            300,
+        )
+        .unwrap();
+    assert_eq!(store.get_task(tid).unwrap().title, "测试一下");
+}
+
+/// 注记未闭合时不做丢弃（宁可漏剥，不可误吃用户文本）。
+#[test]
+fn unclosed_system_segment_is_kept() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, tid) = store.start_session(pid, "cc-sys2", 200).unwrap();
+    store
+        .on_user_prompt(sid, "看这段 <system> 标签怎么用", 300)
+        .unwrap();
+    assert_eq!(store.get_task(tid).unwrap().title, "看这段 <system> 标签怎么用");
+}
+
+/// meowo 自己的附件注入指令也不是用户文本——不进标题（实拍：发图会话标题
+/// 「请读取并结合以下本地附件完成任务…」）。
+#[test]
+fn attachment_instruction_is_stripped_from_title() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, tid) = store.start_session(pid, "cc-att", 200).unwrap();
+    store
+        .on_user_prompt(
+            sid,
+            r"重点看这张
+请读取并结合以下本地附件完成任务（图片请使用图像读取能力）：
+- C:	mp.png
+- C:	mp.png",
+            300,
+        )
+        .unwrap();
+    assert_eq!(store.get_task(tid).unwrap().title, "重点看这张");
+}
+
+/// 纯附图消息（正文为空）：指令剥光后标题保持占位，不拿指令头充数。
+#[test]
+fn attachment_only_prompt_keeps_placeholder_title() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, tid) = store.start_session(pid, "cc-att2", 200).unwrap();
+    store
+        .on_user_prompt(
+            sid,
+            r"请读取并结合以下本地附件完成任务（图片请使用图像读取能力）：
+- C:	mp.png",
+            300,
+        )
+        .unwrap();
+    assert_eq!(store.get_task(tid).unwrap().title, "(未命名会话)");
+}
 // == session cwd ==
 #[test]
 fn set_and_get_session_cwd() {
