@@ -87,6 +87,26 @@ describe("applySettingsFilter（设置搜索过滤，S-1）", () => {
     expect(shown(body.querySelector(".sec-hint"))).toBe(false);
   });
 
+  it("下拉未展开选项的隐藏语料（.dd-search）参与行匹配：搜 WezTerm 命中「恢复终端」行", () => {
+    const body = document.createElement("div");
+    body.innerHTML = `
+      <div class="main-sec" data-sec="general">
+        <div class="row-card">
+          <div class="row"><div class="row-text"><div class="row-label">恢复终端</div></div>
+            <div class="dd"><button class="dd-btn">Windows Terminal</button>
+              <span class="dd-search" hidden aria-hidden="true">Windows Terminal WezTerm PowerShell</span>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    const any = applySettingsFilter(body, "wezterm", NAV);
+    expect(any).toBe(true);
+    expect(shown(body.querySelector(".row"))).toBe(true);
+    // 语料不干扰清空复位（它不在过滤直写的选择器里）
+    applySettingsFilter(body, "", NAV);
+    expect((body.querySelector(".row") as HTMLElement).style.display).toBe("");
+  });
+
   it("零命中返回 false 且全部分区隐藏（驱动「无结果」提示）", () => {
     const body = build();
     const any = applySettingsFilter(body, "不存在的设置xyz", NAV);

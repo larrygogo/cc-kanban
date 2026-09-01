@@ -201,6 +201,13 @@ export function Dropdown<T extends string | number>({
         </span>
         <ChevronDownIcon className="dd-chev" />
       </button>
+      {/* 设置搜索语料（S-1）：选项列表未展开时不渲染，行文本匹配不到选项 label
+          （搜 "WezTerm" 找不到「恢复终端」）。这里挂一份静态文本补足——hidden 不显示、
+          aria-hidden 不让读屏重复朗读；searchFilter 走 textContent 故能命中。
+          label 由调用方按当前语言传入，切语言时随重渲染自动刷新。 */}
+      <span className="dd-search" hidden aria-hidden="true">
+        {options.map((o) => o.label).join(" ")}
+      </span>
       {open && (
         <div className="dd-menu" role="listbox" ref={menuRef} style={{ position: "fixed", top: pos.top, bottom: pos.bottom, left: pos.left, right: pos.right, width: pos.width }}>
           {options.map((o) => (

@@ -109,6 +109,18 @@ describe("Dropdown（统一菜单 primitive）", () => {
     expect(screen.queryByRole("option")).toBeNull();
   });
 
+  it("未展开时选项 label 进入隐藏搜索语料（供设置搜索命中，读屏不重复朗读）", () => {
+    renderDropdown();
+    const corpus = document.querySelector(".dd-search") as HTMLElement;
+    expect(corpus).toBeTruthy();
+    expect(corpus.hidden).toBe(true);
+    expect(corpus.getAttribute("aria-hidden")).toBe("true");
+    // 全部选项都在语料里，而不只是当前选中项
+    for (const o of options) expect(corpus.textContent).toContain(o.label);
+    // 视觉与交互无变化：语料不参与渲染，也不被当成按钮/选项
+    expect(screen.queryByRole("option")).toBeNull();
+  });
+
   it("焦点不在菜单里时 Esc 只关菜单、不抢焦点", () => {
     render(
       <>
