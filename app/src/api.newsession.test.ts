@@ -40,6 +40,13 @@ describe("new-session api", () => {
     });
   });
 
+  it("newSession 透传 invoke 返回值：远程桥回临时负 id，桌面回 null", async () => {
+    invokeMock.mockResolvedValue(-7);
+    await expect(newSession("C:/p", "claude")).resolves.toBe(-7);
+    invokeMock.mockResolvedValue(null);
+    await expect(newSession("C:/p", "claude")).resolves.toBeNull();
+  });
+
   it("checkProviderHooks 传 provider", () => {
     invokeMock.mockResolvedValue("missing");
     checkProviderHooks("codex");

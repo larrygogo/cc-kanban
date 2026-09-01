@@ -6,7 +6,7 @@
 //  - ChatWindow / NewSessionPanel 用 React.lazy 延迟到渲染期加载,那时桥早已就位。
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { markRemoteUi, REMOTE_SETTINGS_EVENT } from "../remoteMode";
+import { markRemoteUi, REMOTE_SETTINGS_EVENT, SELECT_SESSION_EVENT } from "../remoteMode";
 import { installRemoteTransport, NEW_SESSION_EVENT, getToken } from "./transport";
 import { getSettings } from "../api";
 import { TokenGate } from "./TokenGate";
@@ -69,7 +69,17 @@ function RemoteApp() {
       <ChatWindow />
       {newSession && (
         <div className="remote-new-session-overlay">
-          <NewSessionPanel onClose={() => setNewSession(null)} prefill={newSession} />
+          <NewSessionPanel
+            onClose={() => setNewSession(null)}
+            prefill={newSession}
+            // 启动成功:临时负 id 经页内事件送 ChatWindow 选中新会话(侧栏点选的同一通道;
+            // 桥不 reveal,没有这一步用户会落回「去侧栏选会话」空态)。null 不导航。
+            onLaunched={(tempId) => {
+              if (typeof tempId === "number") {
+                window.dispatchEvent(new CustomEvent(SELECT_SESSION_EVENT, { detail: tempId }));
+              }
+            }}
+          />
         </div>
       )}
     </>

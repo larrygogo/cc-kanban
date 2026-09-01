@@ -25,6 +25,11 @@ export function remoteUi(): boolean {
  *  不能反向 import 移动端模块。 */
 export const NEW_SESSION_EVENT = "meowo:remote-new-session";
 
+/** 远程新建会话启动成功后的页内导航事件（detail = 临时负 id）：NewSessionPanel 经
+ *  RemoteApp 派发、ChatWindow 监听后走侧栏点选同一条 resetTo 通道选中新会话。
+ *  没有它，新建后用户落回「去侧栏选会话」空态——桥不 reveal，新会话无从定位。 */
+export const SELECT_SESSION_EVENT = "meowo:remote-select-session";
+
 /** settings-changed 的远程替身:Tauri push 事件到不了浏览器,mobile 入口轮询 get_settings
  *  发现变化后派发此 DOM 事件(detail = 完整 Settings),appearance/i18n 等共享消费方在
  *  remoteUi() 下额外订阅它——桌面改主题/语言,手机不再要刷新才跟上。 */

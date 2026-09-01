@@ -226,6 +226,16 @@ describe("NewSessionPanel (独立窗口)", () => {
     expect(emitMock).not.toHaveBeenCalledWith("session-starting", expect.anything());
   });
 
+  it("启动成功后把临时负 id 交给 onLaunched（远程选中新会话的导航句柄）", async () => {
+    // 远程桥透传 temp_id；桌面命令回 () → undefined（null）。RemoteApp 凭它选中会话。
+    api.newSession.mockResolvedValue(-7);
+    const onLaunched = vi.fn();
+    render(<NewSessionPanel onClose={() => {}} onLaunched={onLaunched} />);
+    fireEvent.change(await screen.findByTestId("ns-dir"), { target: { value: "C:/proj" } });
+    fireEvent.click(screen.getByTestId("ns-launch"));
+    await waitFor(() => expect(onLaunched).toHaveBeenCalledWith(-7));
+  });
+
   /// 跨仓同一需求 = 一个会话 + 附加目录:Ctrl+点击最近项附加,启动把附加目录交给后端
   /// 拼 --add-dir;主目录本身不重复附加。
   it("Ctrl+点击最近项加为附加目录,启动带 extraDirs", async () => {

@@ -931,7 +931,9 @@ export type HooksStatus = "installed" | "missing" | "unknown";
 /** 新建一个全新会话：起托管 PTY，视图与终端类型由设置的 session_open_in / resume_terminal 决定。 */
 /** `options`：启动选项的选择（option id → choice id），映射成 flag 由后端按插件声明表完成。
  *  `extraDirs`：附加目录（跨仓同一需求 = 一个会话 + --add-dir）;仅声明支持的 agent 接受。 */
-export function newSession(cwd: string, provider: AgentId, options?: Record<string, string>, extraDirs: string[] = []): Promise<void> {
+/** 返回：桌面命令回 () → null（reveal 开窗即导航，前端无需句柄）；远程桥回临时负 id，
+ *  移动页据此选中新会话（ChatWindow 的 binding 轮询认领后重绑成真 id）。 */
+export function newSession(cwd: string, provider: AgentId, options?: Record<string, string>, extraDirs: string[] = []): Promise<number | null> {
   return invoke("new_session", { cwd, provider, options, extraDirs });
 }
 

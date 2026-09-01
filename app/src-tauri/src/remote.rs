@@ -35,6 +35,13 @@
 //! `rename_all = "camelCase"` + `deny_unknown_fields`，与前端 invoke 的调用契约
 //! 逐名对齐；返回值原样透传 serde 结果（DTO 的 case 本就不统一，桥不做二次加工）。
 //! 若某命令日后新增 `Window` 参数，这里会**编译期变红**——显式耦合，属预期。
+//!
+//! 例外：`new_session` 的返回值与桌面契约刻意分叉——桌面回 ()（reveal_session 即导航），
+//! 桥透传临时负 id 供移动页选中新会话（详见该臂注释）；参数契约仍逐名对齐。
+//!
+//! 反例教训（2026-08-31）：api.ts 给 `newSession` 加 `extraDirs` 时没同步桥臂，
+//! deny_unknown_fields 把手机端每次新建会话都打成 400（字段空也发 `[]`，无可选豁免）。
+//! **改 api.ts 的 invoke 传参时必须同步本文件对应臂**——这是人肉契约，编译期不兜底。
 
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -1098,10 +1105,18 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
                 terminal: Option<String>,
                 #[serde(default)]
                 options: Option<std::collections::HashMap<String, String>>,
+                // 移动页与桌面共用 NewSessionPanel，api.ts 恒带 extraDirs（空也为 []）——
+                // 缺这个字段 deny_unknown_fields 会把手机端每次新建都打成 400。
+                #[serde(default)]
+                extra_dirs: Option<Vec<String>>,
             }
             let a = args!(A);
             // 只启动托管 PTY，不 reveal（桌面命令的 reveal_session 会在宿主机弹窗/开
-            // 外部终端——手机新建会话时桌面凭空开窗不可接受）。返回 () 与桌面契约对齐。
+            // 外部终端——手机新建会话时桌面凭空开窗不可接受）。
+            // 返回值与桌面契约刻意**不同**：桌面命令回 ()（reveal 即导航，前端无需句柄）；
+            // 桥没有 reveal 这条导航，把临时负 id 透传给移动页——前端据此立即选中新会话
+            // （T-13 binding 轮询认领成真 id），否则用户被丢回「去侧栏选会话」空态。
+            // api.ts newSession 为 Promise<number | null>：桌面 undefined→null，桥→temp_id。
             let broker = state.ptys.clone();
             reply(
                 crate::terminal::new_session_inner(
@@ -1110,11 +1125,9 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
                     a.cwd,
                     a.provider,
                     a.options,
-                    // 手机端新建暂不带附加目录(移动页无该表单);None = 单目录会话。
-                    None,
+                    a.extra_dirs,
                 )
-                .await
-                .map(|_temp_id| ()),
+                .await,
             )
         }
         "check_provider_hooks" => {

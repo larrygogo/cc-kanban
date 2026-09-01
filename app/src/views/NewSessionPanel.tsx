@@ -75,10 +75,13 @@ function saveStoredOpts(provider: string, opts: Record<string, string>) {
   }
 }
 
-export function NewSessionPanel({ onClose, prefill }: {
+export function NewSessionPanel({ onClose, prefill, onLaunched }: {
   onClose?: () => void;
   /** 远程页内打开时的预填(桌面走 URL query / ns-prefill 事件,远程两条都不通,改走 props)。 */
   prefill?: { cwd?: string | null; provider?: string | null };
+  /** 启动成功回调(临时负 id,桌面恒 null)。远程 RemoteApp 借此选中新会话;桌面不传,
+   *  reveal 开窗即导航,无需此通道。 */
+  onLaunched?: (tempId: number | null) => void;
 } = {}): ReactElement {
   const startCwd = prefill?.cwd != null ? normalizePath(prefill.cwd) : initialCwd;
   const startProvider = (prefill?.provider ?? initialProvider) as AgentId | null;
@@ -284,10 +287,13 @@ export function NewSessionPanel({ onClose, prefill }: {
     try {
       // 附加目录剔除与主目录重复的(归一比较):agent 对同一目录拿两份授权无意义。
       const extras = extraDirs.filter((d) => pathKey(d) !== pathKey(cwd.trim()));
-      await newSession(cwd.trim(), provider, opts, extras);
+      const tempId = await newSession(cwd.trim(), provider, opts, extras);
       saveStoredOpts(provider, opts); // 启动成功才记：失败的组合不该成为下次的默认
       // 「正在启动」的可见反馈由看板的占位卡承担（后端把 pending PTY 合成负 id 占位项
       // 合入看板查询，认领出真卡后对账撤下），面板这里启动成功直接自关即可。
+      // 远程没有 reveal 这条导航：自关前把临时 id 交回 RemoteApp 选中新会话，
+      // 否则用户被丢回「去侧栏选会话」空态。桌面 onLaunched 为空，行为零改变。
+      onLaunched?.(tempId);
       closeWin();
     } catch (e) {
       launchPendingRef.current = false;

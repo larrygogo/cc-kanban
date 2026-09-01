@@ -3563,6 +3563,10 @@ select.ns-input {
    三段类选择器压过上面 non-mac 的透明底（同特异性、本组在后）。 */
 .chat-sidebar-scrim { position: absolute; inset: 0; z-index: 60; background: rgba(0, 0, 0, 0.18); }
 .chat-sidebar-overlay { position: absolute; top: 0; bottom: 0; left: 0; z-index: 61; display: flex; flex-direction: column; width: 244px; background: var(--cc-window-bg); border-right: 1px solid var(--cc-border); box-shadow: 14px 0 36px rgba(0, 0, 0, 0.22); }
+/* 抽屉常驻挂载（首开后不卸载，消「每次打开都加载中」）：hidden 隐藏时本类的 display:flex
+   会盖过 UA 的 [hidden]{display:none}，必须显式压回。 */
+.chat-sidebar-scrim[hidden],
+.chat-sidebar-overlay[hidden] { display: none; }
 .chat-sidebar-overlay-head { height: 42px; flex: 0 0 auto; display: flex; align-items: center; padding: 0 var(--sp-12); }
 /* macOS：抽屉从窗口最顶展开，头部按钮必须给左上角的原生红绿灯让位（与其余 mac 头部同规）。 */
 :root.platform-macos .chat-sidebar-overlay-head { padding-left: 84px; }

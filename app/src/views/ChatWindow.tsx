@@ -39,7 +39,7 @@ import { ManagedTerminal } from "./ManagedTerminal";
 import { WindowControls } from "./WindowControls";
 import { DevBadge } from "./DevBadge";
 import { isMac } from "../platform";
-import { remoteUi, NEW_SESSION_EVENT } from "../remoteMode";
+import { remoteUi, NEW_SESSION_EVENT, SELECT_SESSION_EVENT } from "../remoteMode";
 import { appendTerminalText, modeFromScreen, terminalAttention as detectTerminalAttention, visibleTerminalText, type AttentionGrammar, type TerminalAttention, type TerminalAttentionOption } from "../terminalAttention";
 import { Dropdown, useMenuPopup } from "./menu";
 // 恢复时的权限改选需要 agent 的启动选项声明表（与新建会话面板同源）。
@@ -1019,6 +1019,13 @@ export function ChatWindow() {
   // jsdom 没有 matchMedia，恒按宽窗走（测试语义不变）。
   const [narrow, setNarrow] = useState(() => typeof window.matchMedia === "function" && window.matchMedia(SIDEBAR_NARROW_QUERY).matches);
   const [overlaySidebar, setOverlaySidebar] = useState(false);
+  // 抽屉首开后保持挂载（S-2 同款常驻）：每次打开都重挂会让 ChatSidebar 的列表状态
+  // 清零、远程 650ms 轮询空窗期整栏「加载中」闪屏（移动端实拍反馈）。隐藏用 hidden
+  // 属性而非卸载，列表数据与滚动位置都在；拉宽回桌面形态时随 narrow 翻转整体卸载。
+  const [drawerMounted, setDrawerMounted] = useState(false);
+  useEffect(() => {
+    if (narrow && overlaySidebar) setDrawerMounted(true);
+  }, [narrow, overlaySidebar]);
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
     const mq = window.matchMedia(SIDEBAR_NARROW_QUERY);
@@ -1699,6 +1706,17 @@ export function ChatWindow() {
     setOverlaySidebar(false);
     resetTo(id);
   }, [resetTo]);
+  // 远程新建会话启动成功:RemoteApp 把临时负 id 经页内事件送回来(桥不 reveal,这是移动端
+  // 唯一的导航通路)。选中走侧栏点选同一条 resetTo 通道;负 id 由上面的 binding 轮询
+  // (managed_terminal_binding 在远程白名单内)在认领后原地重绑成真 id。桌面此事件永不派发。
+  useEffect(() => {
+    const select = (e: Event) => {
+      const id = (e as CustomEvent<unknown>).detail;
+      if (typeof id === "number") selectFromOverlay(id);
+    };
+    window.addEventListener(SELECT_SESSION_EVENT, select);
+    return () => window.removeEventListener(SELECT_SESSION_EVENT, select);
+  }, [selectFromOverlay]);
 
   const refresh = useCallback(async () => {
     if (sessionId <= 0 || busyRef.current) {
@@ -3268,10 +3286,10 @@ export function ChatWindow() {
       {/* 窄窗浮窗形态（Kimi 式全高抽屉）：挂在窗口层级、从最顶盖到最底——锚在 chat-body
           会被顶栏截一刀（实拍反馈「被分割」）。scrim 点外关；抽屉自带头部行放开关钮，
           与顶栏同高同位，视觉上按钮原地不动、抽屉从它底下展开；选中会话即收（抽屉惯例）。 */}
-      {narrow && overlaySidebar && (
+      {narrow && drawerMounted && (
         <>
-          <div className="chat-sidebar-scrim" onClick={() => setOverlaySidebar(false)} />
-          <div className="chat-sidebar-overlay">
+          <div className="chat-sidebar-scrim" hidden={!overlaySidebar} onClick={() => setOverlaySidebar(false)} />
+          <div className="chat-sidebar-overlay" hidden={!overlaySidebar}>
             <div className="chat-sidebar-overlay-head">{sidebarToggleButton}</div>
             <ChatSidebar
               activeId={sessionId}
