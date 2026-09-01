@@ -339,36 +339,54 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   // 3s 后 pty-exit 到达再弹一次退出封面(T-5 复查)。超时兜底仍 start 一次:事件真丢了
   // 不该把用户钉死在横幅上(升级链末档 3s,留 1s 余量)。
   const RESTART_EXIT_WAIT_MS = 4_000;
-  const waitForExit = () => new Promise<void>((resolve) => {
+  // 拆成「挂监听」与「等事件」两步:listen 是 async 的,必须 await 注册完成才发起 stop。
+  // 此前顺序是「stop resolve → waitForExit 里才注册监听」,resolve 到注册完成之间 pty-exit
+  // 可能抢先到达(Tauri emit 不排队不重放),只能靠 4s 超时白等;提前注册后这条缝隙归零,
+  // 超时兜底保留(事件仍可能真丢)。4s 超时从 stop 完成起算:确认弹窗停留时间不该吃进等待
+  // 预算。取消/失败/超时路径都经 dispose 注销监听,不留野监听器。
+  const armExitWaiter = () => {
     let unlisten: (() => void) | undefined;
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
+    let disposed = false;
+    let exited = false;
+    let notify: (() => void) | undefined;
+    const dispose = () => {
+      if (disposed) return;
+      disposed = true;
       unlisten?.();
-      resolve();
     };
-    const timer = window.setTimeout(finish, RESTART_EXIT_WAIT_MS);
-    void listen<ExitEvent>("pty-exit", ({ payload }) => {
+    // 注册失败不阻断流程:等事件仍有超时兜底,语义同此前 waitForExit 里的 fire-and-forget。
+    const ready = listen<ExitEvent>("pty-exit", ({ payload }) => {
       if (payload.sessionId !== sessionId) return;
-      window.clearTimeout(timer);
-      finish();
+      exited = true;
+      notify?.();
     }).then((un) => {
-      // finish 先于注册完成(超时/极快退出)时立刻注销,不留野监听器。
       unlisten = un;
-      if (done) un();
+      // 注册完成前已被取消/超时注销,立刻补上,不留野监听器。
+      if (disposed) un();
+    }, () => {});
+    const waitForExit = () => new Promise<void>((resolve) => {
+      // stop 前进程自己死掉的情形:事件已被挂着的监听捕获,无需再等。
+      if (exited) { resolve(); return; }
+      const timer = window.setTimeout(() => { dispose(); resolve(); }, RESTART_EXIT_WAIT_MS);
+      notify = () => { window.clearTimeout(timer); dispose(); resolve(); };
     });
-  });
+    return { ready, waitForExit, dispose };
+  };
   // 假死/初始化超时横幅的「结束并恢复」:结束与重启两步合一(此前只有「结束会话」,重启
   // 入口在退出封面上,用户得自己找——而文案里写的就是「点结束会话再重启」)。确认取消
   // (false)即不动;重启失败由 start() 自己的错误通道呈现。start 在下方声明,点击时早已就绪。
   const restartFromBanner = () => {
     if (stopping) return;
     setStopping(true);
-    void confirmStopSession(sessionId, { title: t.chat.endSession, message: t.chat.endSessionConfirm })
-      .then((stopped) => (stopped ? waitForExit().then(() => start()) : undefined))
+    const exitWaiter = armExitWaiter();
+    void exitWaiter.ready
+      .then(() => confirmStopSession(sessionId, { title: t.chat.endSession, message: t.chat.endSessionConfirm }))
+      .then((stopped) => (stopped ? exitWaiter.waitForExit().then(() => start()) : undefined))
       .catch((e) => setError(formatBackendError(e, t.locale)))
-      .finally(() => setStopping(false));
+      .finally(() => {
+        exitWaiter.dispose();
+        setStopping(false);
+      });
   };
   // 悬停在可点内容上(URL/文件路径)的操作提示:Ctrl+点击这条终端惯例此前没有任何
   // 界面表达,用户只能碰运气。非 null 时右下角挂一条固定提示,离开链接即收。

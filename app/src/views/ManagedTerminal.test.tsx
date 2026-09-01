@@ -455,6 +455,36 @@ describe("ManagedTerminal", () => {
     }
   });
 
+  it("「结束并恢复」先挂监听再发 stop:pty-exit 抢在 stop 返回前到达也照接,不白等 4s", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    try {
+      invoke.mockImplementation((command: string) => {
+        if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true });
+        if (command === "confirm_dialog") return Promise.resolve(confirmAnswer.ok);
+        if (command === "stop_managed_terminal") {
+          // kill 一发进程就死:pty-exit 抢在 stop 的 Promise resolve 之前到达。监听已在
+          // 发起 stop 前注册完成(await listen 后才 confirmStopSession),这发事件必须被
+          // 接住;旧顺序(先 stop 后挂监听)会漏掉它,只能白等 4s 超时兜底。
+          eventHandlers.get("pty-exit")!({ payload: { sessionId: 163, code: null } });
+          return Promise.resolve();
+        }
+        return Promise.resolve();
+      });
+      render(<ManagedTerminal sessionId={163} status="running" />);
+      await act(async () => {});
+      await act(async () => { vi.advanceTimersByTime(36_000); });
+      const button = screen.queryByRole("button", { name: "结束并恢复" });
+      expect(button).toBeTruthy();
+      invoke.mockClear();
+      fireEvent.click(button!);
+      // 不推计时器:纯事件驱动,start 应当在微任务里直接发生——等 4s 兜底才算输。
+      await act(async () => {});
+      expect(invoke.mock.calls.map((c) => c[0])).toContain("start_managed_terminal");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("「结束并恢复」等 pty-exit 有超时兜底:事件真丢了也照 start,不把用户钉死在横幅上", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     try {
