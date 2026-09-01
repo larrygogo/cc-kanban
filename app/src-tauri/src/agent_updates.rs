@@ -1,8 +1,9 @@
 //! `check_agent_updates` 命令：各**已安装** agent 的版本与更新状态。
 //!
 //! 本机版本复用 `crate::probe_cli_version`（`<launch_argv> --version`，进程级缓存）；
-//! 最新版本按 agent 各自的权威源拉取——npm 系走 registry 的 `/latest` JSON，kimi 走
-//! `code.kimi.com` 的纯文本版本号（不走 npm）。出站一律经 `ports::HostPorts::for_agent`
+//! 最新版本按 agent 各自的权威源拉取——npm 系走 registry 的 `/latest` JSON；claude 与 kimi
+//! 走纯文本版本号（分别是 `downloads.claude.ai` 的直下渠道与 `code.kimi.com`，均不在 npm 发布
+//! 或 npm 滞后）。出站一律经 `ports::HostPorts::for_agent`
 //! 的 ureq 客户端（代理按 agent 解析）。
 //!
 //! 探测失败（网络/解析/形态不对）一律表现为 `latest_version: None, update_available: false`，
@@ -33,14 +34,16 @@ pub struct AgentUpdateInfo {
 enum LatestSource {
     /// npm registry：`https://registry.npmjs.org/<pkg>/latest` 的 JSON `.version`。
     Npm(&'static str),
-    /// 纯文本版本号 URL（kimi：发布物不在 npm 上）。
+    /// 纯文本版本号 URL（claude 的直下渠道、kimi：发布物不走 npm 或 npm 滞后）。
     PlainText(&'static str),
 }
 
 /// 各 agent 的最新版本来源。返回 None 的 agent 不参与更新检查（latest_version 恒 None）。
 fn latest_source(id: meowo_agent::AgentId) -> Option<LatestSource> {
     Some(match id.as_str() {
-        "claude" => LatestSource::Npm("@anthropic-ai/claude-code"),
+        // claude 的安装通道是 downloads.claude.ai 直下二进制（见 install.rs），latest 也取同一
+        // 渠道的纯文本版本号文件——若走 npm registry，npm 发布滞后时更新提示就跟着滞后。
+        "claude" => LatestSource::PlainText("https://downloads.claude.ai/claude-code-releases/latest"),
         "codex" => LatestSource::Npm("@openai/codex"),
         "gemini" => LatestSource::Npm("@google/gemini-cli"),
         "opencode" => LatestSource::Npm("opencode-ai"),
@@ -261,6 +264,20 @@ mod tests {
     fn plain_version_parses() {
         assert_eq!(parse_plain_version("0.39.1"), Some("0.39.1".to_string()));
         assert_eq!(parse_plain_version("0.39.1\n"), Some("0.39.1".to_string()));
+    }
+
+    #[test]
+    fn claude_latest_source_is_direct_release_channel() {
+        // 与 install.rs 的直下安装同一渠道（downloads.claude.ai 的纯文本版本号），
+        // 不走 npm——npm 发布滞后时，更新提示不该跟着滞后。
+        let src = latest_source(meowo_agent::AgentId::new("claude")).expect("claude 应有 latest 源");
+        let LatestSource::PlainText(url) = src else {
+            panic!("claude 的 latest 源必须是直下渠道的纯文本版本号，而不是 npm");
+        };
+        assert_eq!(
+            url,
+            "https://downloads.claude.ai/claude-code-releases/latest"
+        );
     }
 
     #[test]
