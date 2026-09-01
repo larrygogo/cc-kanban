@@ -8,4 +8,9 @@ export type TodoDto = { content: string,
 /**
  * `pending` / `in_progress` / `completed`。
  */
-status: string, };
+status: string, 
+/**
+ * 「上一任务」残留标记（用户开新回合时置位；transcript 重建路径没有此概念，恒 false）。
+ * true 的行不计入当前进度，前端渲染为弱化的「上一任务」区。
+ */
+stale: boolean, };

@@ -147,6 +147,9 @@ pub struct Todo {
     pub status: String,
     #[cfg_attr(test, ts(type = "number"))]
     pub order_idx: i64,
+    /// 「上一任务」残留标记：用户开新回合时置 true（见 migrations.rs todos.stale 注释）。
+    /// true = 这条属于上一个任务，展示层把它降成弱化区，不计入当前进度。
+    pub stale: bool,
 }
 
 /// 上报器同步 todo 时的输入项。

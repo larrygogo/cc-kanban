@@ -44,6 +44,9 @@ pub fn dispatch(
                 // 新回合开始:上一回合的活动名已是过时信息,清掉(方法内不 touch,下面的
                 // on_user_prompt / touch_session 才是本事件的状态翻转)。
                 store.clear_current_activity(sid, now_ms)?;
+                // 同理:现有待办属于上一个任务,新任务的清单还没写出来——标成「上一任务」
+                // 残留(stale),而不是删行(读不到 ≠ 已清空,旧任务的完成记录要留得下来)。
+                store.mark_todos_stale(sid)?;
                 if let Some(prompt) = ev.prompt_text() {
                     // on_user_prompt 内部会 touch；避免文本消息对 sessions 做两次相同 UPDATE。
                     store.on_user_prompt(sid, &prompt, now_ms)?;

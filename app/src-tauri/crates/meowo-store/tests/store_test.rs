@@ -1503,3 +1503,121 @@ fn backfill_session_cwd_only_fills_null_and_keeps_clock() {
         Some("C:/work/proj")
     );
 }
+
+// == stale（「上一任务」残留标记, v14）==
+
+/// 新回合（mark_todos_stale）把现有待办标成残留；下一份真实快照（sync_todos）整份
+/// 重插后天然回到非残留——残留只是两任务之间的过渡态，不是待办的永久属性。
+#[test]
+fn stale_mark_then_new_snapshot_clears_it() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, tid) = store.start_session(pid, "s", 100).unwrap();
+    let snap = || {
+        [TodoInput {
+            content: "旧任务步骤".into(),
+            status: TodoStatus::Completed,
+        }]
+    };
+    store.sync_todos(sid, &snap(), 200).unwrap();
+    assert!(store.list_todos(tid).unwrap().iter().all(|t| !t.stale));
+
+    // 用户开新回合：旧清单标成「上一任务」残留。
+    store.mark_todos_stale(sid).unwrap();
+    assert!(store.list_todos(tid).unwrap().iter().all(|t| t.stale));
+    // 幂等：没有非 stale 行时不再写（也不会把行搞丢）。
+    store.mark_todos_stale(sid).unwrap();
+    assert_eq!(store.list_todos(tid).unwrap().len(), 1);
+
+    // 新任务的第一份真实快照到达：整份重插，残留标记随之清零。
+    store.sync_todos(sid, &snap(), 300).unwrap();
+    assert!(store.list_todos(tid).unwrap().iter().all(|t| !t.stale));
+}
+
+/// 增量路径（TaskCreate/TaskUpdate）触碰到的行同样清残留：agent 在新回合又动了
+/// 这条，它就是当前任务的活计划。新插行由列默认值天然 stale=0。
+#[test]
+fn todo_delta_clears_stale_on_touched_row() {
+    use meowo_store::TodoDelta;
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, tid) = store.start_session(pid, "s", 100).unwrap();
+    store
+        .apply_todo_delta(
+            sid,
+            &TodoDelta::Create {
+                external_id: "1".into(),
+                content: "步骤一".into(),
+            },
+            200,
+        )
+        .unwrap();
+
+    store.mark_todos_stale(sid).unwrap();
+    assert!(store.list_todos(tid).unwrap()[0].stale);
+
+    store
+        .apply_todo_delta(
+            sid,
+            &TodoDelta::Update {
+                external_id: "1".into(),
+                content: None,
+                status: Some(TodoStatus::Completed),
+                deleted: false,
+            },
+            300,
+        )
+        .unwrap();
+    let todos = store.list_todos(tid).unwrap();
+    assert!(!todos[0].stale, "增量触碰应清掉残留标记");
+    assert_eq!(todos[0].status, "completed");
+}
+
+/// 被动重建的保守语义：DB 行已全部 stale（旧任务残留）、且日志重建出的快照与它们
+/// 逐条相同（同内容同状态同序）→ 日志里只有旧任务那一版，保留 stale 不洗白。
+/// 内容一旦有变化（含行数不同），才按新快照覆盖（新行 stale=0）。
+#[test]
+fn rebuild_preserves_stale_on_identical_snapshot_and_overwrites_on_change() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, tid) = store.start_session(pid, "s", 100).unwrap();
+    let snap = |content: &str| {
+        [TodoInput {
+            content: content.into(),
+            status: TodoStatus::Completed,
+        }]
+    };
+    store.sync_todos(sid, &snap("旧任务步骤"), 200).unwrap();
+    store.mark_todos_stale(sid).unwrap();
+
+    // 重建出与残留逐条相同的快照（日志最后一次待办仍是旧任务那版）→ 残留保留。
+    store.sync_todos_rebuild(sid, &snap("旧任务步骤"), 900).unwrap();
+    let todos = store.list_todos(tid).unwrap();
+    assert!(todos[0].stale, "相同快照不得把残留洗白成当前进度");
+
+    // 重建出不同内容（日志里已有新任务的清单）→ 按新快照覆盖，残留清零。
+    store.sync_todos_rebuild(sid, &snap("新任务步骤"), 1000).unwrap();
+    let todos = store.list_todos(tid).unwrap();
+    assert_eq!(todos[0].content, "新任务步骤");
+    assert!(!todos[0].stale);
+}
+
+/// 行数不同也算「内容有变化」：新任务清单比旧的长/短都要覆盖，不能拿旧行凑数。
+#[test]
+fn rebuild_overwrites_when_row_count_differs() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "p", 100).unwrap();
+    let (sid, tid) = store.start_session(pid, "s", 100).unwrap();
+    let item = |content: &str| TodoInput {
+        content: content.into(),
+        status: TodoStatus::Pending,
+    };
+    store.sync_todos(sid, &[item("a")], 200).unwrap();
+    store.mark_todos_stale(sid).unwrap();
+    store
+        .sync_todos_rebuild(sid, &[item("a"), item("b")], 900)
+        .unwrap();
+    let todos = store.list_todos(tid).unwrap();
+    assert_eq!(todos.len(), 2);
+    assert!(todos.iter().all(|t| !t.stale));
+}

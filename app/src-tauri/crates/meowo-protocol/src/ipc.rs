@@ -11,6 +11,9 @@ pub struct TodoDto {
     pub content: String,
     /// `pending` / `in_progress` / `completed`。
     pub status: String,
+    /// 「上一任务」残留标记（用户开新回合时置位；transcript 重建路径没有此概念，恒 false）。
+    /// true 的行不计入当前进度，前端渲染为弱化的「上一任务」区。
+    pub stale: bool,
 }
 
 /// 一次子任务委派的展示信息。真正的子任务时间线不在这里——它住在 provider 的侧车流里，

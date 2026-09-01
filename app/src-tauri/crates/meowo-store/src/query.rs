@@ -115,7 +115,7 @@ impl Store {
         for chunk in task_ids.chunks(CHUNK) {
             let placeholders = vec!["?"; chunk.len()].join(",");
             let sql = format!(
-                "SELECT id, task_id, content, status, order_idx FROM todos
+                "SELECT id, task_id, content, status, order_idx, stale FROM todos
                  WHERE task_id IN ({placeholders}) ORDER BY task_id, order_idx"
             );
             let mut stmt = self.conn.prepare(&sql)?;
@@ -126,6 +126,7 @@ impl Store {
                     content: r.get(2)?,
                     status: r.get(3)?,
                     order_idx: r.get(4)?,
+                    stale: r.get::<_, i64>(5)? != 0,
                 })
             })?;
             for row in rows {
@@ -345,8 +346,14 @@ impl Store {
             let todos = task_id
                 .and_then(|tid| todos_map.remove(&tid))
                 .unwrap_or_default();
-            let todo_total = todos.len() as i64;
-            let todo_done = todos.iter().filter(|t| t.status == "completed").count() as i64;
+            // 角标进度只计「当前任务」的行：stale=1 的是上一任务的残留，计入会让
+            // 看板在新任务待办写出来之前一直显示旧任务的 3/3（失真）。全 stale 时
+            // 归 0/0——没有当前进度可言，角标消失。
+            let todo_total = todos.iter().filter(|t| !t.stale).count() as i64;
+            let todo_done = todos
+                .iter()
+                .filter(|t| !t.stale && t.status == "completed")
+                .count() as i64;
             out.push(LiveSession {
                 session,
                 project_name,

@@ -718,3 +718,58 @@ fn superseded_sessions_fold_from_all_board_scopes() {
     let raw = store.live_sessions(None, None, None, None, 1000).unwrap();
     assert!(raw.iter().any(|l| l.session.id == a));
 }
+
+/// 看板进度只计「当前任务」的行：stale=1 的残留（用户已开新回合、新任务待办还没写
+/// 出来）不计入 todo_done/todo_total——否则看板在新任务清单到达前一直显示旧任务的
+/// 3/3（实拍失真）。全 stale 时归 0/0，角标消失；残留行本身仍随 todos 带出（由
+/// 前端决定如何弱化展示）。
+#[test]
+fn live_progress_counts_only_non_stale_todos() {
+    let store = Store::open_in_memory().unwrap();
+    let pid = store.upsert_project_by_root("/p", "proj", 100).unwrap();
+    let (s1, _t1) = store.start_session(pid, "s", 100).unwrap();
+    store.on_user_prompt(s1, "任务", 110).unwrap();
+    store
+        .sync_todos(
+            s1,
+            &[
+                meowo_store::TodoInput {
+                    content: "a".into(),
+                    status: meowo_store::TodoStatus::Completed,
+                },
+                meowo_store::TodoInput {
+                    content: "b".into(),
+                    status: meowo_store::TodoStatus::Completed,
+                },
+            ],
+            120,
+        )
+        .unwrap();
+    let live = store.live_sessions(None, None, None, None, 1000).unwrap();
+    assert_eq!((live[0].todo_done, live[0].todo_total), (2, 2));
+
+    // 用户开新回合 → 全部标成残留：角标归零,但行仍带得出（stale 标记随 DTO 走）。
+    store.mark_todos_stale(s1).unwrap();
+    let live = store.live_sessions(None, None, None, None, 1000).unwrap();
+    assert_eq!(
+        (live[0].todo_done, live[0].todo_total),
+        (0, 0),
+        "残留不计入看板进度"
+    );
+    assert_eq!(live[0].todos.len(), 2);
+    assert!(live[0].todos.iter().all(|t| t.stale));
+
+    // 新任务的第一条真实待办到达（增量路径,清 stale）→ 角标只计这条。
+    store
+        .apply_todo_delta(
+            s1,
+            &meowo_store::TodoDelta::Create {
+                external_id: "1".into(),
+                content: "新活".into(),
+            },
+            200,
+        )
+        .unwrap();
+    let live = store.live_sessions(None, None, None, None, 1000).unwrap();
+    assert_eq!((live[0].todo_done, live[0].todo_total), (0, 1));
+}

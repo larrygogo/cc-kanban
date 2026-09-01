@@ -84,6 +84,8 @@ export type TodoPanelRow = {
   finishedAt?: string | null;
   /** 子任务行携带委派的 tool_use id，中途结局的侧车探测按它索引。任务清单行没有。 */
   id?: string;
+  /** 「上一任务」残留（仅 DB 快照路径带）：不计入当前进度，收进弱化的折叠区。 */
+  stale?: boolean;
 };
 
 /** 行尾的执行时长:在跑 = 从委派时刻到现在(面板开着时逐秒刷新),结束 = 总用时。
@@ -131,11 +133,17 @@ export function ChatTodoMenu({ todos, subagents, onOpenChange, t }: {
   t: ReturnType<typeof useT>;
 }) {
   const { open, pos, ref, btnRef, menuRef, toggle, onKeyDown } = useMenuPopup();
-  const done = todos.filter((todo) => todo.status === "completed").length;
+  // 「上一任务」残留（stale）与当前清单分开：进度计数、活动小点只认当前任务——
+  // 新任务的清单还没写出来时,旧任务的 3/3 不能继续冒充当前进度(实拍失真)。
+  const freshTodos = todos.filter((row) => !row.stale);
+  const staleTodos = todos.filter((row) => row.stale);
+  const staleDone = staleTodos.filter((row) => row.status === "completed").length;
+  const done = freshTodos.filter((todo) => todo.status === "completed").length;
   const subDone = subagents.filter((row) => row.status === "completed").length;
   // 里面有活儿在跑(任务或子任务进行中)→ 入口图标挂脉冲小点。面板收着时这是唯一的
-  // 活动信号——用户反馈「入口上看不出里面有在执行的」。
-  const live = todos.some((row) => row.status === "in_progress") || subagents.some((row) => row.status === "in_progress");
+  // 活动信号——用户反馈「入口上看不出里面有在执行的」。残留的 in_progress 不算：
+  // 那是上一任务被新回合打断的半态,不是此刻在跑。
+  const live = freshTodos.some((row) => row.status === "in_progress") || subagents.some((row) => row.status === "in_progress");
   // 面板开着且有在跑的子任务时逐秒重渲染,让行尾「已耗时」走起来;收起即停。
   const ticking = open && subagents.some((row) => row.status === "in_progress" && row.startedAt);
   const [, setTick] = useState(0);
@@ -165,7 +173,7 @@ export function ChatTodoMenu({ todos, subagents, onOpenChange, t }: {
     const want = pane ? window.innerWidth - pane.right + 10 : 10;
     setPanelRight(Math.max(10, Math.min(want, window.innerWidth - menuW - 6)));
   }, [open, ref, menuRef]);
-  const sortedTodos = sortPanelRows(todos);
+  const sortedTodos = sortPanelRows(freshTodos);
   const sortedSubs = sortPanelRows(subagents);
   const hiddenCount =
     Math.max(0, sortedTodos.length - TODO_PANEL_COLLAPSED_MAX) +
@@ -173,6 +181,7 @@ export function ChatTodoMenu({ todos, subagents, onOpenChange, t }: {
   const collapsible = hiddenCount > 1;
   const clip = (rows: TodoPanelRow[]) =>
     collapsible && !expanded ? rows.slice(0, TODO_PANEL_COLLAPSED_MAX) : rows;
+  // 只剩残留也算非空:不亮骨架(骨架=「将来会有任务进度」),残留区本身就是内容。
   const empty = todos.length === 0 && subagents.length === 0;
   return (
     <div className="dd chat-todo-menu" ref={ref} onKeyDown={onKeyDown}>
@@ -200,7 +209,7 @@ export function ChatTodoMenu({ todos, subagents, onOpenChange, t }: {
         <div className="dd-menu chat-todo-panel" role="dialog" aria-label={t.chat.todoPanelTitle} ref={menuRef} style={{ position: "fixed", top: pos.top, bottom: pos.bottom, right: panelRight }}>
           <div className="chat-todo-panel-head">
             <span className="chat-todo-panel-title">{t.chat.todoPanelTitle}</span>
-            {todos.length > 0 && <span className="chat-todos-count">{t.chat.todoProgress(done, todos.length)}</span>}
+            {freshTodos.length > 0 && <span className="chat-todos-count">{t.chat.todoProgress(done, freshTodos.length)}</span>}
           </div>
           {empty ? (
             <div className="chat-todo-panel-empty">
@@ -218,7 +227,17 @@ export function ChatTodoMenu({ todos, subagents, onOpenChange, t }: {
             <>
               {/* 行样式独立于底部 TodoPanel 的紧凑清单(用户按参考形态指定):实心圆勾徽章、
                   宽松行距、单行省略。 */}
-              {todos.length > 0 && <TodoPanelList rows={clip(sortedTodos)} t={t} />}
+              {freshTodos.length > 0 && <TodoPanelList rows={clip(sortedTodos)} t={t} />}
+              {staleTodos.length > 0 && (
+                /* 上一任务的残留:默认折叠的弱化区,不参与上面的进度计数与折叠裁剪。 */
+                <details className="chat-todo-panel-stale">
+                  <summary>
+                    <span className="chat-todo-panel-title">{t.chat.todoPrevTask(staleDone, staleTodos.length)}</span>
+                    <span className="chat-tool-chevron">›</span>
+                  </summary>
+                  <TodoPanelList rows={staleTodos} t={t} />
+                </details>
+              )}
               {subagents.length > 0 && (
                 <>
                   <div className="chat-todo-panel-head is-sub">

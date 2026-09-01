@@ -192,7 +192,7 @@ impl Store {
     ///     使用——SQLite 降版本/删列要再做一版迁移,空表零成本;全仓无任何读写端。
     /// v13: sessions 加 extra_dirs 列（附加目录 JSON 数组，claude --add-dir 的回放依据）。
     ///     老库补齐后全是 NULL = 单目录会话，正是我们要的。
-    const USER_VERSION: i64 = 13;
+    const USER_VERSION: i64 = 14;
 
     /// 一次性建表 + 迁移 + 建索引，用 `PRAGMA user_version` 门控：已是最新版直接返回，
     /// 避免 statusline/hook 每次 open 都重跑 DDL 与注定失败的 ALTER（hot-path 浪费）。
@@ -207,7 +207,7 @@ impl Store {
         }
         conn.execute_batch(SCHEMA)?;
         // 给旧库补列（新库 SCHEMA 已含这些列 → ALTER 必报 duplicate，忽略即可）。
-        const ALTERS: [&str; 16] = [
+        const ALTERS: [&str; 17] = [
             "ALTER TABLE sessions ADD COLUMN pid INTEGER",
             "ALTER TABLE sessions ADD COLUMN cwd TEXT",
             "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
@@ -232,6 +232,8 @@ impl Store {
             "ALTER TABLE sessions ADD COLUMN work_group_id INTEGER REFERENCES work_groups(id)",
             // 附加目录（v13）：老库补齐后全是 NULL = 单目录会话，正是我们要的。
             "ALTER TABLE sessions ADD COLUMN extra_dirs TEXT",
+            // 「上一任务」残留标记（v14）：老库补齐后全是 0 = 现状语义，正是我们要的。
+            "ALTER TABLE todos ADD COLUMN stale INTEGER NOT NULL DEFAULT 0",
         ];
         for sql in ALTERS {
             if let Err(e) = conn.execute(sql, []) {
@@ -479,6 +481,32 @@ impl Store {
         Ok(())
     }
 
+    /// 用户开启新回合：把现有待办全部标成「上一任务」残留（stale=1）——它们属于上一个
+    /// 任务，新任务的待办还没写出来。不删行：**读不到 ≠ 已清空**，删掉会让上一任务的
+    /// 完成记录彻底消失；标 stale 让展示层把它降成「上一任务 N/N」的弱化区，等新任务
+    /// 的第一条真实待办写入（快照重插/增量触碰）把对应行清回 0。
+    ///
+    /// 与 `clear_current_activity` 同款纪律：不 touch 会话；无任务卡静默通过。先于
+    /// EXISTS 探测再发 UPDATE：每回合都有的空写（没有非 stale 行时）会白推 data_version、
+    /// 触发前端无谓刷新。
+    pub fn mark_todos_stale(&self, session_id: i64) -> Result<(), StoreError> {
+        let Some(tid) = self.task_id_of_session_opt(session_id)? else {
+            return Ok(());
+        };
+        let has_fresh: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM todos WHERE task_id = ?1 AND stale = 0)",
+            [tid],
+            |r| r.get(0),
+        )?;
+        if has_fresh {
+            self.conn.execute(
+                "UPDATE todos SET stale = 1 WHERE task_id = ?1 AND stale = 0",
+                [tid],
+            )?;
+        }
+        Ok(())
+    }
+
     /// 直接设置会话任务标题（来自 CC ai-title/custom-title），覆盖占位/旧标题。空标题忽略。
     pub fn set_session_title(
         &self,
@@ -678,6 +706,31 @@ impl Store {
         if task_updated_at > now_ms {
             return tx.commit();
         }
+        // 被动重建（kimi 从 wire.jsonl 读最后一次待办快照）的保守语义：重建出的快照可能
+        // 属于**旧任务**（用户已开新回合、新任务的待办还没写进日志）。此时 DB 里的行已被
+        // mark_todos_stale 置 1，若重建快照与这些行内容完全一致（同内容同状态同序），说明
+        // 日志里只有旧任务那一版——保留 stale=1 不动，不能把残留「洗白」成当前进度。
+        // 内容有变化（含行数不同）才按新快照整份覆盖（新行 stale=0）。
+        if !is_activity {
+            let mut stmt = self.conn.prepare(
+                "SELECT content, status, stale FROM todos WHERE task_id = ?1 ORDER BY order_idx",
+            )?;
+            let existing: Vec<(String, String, bool)> = stmt
+                .query_map([tid], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0))
+                })?
+                .collect::<Result<_, _>>()?;
+            let all_stale = !existing.is_empty() && existing.iter().all(|(_, _, s)| *s);
+            let same_snapshot = existing.len() == todos.len()
+                && existing
+                    .iter()
+                    .zip(todos.iter())
+                    .all(|((c, s, _), t)| *c == t.content && *s == t.status.as_str());
+            if all_stale && same_snapshot {
+                // 整份保持：列推导的结果也必然与现状相同，无需再写。
+                return tx.commit();
+            }
+        }
         self.conn
             .execute("DELETE FROM todos WHERE task_id = ?1", [tid])?;
         for (i, t) in todos.iter().enumerate() {
@@ -742,8 +795,9 @@ impl Store {
                 content,
             } => {
                 // hook 重放/重复投递时同编号会再来一次 Create——更新内容而不是长出重复行。
+                // 顺带 stale=0：agent 在新回合又碰了这条，它就是当前任务的活计划。
                 let updated = self.conn.execute(
-                    "UPDATE todos SET content = ?1 WHERE task_id = ?2 AND external_id = ?3",
+                    "UPDATE todos SET content = ?1, stale = 0 WHERE task_id = ?2 AND external_id = ?3",
                     rusqlite::params![content, tid, external_id],
                 )?;
                 if updated == 0 {
@@ -769,7 +823,7 @@ impl Store {
                     )?;
                 } else {
                     let updated = self.conn.execute(
-                        "UPDATE todos SET status = COALESCE(?1, status), content = COALESCE(?2, content)
+                        "UPDATE todos SET status = COALESCE(?1, status), content = COALESCE(?2, content), stale = 0
                          WHERE task_id = ?3 AND external_id = ?4",
                         rusqlite::params![
                             status.map(|s| s.as_str()),
@@ -839,7 +893,7 @@ impl Store {
 
     pub fn list_todos(&self, task_id: i64) -> Result<Vec<Todo>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, content, status, order_idx FROM todos WHERE task_id = ?1 ORDER BY order_idx",
+            "SELECT id, task_id, content, status, order_idx, stale FROM todos WHERE task_id = ?1 ORDER BY order_idx",
         )?;
         let rows = stmt.query_map([task_id], |r| {
             Ok(Todo {
@@ -848,6 +902,7 @@ impl Store {
                 content: r.get(2)?,
                 status: r.get(3)?,
                 order_idx: r.get(4)?,
+                stale: r.get::<_, i64>(5)? != 0,
             })
         })?;
         let mut out = Vec::new();

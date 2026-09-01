@@ -1015,3 +1015,36 @@ fn compact_session_start_still_fills_cwd_on_fresh_row() {
     let sid = store.find_session_id_pub("cw2").unwrap().unwrap();
     assert_eq!(store.session_cwd(sid).unwrap().as_deref(), Some("/repo/sub"));
 }
+
+/// 新回合（UserPromptSubmit）把现有待办标成「上一任务」残留：任务 A 的清单不能在
+/// 任务 B 的待办写出来之前继续冒充当前进度（实拍：待办卡/看板一直显示旧任务的 3/3）。
+/// 不删行（读不到 ≠ 已清空）——下一条 TodoWrite 快照到达时整份重插，残留标记随之清零。
+#[test]
+fn new_prompt_marks_todos_stale_and_next_snapshot_clears() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"st1","cwd":"/tmp/p"}"#),
+        100,
+    )
+    .unwrap();
+    let sid = store.find_session_id_pub("st1").unwrap().unwrap();
+    let tid = store.task_id_of_session_pub(sid).unwrap();
+    // 任务 A：两条待办全部完成。
+    disp(&store, &ev(r#"{"hook_event_name":"UserPromptSubmit","session_id":"st1","prompt":"任务A"}"#), 200).unwrap();
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"st1","tool_name":"TodoWrite","tool_input":{"todos":[{"content":"a","status":"completed"},{"content":"b","status":"completed"}]}}"#), 300).unwrap();
+    assert!(store.list_todos(tid).unwrap().iter().all(|t| !t.stale));
+
+    // 用户下发任务 B：旧清单标成残留，但行还在（完成记录留得下来）。
+    disp(&store, &ev(r#"{"hook_event_name":"UserPromptSubmit","session_id":"st1","prompt":"任务B"}"#), 400).unwrap();
+    let todos = store.list_todos(tid).unwrap();
+    assert_eq!(todos.len(), 2);
+    assert!(todos.iter().all(|t| t.stale), "新回合应把旧待办标成上一任务残留");
+
+    // 任务 B 的第一份快照到达：整份重插,残留清零。
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"st1","tool_name":"TodoWrite","tool_input":{"todos":[{"content":"c","status":"in_progress"}]}}"#), 500).unwrap();
+    let todos = store.list_todos(tid).unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].content, "c");
+    assert!(!todos[0].stale);
+}

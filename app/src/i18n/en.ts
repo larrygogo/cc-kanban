@@ -365,6 +365,9 @@ export const en: Dict = {
     slashMenuDismiss: "Dismiss",
     todos: "To-do",
     todoProgress: (done: number, total: number) => `${done}/${total}`,
+    // Stale group header: leftovers of the previous task after the user started a new turn,
+    // before the agent has written the new task's to-dos.
+    todoPrevTask: (done: number, total: number) => `Previous task ${done}/${total}`,
     todoBadgeTip: "Task progress",
     diff: "View changes",
     diffNoRepo: "This directory is not inside a git repository",

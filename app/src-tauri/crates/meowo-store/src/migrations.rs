@@ -75,7 +75,12 @@ CREATE TABLE IF NOT EXISTS todos (
     order_idx INTEGER NOT NULL,
     -- agent 自己的任务编号（claude TaskCreate 的 "1"/"2"…）。增量更新（TaskUpdate）靠它
     -- 定位行；快照式同步（sync_todos）不写它，恒 NULL。
-    external_id TEXT
+    external_id TEXT,
+    -- 「上一任务」残留标记（v14）：用户开新回合（UserPromptSubmit）时把现有行置 1——
+    -- 它们属于上一个任务，新任务的待办还没写出来，不能照旧当成当前进度展示。
+    -- 任何一条真实的待办写入（快照重插/增量触碰）都把对应行清回 0。
+    -- 旧库由 migrate 的 ALTER 补齐，存量行归 0（= 现状语义，不算残留）。
+    stale INTEGER NOT NULL DEFAULT 0
 );
 
 -- events: 预留给后续计划的事件审计流，当前管线尚未写入。

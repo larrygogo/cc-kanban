@@ -4369,6 +4369,35 @@ select.ns-input {
 .chat-todos-list li.is-in_progress .chat-todo-text { color: var(--cc-text); font-weight: 550; }
 .chat-todos-list li.is-pending .chat-todo-text { color: var(--cc-text-dim); }
 
+/* 「上一任务」残留区（stale）：旧任务的待办在新清单写出来之前降级成弱化的折叠区,
+   不再冒充当前进度。整体压暗,默认折叠。 */
+.chat-todos.is-stale-only { border-style: dashed; background: transparent; }
+.chat-todos.is-stale-only > summary { min-height: calc(34px * var(--cc-ui)); color: var(--cc-text-faint); }
+.chat-todos.is-stale-only .chat-todos-title { color: var(--cc-text-faint); font-weight: 500; }
+.chat-todos-stale { border-top: 1px dashed color-mix(in srgb, var(--cc-border) 56%, transparent); }
+.chat-todos-stale > summary::-webkit-details-marker { display: none; }
+.chat-todos-stale > summary {
+  padding: var(--sp-6) var(--sp-18);
+  display: flex; align-items: center; gap: var(--sp-9);
+  list-style: none; cursor: pointer;
+  font-size: var(--fs-10); color: var(--cc-text-faint);
+}
+.chat-todos-stale[open] > summary .chat-tool-chevron { transform: rotate(90deg); }
+.chat-todos-stale .chat-todos-stale-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-todos-stale .chat-todos-list { padding-top: 0; opacity: 0.62; }
+
+/* 标题栏进度面板里的同款残留区。 */
+.chat-todo-panel-stale { margin-top: var(--sp-6); border-top: 1px dashed color-mix(in srgb, var(--cc-border) 56%, transparent); }
+.chat-todo-panel-stale > summary::-webkit-details-marker { display: none; }
+.chat-todo-panel-stale > summary {
+  padding: var(--sp-8) var(--sp-14) var(--sp-5);
+  display: flex; align-items: center; gap: var(--sp-9);
+  list-style: none; cursor: pointer; color: var(--cc-text-faint);
+}
+.chat-todo-panel-stale[open] > summary .chat-tool-chevron { transform: rotate(90deg); }
+.chat-todo-panel-stale .chat-todo-panel-title { flex: 1; font-size: var(--fs-11); color: var(--cc-text-faint); }
+.chat-todo-panel-stale .chat-todo-panel-list { opacity: 0.62; }
+
 /* 子任务：一次委派出去的独立工作。不并进「N 次工具操作」那一坨——它代表一整段
    自成一体的过程，展开的是子任务自己的时间线（可再嵌套，Claude 的 spawnDepth）。
    用左侧强调条与工具组区分：同为可展开容器，但语义层级不同。 */

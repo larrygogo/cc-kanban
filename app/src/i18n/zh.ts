@@ -384,6 +384,9 @@ export const zh = {
     slashMenuDismiss: "收起",
     todos: "待办",
     todoProgress: (done: number, total: number) => `${done}/${total}`,
+    // 「上一任务」残留区（stale）：用户已开新回合、新任务的清单还没写出来时,旧任务的
+    // 待办收进这个弱化折叠区,不再冒充当前进度。
+    todoPrevTask: (done: number, total: number) => `上一任务 ${done}/${total}`,
     todoBadgeTip: "任务进度",
     diff: "查看改动",
     diffNoRepo: "当前目录不在 git 仓库中",

@@ -193,6 +193,7 @@ fn load_chat_history(
                     .map(|todo| meowo_protocol::ipc::TodoDto {
                         content: todo.content,
                         status: todo.status.as_str().to_string(),
+                        stale: todo.stale,
                     })
                     .collect()
             })
@@ -435,6 +436,8 @@ pub(crate) async fn refresh_session_model(
 /// - 早先的解析有误（如状态别名不认识，已完成项被降级成待办）。
 ///
 /// 一次有界读 + 整份覆盖，不进历史轮询热路径；由前端在切换会话时调一次。
+/// 覆盖在 store 层有保守口径（见 sync_todos_rebuild）：DB 现有行已全部标成「上一任务」
+/// 残留、且重建快照与它们逐条相同时，说明日志里只有旧任务那一版——保留 stale 不洗白。
 fn refresh_todos(db_path: &Path, session_id: i64) -> Result<usize, String> {
     let store = super::open_store(db_path)?;
     let header = store
