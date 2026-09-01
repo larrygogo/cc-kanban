@@ -462,6 +462,15 @@ pub(crate) fn db_path() -> PathBuf {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".to_string());
+    // dev 构建默认隔离数据目录（settings/profiles/broker discovery 等全部派生自本函数，
+    // 一并跟随）：与安装版共享一份库意味着 dev 一启动就可能用更高的 USER_VERSION 升级
+    // 生产库（不可逆，v13→v14 已发生）、settings 互写（远程端口事故）、approval-broker
+    // 互覆、双 watch 重复通知。生产会话的可见性由 session_query 的外库只读聚合
+    // （foreign_db_path，debug 专属）保——本库≠~/.meowo/board.db 时自动激活。
+    // 想回共享：显式设 MEOWO_DB=~/.meowo/board.db（优先级在本函数顶部，不变）。
+    #[cfg(debug_assertions)]
+    return PathBuf::from(home).join(".meowo-dev").join("board.db");
+    #[cfg(not(debug_assertions))]
     PathBuf::from(home).join(".meowo").join("board.db")
 }
 
@@ -1588,8 +1597,9 @@ pub fn run() {
             // （%LOCALAPPDATA%\<identifier>\EBWebView）与 window-state 落盘是同一份——
             // 两个应用寄生同一个 WebView2 浏览器进程，dev 热重建的崩溃/重启会连带杀死
             // 安装版的 webview（实拍：贴纸窗 JS 全灭，托盘「找回贴纸」失灵，重启才恢复）；
-            // 窗口位置/吸附状态也互相污染。数据目录（~/.meowo）刻意仍共享（用户要求
-            // 不分两份数据）——这里隔离的只是「壳」：webview 配置、窗口状态、单实例键。
+            // 窗口位置/吸附状态也互相污染。这里隔离的是「壳」：webview 配置、窗口状态、
+            // 单实例键；数据目录的隔离在 db_path()（dev 默认 ~/.meowo-dev，注释详见该函数，
+            // 生产会话经外库只读聚合保可见）。
             #[cfg(debug_assertions)]
             {
                 context.config_mut().identifier = "com.larrygogo.meowo.dev".into();

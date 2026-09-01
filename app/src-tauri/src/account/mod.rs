@@ -30,7 +30,12 @@ fn usage_cache_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("MEOWO_DB") {
         return Some(PathBuf::from(p).with_file_name("usage-cache.json"));
     }
-    home_dir().map(|h| h.join(".meowo").join("usage-cache.json"))
+    // 与 db_path() 同目录（含 dev 的 .meowo-dev 隔离）：此前 hardcode ~/.meowo，
+    // dev/安装版双实例互覆缓存（仅显示抖动，但隔离后应各用各的）。
+    home_dir().map(|h| {
+        h.join(if cfg!(debug_assertions) { ".meowo-dev" } else { ".meowo" })
+            .join("usage-cache.json")
+    })
 }
 
 fn read_json(path: &std::path::Path) -> Option<serde_json::Value> {
