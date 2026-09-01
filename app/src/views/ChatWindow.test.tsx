@@ -3939,6 +3939,87 @@ describe("ChatWindow", () => {
     expect(screen.queryByText(/请先完整阅读文件/)).toBeNull();
   });
 
+  /**
+   * 未读徽章口径:快照与差值都只数真实内容项。脱离底部期间到达的 handoff 分隔条
+   * (meta 行)与前序段旧历史都不算未读(快照同步抬高,同 loadEarlier 前插);只有
+   * 真正的新消息才 +1。
+   */
+  it("脱离底部后:接续分隔条与旧历史不计未读,新消息才 +1", async () => {
+    window.history.replaceState({}, "", "/?sessionId=80");
+    // lineage 拉到一半挂起:先把「脱离底部」的快照落下来,再放行前序段到达。
+    let resolveLineage!: (value: unknown) => void;
+    const lineagePending = new Promise((resolve) => { resolveLineage = resolve; });
+    let newMessageArrived = false;
+    const currentItems = () => [
+      { type: "user_text", id: "u1", timestamp: null, text: "当前段的问题" },
+      { type: "assistant_text", id: "a1", timestamp: null, text: "当前段的回答" },
+      ...(newMessageArrived
+        ? [{ type: "assistant_text", id: "a2", timestamp: null, text: "刚落地的新消息" }]
+        : []),
+    ];
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_chat_history") {
+        const id = (args as { sessionId: number }).sessionId;
+        if (id === 79) return Promise.resolve({
+          sessionId: 79, title: "前序段", status: "ended", provider: "claude", cwd: "C:/repo",
+          supported: true, offset: 2, reset: false, pendingReview: null, model: null,
+          connected: false, predecessorId: null, supersededBy: 80,
+          items: [
+            { type: "user_text", id: "p1", timestamp: null, text: "前序段旧问题" },
+            { type: "assistant_text", id: "p2", timestamp: null, text: "前序段旧回答" },
+          ],
+        });
+        const items = currentItems();
+        const cursor = ((args as { offset?: number }).offset) ?? 0;
+        const base = {
+          sessionId: 80, title: "接续段", status: "running", provider: "kimi", cwd: "C:/repo",
+          supported: true, offset: items.length, reset: false, pendingReview: null, model: null,
+          connected: true, predecessorId: 79, supersededBy: null, hasMore: false,
+        };
+        // 增量语义:轮询只回 offset 之后的新条目(回整批会被组件再追加一遍);
+        // 元信息字段必须全量保留——增量响应缺字段会把 history 里的 provider/status 冲掉。
+        if (cursor > 0) {
+          return Promise.resolve({ ...base, items: cursor >= items.length ? [] : items.slice(cursor) });
+        }
+        return Promise.resolve({ ...base, items });
+      }
+      if (command === "get_session_lineage") return lineagePending;
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      if (command === "agent_chat_ui") return Promise.resolve(chatUi((args as { provider: string }).provider));
+      if (command === "list_agents") return Promise.resolve(descriptors(["claude", "kimi"]));
+      if (command === "managed_terminal_binding") return Promise.resolve(null);
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 80, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    expect(await screen.findByText("当前段的回答")).toBeTruthy();
+    // 滚离底部:jsdom 的滚动度量恒 0,直接定义出「视口 500、内容 2000、停在顶部」。
+    const scroller = document.querySelector(".chat-scroll") as HTMLElement;
+    Object.defineProperty(scroller, "scrollHeight", { value: 2000, configurable: true });
+    Object.defineProperty(scroller, "clientHeight", { value: 500, configurable: true });
+    scroller.scrollTop = 0;
+    fireEvent.scroll(scroller);
+    const jumpButton = await screen.findByRole("button", { name: /回到最新/ });
+    // 脱离瞬间没有未读。
+    expect(jumpButton.querySelector(".chat-jump-latest-count")).toBeNull();
+
+    // 前序段到达:2 条旧消息 + 分隔条(meta 行)前插进时间线——都不算未读。
+    resolveLineage([
+      { id: 79, provider: "claude", startedAt: 1, endedAt: 2, model: null },
+      { id: 80, provider: "kimi", startedAt: 3, endedAt: null, model: null },
+    ]);
+    expect(await screen.findByText("切换至 Kimi Code 继续，完整上下文已交接")).toBeTruthy();
+    expect(await screen.findByText("前序段旧问题")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /回到最新/ }).querySelector(".chat-jump-latest-count")).toBeNull();
+
+    // 当前段真来一条新消息:徽章 +1。
+    newMessageArrived = true;
+    await waitFor(() => {
+      const badge = screen.getByRole("button", { name: /回到最新/ }).querySelector(".chat-jump-latest-count");
+      expect(badge?.textContent).toBe("1");
+    }, { timeout: 3000 });
+  });
+
   /// 断线语言（C-18）：一次瞬时 IPC 抖动只配通用「读取失败，正在重试」；连续失败（≥3 次，
   /// ≈2s）单列为「同步中断」（role=alert）——它只说窗口与后端的通道断了，与状态徽标讲的
   /// 「agent 进程没了」（已断开）是两种事实，措辞与样式都分开。

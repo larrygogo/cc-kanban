@@ -1582,7 +1582,14 @@ export function ChatWindow() {
           if (cancelled) return;
           segments.push({ provider: entry.provider, items: full && full.supported !== false ? full.items : [] });
         }
-        if (!cancelled) setPrefixSegments(segments);
+        if (!cancelled) {
+          // 前序段是旧历史（同 loadEarlier 的前插）：未读快照同步抬高，否则接续段
+          // 在脱离底部期间到达时，整段旧消息会被差值算成未读。
+          if (awayCountRef.current !== null) {
+            awayCountRef.current += segments.reduce((n, segment) => n + segment.items.length, 0);
+          }
+          setPrefixSegments(segments);
+        }
       } catch {
         // 链读取失败：prefixSegments 保持空，时间线退回 handoffContinued 注脚。
       }
@@ -1603,6 +1610,12 @@ export function ChatWindow() {
     out.push({ type: "meta", id: "handoff-current", timestamp: null, kind: `handoff:${nameOf(provider ?? "")}` });
     return [...out, ...displayItems];
   }, [prefixSegments, displayItems, agentsForOptions, provider]);
+  // 未读计数的口径：只数真实内容项。handoff 分隔条是 meta 行（结构标记，不是消息），
+  // 混进 length 快照/差值会让「回到最新」徽章虚高 1。
+  const timelineContentCount = useMemo(
+    () => timelineItems.reduce((n, item) => n + (item.type === "meta" ? 0 : 1), 0),
+    [timelineItems],
+  );
   // 前序内容没取到（或本来就没有）时的来历注脚；取到后由分隔条接力表达同一事实。
   const showHandoffNote = history?.predecessorId != null && prefixSegments.every((segment) => segment.items.length === 0);
   // 识别窗口是个时间点，不是布尔——过期后要真的停下来，故用一个到点自灭的计时器驱动重渲染。
@@ -2057,6 +2070,7 @@ export function ChatWindow() {
       const merged = reduceChatEvents(reduceChatEvents([], page.items, true), items, false);
       setItems(merged);
       // 前插的是旧消息，不算未读：未读快照同步抬高，否则「加载更早」会把徽章灌大。
+      // （items 是会话原始消息、不含 meta 行，增量与内容项口径一致。）
       if (awayCountRef.current !== null) awayCountRef.current += merged.length - items.length;
       earliestRef.current = page.earliest;
       setHasEarlier(page.hasMore);
@@ -2091,9 +2105,9 @@ export function ChatWindow() {
     if (!el) return;
     const at = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     followRef.current = at;
-    // 脱离底部的瞬间记下时间线长度快照，贴回底部即清：悬浮钮的未读徽章由差值派生。
+    // 脱离底部的瞬间记下时间线内容项数快照，贴回底部即清：悬浮钮的未读徽章由差值派生。
     if (at) awayCountRef.current = null;
-    else if (awayCountRef.current === null) awayCountRef.current = timelineItems.length;
+    else if (awayCountRef.current === null) awayCountRef.current = timelineContentCount;
     // 驱动「回到最新」悬浮钮的显隐；同值短路避免滚动过程反复重渲染。
     setAtBottom((prev) => (prev === at ? prev : at));
   };
@@ -3302,10 +3316,10 @@ export function ChatWindow() {
     </button>
   );
 
-  // 「回到最新」悬浮钮的未读数：脱离底部时的时间线长度为快照，之后追加的算未读
-  // （前插的「加载更早」不算——快照在 loadEarlier 里同步抬高）。
+  // 「回到最新」悬浮钮的未读数：脱离底部时的内容项数为快照（meta 分隔条不算消息），
+  // 之后追加的算未读（前插的「加载更早」与接续段旧历史不算——快照同步抬高）。
   const unseenCount = !atBottom && awayCountRef.current !== null
-    ? Math.max(0, timelineItems.length - awayCountRef.current)
+    ? Math.max(0, timelineContentCount - awayCountRef.current)
     : 0;
 
   return (
