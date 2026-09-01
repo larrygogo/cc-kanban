@@ -49,6 +49,14 @@ describe("reduceChatEvents", () => {
     expect(next).toBe(previous);
   });
 
+  // 真实 wire.jsonl 实测：kimi 双写两行的 time 各自取落盘时刻，相邻行最多差 1ms——
+  // 全等判定会被这 1ms 击穿（消息双显的实拍出处），容差窗口内仍要消除。
+  it("deduplicates the dual-write when timestamps differ by 1ms", () => {
+    const previous = [{ ...user("prompt", "继续"), timestamp: "2026-08-18T01:00:00.809Z" }];
+    const next = reduceChatEvents(previous, [{ ...user("append-message", "继续"), timestamp: "2026-08-18T01:00:00.810Z" }], false);
+    expect(next).toBe(previous);
+  });
+
   it("does not deduplicate equal user text across another event", () => {
     const previous: ChatItem[] = [
       user("u1", "继续"),

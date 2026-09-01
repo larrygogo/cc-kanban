@@ -27,9 +27,14 @@ export function reduceChatEvents(
     if (item.type !== "assistant_delta" && item.type !== "reasoning_delta") {
       // 同一语义事件可能被 Provider 同时写进两个兼容日志入口；只消除相邻且完全等价的记录，
       // 不跨工具活动或其它消息猜测重复，避免吞掉用户确实连续发送的相同文本。
-      // 「等价」必须含 timestamp:kimi 的 turn.prompt 与 context.append_message 双写发生在
-      // 同一时刻(同戳),而用户连发两条相同消息戳必然不同——只看文本会把第二条吞掉。
-      if (item.type === "user_text" && last?.type === "user_text" && last.text === item.text && last.timestamp === item.timestamp) continue;
+      // 「等价」= 同文 + 同刻：kimi 的 turn.prompt 与 context.append_message 双写是同一
+      // 消息的两次落盘，time 各自取落盘时刻——实测相邻两行的戳**最多差 1ms**（不是同戳，
+      // 全等判定会被 1ms 差击穿，消息双显）；用户连发两条相同消息的间隔必然远大于此。
+      // 故时间维度用 ≤2s 容差窗口：双写消除、真人连发不吞（5s 差用例钉在 reducer.test）。
+      if (item.type === "user_text" && last?.type === "user_text" && last.text === item.text
+        && (last.timestamp === item.timestamp
+          || (last.timestamp != null && item.timestamp != null
+            && Math.abs(Date.parse(item.timestamp) - Date.parse(last.timestamp)) <= 2_000))) continue;
       if (item.type === "reasoning" && last?.type === "reasoning" && last.text === item.text) continue;
       writable().push(item);
       continue;
