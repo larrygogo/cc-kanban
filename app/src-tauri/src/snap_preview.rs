@@ -100,6 +100,12 @@ mod imp {
         // 与贴纸主窗同款的 transparent（tauri.conf.json 的 main 已验证 WebView2 透明
         // 可行）。visible(false) 创建、READY 握手后才 show：加载期不闪白框。
         // focused(false) 不抢焦点——拖拽循环里焦点易主会让 OS 提前结束拖动。
+        // shadow(false) 与 main 一致（tauri.conf.json 的 main 也是 shadow:false）——缺省
+        // shadow:true 会让 tao 走「无边框+阴影」路径：WM_NCCALCSIZE 按不可见边框 insets
+        // （150% 缩放下左/右/底各 11、顶 2）收缩 client 区，set_inner_size 再反向补偿
+        // 把外框撑大——实测外框 55px vs 请求 42px，且内容区偏移 (+11,+2)，预览条比真实
+        // 缩略条厚一圈还不贴边。预览条只是幽灵色块，不需要 DWM 阴影，关掉后
+        // winrect==client==请求值，与 main 的行为一致。
         let builder = tauri::WebviewWindowBuilder::new(
             &app,
             LABEL,
@@ -107,6 +113,7 @@ mod imp {
         )
         .title("")
         .decorations(false)
+        .shadow(false)
         .transparent(true)
         .always_on_top(true)
         .skip_taskbar(true)
