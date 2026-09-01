@@ -361,6 +361,24 @@ const EMPTY_MARKERS: string[] = [];
 const trimActivityCdPrefix = (activity: string): string =>
   activity.replace(/^([›>]\s*)?cd\s+("[^"]*"|'[^']*'|[^\s&]+)\s+&&\s*/, "$1");
 
+// 运行指示的「贪吃蛇」（用户指定形态，kimi TUI 同款）：2×4 盲文格内 3 个亮点沿
+// 顺时针环路爬行（左列往上、右列往下），8 帧一轮。比原地呼吸的圆点更「在前进」。
+// 帧字符按盲文点位预生成（dot1..8 = bit0..7，左列 1,2,3,7 / 右列 4,5,6,8）。
+const SNAKE_PATH = [1, 4, 5, 6, 8, 7, 3, 2]; // 顺时针环路（盲文点编号）
+const SNAKE_FRAMES = SNAKE_PATH.map((_, i) =>
+  String.fromCharCode(0x2800 + [0, 1, 2].reduce((m, k) => m | (1 << (SNAKE_PATH[(i + k) % 8] - 1)), 0)),
+);
+function SnakeSpinner() {
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    // reduced-motion：不启动循环，定格首帧（仍有「蛇」形，不晃）。
+    if (typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const timer = window.setInterval(() => setFrame((f) => (f + 1) % SNAKE_FRAMES.length), 120);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <i className="chat-running-snake" aria-hidden="true">{SNAKE_FRAMES[frame]}</i>;
+}
+
 
 /// 把 content 写进 composer 并提交：正文与回车**必须分两次写**。
 ///
@@ -3483,7 +3501,7 @@ export function ChatWindow() {
         <div className="chat-running" role="status">
           {/* 长命令被 CSS 截断成单行，全文进 data-tip。展示文本剥掉 cd 前缀
               （见 trimActivityCdPrefix）。 */}
-          <i /><span data-tip={history?.currentActivity || undefined}>
+          <SnakeSpinner /><span data-tip={history?.currentActivity || undefined}>
             {history?.currentActivity ? trimActivityCdPrefix(history.currentActivity) : t.chat.running}
           </span>
         </div>

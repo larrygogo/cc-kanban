@@ -4709,12 +4709,10 @@ select.ns-input {
 /* 活动文本恒单行:currentActivity 是最近一条命令的原文,长命令折行会把状态条撑成一坨
    多行原始文本(且每换一条活动高度都在跳)。截断展示,全文走 title 悬停。 */
 .chat-running span { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 运行指示的「贪吃蛇」：8px 脉冲点实拍被读成「静止圆点+装饰」，换成蛇形流动——
-   轨道上一条头亮尾淡的光节持续向前爬行（渐变拖尾即蛇身），「在干活」的方向感
-   比原地呼吸强。reduced-motion 由全局通配压成静帧（光节停在轨道上，仍可读）。 */
-.chat-running i { position: relative; width: 56px; height: 8px; flex: 0 0 auto; border-radius: 999px; background: color-mix(in srgb, var(--cc-text) 10%, transparent); overflow: hidden; }
-.chat-running i::before { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 18px; border-radius: 999px; background: linear-gradient(90deg, transparent, var(--cc-accent) 55%, var(--cc-accent)); animation: chat-running-snake 1.4s linear infinite; }
-@keyframes chat-running-snake { from { transform: translateX(-18px); } to { transform: translateX(56px); } }
+/* 运行指示的「贪吃蛇」（用户指定形态，kimi TUI 同款盲文蛇）：2×4 盲文格内 3 个亮点
+   沿环路爬行，帧字符由 SnakeSpinner 以 120ms 轮转。比原地呼吸的圆点更「在前进」；
+   reduced-motion 下组件定格首帧。 */
+.chat-running i.chat-running-snake { font-style: normal; font-size: calc(14px * var(--cc-ui)); line-height: 1; color: var(--cc-accent); flex: 0 0 auto; width: auto; height: auto; background: none; overflow: visible; border-radius: 0; }
 /* 脉冲关键帧仍被 .chat-todo-live / .chat-sidebar-dot.is-* 三处复用（它们保持呼吸点形态）。 */
 @keyframes chat-running-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.7); } }
 /* "/" 补全与模型菜单的皮肤统一走 .dd-menu / .dd-item（不透明表面、主题覆盖、入场动画

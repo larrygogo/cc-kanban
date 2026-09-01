@@ -3636,6 +3636,21 @@ describe("ChatWindow", () => {
     await waitFor(() => expect(setTitleMock).toHaveBeenCalledWith("▶ 跑着的会话 · Meowo"));
   });
 
+  /** 运行指示是盲文贪吃蛇（用户指定形态）：帧字符随时间轮转，不再是原地呼吸的圆点。 */
+  it("运行指示:盲文蛇帧随时间轮转", async () => {
+    window.history.replaceState({}, "", "/?sessionId=95");
+    respondWithHistory({
+      sessionId: 95, title: "蛇", status: "running", provider: "claude", cwd: "C:/repo",
+      supported: true, offset: 1, reset: false, pendingReview: null, connected: true,
+      items: [{ type: "user_text", id: "u1", timestamp: null, text: "开始" }],
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(document.querySelector(".chat-running-snake")).toBeTruthy());
+    const snake = document.querySelector(".chat-running-snake")!;
+    const first = snake.textContent;
+    await waitFor(() => expect(snake.textContent).not.toBe(first), { timeout: 1_000 });
+  });
+
   /**
    * 跨 provider 切换（切换引擎）:模型下拉出现「切换引擎」分组,点目标 agent 展开二级,
    * 点档位先 appConfirm(破坏性:要杀当前进程)——取消不发命令;确认后调
