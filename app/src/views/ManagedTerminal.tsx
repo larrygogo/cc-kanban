@@ -458,6 +458,11 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   // 不下发任何 resize（含网格自愈），外部终端的尺寸得以稳定生效；重新聚焦时补一次
   // fit+resize 把主控权拿回来（监听器在挂载 effect 里）。
   const focusedRef = useRef(true);
+  // 仲裁对象存在与否的本地镜像（T-14）：初值随快照对齐（inspectSnapshot），实时增删
+  // 走 pty-external-viewers 监听。外部视图**离线**的瞬间仲裁对象就没了——由那个监听
+  // 立刻把网格夺回本地，不等下一次聚焦/拖窗口（实拍：外部终端关掉后对话窗终端一直
+  // 只显示上半截，拖一下窗口才复原）。
+  const externalViewersRef = useRef(false);
   const resizeIfChanged = (sid: number, cols: number, rows: number) => {
     if (!focusedRef.current) return; // 非聚焦视图不下发 resize（T-14，见 focusedRef）
     const last = lastSentSizeRef.current;
@@ -995,6 +1000,25 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       if (cancelled) un();
       else unSettings = un;
     }).catch(() => {});
+    let unExternal: (() => void) | undefined;
+    // 外部视图全员离线 = T-14 尺寸仲裁的对象没了：立刻把网格夺回本地 fit 出的尺寸，
+    // 不等「重新聚焦」——实拍：外部同步终端关掉后，对话窗终端一直只显示上半截（PTY
+    // 停在外部终端的小网格），拖到窗口触发激活才复原。在线期间不动：聚焦视图才是
+    // 尺寸主控（见 focusedRef），这里抢会让两个视图来回重排。
+    listen<{ sessionId: number; online: boolean }>("pty-external-viewers", ({ payload }) => {
+      if (payload.sessionId !== sessionIdRef.current) return;
+      externalViewersRef.current = payload.online;
+      if (payload.online || !visibleRef.current || !fittedRef.current) return;
+      const term = terminalRef.current;
+      if (!term || term.cols <= 1 || term.rows <= 1) return;
+      lastSentSizeRef.current = { cols: term.cols, rows: term.rows };
+      void resizeManagedTerminal(sessionIdRef.current, term.cols, term.rows).catch(() => {
+        lastSentSizeRef.current = null;
+      });
+    }).then((un) => {
+      if (cancelled) un();
+      else unExternal = un;
+    }).catch(() => {});
     // 保底：TUI 一直不画东西也不能永远停在 spinner 上。撤遮罩的同时挂超时提示——
     // 纯黑屏零解释时用户不知道是启动失败、还在等、还是自己该做什么。
     let initTimerFired = false;
@@ -1164,6 +1188,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       setExitCode(snapshot.exited ? snapshot.exitCode : undefined);
       // 外部视图在线初值（T-14）：实时增删走 pty-external-viewers 事件，这里是
       // 重开窗口/重对齐时的对齐点。同值 setState 上游会 bail out，不去重。
+      externalViewersRef.current = snapshot.externalViewers === true;
       onExternalViewersRef.current?.(snapshot.externalViewers === true);
       // 快照不带 forced（重开窗口补齐历史画面）：按正常退出呈现。
       setExitForced(false);
@@ -1479,6 +1504,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       unOutput?.();
       unExit?.();
       unSettings?.();
+      unExternal?.();
       // webgl 先于 terminal dispose(xterm 惯例:renderer addon 依赖 core 的 DOM 还在)。
       try { webgl?.dispose(); } catch { /* 上下文丢失时已自释放 */ }
       searchAddonRef.current = null;
@@ -1543,7 +1569,18 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       fit.fit();
       fittedRef.current = true;
       if (terminal.cols > 1 && terminal.rows > 1) {
-        resizeIfChanged(sessionId, terminal.cols, terminal.rows);
+        // 刻意不走 resizeIfChanged 的同值缓存：PTY 可能已被别的通路改小（外部同步终端
+        // 的握手 resize、手机端查看后异常退出没还原、占位网格就地重启），而缓存里记的
+        // 还是本地值、同值跳过——画面固化成「只显示上半截」，拖窗口才复原（实拍，与
+        // 64ab995 修过的手机尺寸卡死同一类）。后端 last_size 有同值短路（pty.rs），
+        // 重复下发零 SIGWINCH——无条件补发换来「切回终端页必然自愈」。
+        // 唯一的让路沿用 T-14 仲裁：外部视图在线且本窗失焦时不抢（外部终端是尺寸主控）。
+        if (focusedRef.current || !externalViewersRef.current) {
+          lastSentSizeRef.current = { cols: terminal.cols, rows: terminal.rows };
+          void resizeManagedTerminal(sessionId, terminal.cols, terminal.rows).catch(() => {
+            lastSentSizeRef.current = null;
+          });
+        }
       }
       // 显式滚底：终端是实时视图，切回就该看最新。以前靠「切回必发 resize→TUI 整屏
       // 重绘」的副作用顺带回底，resize 同值短路后副作用消失，上翻的视口会停在原地。

@@ -1149,6 +1149,57 @@ describe("ManagedTerminal", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("resize_managed_terminal", { sessionId: 163, cols: 80, rows: 24 }));
   });
 
+  /**
+   * 外部视图离线即夺回网格（实拍回归：外部同步终端关掉后，PTY 停在它的小网格，
+   * 对话窗终端只显示上半截；原设计只在「重新聚焦」时夺回，用户盯着窗口不点击就
+   * 一直错着，拖到窗口触发激活才复原）。仲裁对象没了就不需要等聚焦。
+   */
+  it("外部视图离线立即夺回网格,不等重新聚焦", async () => {
+    const snapshot = { ...noPty, active: true, cols: 100, rows: 30, externalViewers: true, data: btoa("hi"), endOffset: 2 };
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(snapshot);
+      if (command === "managed_terminal_grid") return Promise.resolve([100, 30]);
+      return Promise.resolve();
+    });
+    render(<ManagedTerminal sessionId={163} status="running" />);
+    // 挂载时可见 effect 补发一次（本窗聚焦，无仲裁冲突）。
+    await waitFor(() => expect(invoke.mock.calls.some(([c]) => c === "resize_managed_terminal")).toBe(true));
+    invoke.mockClear();
+    // 失焦 + 外部视图在线：仲裁期一切让路（外部终端是尺寸主控）。
+    focusState.current = false;
+    fireEvent(window, new Event("blur"));
+    // 外部视图离线：立刻按本地网格（哑终端 80×24）夺回，不等重新聚焦。
+    eventHandlers.get("pty-external-viewers")!({ payload: { sessionId: 163, online: false } });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("resize_managed_terminal", { sessionId: 163, cols: 80, rows: 24 }));
+    // 别的会话的离线事件不触发本组件。
+    invoke.mockClear();
+    eventHandlers.get("pty-external-viewers")!({ payload: { sessionId: 999, online: false } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(invoke.mock.calls.some(([c]) => c === "resize_managed_terminal")).toBe(false);
+  });
+
+  /**
+   * 切回终端页无条件补发 resize（64ab995 的语义，U1-16 的同值短路曾把它弱化）：
+   * PTY 可能已被别的通路改小（外部握手/手机查看后异常退出/占位网格重启），缓存同值
+   * 跳过就永远收不回；后端 last_size 同值短路兜底，常规路径不多吃 SIGWINCH。
+   */
+  it("切回终端页无条件补发 resize,同值缓存不挡自愈", async () => {
+    const snapshot = { ...noPty, active: true, cols: 80, rows: 24, data: btoa("hi"), endOffset: 2 };
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve(snapshot);
+      if (command === "managed_terminal_grid") return Promise.resolve([80, 24]);
+      return Promise.resolve();
+    });
+    const { rerender } = render(<ManagedTerminal sessionId={163} status="running" visible />);
+    await waitFor(() => expect(invoke.mock.calls.some(([c]) => c === "resize_managed_terminal")).toBe(true));
+    invoke.mockClear();
+    // 切走再切回：fit 出的尺寸与缓存同值——旧实现被 resizeIfChanged 短路掉，
+    // 现实现必须照样补发。
+    rerender(<ManagedTerminal sessionId={163} status="running" visible={false} />);
+    rerender(<ManagedTerminal sessionId={163} status="running" visible />);
+    await waitFor(() => expect(invoke.mock.calls.some(([c]) => c === "resize_managed_terminal")).toBe(true));
+  });
+
   it("isMouseMotionReport 只认无按键的 SGR 移动事件", () => {
     expect(isMouseMotionReport("\x1b[<35;10;20M")).toBe(true);
     expect(isMouseMotionReport("\x1b[<39;10;20M")).toBe(true); // shift+移动
