@@ -41,7 +41,9 @@
 //!
 //! 反例教训（2026-08-31）：api.ts 给 `newSession` 加 `extraDirs` 时没同步桥臂，
 //! deny_unknown_fields 把手机端每次新建会话都打成 400（字段空也发 `[]`，无可选豁免）。
-//! **改 api.ts 的 invoke 传参时必须同步本文件对应臂**——这是人肉契约，编译期不兜底。
+//! **改 api.ts 的 invoke 传参时必须同步本文件对应臂**——契约仍是人肉对齐，但有机制
+//! 兜底：tests::every_bridged_command_sample_payload_parses 给每条臂钉了一份镜像
+//! api.ts 实参的样例 payload，api.ts 加键后同步样例、桥臂没跟上即红。
 
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -698,10 +700,175 @@ async fn rpc_handler(
     dispatch(&ctx.app, &command, &body).await
 }
 
-/// 白名单命令 → 各 command 函数本体。参数结构体逐命令定义（camelCase +
+/// 各臂参数结构体（模块级）。原先是 dispatch 各臂内的匿名 `struct A`，测试够不着；
+/// 机械外提（字段、serde 属性一字未改）只为让「样例 payload → 不 400」契约测试拿得到
+/// 类型（见 tests::every_bridged_command_sample_payload_parses）。camelCase +
+/// deny_unknown_fields 由宏统一强制——新臂手写漏了 deny_unknown_fields 会退化成
+/// 静默丢键，不许再有这个自由度。
+macro_rules! bridged_args {
+    ($name:ident { $( $(#[$attr:meta])* $field:ident : $ty:ty ),* $(,)? }) => {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct $name {
+            $( $(#[$attr])* $field : $ty, )*
+        }
+    };
+}
+
+// sessionId 单参臂共用。
+bridged_args!(SessionArg { session_id: i64 });
+
+bridged_args!(GetLiveSessionsPageArgs {
+    filter: String,
+    #[serde(default)]
+    search: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    before_last_event_at: Option<i64>,
+    #[serde(default)]
+    before_id: Option<i64>,
+    limit: usize,
+    #[serde(default)]
+    include_foreign: Option<bool>,
+    #[serde(default)]
+    include_pending: Option<bool>
+});
+
+bridged_args!(SearchChatTranscriptsArgs { query: String });
+
+bridged_args!(RecentCwdsArgs { limit: usize });
+
+bridged_args!(RenameSessionArgs {
+    #[serde(default)]
+    cwd: Option<String>,
+    session_id: String,
+    title: String,
+    #[serde(default)]
+    provider: Option<String>
+});
+
+bridged_args!(SetArchivedArgs {
+    session_id: i64,
+    archived: bool
+});
+
+bridged_args!(SetSessionNoteArgs {
+    session_id: String,
+    note: String
+});
+
+bridged_args!(GetChatHistoryArgs {
+    session_id: i64,
+    offset: u64,
+    #[serde(default)]
+    full: Option<bool>,
+    #[serde(default)]
+    before: Option<u64>
+});
+
+bridged_args!(GetSubagentTranscriptArgs {
+    session_id: i64,
+    tool_use_id: String
+});
+
+bridged_args!(ManagedTerminalSnapshotArgs {
+    session_id: i64,
+    #[serde(default)]
+    since: Option<u64>
+});
+
+bridged_args!(WriteManagedTerminalArgs {
+    session_id: i64,
+    data: String
+});
+
+bridged_args!(ResizeManagedTerminalArgs {
+    session_id: i64,
+    cols: u16,
+    rows: u16
+});
+
+bridged_args!(StartManagedTerminalArgs {
+    session_id: i64,
+    cols: u16,
+    rows: u16,
+    #[serde(default)]
+    options: Option<std::collections::HashMap<String, String>>
+});
+
+bridged_args!(TakeoverManagedTerminalArgs {
+    session_id: i64,
+    cols: u16,
+    rows: u16,
+    #[serde(default)]
+    options: Option<std::collections::HashMap<String, String>>
+});
+
+bridged_args!(SendBackgroundPromptArgs {
+    session_id: i64,
+    text: String
+});
+
+bridged_args!(SetSessionLaunchSelectionArgs {
+    session_id: i64,
+    option: String,
+    choice: String
+});
+
+bridged_args!(RegisterApprovalConsumerArgs {
+    session_id: i64,
+    consumer_id: String
+});
+
+bridged_args!(UnregisterApprovalConsumerArgs { consumer_id: String });
+
+bridged_args!(ResolvePendingApprovalArgs {
+    session_id: i64,
+    request_id: String,
+    choice: String
+});
+
+bridged_args!(SavePastedAttachmentArgs {
+    file_name: String,
+    data_base64: String
+});
+
+bridged_args!(AgentChatUiArgs {
+    provider: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    session_id: Option<i64>
+});
+
+bridged_args!(AgentModelsArgs { provider: String });
+
+bridged_args!(NewSessionArgs {
+    cwd: String,
+    provider: String,
+    /// 旧前端兼容参数，桌面命令同样忽略。
+    #[serde(default)]
+    #[allow(dead_code)]
+    terminal: Option<String>,
+    #[serde(default)]
+    options: Option<std::collections::HashMap<String, String>>,
+    // 移动页与桌面共用 NewSessionPanel，api.ts 恒带 extraDirs（空也为 []）——
+    // 缺这个字段 deny_unknown_fields 会把手机端每次新建都打成 400。
+    #[serde(default)]
+    extra_dirs: Option<Vec<String>>
+});
+
+bridged_args!(CheckProviderHooksArgs { provider: String });
+
+bridged_args!(ListSubdirectoriesArgs {
+    #[serde(default)]
+    path: Option<String>
+});
+
+/// 白名单命令 → 各 command 函数本体。参数结构体见上方模块级定义（camelCase +
 /// deny_unknown_fields），与 api.ts 的 invoke 传参逐名对齐。
 async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Response {
-    use serde::Deserialize;
     macro_rules! args {
         ($t:ty) => {
             match parse::<$t>(body) {
@@ -710,34 +877,11 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             }
         };
     }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct SessionArg {
-        session_id: i64,
-    }
 
     let state = app.state::<crate::AppState>();
     match command {
         "get_live_sessions_page" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                filter: String,
-                #[serde(default)]
-                search: Option<String>,
-                #[serde(default)]
-                cwd: Option<String>,
-                #[serde(default)]
-                before_last_event_at: Option<i64>,
-                #[serde(default)]
-                before_id: Option<i64>,
-                limit: usize,
-                #[serde(default)]
-                include_foreign: Option<bool>,
-                #[serde(default)]
-                include_pending: Option<bool>,
-            }
-            let a = args!(A);
+            let a = args!(GetLiveSessionsPageArgs);
             reply(
                 crate::session_query::get_live_sessions_page(
                     state,
@@ -761,35 +905,15 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             reply(crate::handoff::get_session_lineage(state, a.session_id).await)
         }
         "search_chat_transcripts" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                query: String,
-            }
-            let a = args!(A);
+            let a = args!(SearchChatTranscriptsArgs);
             reply(crate::chat::search_chat_transcripts(state, a.query).await)
         }
         "recent_cwds" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                limit: usize,
-            }
-            let a = args!(A);
+            let a = args!(RecentCwdsArgs);
             reply(crate::session_query::recent_cwds(state, a.limit).await)
         }
         "rename_session" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                #[serde(default)]
-                cwd: Option<String>,
-                session_id: String,
-                title: String,
-                #[serde(default)]
-                provider: Option<String>,
-            }
-            let a = args!(A);
+            let a = args!(RenameSessionArgs);
             reply(
                 crate::session_command::rename_session(
                     app.clone(),
@@ -803,56 +927,28 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             )
         }
         "set_archived" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                session_id: i64,
-                archived: bool,
-            }
-            let a = args!(A);
+            let a = args!(SetArchivedArgs);
             reply(
                 crate::session_command::set_archived(app.clone(), state, a.session_id, a.archived)
                     .await,
             )
         }
         "set_session_note" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                session_id: String,
-                note: String,
-            }
-            let a = args!(A);
+            let a = args!(SetSessionNoteArgs);
             reply(
                 crate::session_command::set_session_note(app.clone(), state, a.session_id, a.note)
                     .await,
             )
         }
         "get_chat_history" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                session_id: i64,
-                offset: u64,
-                #[serde(default)]
-                full: Option<bool>,
-                #[serde(default)]
-                before: Option<u64>,
-            }
-            let a = args!(A);
+            let a = args!(GetChatHistoryArgs);
             reply(
                 crate::chat::get_chat_history(state, a.session_id, a.offset, a.full, a.before)
                     .await,
             )
         }
         "get_subagent_transcript" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                session_id: i64,
-                tool_use_id: String,
-            }
-            let a = args!(A);
+            let a = args!(GetSubagentTranscriptArgs);
             reply(crate::chat::get_subagent_transcript(state, a.session_id, a.tool_use_id).await)
         }
         "refresh_session_model" => {
@@ -868,14 +964,7 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             reply(crate::managed_terminal::managed_terminal_grid(state, a.session_id).await)
         }
         "managed_terminal_snapshot" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                session_id: i64,
-                #[serde(default)]
-                since: Option<u64>,
-            }
-            let a = args!(A);
+            let a = args!(ManagedTerminalSnapshotArgs);
             reply(
                 crate::managed_terminal::managed_terminal_snapshot(state, a.session_id, a.since)
                     .await,
@@ -889,26 +978,13 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             ))
         }
         "write_managed_terminal" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                session_id: i64,
-                data: String,
-            }
-            let a = args!(A);
+            let a = args!(WriteManagedTerminalArgs);
             reply(
                 crate::managed_terminal::write_managed_terminal(state, a.session_id, a.data).await,
             )
         }
         "resize_managed_terminal" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                session_id: i64,
-                cols: u16,
-                rows: u16,
-            }
-            let a = args!(A);
+            let a = args!(ResizeManagedTerminalArgs);
             reply(
                 crate::managed_terminal::resize_managed_terminal(
                     state,
@@ -920,16 +996,7 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             )
         }
         "start_managed_terminal" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                session_id: i64,
-                cols: u16,
-                rows: u16,
-                #[serde(default)]
-                options: Option<std::collections::HashMap<String, String>>,
-            }
-            let a = args!(A);
+            let a = args!(StartManagedTerminalArgs);
             reply(
                 crate::managed_terminal::start_managed_terminal(
                     app.clone(),
@@ -943,16 +1010,7 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             )
         }
         "takeover_managed_terminal" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                session_id: i64,
-                cols: u16,
-                rows: u16,
-                #[serde(default)]
-                options: Option<std::collections::HashMap<String, String>>,
-            }
-            let a = args!(A);
+            let a = args!(TakeoverManagedTerminalArgs);
             reply(
                 crate::terminal::takeover_managed_terminal(
                     app.clone(),
@@ -970,13 +1028,7 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             reply(crate::managed_terminal::attach_background_session(state, a.session_id).await)
         }
         "send_background_prompt" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                session_id: i64,
-                text: String,
-            }
-            let a = args!(A);
+            let a = args!(SendBackgroundPromptArgs);
             reply(
                 crate::managed_terminal::send_background_prompt(state, a.session_id, a.text).await,
             )
@@ -986,14 +1038,7 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             reply(crate::session_command::session_launch_selections(a.session_id).await)
         }
         "set_session_launch_selection" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                session_id: i64,
-                option: String,
-                choice: String,
-            }
-            let a = args!(A);
+            let a = args!(SetSessionLaunchSelectionArgs);
             reply(
                 crate::session_command::set_session_launch_selection(
                     a.session_id,
@@ -1015,13 +1060,7 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             crate::managed_terminal::awaiting_interaction_sessions(state),
         ),
         "register_approval_consumer" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                session_id: i64,
-                consumer_id: String,
-            }
-            let a = args!(A);
+            let a = args!(RegisterApprovalConsumerArgs);
             reply(crate::managed_terminal::register_approval_consumer(
                 state,
                 a.session_id,
@@ -1029,12 +1068,7 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             ))
         }
         "unregister_approval_consumer" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                consumer_id: String,
-            }
-            let a = args!(A);
+            let a = args!(UnregisterApprovalConsumerArgs);
             crate::managed_terminal::unregister_approval_consumer(
                 state,
                 remote_consumer_id(&a.consumer_id),
@@ -1042,14 +1076,7 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             reply_ok(())
         }
         "resolve_pending_approval" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                session_id: i64,
-                request_id: String,
-                choice: String,
-            }
-            let a = args!(A);
+            let a = args!(ResolvePendingApprovalArgs);
             reply(
                 crate::managed_terminal::resolve_pending_approval(
                     state,
@@ -1066,56 +1093,20 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             reply_ok(())
         }
         "save_pasted_attachment" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                file_name: String,
-                data_base64: String,
-            }
-            let a = args!(A);
+            let a = args!(SavePastedAttachmentArgs);
             reply(crate::chat::save_pasted_attachment(a.file_name, a.data_base64).await)
         }
         "list_agents" => reply_ok(crate::list_agents().await),
         "agent_chat_ui" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                provider: String,
-                #[serde(default)]
-                cwd: Option<String>,
-                #[serde(default)]
-                session_id: Option<i64>,
-            }
-            let a = args!(A);
+            let a = args!(AgentChatUiArgs);
             reply_ok(crate::agent_chat_ui(a.provider, a.cwd, a.session_id).await)
         }
         "agent_models" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                provider: String,
-            }
-            let a = args!(A);
+            let a = args!(AgentModelsArgs);
             reply_ok(crate::agent_models(a.provider).await)
         }
         "new_session" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                cwd: String,
-                provider: String,
-                /// 旧前端兼容参数，桌面命令同样忽略。
-                #[serde(default)]
-                #[allow(dead_code)]
-                terminal: Option<String>,
-                #[serde(default)]
-                options: Option<std::collections::HashMap<String, String>>,
-                // 移动页与桌面共用 NewSessionPanel，api.ts 恒带 extraDirs（空也为 []）——
-                // 缺这个字段 deny_unknown_fields 会把手机端每次新建都打成 400。
-                #[serde(default)]
-                extra_dirs: Option<Vec<String>>,
-            }
-            let a = args!(A);
+            let a = args!(NewSessionArgs);
             // 只启动托管 PTY，不 reveal（桌面命令的 reveal_session 会在宿主机弹窗/开
             // 外部终端——手机新建会话时桌面凭空开窗不可接受）。
             // 返回值与桌面契约刻意**不同**：桌面命令回 ()（reveal 即导航，前端无需句柄）；
@@ -1136,22 +1127,11 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             )
         }
         "check_provider_hooks" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                provider: String,
-            }
-            let a = args!(A);
+            let a = args!(CheckProviderHooksArgs);
             reply(crate::install::check_provider_hooks(a.provider).await)
         }
         "list_subdirectories" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase", deny_unknown_fields)]
-            struct A {
-                #[serde(default)]
-                path: Option<String>,
-            }
-            let a = args!(A);
+            let a = args!(ListSubdirectoriesArgs);
             reply(list_subdirectories(a.path).await)
         }
         "get_settings" => reply(
@@ -1612,5 +1592,181 @@ mod tests {
         assert_eq!(ok.full, None);
         assert!(serde_json::from_str::<A>(r#"{"session_id":7}"#).is_err());
         assert!(serde_json::from_str::<A>(r#"{"sessionId":7,"extra":1}"#).is_err());
+    }
+
+    /// 参数契约的机制性防护（头注 2026-08-31 反例的兜底）：每条白名单臂一份样例
+    /// payload，逐键镜像 api.ts 对应 invoke 的实参对象——含可选/条件包含的键（凡可能
+    /// 出现在 payload 的键样例里都有），断言能反序列化进该臂结构体，即「这一发不 400」。
+    /// api.ts 加键而桥臂没跟上时，样例按 api.ts 同步更新后本测试即红。白名单新增命令
+    /// 在 sample_payload_parse_check 缺样例会撞 `_` 臂失败——样例与命令同生同灭，
+    /// 与 every_bridged_command_has_a_dispatch_arm 同思路。
+    #[test]
+    fn every_bridged_command_sample_payload_parses() {
+        for cmd in BRIDGED_COMMANDS {
+            if let Err(e) = sample_payload_parse_check(cmd) {
+                panic!("{cmd} 样例 payload 未通过：{e}");
+            }
+        }
+        // api.ts 多处显式发 null（非缺键，见 :568/:885/:941）——Option 字段必须吃 null。
+        assert!(
+            parse::<GetLiveSessionsPageArgs>(
+                br#"{"filter":"all","search":null,"cwd":null,"beforeLastEventAt":null,"beforeId":null,"limit":50,"includeForeign":null,"includePending":null}"#
+            )
+            .is_ok()
+        );
+        assert!(
+            parse::<NewSessionArgs>(
+                br#"{"cwd":"C:/repo","provider":"claude","options":null,"extraDirs":null}"#
+            )
+            .is_ok()
+        );
+        assert!(parse::<ListSubdirectoriesArgs>(br#"{"path":null}"#).is_ok());
+        assert!(parse::<AgentChatUiArgs>(br#"{"provider":"claude","cwd":null,"sessionId":null}"#).is_ok());
+    }
+
+    /// 单臂样例校验：Ok = 样例能进该臂结构体；Err = 解析失败或缺样例。
+    /// 注释行号是样例键的出处（api.ts 的 invoke 调用点；host_os/file_access_token
+    /// 不经 api.ts，走 mobile/transport.ts 直发）。无参臂 dispatch 不读载荷，样例 `{}`
+    /// 用 IgnoredAny 只是钉死「传 {} 即可」这一事实（空 body 由 parse 归一为 {}）。
+    fn sample_payload_parse_check(cmd: &str) -> Result<(), String> {
+        match cmd {
+            // api.ts:566（getLiveSessionsPage：filter/limit 恒有，search/cwd/游标键恒发、
+            // 空值发 null，includeForeign/includePending 恒发）
+            "get_live_sessions_page" => parse::<GetLiveSessionsPageArgs>(
+                br#"{"filter":"running","search":"fix","cwd":"C:/repo","beforeLastEventAt":1725000000000,"beforeId":42,"limit":50,"includeForeign":false,"includePending":true}"#,
+            )
+            .map(|_| ()),
+            // api.ts:526
+            "search_chat_transcripts" => {
+                parse::<SearchChatTranscriptsArgs>(br#"{"query":"login"}"#).map(|_| ())
+            }
+            // api.ts:946
+            "recent_cwds" => parse::<RecentCwdsArgs>(br#"{"limit":8}"#).map(|_| ()),
+            // api.ts:451（renameSession：cwd/provider 可 null，sessionId 是 cc_session_id 字符串）
+            "rename_session" => parse::<RenameSessionArgs>(
+                br#"{"cwd":"C:/repo","sessionId":"cc-abc","title":"renamed","provider":"claude"}"#,
+            )
+            .map(|_| ()),
+            // api.ts:456
+            "set_archived" => {
+                parse::<SetArchivedArgs>(br#"{"sessionId":7,"archived":true}"#).map(|_| ())
+            }
+            // api.ts:461
+            "set_session_note" => {
+                parse::<SetSessionNoteArgs>(br#"{"sessionId":"cc-abc","note":"memo"}"#).map(|_| ())
+            }
+            // api.ts:182（full/before 可选——undefined 键被 JSON 丢弃，给了就须在结构体内）
+            "get_chat_history" => parse::<GetChatHistoryArgs>(
+                br#"{"sessionId":7,"offset":0,"full":true,"before":100}"#,
+            )
+            .map(|_| ()),
+            // api.ts:193
+            "get_subagent_transcript" => {
+                parse::<GetSubagentTranscriptArgs>(br#"{"sessionId":7,"toolUseId":"tu-1"}"#)
+                    .map(|_| ())
+            }
+            // api.ts:362（since 可选）
+            "managed_terminal_snapshot" => {
+                parse::<ManagedTerminalSnapshotArgs>(br#"{"sessionId":7,"since":12}"#).map(|_| ())
+            }
+            // api.ts:368
+            "write_managed_terminal" => {
+                parse::<WriteManagedTerminalArgs>(br#"{"sessionId":7,"data":"ls\r"}"#).map(|_| ())
+            }
+            // api.ts:371
+            "resize_managed_terminal" => {
+                parse::<ResizeManagedTerminalArgs>(br#"{"sessionId":7,"cols":80,"rows":24}"#)
+                    .map(|_| ())
+            }
+            // api.ts:322（options 可选）
+            "start_managed_terminal" => parse::<StartManagedTerminalArgs>(
+                br#"{"sessionId":7,"cols":80,"rows":24,"options":{"permissionMode":"default"}}"#,
+            )
+            .map(|_| ()),
+            // api.ts:344（options 可选）
+            "takeover_managed_terminal" => parse::<TakeoverManagedTerminalArgs>(
+                br#"{"sessionId":7,"cols":80,"rows":24,"options":{"permissionMode":"default"}}"#,
+            )
+            .map(|_| ()),
+            // api.ts:339
+            "send_background_prompt" => {
+                parse::<SendBackgroundPromptArgs>(br#"{"sessionId":7,"text":"go on"}"#).map(|_| ())
+            }
+            // api.ts:355
+            "set_session_launch_selection" => parse::<SetSessionLaunchSelectionArgs>(
+                br#"{"sessionId":7,"option":"model","choice":"opus"}"#,
+            )
+            .map(|_| ()),
+            // api.ts:428
+            "register_approval_consumer" => {
+                parse::<RegisterApprovalConsumerArgs>(br#"{"sessionId":7,"consumerId":"c1"}"#)
+                    .map(|_| ())
+            }
+            // api.ts:431
+            "unregister_approval_consumer" => {
+                parse::<UnregisterApprovalConsumerArgs>(br#"{"consumerId":"c1"}"#).map(|_| ())
+            }
+            // api.ts:434
+            "resolve_pending_approval" => parse::<ResolvePendingApprovalArgs>(
+                br#"{"sessionId":7,"requestId":"r1","choice":"allow"}"#,
+            )
+            .map(|_| ()),
+            // api.ts:247
+            "save_pasted_attachment" => {
+                parse::<SavePastedAttachmentArgs>(br#"{"fileName":"a.png","dataBase64":"aGk="}"#)
+                    .map(|_| ())
+            }
+            // api.ts:810（cwd/sessionId 可 null）
+            "agent_chat_ui" => {
+                parse::<AgentChatUiArgs>(br#"{"provider":"claude","cwd":"C:/repo","sessionId":7}"#)
+                    .map(|_| ())
+            }
+            // api.ts:818
+            "agent_models" => {
+                parse::<AgentModelsArgs>(br#"{"provider":"claude"}"#).map(|_| ())
+            }
+            // api.ts:941（options 可选、extraDirs 恒发——空也发 []，2026-08-31 事故的字段）
+            "new_session" => parse::<NewSessionArgs>(
+                br#"{"cwd":"C:/repo","provider":"claude","options":{"permissionMode":"default"},"extraDirs":["C:/other"]}"#,
+            )
+            .map(|_| ()),
+            // api.ts:972
+            "check_provider_hooks" => {
+                parse::<CheckProviderHooksArgs>(br#"{"provider":"claude"}"#).map(|_| ())
+            }
+            // api.ts:885（path 键恒发、无参发 null）
+            "list_subdirectories" => {
+                parse::<ListSubdirectoriesArgs>(br#"{"path":"C:/"}"#).map(|_| ())
+            }
+            // sessionId 单参臂，共用 SessionArg——出处：api.ts:967 getSessionLineage /
+            // :218 refreshSessionModel / :229 refreshSessionTodos / :381 managedTerminalGrid /
+            // :365 managedTerminalBinding / :331 attachBackgroundSession /
+            // :349 sessionLaunchSelections / :421 pendingInteraction /
+            // :425 dismissInteractiveQuestion
+            "get_session_lineage"
+            | "refresh_session_model"
+            | "refresh_session_todos"
+            | "managed_terminal_grid"
+            | "managed_terminal_binding"
+            | "attach_background_session"
+            | "session_launch_selections"
+            | "pending_interaction"
+            | "dismiss_interactive_question" => {
+                parse::<SessionArg>(br#"{"sessionId":7}"#).map(|_| ())
+            }
+            // 无参臂，dispatch 忽略载荷——出处：api.ts:537 getLiveSessionsCounts /
+            // :871 awaitingInteractionSessions / :802 listAgents / :830 getSettings /
+            // :926 getAccounts；platform.ts:7 host_os（transport.ts:87 直发 body "{}"）、
+            // transport.ts:108 file_access_token（rpc("file_access_token", {})）
+            "get_live_sessions_counts"
+            | "awaiting_interaction_sessions"
+            | "list_agents"
+            | "get_settings"
+            | "host_os"
+            | "file_access_token"
+            | "get_accounts" => parse::<serde::de::IgnoredAny>(br#"{}"#).map(|_| ()),
+            // 白名单新增项必须补样例——落到此臂是样例漏写，不是命令坏了。
+            _ => Err(format!("{cmd} 在 sample_payload_parse_check 缺 payload 样例")),
+        }
     }
 }
