@@ -175,7 +175,10 @@ impl Store {
                 s.extra_dirs
          FROM sessions s
          JOIN projects p ON p.id = s.project_id
-         LEFT JOIN tasks t ON t.session_id = s.id
+         -- 关联子查询取每会话最新一张 task：ux_tasks_session 建立前的旧库可能一会话
+         -- 多卡，裸 JOIN t.session_id 会扇出重复行（列表重复卡、计数虚高）。与
+         -- task_id_of_session 的「最新卡」口径一致；其余三处 tasks JOIN 同式同义。
+         LEFT JOIN tasks t ON t.id = (SELECT MAX(t2.id) FROM tasks t2 WHERE t2.session_id = s.id)
          LEFT JOIN session_context sc ON sc.cc_session_id = s.cc_session_id
          LEFT JOIN session_notes sn ON sn.cc_session_id = s.cc_session_id";
 
@@ -409,7 +412,7 @@ impl Store {
     pub fn live_sessions_totals(&self) -> Result<(i64, i64), StoreError> {
         const SQL: &str = "SELECT COUNT(*), COALESCE(SUM(s.archived = 1), 0)
              FROM sessions s
-             LEFT JOIN tasks t ON t.session_id = s.id
+             LEFT JOIN tasks t ON t.id = (SELECT MAX(t2.id) FROM tasks t2 WHERE t2.session_id = s.id)
              WHERE s.superseded_by IS NULL AND NOT (
                  LOWER(TRIM(COALESCE(t.title, ''))) = 'ping'
                  OR (s.status = 'ended'
@@ -436,7 +439,7 @@ impl Store {
             let sql = format!(
                 "SELECT COUNT(*), COALESCE(SUM(s.archived = 1), 0)
                  FROM sessions s
-                 LEFT JOIN tasks t ON t.session_id = s.id
+                 LEFT JOIN tasks t ON t.id = (SELECT MAX(t2.id) FROM tasks t2 WHERE t2.session_id = s.id)
                  WHERE s.cc_session_id IN ({placeholders})
                    AND s.superseded_by IS NULL AND NOT (
                      LOWER(TRIM(COALESCE(t.title, ''))) = 'ping'
@@ -474,7 +477,7 @@ impl Store {
         let mut st = self.conn.prepare(
             "SELECT s.id, s.status, s.pending_review, s.pid, s.last_event_at,
                     s.cc_session_id, s.provider, s.cwd FROM sessions s
-             LEFT JOIN tasks t ON t.session_id = s.id
+             LEFT JOIN tasks t ON t.id = (SELECT MAX(t2.id) FROM tasks t2 WHERE t2.session_id = s.id)
              WHERE s.archived = 0 AND s.status != 'ended' AND s.superseded_by IS NULL
                AND (s.status IN ('running','waiting') OR s.pending_review IS NOT NULL)
                AND LOWER(TRIM(COALESCE(t.title, ''))) != 'ping'",

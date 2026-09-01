@@ -60,7 +60,7 @@ fn parse_posttooluse_todowrite() {
     }"#;
     let ev = HookEvent::parse(json).expect("parse");
     assert_eq!(ev.tool_name.as_deref(), Some("TodoWrite"));
-    let todos = ev.todo_items();
+    let todos = ev.todo_items().expect("显式 todos 键应解析出快照");
     assert_eq!(todos.len(), 2);
     assert_eq!(todos[1].content, "b");
 }
@@ -240,9 +240,10 @@ fn claude_task_delta_accumulates_into_todos() {
     assert_eq!(todos[0].content, "生成基线迁移(改名)");
 }
 
-/// 结果文本改版/缺失时解析放弃，事件降级为 touch——绝不能造错误编号或报错冒泡。
+/// 结果文本改版/缺失时 Create 不再整条丢：用确定性占位编号（pending-{subject}）先落行，
+/// 后续 TaskUpdate 带回真编号与同一 subject 时换绑到真编号——行数不变、状态照走。
 #[test]
-fn claude_task_create_without_parsable_response_is_a_noop() {
+fn claude_task_create_without_parsable_response_lands_placeholder_then_rebinds() {
     let store = Store::open_in_memory().unwrap();
     disp(
         &store,
@@ -250,11 +251,29 @@ fn claude_task_create_without_parsable_response_is_a_noop() {
         100,
     )
     .unwrap();
+    // 结果文案改了抠不出编号：占位落行，不丢这条待办，也不报错冒泡。
     disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TaskCreate",
         "tool_input":{"subject":"x"},"tool_response":"格式变了"}"#), 200).unwrap();
     let sid = store.find_session_id_pub("s1").unwrap().unwrap();
     let tid = store.task_id_of_session_pub(sid).unwrap();
-    assert!(store.list_todos(tid).unwrap().is_empty());
+    let todos = store.list_todos(tid).unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].content, "x");
+    assert_eq!(todos[0].status.as_str(), "pending");
+
+    // TaskUpdate 带回真编号与同一 subject：占位行换绑到真编号，不长重复行。
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TaskUpdate",
+        "tool_input":{"taskId":"1","subject":"x","status":"in_progress"}}"#), 300).unwrap();
+    let todos = store.list_todos(tid).unwrap();
+    assert_eq!(todos.len(), 1, "换绑而不是另起一行");
+    assert_eq!(todos[0].status.as_str(), "in_progress");
+
+    // 换绑后按真编号的后续更新（不再带 subject）也能命中同一行。
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TaskUpdate",
+        "tool_input":{"taskId":"1","status":"completed"}}"#), 400).unwrap();
+    let todos = store.list_todos(tid).unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].status.as_str(), "completed");
 }
 
 #[test]
@@ -1047,4 +1066,31 @@ fn new_prompt_marks_todos_stale_and_next_snapshot_clears() {
     assert_eq!(todos.len(), 1);
     assert_eq!(todos[0].content, "c");
     assert!(!todos[0].stale);
+}
+
+/// TodoWrite 不带 todos 键（旧版 claude 的同名读操作）不是「清空清单」——必须跳过同步，
+/// 否则空列表会把整份待办表 DELETE 掉；显式 todos: [] 才是 agent 明确清空，照清。
+#[test]
+fn todowrite_without_todos_key_keeps_list_but_explicit_empty_clears() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"s1","cwd":"/home/me/proj"}"#),
+        100,
+    )
+    .unwrap();
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TodoWrite","tool_input":{"todos":[{"content":"a","status":"in_progress"}]}}"#), 200).unwrap();
+    let sid = store.find_session_id_pub("s1").unwrap().unwrap();
+    let tid = store.task_id_of_session_pub(sid).unwrap();
+    assert_eq!(store.list_todos(tid).unwrap().len(), 1);
+
+    // 不带 todos 键的同名调用：清单原样保留。
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TodoWrite","tool_input":{}}"#), 300).unwrap();
+    let todos = store.list_todos(tid).unwrap();
+    assert_eq!(todos.len(), 1, "键缺失不许误清表");
+    assert_eq!(todos[0].content, "a");
+
+    // 显式空数组：agent 明确清空，合法语义。
+    disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TodoWrite","tool_input":{"todos":[]}}"#), 400).unwrap();
+    assert!(store.list_todos(tid).unwrap().is_empty(), "显式空数组应清表");
 }

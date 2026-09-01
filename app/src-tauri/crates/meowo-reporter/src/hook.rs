@@ -42,8 +42,10 @@ pub struct HookEvent {
 /// 两者都只是「这条待办的文字」，用 alias 收进同一个字段，不必为此分叉解析。
 #[derive(Debug, Deserialize)]
 struct RawTodo {
+    // 内容字段可选：缺 content/title 的行不丢，由调用方补占位文案——静默丢掉会让
+    // 快照只剩部分行，进度计数失真（宁可占位，不可静默丢）。
     #[serde(alias = "title", alias = "subject", alias = "text")]
-    content: String,
+    content: Option<String>,
     #[serde(default)]
     status: String,
 }
@@ -63,28 +65,32 @@ impl HookEvent {
         }
     }
 
-    /// 从 tool_input.todos 提取 TodoInput 列表（非 TodoWrite 或无 todos 时返回空）。
-    pub fn todo_items(&self) -> Vec<TodoInput> {
-        let Some(input) = &self.tool_input else {
-            return Vec::new();
-        };
-        let Some(arr) = input.get("todos").and_then(|v| v.as_array()) else {
-            return Vec::new();
-        };
-        arr.iter()
-            .filter_map(|v| serde_json::from_value::<RawTodo>(v.clone()).ok())
-            .map(|t| TodoInput {
-                content: t.content,
-                status: TodoStatus::from_str(&t.status),
-            })
-            .collect()
+    /// 从 tool_input.todos 提取 TodoInput 列表。
+    ///
+    /// 返回 `Option` 是为区分两种「空」：`todos` 键缺失/不是数组 → `None`——这不是
+    /// 清单语义（旧版 claude 有同名的读操作调用，根本不带 todos 参数），调用方必须
+    /// 跳过同步，否则空列表会把整份待办表 DELETE 掉；显式 `todos: []` →
+    /// `Some(vec![])`，agent 明确清空是合法语义，照清。
+    pub fn todo_items(&self) -> Option<Vec<TodoInput>> {
+        let input = self.tool_input.as_ref()?;
+        let arr = input.get("todos")?.as_array()?;
+        Some(
+            arr.iter()
+                .filter_map(|v| serde_json::from_value::<RawTodo>(v.clone()).ok())
+                .map(|t| TodoInput {
+                    // 缺内容字段的行给占位文案保留进快照（理由见 RawTodo 注释）。
+                    content: t.content.unwrap_or_else(|| "（未命名事项）".to_string()),
+                    status: TodoStatus::from_str(&t.status),
+                })
+                .collect(),
+        )
     }
 
     /// 从增量待办工具（claude 的 TaskCreate/TaskUpdate）的调用中提取一条 TodoDelta。
     ///
     /// 不看工具名、靠字段区分：带 `taskId` 的是更新，带 `subject` 无 `taskId` 的是新建
     /// ——与 `RawTodo` 用 alias 收束各家字段名同一思路，将来别家的增量工具字段对得上
-    /// 就直接复用。解析不出（拿不到编号/字段缺失）返回 None，调用方降级为无操作。
+    /// 就直接复用。字段缺失（既无 taskId 也无 subject）返回 None，调用方降级为无操作。
     pub fn todo_delta(&self) -> Option<TodoDelta> {
         let input = self.tool_input.as_ref()?;
         // taskId 可能是字符串 "1" 也可能是数字 1，统一成字符串存。
@@ -112,9 +118,16 @@ impl HookEvent {
             });
         }
         let content = subject?;
-        // 新建的编号只在结果文本里；结果还没来（PreToolUse）或格式变了 → 放弃这条，
-        // 宁可少一条待办也不造一个错误编号。
-        let external_id = task_number(&response_text(self.tool_response.as_ref()?)?)?;
+        // 新建的编号只在结果文本里；抠不到（PreToolUse 还没结果 / CC 改了结果文案）不能
+        // 把这条 Create 整条丢掉——用 subject 拼一个确定性占位编号先落行，后续 TaskUpdate
+        // 带着同一 subject 与真编号到达时，由 store 层把占位行换绑到真编号
+        // （"pending-" 前缀是 hook 与 store 两侧的约定，见 apply_todo_delta）。
+        let external_id = self
+            .tool_response
+            .as_ref()
+            .and_then(response_text)
+            .and_then(|t| task_number(&t))
+            .unwrap_or_else(|| format!("pending-{content}"));
         Some(TodoDelta::Create {
             external_id,
             content,

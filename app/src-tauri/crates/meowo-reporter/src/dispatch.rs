@@ -88,11 +88,19 @@ pub fn dispatch(
                 });
                 match ev.tool_name.as_deref() {
                     _ if todo_tool => {
-                        store.sync_todos(sid, &ev.todo_items(), now_ms)?;
+                        // todos 键缺失不是「清空清单」：旧版 claude 有同名的读操作调用，
+                        // 根本不带 todos 参数——若把空列表交给 sync_todos，整份待办表会被
+                        // DELETE 掉。键缺失只按普通活动 touch；显式 todos: [] 才是 agent
+                        // 明确清空（合法语义，照清）。
+                        match ev.todo_items() {
+                            Some(items) => store.sync_todos(sid, &items, now_ms)?,
+                            None => store.touch_session(sid, now_ms)?,
+                        }
                     }
                     _ if todo_delta_tool => {
-                        // 解析不出（结果文本改版等）降级为 touch——任务工具是元操作，
-                        // 不该像普通工具那样把名字写进 current_activity。
+                        // 解析不出（既无 taskId 也无 subject）降级为 touch——任务工具是元操作，
+                        // 不该像普通工具那样把名字写进 current_activity。Create 抠不到结果编号
+                        // 时不再丢行：hook 侧已改用 pending- 占位编号落行（见 hook.rs）。
                         match ev.todo_delta() {
                             Some(delta) => store.apply_todo_delta(sid, &delta, now_ms)?,
                             None => store.touch_session(sid, now_ms)?,

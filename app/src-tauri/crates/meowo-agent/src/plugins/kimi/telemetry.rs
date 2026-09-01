@@ -1228,19 +1228,22 @@ pub fn parse_todos(content: &str) -> Option<Vec<crate::caps::TodoSnapshot>> {
         last = Some(
             todos
                 .iter()
-                .filter_map(|todo| {
+                .map(|todo| {
+                    // 缺标题的行给占位文案保留（与 hook 侧 RawTodo 同口径）：静默丢掉会让
+                    // 快照只剩部分行、进度计数失真——宁可占位，不可静默丢。
                     let content = todo
                         .get("title")
                         .or_else(|| todo.get("content"))
-                        .and_then(|v| v.as_str())?;
-                    Some(crate::caps::TodoSnapshot {
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("（未命名事项）");
+                    crate::caps::TodoSnapshot {
                         content: content.to_string(),
                         status: todo
                             .get("status")
                             .and_then(|v| v.as_str())
                             .unwrap_or("pending")
                             .to_string(),
-                    })
+                    }
                 })
                 .collect(),
         );
@@ -1546,6 +1549,18 @@ mod tests {
         // 没有 TodoList 调用时返回 None——「读不到」不等于「清单为空」，
         // 上层据此保持 DB 现状，不能拿空列表覆盖 hook 已落好的数据。
         assert!(parse_todos(r#"{"type":"usage.record","model":"x"}"#).is_none());
+    }
+
+    /// 缺标题的行给占位文案保留（与 hook 侧同口径）：静默丢掉会让快照只剩部分行、
+    /// 进度计数失真——宁可占位，不可静默丢。
+    #[test]
+    fn parse_todos_keeps_untitled_row_with_placeholder() {
+        let wire = r#"{"type":"context.append_loop_event","event":{"type":"tool.call","name":"TodoList","args":{"todos":[{"status":"done"},{"title":"有标题","status":"pending"}]}}}"#;
+        let todos = parse_todos(wire).expect("应读到待办快照");
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[0].content, "（未命名事项）");
+        assert_eq!(todos[0].status, "done");
+        assert_eq!(todos[1].content, "有标题");
     }
 
     #[test]

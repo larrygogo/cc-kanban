@@ -533,7 +533,8 @@ impl Store {
     /// 用作可见前缀（比 cwd 目录名更贴合卡片）。
     pub fn session_title(&self, session_id: i64) -> Result<Option<String>, StoreError> {
         match self.conn.query_row(
-            "SELECT title FROM tasks WHERE session_id = ?1",
+            // 同 task_id_of_session：旧库可能多卡，读最新一张才与写侧同卡。
+            "SELECT title FROM tasks WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
             [session_id],
             |r| r.get::<_, String>(0),
         ) {
@@ -557,8 +558,12 @@ impl Store {
     }
 
     pub(crate) fn task_id_of_session(&self, session_id: i64) -> Result<i64, StoreError> {
+        // 取**最新**一张卡（id DESC）：正常路径有 tasks(session_id) 唯一索引，一会话一卡；
+        // 但早期库在索引建立之前可能留下同 session 多卡的旧数据——此时取第一张会让 todos
+        // 落回早已被接替的旧卡（handoff/多卡场景），取最新才与读侧（标题/活动名也是
+        // id DESC，见 session_header 等）落在同一张卡上。
         let id: i64 = self.conn.query_row(
-            "SELECT id FROM tasks WHERE session_id = ?1 ORDER BY id LIMIT 1",
+            "SELECT id FROM tasks WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
             [session_id],
             |r| r.get(0),
         )?;
@@ -576,7 +581,8 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT id FROM tasks WHERE session_id = ?1 ORDER BY id LIMIT 1",
+                // 同 task_id_of_session：旧库可能多卡，取最新一张。
+                "SELECT id FROM tasks WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
                 [session_id],
                 |r| r.get(0),
             )
@@ -796,9 +802,12 @@ impl Store {
             } => {
                 // hook 重放/重复投递时同编号会再来一次 Create——更新内容而不是长出重复行。
                 // 顺带 stale=0：agent 在新回合又碰了这条，它就是当前任务的活计划。
+                // 额外认占位编号：此前抠不到结果编号时 hook 落了 "pending-{subject}" 占位行
+                // （hook.rs todo_delta），这次拿到真编号要把它换绑过来，而不是另插一条重复行。
                 let updated = self.conn.execute(
-                    "UPDATE todos SET content = ?1, stale = 0 WHERE task_id = ?2 AND external_id = ?3",
-                    rusqlite::params![content, tid, external_id],
+                    "UPDATE todos SET content = ?1, external_id = ?3, stale = 0
+                     WHERE task_id = ?2 AND (external_id = ?3 OR external_id = ?4)",
+                    rusqlite::params![content, tid, external_id, format!("pending-{content}")],
                 )?;
                 if updated == 0 {
                     self.conn.execute(
@@ -822,6 +831,16 @@ impl Store {
                         rusqlite::params![tid, external_id],
                     )?;
                 } else {
+                    // Create 时抠不到编号落的占位行（"pending-{subject}"，hook.rs todo_delta）：
+                    // 这次 Update 带回了真编号与同一 subject，先把占位行换绑到真编号再走正常
+                    // 更新——否则占位行永远对不上账，下面的补建自愈还会长出一条重复待办。
+                    if let Some(subject) = content.as_deref() {
+                        self.conn.execute(
+                            "UPDATE todos SET external_id = ?1
+                             WHERE task_id = ?2 AND external_id = ?3",
+                            rusqlite::params![external_id, tid, format!("pending-{subject}")],
+                        )?;
+                    }
                     let updated = self.conn.execute(
                         "UPDATE todos SET status = COALESCE(?1, status), content = COALESCE(?2, content), stale = 0
                          WHERE task_id = ?3 AND external_id = ?4",
@@ -1313,6 +1332,8 @@ impl Store {
     /// 对话窗口一次拿齐会话头部信息。此前这些字段由 5 个方法分别查询——它们打的是
     /// sessions/tasks 各自的**同一行**，在 650ms 轮询下每秒多做近十次无谓往返。
     /// tasks 用 LEFT JOIN：会话未必有关联任务，缺行时 title/current_activity 为 None。
+    /// ORDER BY t.id DESC：旧库可能同 session 多卡，读最新一张才与写侧同卡
+    /// （见 task_id_of_session）。
     pub fn session_header(&self, session_id: i64) -> Result<SessionHeader, StoreError> {
         self.conn
             .query_row(
@@ -1321,7 +1342,7 @@ impl Store {
                         s.pid, s.last_event_at, s.archived, s.predecessor_id, s.superseded_by, \
                         s.extra_dirs \
                  FROM sessions s LEFT JOIN tasks t ON t.session_id = s.id \
-                 WHERE s.id = ?1 LIMIT 1",
+                 WHERE s.id = ?1 ORDER BY t.id DESC LIMIT 1",
                 [session_id],
                 |row| {
                     // provider 的空值回退必须与 session_provider 一致：DB 里可能是 NULL
@@ -1382,7 +1403,7 @@ impl Store {
     /// 会话对应任务的当前活动文本（工具名/阶段描述，hook 写入）。无任务或空闲为 None。
     pub fn session_current_activity(&self, session_id: i64) -> Result<Option<String>, StoreError> {
         match self.conn.query_row(
-            "SELECT current_activity FROM tasks WHERE session_id = ?1 LIMIT 1",
+            "SELECT current_activity FROM tasks WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
             [session_id],
             |row| row.get(0),
         ) {
@@ -2097,5 +2118,149 @@ mod profile_rehome_tests {
         let find = |id: i64| page.iter().find(|s| s.session.id == id).unwrap();
         assert_eq!(find(with).profile.as_deref(), Some("work"));
         assert_eq!(find(without).profile, None);
+    }
+}
+
+#[cfg(test)]
+mod multi_task_tests {
+    use super::*;
+
+    /// 旧库（tasks(session_id) 唯一索引建立之前）可能存在同 session 多卡。此时 todos 的
+    /// 读写都必须落到**最新**那张卡：取第一张会让 handoff/多卡场景的待办写回早已被
+    /// 接替的旧卡，卡片上永远看不到新清单。
+    #[test]
+    fn latest_task_wins_when_legacy_db_has_multiple_cards() {
+        let store = Store::open_in_memory().unwrap();
+        let pid = store
+            .upsert_project_by_root("C:/root", "root", 100)
+            .unwrap();
+        let (sid, first_tid) = store.start_session(pid, "s1", 100).unwrap();
+        // 正常路径唯一索引挡着造不出第二张卡，绕开索引直插模拟旧库遗留。
+        store.conn.execute("DROP INDEX ux_tasks_session", []).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO tasks (project_id, session_id, title, column_name, column_locked, created_at, updated_at)
+                 VALUES (?1, ?2, '(未命名会话)', 'todo', 0, 200, 200)",
+                rusqlite::params![pid, sid],
+            )
+            .unwrap();
+        let latest_tid = store.task_id_of_session_pub(sid).unwrap();
+        assert_ne!(latest_tid, first_tid, "应取最新一张卡");
+
+        // 写侧：sync_todos / 增量都落最新卡。
+        store
+            .sync_todos(
+                sid,
+                &[TodoInput {
+                    content: "x".into(),
+                    status: TodoStatus::Pending,
+                }],
+                300,
+            )
+            .unwrap();
+        assert_eq!(store.list_todos(latest_tid).unwrap().len(), 1);
+        assert!(store.list_todos(first_tid).unwrap().is_empty());
+
+        // 读侧同卡：标题/活动名也读最新一张，否则卡片显示与待办落点打架。
+        store.set_session_title(sid, "新卡标题", 400).unwrap();
+        assert_eq!(store.get_task(latest_tid).unwrap().title, "新卡标题");
+        assert_eq!(store.session_title(sid).unwrap().as_deref(), Some("新卡标题"));
+        assert_eq!(
+            store.session_header(sid).unwrap().title.as_deref(),
+            Some("新卡标题")
+        );
+    }
+}
+
+#[cfg(test)]
+mod todo_delta_placeholder_tests {
+    use super::*;
+    use crate::models::TodoDelta;
+
+    /// Create 抠不到结果编号时 hook 落 "pending-{subject}" 占位行；后续拿到真编号的
+    /// Create（同 subject 重放/迟到）必须换绑占位行，而不是另插一条重复行。
+    #[test]
+    fn create_with_real_id_rebinds_placeholder_row() {
+        let store = Store::open_in_memory().unwrap();
+        let pid = store
+            .upsert_project_by_root("C:/root", "root", 100)
+            .unwrap();
+        let (sid, tid) = store.start_session(pid, "s1", 100).unwrap();
+        store
+            .apply_todo_delta(
+                sid,
+                &TodoDelta::Create {
+                    external_id: "pending-甲".into(),
+                    content: "甲".into(),
+                },
+                200,
+            )
+            .unwrap();
+        store
+            .apply_todo_delta(
+                sid,
+                &TodoDelta::Create {
+                    external_id: "1".into(),
+                    content: "甲".into(),
+                },
+                300,
+            )
+            .unwrap();
+        let todos = store.list_todos(tid).unwrap();
+        assert_eq!(todos.len(), 1, "换绑而不是另起一行");
+        assert_eq!(todos[0].content, "甲");
+
+        // 换绑后按真编号的 Update 能命中。
+        store
+            .apply_todo_delta(
+                sid,
+                &TodoDelta::Update {
+                    external_id: "1".into(),
+                    content: None,
+                    status: Some(TodoStatus::Completed),
+                    deleted: false,
+                },
+                400,
+            )
+            .unwrap();
+        let todos = store.list_todos(tid).unwrap();
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].status.as_str(), "completed");
+    }
+
+    /// TaskUpdate 带回真编号与同一 subject：占位行先换绑再更新，状态照走、行数不变。
+    #[test]
+    fn update_rebinds_placeholder_row_by_subject() {
+        let store = Store::open_in_memory().unwrap();
+        let pid = store
+            .upsert_project_by_root("C:/root", "root", 100)
+            .unwrap();
+        let (sid, tid) = store.start_session(pid, "s1", 100).unwrap();
+        store
+            .apply_todo_delta(
+                sid,
+                &TodoDelta::Create {
+                    external_id: "pending-甲".into(),
+                    content: "甲".into(),
+                },
+                200,
+            )
+            .unwrap();
+        store
+            .apply_todo_delta(
+                sid,
+                &TodoDelta::Update {
+                    external_id: "1".into(),
+                    content: Some("甲".into()),
+                    status: Some(TodoStatus::InProgress),
+                    deleted: false,
+                },
+                300,
+            )
+            .unwrap();
+        let todos = store.list_todos(tid).unwrap();
+        assert_eq!(todos.len(), 1, "换绑而不是补建第二行");
+        assert_eq!(todos[0].status.as_str(), "in_progress");
     }
 }
