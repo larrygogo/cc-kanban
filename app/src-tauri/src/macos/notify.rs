@@ -191,34 +191,32 @@ pub fn init(app: &AppHandle) {
 /// （系统层仍会投递，只是默认不打扰）。
 #[tauri::command]
 pub async fn notification_authorization_status() -> Result<String, String> {
-    let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
-    let center = UNUserNotificationCenter::currentNotificationCenter();
-    // getNotificationSettings 是异步回调式 API（与 init 里授权请求同一模型）；回调在
-    // 系统内部队列触发，mpsc + blocking 池等待不卡主线程。
-    let handler: RcBlock<dyn Fn(NonNull<UNNotificationSettings>)> =
-        RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
-            // SAFETY: completion handler 契约保证 settings 非空且指向有效对象。
-            let status = unsafe { settings.as_ref() }.authorizationStatus();
-            let mapped = if status == UNAuthorizationStatus::Denied {
-                "denied"
-            } else if status == UNAuthorizationStatus::NotDetermined {
-                "notDetermined"
-            } else {
-                "granted"
-            };
-            let _ = tx.send(mapped);
-        });
-    center.getNotificationSettingsWithCompletionHandler(&handler);
-    // handler/center 都不是 Send，而 tauri 命令的 future 必须 Send——API 会 copy
-    // 回调 block（标准 Block 语义，调用后即由系统持有），center 是进程级单例，
-    // 两个引用在 await 前放下即可，不影响回调触发。
-    drop(handler);
-    drop(center);
-    tauri::async_runtime::spawn_blocking(move || rx.recv())
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
-        .map(str::to_owned)
+    // 整个 Objective-C 交互收进 blocking 线程闭包里：RcBlock 与 UNUserNotificationCenter
+    // 都非 Send/Sync，在 async fn 体内跨 await 持有会被 tauri 命令的 Send 约束拒掉
+    // （CI macOS 实测）；闭包内创建内销毁、不捕获任何非 Send 值，future 只等一个
+    // Send 的 JoinHandle。getNotificationSettings 是异步回调式 API（与 init 里授权
+    // 请求同一模型），回调在系统内部队列触发，mpsc 等待不卡主线程。
+    tauri::async_runtime::spawn_blocking(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let handler: RcBlock<dyn Fn(NonNull<UNNotificationSettings>)> =
+            RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
+                // SAFETY: completion handler 契约保证 settings 非空且指向有效对象。
+                let status = unsafe { settings.as_ref() }.authorizationStatus();
+                let mapped = if status == UNAuthorizationStatus::Denied {
+                    "denied"
+                } else if status == UNAuthorizationStatus::NotDetermined {
+                    "notDetermined"
+                } else {
+                    "granted"
+                };
+                let _ = tx.send(mapped);
+            });
+        center.getNotificationSettingsWithCompletionHandler(&handler);
+        rx.recv().map(str::to_owned).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 直达「系统设置 → 通知」页（设置页授权被拒提示的按钮动作）。与 terminal.rs
