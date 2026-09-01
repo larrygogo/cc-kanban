@@ -2693,6 +2693,58 @@ describe("ChatWindow", () => {
     expect(screen.getByText(/\[Image #2\]/)).toBeTruthy();
   });
 
+  /** kimi 文本回退时不吃指令里的路径行:「指令头 + '- <图片绝对路径>'」整段落进文本
+   *  (claude 会转成 [Image: source: …] 引用行)。有指令头时图片路径行抽成 chip、
+   *  头与路径行都不上屏;单图/多图同口径。 */
+  it("kimi 式指令头 + 图片路径行:抽成缩略图 chip,头与路径不上屏", async () => {
+    window.history.replaceState({}, "", "/?sessionId=47");
+    respondWithHistory({
+      sessionId: 47, title: "kimi 路径行", status: "running", provider: "kimi", cwd: "C:/repo",
+      supported: true, offset: 1, reset: false, pendingReview: null,
+      items: [
+        { type: "user_text", id: "u1", timestamp: null, text: "请读取并结合以下本地附件完成任务（图片请使用图像读取能力）：\n- C:\\Users\\me\\meowo-paste\\a.png\n- D:\\img\\b 2.jpeg" },
+      ],
+    });
+    render(<ChatWindow />);
+    await screen.findByAltText("a.png");
+    expect(screen.getByAltText("b 2.jpeg")).toBeTruthy();
+    expect(screen.queryByText(/本地附件/)).toBeNull();
+    expect(screen.queryByText(/meowo-paste/)).toBeNull();
+  });
+
+  /** 混排非图附件行维持既有保留语义:图片路径行抽成 chip,指令头与「- <非图路径>」
+   *  原文保留(头要留着解释那行附件是什么)。 */
+  it("kimi 式混排附件:图片行抽 chip,非图附件行与指令头保留", async () => {
+    window.history.replaceState({}, "", "/?sessionId=48");
+    respondWithHistory({
+      sessionId: 48, title: "kimi 混排", status: "running", provider: "kimi", cwd: "C:/repo",
+      supported: true, offset: 1, reset: false, pendingReview: null,
+      items: [
+        { type: "user_text", id: "u1", timestamp: null, text: "请读取并结合以下本地附件完成任务（图片请使用图像读取能力）：\n- C:\\img\\a.png\n- C:\\docs\\notes.txt" },
+      ],
+    });
+    render(<ChatWindow />);
+    await screen.findByAltText("a.png");
+    expect(screen.getByText(/本地附件/)).toBeTruthy();
+    expect(screen.getByText(/notes\.txt/)).toBeTruthy();
+    expect(screen.queryByText(/C:\\img/)).toBeNull();
+  });
+
+  /** 无指令头时不动:用户手打的「- <路径>」列表是正文内容,不能当附件吃掉。 */
+  it("无指令头的「- 图片路径」行是用户正文,不抽 chip", async () => {
+    window.history.replaceState({}, "", "/?sessionId=49");
+    respondWithHistory({
+      sessionId: 49, title: "手打列表", status: "running", provider: "kimi", cwd: "C:/repo",
+      supported: true, offset: 1, reset: false, pendingReview: null,
+      items: [
+        { type: "user_text", id: "u1", timestamp: null, text: "这几个文件看下：\n- C:\\img\\a.png" },
+      ],
+    });
+    render(<ChatWindow />);
+    await screen.findByText(/C:\\img\\a\.png/);
+    expect(screen.queryByAltText("a.png")).toBeNull();
+  });
+
   /** 多问题题面用 tab 切换：全部竖排会把卡片堆得比对话区还高、把输入框挤出可视区。 */
   it("多问题题面渲染成 tab,一次只显示一题", async () => {
     window.history.replaceState({}, "", "/?sessionId=43");
@@ -3317,6 +3369,46 @@ describe("ChatWindow", () => {
     // 新证据落盘(lastUserText 变成插话本身):这才消解。
     current = { ...current, lastUserText: "ok" };
     await waitFor(() => expect(screen.queryByText(/插话已排队/)).toBeNull(), { timeout: 3_000 });
+  });
+
+  /**
+   * 纯附件插话的回执:正文为空时回执文本是占位「（附件）」,它永不落盘——文本包含
+   * 匹配对它恒失败,旧逻辑下回执永不消解(claude/kimi 同样命中)。消解改认「水位线
+   * 之后出现任意新 user_text」为证据。
+   */
+  it("纯附件插话:占位回执在新 user_text 落盘时消解", async () => {
+    window.history.replaceState({}, "", "/?sessionId=98");
+    let current: Record<string, unknown> = {
+      sessionId: 98, title: "纯附件回执", status: "running", provider: "claude", cwd: "C:/repo",
+      supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve(current);
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
+      // 剪贴板写不进去 → 退回指令文本通道;记账不受影响,占位回执照样进排队清单。
+      if (command === "clipboard_set_image") return Promise.reject(new Error("clipboard occupied"));
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 98, active: true, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("纯附件回执")).toBeTruthy());
+    const box = () => screen.getByRole("combobox", { name: "发送消息给 Agent" });
+    // 只挂附件、不写正文:回执文本只能是占位「（附件）」。
+    openDialog.mockResolvedValueOnce(["C:\\repo\\shot.png"]);
+    fireEvent.click(screen.getByRole("button", { name: "添加图片或文件" }));
+    await waitFor(() => expect(screen.getByAltText("shot.png")).toBeTruthy());
+    fireEvent.keyDown(box(), { key: "Enter" });
+    expect(await screen.findByText("1 条插话已排队，本回合结束后处理")).toBeTruthy();
+    // transcript 落盘的是图片引用行,不含占位文本——旧的包含匹配在此永不消解。
+    current = {
+      ...current,
+      offset: 10,
+      items: [{ type: "user_text", id: "u9", timestamp: null, text: "[Image: source: C:\\cache\\shot.png]" }],
+    };
+    await waitFor(() => expect(screen.queryByText(/插话已排队/)).toBeNull(), { timeout: 3_000 });
+    // 会话仍在运行(打断后无缝进入新回合):消解不靠回合结束。
+    expect(document.querySelector(".chat-running")).toBeTruthy();
   });
 
   /**

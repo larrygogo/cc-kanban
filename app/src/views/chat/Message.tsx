@@ -17,6 +17,12 @@ import { parseUserText } from "./localCommand";
 // 用户名等身份信息。要看是哪张图，缩略图本身与文件名就够了。
 const IMAGE_REF = /\[Image(?: #\d+)?: source: ([^\]]+?)\]/g;
 
+// kimi 文本回退时不吃指令里的路径行,附件行「- <图片绝对路径>」原文落进 transcript
+// (claude 会转成上面的 [Image: source: …] 引用行)。有指令头时把这类行也抽成 chip。
+// 只认 Windows 绝对路径(盘符 + 反斜杠,与实测形态一致);路径可含空格,故不按空白切、
+// 整行捕获到扩展名收尾。扩展名口径与 ChatWindow 的 IMAGE_EXTENSIONS 保持一致。
+const IMAGE_PATH_LINE = /^- ([A-Za-z]:\\.+\.(?:png|jpe?g|gif|webp|bmp|svg))\s*$/i;
+
 /** 附件指令头（composer 注入给 CLI 的那句，见 i18n 的 attachmentInstruction）。
  *  图片已渲染成缩略图时，这句对人是纯噪音——按下方规则剥掉。直接从两份语言资产派生
  *  （attachmentInstruction("") 去掉附件列表后 trim），不手抄原句：文案改动自动跟上，
@@ -27,6 +33,8 @@ const ATTACHMENT_INSTRUCTION_HEADERS = new Set(
 
 /** 把用户文本拆成「正文（去掉图片引用行）+ 图片路径列表」。图片不混排在文字里：
  *  气泡是「说的话」，图片是附件，各归各的（正文里的 [Image #N] 指代照旧保留）。
+ *  图片来源有两种形态：claude 式 [Image: source: …] 引用行，以及 kimi 文本回退时
+ *  的「- <图片绝对路径>」附件行（仅在有附件指令头时抽取，见下方 IMAGE_PATH_LINE）。
  *  导出给 ChatWindow 的 ↑ 召回复用：召回只回填正文，口径必须与气泡渲染一致。 */
 export function splitUserText(text: string): { body: string; images: { path: string; key: string }[] } {
   const matches = [...text.matchAll(IMAGE_REF)];
@@ -52,6 +60,24 @@ export function splitUserText(text: string): { body: string; images: { path: str
   const hasInstructionHeader = kept.some((line) =>
     ATTACHMENT_INSTRUCTION_HEADERS.has(line.replace(/\[Image #\d+\]\s*/g, "").trim()),
   );
+  // kimi 式「指令头 + 图片路径行」:文本回退时 kimi 不吃路径行,「- C:\…\image.png」
+  // 原样落进文本。有指令头时把这些行抽成 chip 并剥掉——剥在判头保留之前,这样
+  // 「头 + 纯图片路径行」会走「无实质附件行 → 头也剥」的既有分支;混排的非图片
+  // 「- xxx」附件行留下,头按既有语义保留。无指令头时不动:用户手打的「- 路径」
+  // 列表是正文内容。
+  if (hasInstructionHeader) {
+    const withoutImagePaths: string[] = [];
+    for (let i = 0; i < kept.length; i++) {
+      const match = IMAGE_PATH_LINE.exec(kept[i].trim());
+      if (match) {
+        images.push({ path: match[1], key: `path:${i}` });
+        continue;
+      }
+      withoutImagePaths.push(kept[i]);
+    }
+    kept.length = 0;
+    kept.push(...withoutImagePaths);
+  }
   let inLeadingRefs = hasInstructionHeader;
   const body: string[] = [];
   for (let i = 0; i < kept.length; i++) {

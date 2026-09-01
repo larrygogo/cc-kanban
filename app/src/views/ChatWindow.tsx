@@ -561,9 +561,14 @@ export function ChatWindow() {
   // 水位线快照(priorUserText / priorItemIds):消解只认**入队之后**才出现的证据——
   // 「包含」匹配对短插话(ok/继续/yes)常态性命中旧消息,没有水位线的话回执在下一次
   // 轮询就消失,而消息还在 CLI 队列里,复现了回执本要防止的「我的消息不见了」。
+  // attachmentOnly:纯附件消息的回执文本是占位「（附件）」,它永不落盘,文本包含匹配
+  // 恒失败——消解改认「水位线后任意新 user_text / lastUserText 变化」(见消解 effect)。
+  // at:与 pendingEchoes 同款的 15s sweep 兜底用,tone 卡 running 且证据永不到达时收走。
   const [queuedInterjections, setQueuedInterjections] = useState<{
     id: number;
     text: string;
+    at: number;
+    attachmentOnly: boolean;
     priorUserText: string | null;
     priorItemIds: ReadonlySet<string>;
   }[]>([]);
@@ -576,6 +581,7 @@ export function ChatWindow() {
     id: number;
     text: string;
     at: number;
+    attachmentOnly: boolean;
     priorUserText: string | null;
     priorItemIds: ReadonlySet<string>;
   }[]>([]);
@@ -2428,6 +2434,9 @@ export function ChatWindow() {
     // 在它出现于 transcript / 回合结束时清除。
     const interjecting = tone === "running";
     const queuedText = bare || t.chat.queuedAttachmentOnly;
+    // 纯附件消息的回执文本是占位「（附件）」,它永不落盘——打标让消解侧改认
+    // 「水位线后任意新 user_text」而非文本包含(见 queuedInterjections 消解 effect)。
+    const attachmentOnly = bare === "" && attachments.length > 0;
     const markQueued = () => {
       // 水位线快照:此刻已有的最近用户消息与 transcript 尾部条目都算旧证据,消解
       // 一律不认(见 queuedInterjections 声明处)。
@@ -2440,6 +2449,8 @@ export function ChatWindow() {
         setQueuedInterjections((current) => [...current, {
           id,
           text: queuedText,
+          at: Date.now(),
+          attachmentOnly,
           priorUserText: history?.lastUserText ?? null,
           priorItemIds,
         }]);
@@ -2450,6 +2461,7 @@ export function ChatWindow() {
           id: echoIdRef.current,
           text: queuedText,
           at: Date.now(),
+          attachmentOnly,
           priorUserText: history?.lastUserText ?? null,
           priorItemIds,
         }]);
@@ -2531,18 +2543,28 @@ export function ChatWindow() {
   // 不在入队时的尾部快照里;否则「ok」「继续」这类短插话立刻子串命中上一回合的旧
   // 消息,回执在消息还排着队时就消失了。updater 里同引用短路,防 setState 新引用
   // 触发自循环。
+  // 纯附件回执(attachmentOnly)例外:占位「（附件）」永不落盘,包含匹配恒失败——
+  // 改认「水位线之后出现任意新 user_text,或 lastUserText 与快照不同」为证据。
+  // 另有与 pendingEchoes 同款的 15s sweep 兜底:tone 卡 running 且证据永不到达时
+  // 回执不能永久残留(计时器见 echoSweep 的 interval effect)。
   useEffect(() => {
     setQueuedInterjections((current) => {
       if (current.length === 0) return current;
       if (tone !== "running") return [];
       const collapse = (text: string) => text.replace(/\s+/g, " ").trim();
       const recent = items.slice(-12);
-      const next = current.filter(({ text, priorUserText, priorItemIds }) => {
+      const now = Date.now();
+      const next = current.filter(({ text, at, attachmentOnly, priorUserText, priorItemIds }) => {
+        if (now - at > 15_000) return false;
+        const lastUserChanged = history?.lastUserText != null
+          && collapse(history.lastUserText) !== collapse(priorUserText ?? "");
+        if (attachmentOnly) {
+          return !lastUserChanged
+            && !recent.some((item) => item.type === "user_text" && !priorItemIds.has(item.id));
+        }
         const needle = collapse(text);
         const seen = (candidate: string | null | undefined) =>
           !!candidate && collapse(candidate).includes(needle);
-        const lastUserChanged = history?.lastUserText != null
-          && collapse(history.lastUserText) !== collapse(priorUserText ?? "");
         return !(lastUserChanged && seen(history?.lastUserText))
           && !recent.some((item) => item.type === "user_text"
             && !priorItemIds.has(item.id)
@@ -2550,7 +2572,7 @@ export function ChatWindow() {
       });
       return next.length === current.length ? current : next;
     });
-  }, [tone, items, history?.lastUserText]);
+  }, [tone, items, history?.lastUserText, echoSweep]);
   // 乐观回显的消解：与排队回执同一套「包含 + 水位线」证据规则，但**不随 tone 清空**——
   // 空闲态发送后 tone 会变 running，回显此刻正要发挥作用。15s 兜底防证据永不出现。
   useEffect(() => {
@@ -2559,13 +2581,18 @@ export function ChatWindow() {
       const collapse = (text: string) => text.replace(/\s+/g, " ").trim();
       const recent = items.slice(-12);
       const now = Date.now();
-      const next = current.filter(({ text, at, priorUserText, priorItemIds }) => {
+      const next = current.filter(({ text, at, attachmentOnly, priorUserText, priorItemIds }) => {
         if (now - at > 15_000) return false;
+        const lastUserChanged = history?.lastUserText != null
+          && collapse(history.lastUserText) !== collapse(priorUserText ?? "");
+        if (attachmentOnly) {
+          // 纯附件回显:占位「（附件）」永不落盘,包含匹配恒失败,证据口径同排队回执。
+          return !lastUserChanged
+            && !recent.some((item) => item.type === "user_text" && !priorItemIds.has(item.id));
+        }
         const needle = collapse(text);
         const seen = (candidate: string | null | undefined) =>
           !!candidate && collapse(candidate).includes(needle);
-        const lastUserChanged = history?.lastUserText != null
-          && collapse(history.lastUserText) !== collapse(priorUserText ?? "");
         return !(lastUserChanged && seen(history?.lastUserText))
           && !recent.some((item) => item.type === "user_text"
             && !priorItemIds.has(item.id)
@@ -2574,15 +2601,15 @@ export function ChatWindow() {
       return next.length === current.length ? current : next;
     });
   }, [items, history?.lastUserText, echoSweep]);
-  // 15s 兜底必须由**计时器**驱动。上面那个 effect 只在 items / lastUserText 变化时才重算，
+  // 15s 兜底必须由**计时器**驱动。上面两个消解 effect 只在 items / lastUserText 变化时才重算，
   // 而兜底要覆盖的恰恰是「消息其实没进 composer」——那时 transcript 不再增长、lastUserText
-  // 也不变,effect 永远不再执行,那条假的 user 气泡就一直挂在时间线末尾,用户以为发出去了。
-  // 有回显在场时每秒踢一次重算(setState 同值会被 React 短路,不会引起重渲染)。
+  // 也不变,effect 永远不再执行,假回执(乐观回显的 user 气泡 / 排队回执条)就一直挂着。
+  // 有回显或排队回执在场时每秒踢一次重算(setState 同值会被 React 短路,不会引起重渲染)。
   useEffect(() => {
-    if (pendingEchoes.length === 0) return;
+    if (pendingEchoes.length === 0 && queuedInterjections.length === 0) return;
     const timer = window.setInterval(() => setEchoSweep((n) => n + 1), 1_000);
     return () => window.clearInterval(timer);
-  }, [pendingEchoes.length]);
+  }, [pendingEchoes.length, queuedInterjections.length]);
   /// 斜杠命令直通 PTY——CLI 的 composer 收到 "/xxx" + 回车会当命令执行，无需特殊协议。
   const sendSlash = (command: string) => {
     if (sending) return;

@@ -384,8 +384,13 @@ impl AgentPlugin for Kimi {
     }
     /// kimi TUI 的 Ctrl-V 读系统剪贴板并把图片缓存为 blob 原生附加(官方文档:composer
     /// 显示 `[image:…]` 占位;wire.jsonl 实测入 prompt 为 image_url blobref)。
-    fn clipboard_image_paste(&self, version: Option<&str>) -> Option<&'static str> {
-        version.map(|_| r"\[image[:# ]")
+    /// 版本探测不到时**仍声明**:能力已在真机实测,探测失败只是拿不到版本号,不代表
+    /// 能力缺失(同 attachment_mention 的取值理由,但方向相反——那里探测不到时宁可
+    /// 不用 `@`,因为文本通道恒可用;这里探测不到就**没有**声明的话,前端会静默退回
+    /// 文本通道,把注入指令原文整段打进 TUI,实拍踩过)。剪贴板通道走不通时前端原有
+    /// 的 sendWithClipboardImages → sendText 回退仍在,风险有底。
+    fn clipboard_image_paste(&self, _version: Option<&str>) -> Option<&'static str> {
+        Some(r"\[image[:# ]")
     }
     /// kimi 的 `/model` 同样是交互式菜单（二进制里的命令描述就是 `/model: switch model`，
     /// 且失败提示是「Run /model to select one first」），不接受内联参数，故不声明模型预设。
@@ -549,6 +554,16 @@ mod tests {
         let plugin = Kimi;
         assert!(plugin.sets_terminal_tab_title());
         assert!(plugin.writes_tab_token());
+    }
+
+    #[test]
+    fn clipboard_image_paste_declared_even_without_version() {
+        // 版本探测失败(拿不到版本号)不等于能力缺失:剪贴板发图已真机实测,探测不到
+        // 就不声明会让前端静默退回文本通道、把注入指令原文打进 TUI(实拍)。无论版本
+        // 是否探到,marker 声明必须一致。
+        let plugin = Kimi;
+        assert_eq!(plugin.clipboard_image_paste(None), Some(r"\[image[:# ]"));
+        assert_eq!(plugin.clipboard_image_paste(Some("1.0")), Some(r"\[image[:# ]"));
     }
 
     #[test]

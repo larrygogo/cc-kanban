@@ -885,15 +885,21 @@ mod tests {
             );
         }
         // Ctrl-V 原生图片粘贴:只有文档/实测确认 TUI 会读系统剪贴板的 claude/kimi 声明,
-        // 占位符正则非空且版本未知时兜底 None。
+        // 占位符正则非空。claude 版本未知时兜底 None;kimi 相反——探测不到就不声明会让前端
+        // 静默退回文本通道、把注入指令原文整段打进 TUI(实拍),能力已真机实测,故版本未知
+        // 也照声明(理由见 plugins/kimi/mod.rs 的 clipboard_image_paste)。
         for id in ["claude", "kimi"] {
             let marker = by_id(id).unwrap().clipboard_image_paste(Some("1.0.0"));
             assert!(marker.is_some_and(|m| !m.is_empty()), "{id}");
-            assert!(
-                by_id(id).unwrap().clipboard_image_paste(None).is_none(),
-                "{id} 版本未知须兜底"
-            );
         }
+        assert!(
+            by_id("claude").unwrap().clipboard_image_paste(None).is_none(),
+            "claude 版本未知须兜底"
+        );
+        assert!(
+            by_id("kimi").unwrap().clipboard_image_paste(None).is_some(),
+            "kimi 版本未知仍声明(探测失败不等于能力缺失)"
+        );
         for id in ["codex", "gemini", "opencode"] {
             assert!(
                 by_id(id)
