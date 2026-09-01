@@ -1,4 +1,5 @@
 mod account;
+mod agent_updates;
 #[cfg(any(target_os = "macos", test))]
 mod app_bundle;
 mod bgpty;
@@ -707,18 +708,33 @@ fn run_cli_capture(
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// 已装 CLI 的版本，`<launch_argv> --version` 探测，**进程级缓存**（版本只随重装变化，而
-/// node 系 CLI 冷启动要一秒上下，不能每开一个对话窗都付一次）。探测失败缓存 None，不反复重试。
-fn probe_cli_version(plugin: &'static dyn meowo_agent::AgentPlugin) -> Option<String> {
-    use std::collections::HashMap;
-    use std::sync::{LazyLock, Mutex};
-    static CACHE: LazyLock<Mutex<HashMap<String, Option<String>>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
+/// `probe_cli_version` 的进程级缓存（版本只随重装变化，而 node 系 CLI 冷启动要一秒上下，
+/// 不能每开一个对话窗都付一次）。探测失败缓存 None，不反复重试。
+/// 模块级而非函数内：安装成功后 `invalidate_cli_version_cache` 要能清掉对应条目。
+static CLI_VERSION_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+/// 安装/更新成功后调用：清掉该 agent 的版本探测缓存，下次探测拿到新版本号。
+pub(crate) fn invalidate_cli_version_cache(provider: &str) {
+    CLI_VERSION_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(provider);
+}
+
+/// 已装 CLI 的版本，`<launch_argv> --version` 探测，缓存见 [`CLI_VERSION_CACHE`]。
+pub(crate) fn probe_cli_version(
+    plugin: &'static dyn meowo_agent::AgentPlugin,
+) -> Option<String> {
     let id = plugin.id().as_str().to_string();
     // 中毒恢复而非 unwrap：缓存只是探测结果的备忘录，读到写一半的旧值无害；
     // panic 则让之后每次开对话窗都失败（本函数跑在 blocking 池，用户只会看到「打不开」）。
-    if let Some(hit) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
+    if let Some(hit) = CLI_VERSION_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+    {
         return hit.clone();
     }
     let version = run_cli_capture(plugin, &["--version"], std::time::Duration::from_secs(5))
@@ -728,7 +744,7 @@ fn probe_cli_version(plugin: &'static dyn meowo_agent::AgentPlugin) -> Option<St
                 .find(|l| !l.is_empty())
                 .map(str::to_string)
         });
-    CACHE
+    CLI_VERSION_CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(id, version.clone());
@@ -1316,6 +1332,7 @@ pub fn run() {
             list_agents,
             agent_chat_ui,
             agent_models,
+            agent_updates::check_agent_updates,
             profile::list_profiles,
             profile::create_profile,
             profile::rename_profile,

@@ -23,6 +23,8 @@ const api = vi.hoisted(() => ({
   agentPathGap: vi.fn(),
   addAgentToUserPath: vi.fn(),
   openInstallLog: vi.fn(),
+  checkAgentUpdates: vi.fn(),
+  getLiveSessionsPage: vi.fn(),
   // 多账号
   listProfiles: vi.fn(),
   createProfile: vi.fn(),
@@ -96,6 +98,10 @@ beforeEach(() => {
   api.addAgentToUserPath.mockResolvedValue(undefined);
   // 默认 hooks 已接入（无「未接入」提示条），验接线的用例再覆盖。
   api.checkProviderHooks.mockResolvedValue("installed");
+  // 默认：版本探测返回空（无版本行/更新入口），验更新的用例再覆盖。
+  api.checkAgentUpdates.mockResolvedValue([]);
+  // 默认：无活跃会话（点「更新」不弹确认），有会话的用例再覆盖。
+  api.getLiveSessionsPage.mockResolvedValue({ items: [], next_cursor: null });
   // 默认：只有一个默认账号（没建过自定义账号）。
   api.listProfiles.mockResolvedValue([
     { id: null, name: "", active: true, account: { email: "a@b.c" } },
@@ -1119,5 +1125,100 @@ describe("AccountSection 退出登录 vs 删除账号", () => {
     fireEvent.keyDown(input, { key: "Enter" });
 
     await waitFor(() => expect(api.renameProfile).toHaveBeenCalledWith("claude", null, "个人号"));
+  });
+});
+
+describe("AccountSection 版本与更新", () => {
+  const updates = (
+    list: Array<{
+      provider: string;
+      installed_version: string | null;
+      latest_version: string | null;
+      update_available: boolean;
+    }>,
+  ) => api.checkAgentUpdates.mockResolvedValue(list);
+
+  it("无新版：显示当前版本，无更新按钮", async () => {
+    updates([{ provider: "claude", installed_version: "1.2.3", latest_version: "1.2.3", update_available: false }]);
+    render(<AccountSection />);
+    const row = await screen.findByTestId("agent-version-claude");
+    expect(row.textContent).toContain("1.2.3");
+    expect(screen.queryByTestId("agent-update-claude")).toBeNull();
+    expect(screen.queryByTestId("agent-update-available-claude")).toBeNull();
+  });
+
+  it("有新版：显示新版号与更新按钮；有活跃托管会话时先弹危险确认，确认后走安装入口", async () => {
+    updates([{ provider: "claude", installed_version: "1.2.3", latest_version: "1.3.0", update_available: true }]);
+    api.getLiveSessionsPage.mockResolvedValue({
+      items: [
+        { connected: true, pty_managed: true, provider: "claude" },
+        { connected: true, pty_managed: true, provider: "codex" }, // 别家的不算
+        { connected: false, pty_managed: true, provider: "claude" }, // 断连的不算
+      ],
+      next_cursor: null,
+    });
+    api.installAgent.mockResolvedValue(undefined);
+    render(<AccountSection />);
+    expect((await screen.findByTestId("agent-update-available-claude")).textContent).toContain("1.3.0");
+    fireEvent.click(screen.getByTestId("agent-update-claude"));
+    // 只数本 provider 的 connected && pty_managed 会话 → 1 个，弹 danger 确认。
+    await waitFor(() => expect(dialog.confirm).toHaveBeenCalled());
+    expect(dialog.confirm.mock.calls[0][0]).toContain("1");
+    expect(dialog.confirm.mock.calls[0][1]).toMatchObject({ danger: true });
+    // 确认（beforeEach 默认 resolve true）→ 走与「安装」同一入口（装的就是 latest）。
+    await waitFor(() => expect(api.installAgent).toHaveBeenCalledWith("claude"));
+    // install-done 成功后重查版本（后端在安装成功后已失效版本缓存）。
+    fireDone("claude", true);
+    await waitFor(() => expect(api.checkAgentUpdates.mock.calls.length).toBeGreaterThanOrEqual(2));
+  });
+
+  it("确认框点取消 → 不更新", async () => {
+    updates([{ provider: "claude", installed_version: "1.2.3", latest_version: "1.3.0", update_available: true }]);
+    api.getLiveSessionsPage.mockResolvedValue({
+      items: [{ connected: true, pty_managed: true, provider: "claude" }],
+      next_cursor: null,
+    });
+    dialog.confirm.mockResolvedValue(false);
+    render(<AccountSection />);
+    fireEvent.click(await screen.findByTestId("agent-update-claude"));
+    await waitFor(() => expect(dialog.confirm).toHaveBeenCalled());
+    expect(api.installAgent).not.toHaveBeenCalled();
+  });
+
+  it("无活跃托管会话：不弹确认直接装", async () => {
+    updates([{ provider: "claude", installed_version: "1.2.3", latest_version: "1.3.0", update_available: true }]);
+    api.installAgent.mockResolvedValue(undefined);
+    render(<AccountSection />);
+    fireEvent.click(await screen.findByTestId("agent-update-claude"));
+    await waitFor(() => expect(api.installAgent).toHaveBeenCalledWith("claude"));
+    expect(dialog.confirm).not.toHaveBeenCalled();
+  });
+
+  it("latest_version 为 null（unknown）：只显示当前版本，无更新入口", async () => {
+    updates([{ provider: "claude", installed_version: "1.2.3", latest_version: null, update_available: false }]);
+    render(<AccountSection />);
+    const row = await screen.findByTestId("agent-version-claude");
+    expect(row.textContent).toContain("1.2.3");
+    expect(screen.queryByTestId("agent-update-claude")).toBeNull();
+    expect(screen.queryByTestId("agent-update-available-claude")).toBeNull();
+  });
+
+  it("installed_version 为 null：版本行整块不渲染", async () => {
+    updates([{ provider: "claude", installed_version: null, latest_version: "1.3.0", update_available: true }]);
+    render(<AccountSection />);
+    await screen.findByTestId("agent-card-claude");
+    // 探测在 listAgents 之后串行触发，等它兑现后再断言「什么都没有」。
+    await waitFor(() => expect(api.checkAgentUpdates).toHaveBeenCalled());
+    expect(screen.queryByTestId("agent-version-claude")).toBeNull();
+    expect(screen.queryByTestId("agent-update-claude")).toBeNull();
+  });
+
+  it("checkAgentUpdates 失败：页面正常渲染，无版本 UI、无红字", async () => {
+    api.checkAgentUpdates.mockRejectedValue(new Error("boom"));
+    render(<AccountSection />);
+    await screen.findByTestId("agent-card-claude");
+    await waitFor(() => expect(api.checkAgentUpdates).toHaveBeenCalled());
+    expect(screen.queryByTestId("agent-version-claude")).toBeNull();
+    expect(document.querySelector(".agent-install-error")).toBeNull();
   });
 });

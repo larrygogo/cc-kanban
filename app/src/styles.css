@@ -2501,6 +2501,26 @@ body[data-edge="right"] .snap-preview-bar { border-radius: var(--r-lg) 0 0 var(-
   border-color: var(--cc-accent-dim);
   transform: translateY(-1px);
 }
+/* 版本行里的小型动作按钮（更新/取消安装）：与标题区小字同排，不能用正常尺寸的胶囊。 */
+.provider-card-action-sm {
+  padding: var(--sp-2) var(--sp-8);
+  font-size: var(--fs-11);
+}
+/* 版本与更新入口：紧贴标题行的低调一行小字（参照 provider-card-desc 的弱化处理）。
+   有新版时「有新版 vX」用 accent 色点亮，更新按钮紧随其后。 */
+.provider-card-version {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-8);
+  font-size: var(--fs-12);
+  line-height: 1.4;
+  color: var(--cc-text-dim);
+}
+.provider-card-version-new {
+  color: var(--cc-accent-text);
+  font-weight: 500;
+}
 .provider-card-body {
   padding: 0 var(--sp-16) var(--sp-14);
   font-size: var(--fs-13);

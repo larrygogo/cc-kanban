@@ -1030,6 +1030,9 @@ pub(crate) async fn install_agent(app: tauri::AppHandle, provider: String) -> Re
                     // 装好了就顺手接线；失败（多半是数据目录还没建）不影响安装结果。
                     if ok {
                         wire_hooks_best_effort(id, "安装");
+                        // 装完版本必变：清掉版本探测与更新检查缓存，设置页立刻看到新版本号。
+                        crate::invalidate_cli_version_cache(id.as_str());
+                        crate::agent_updates::invalidate_update_cache(id.as_str());
                     }
                     let _ = app.emit(
                         "install-done",
@@ -1161,6 +1164,9 @@ pub(crate) async fn install_agent(app: tauri::AppHandle, provider: String) -> Re
             // 装好了就顺手接线；失败（多半是数据目录还没建）不影响安装结果。
             if code == Some(0) {
                 wire_hooks_best_effort(id, "安装");
+                // 装完版本必变：清掉版本探测与更新检查缓存，设置页立刻看到新版本号。
+                crate::invalidate_cli_version_cache(id.as_str());
+                crate::agent_updates::invalidate_update_cache(id.as_str());
             }
             let _ = app.emit(
                 "install-done",

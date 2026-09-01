@@ -869,6 +869,13 @@ export const zh = {
     // 日志路径不再裸文本展示（没法点）：按钮打开，完整路径在按钮 tooltip。
     installLogOpen: "打开安装日志",
     installLogOpenFailed: (e: string) => `打开日志失败：${e}`,
+    // 版本与更新：探测结果字段为 null 时前端整块降级（见 AccountSection 版本行），这几条只在有值时出场。
+    versionCurrent: (v: string) => `当前 v${v}`,
+    updateAvailable: (v: string) => `有新版 v${v}`,
+    update: "更新",
+    // 仿 updater.restartConfirm：更新 = 重跑幂等安装（装的就是 latest），会重拉 agent 本体，
+    // 该 Agent 运行中的会话可能当场出事，必须先说清后果。
+    updateConfirm: (n: number) => `更新将中断该 Agent 的 ${n} 个运行中的会话，继续？`,
     // 提示条要低调：它对多数人是背景噪音（装完就在 PATH 上），只有少数人需要点它。
     // 完整路径挪进 tooltip（pathGapDetail），正文只留一句「为什么该点」。
     pathGap: "终端里敲不出命令？",

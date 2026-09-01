@@ -25,6 +25,9 @@ import {
   agentPathGap,
   addAgentToUserPath,
   openInstallLog,
+  checkAgentUpdates,
+  getLiveSessionsPage,
+  type AgentUpdateInfo,
   type ProviderAccountPayload,
   type ProviderUsage,
   type UsageLane,
@@ -145,7 +148,7 @@ function UsageBar({ lane, label }: { lane: UsageLane; label: string }) {
 
 // 单个 provider 卡片：安装/登录/用量三态。已装且登录 = 现有账号信息 + 用量泳道 + 刷新按钮 + 贴纸显示开关；
 // 已装未登录 = 提示语；未装 = 一键安装按钮。
-function ProviderCard({ provider, name, installed, supportsAccount, supportsApiKeyLogin, supportsProfiles, supportsContext, relay, payload, usage, err, onRefresh, installOp, onStartInstall, onCancelInstall, onLoggedIn, loginState, onStartLogin, onCancelLogin, refreshing, settings, patchSettings, onToggleQuota, usageRefreshedAt }: {
+function ProviderCard({ provider, name, installed, supportsAccount, supportsApiKeyLogin, supportsProfiles, supportsContext, relay, payload, usage, err, onRefresh, installOp, onStartInstall, onCancelInstall, onLoggedIn, loginState, onStartLogin, onCancelLogin, refreshing, settings, patchSettings, onToggleQuota, usageRefreshedAt, updateInfo }: {
   provider: AgentId;
   /** 展示名，来自后端 list_agents()（产品名，不翻译）。 */
   name: string;
@@ -198,6 +201,8 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
   onToggleQuota: () => void;
   /** 最近一次联网刷新配额的时刻（epoch ms）；null = 本次会话尚未刷新过（只显示缓存）。 */
   usageRefreshedAt?: number | null;
+  /** 页面级探测的版本/更新信息（check_agent_updates）。null = 尚未探测或探测失败——整块不渲染。 */
+  updateInfo: AgentUpdateInfo | null;
 }) {
   const t = useT();
   const assets = agentAssets(provider);
@@ -319,6 +324,29 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
 
   // 发起安装：状态机在页面级（useInstallOperations），卡片只是触发器。
   const startInstall = () => onStartInstall();
+
+  // 「更新」= 重跑幂等安装（五条安装通道装的都是 latest）。仿 U0-12：重装前先看该 provider
+  // 有没有活跃托管会话——更新会重拉 agent 本体，正在跑的会话可能当场出事，n>0 必须过危险
+  // 确认（主按钮说后果）；查询失败按 0 处理，不挡流程。busy 态复用安装中的转圈+取消，不另造。
+  const startUpdate = async () => {
+    if (installState === "installing") return;
+    let managed = 0;
+    try {
+      const page = await getLiveSessionsPage("all", null, null, 200);
+      managed = page.items.filter((l) => l.connected && l.pty_managed && l.provider === provider).length;
+    } catch {
+      /* 查询失败按 0 处理，不挡更新 */
+    }
+    if (managed > 0) {
+      const ok = await appConfirm(t.account.updateConfirm(managed), {
+        title: t.account.update,
+        danger: true,
+        confirmLabel: t.account.update,
+      });
+      if (!ok) return;
+    }
+    onStartInstall();
+  };
 
   /** 拉起交互式登录。成功 spawn 后不清 busy——等 login-done（或 5 分钟超时 / 用户取消）才落回。 */
   const startLogin = () => {
@@ -456,6 +484,46 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
             )}
             {statusBadge && <span className={"provider-badge" + (installed === false ? " provider-badge-off" : "")}>{statusBadge}</span>}
           </div>
+          {/* 版本与更新入口紧贴标题行：低调一行小字。探测失败的降级全在这里收口——
+              installed_version 为 null 整块不渲染；latest_version 为 null（unknown）只显当前版本、
+              不给更新入口；check_agent_updates 整体失败时 updateInfo 为 null，同样什么都不显示。 */}
+          {isInstalled && updateInfo?.installed_version && (
+            <div className="provider-card-version" data-testid={"agent-version-" + provider}>
+              <span className="provider-card-version-current">{t.account.versionCurrent(updateInfo.installed_version)}</span>
+              {updateInfo.update_available && updateInfo.latest_version != null && (
+                installState === "installing" ? (
+                  <div className="agent-install-progress" data-testid={"agent-installing-" + provider}>
+                    <RefreshIcon spinning />
+                    <span className="agent-install-step">
+                      {installElapsed >= 5 ? t.account.installingFor(installElapsed) : t.account.installing}
+                    </span>
+                    <button
+                      type="button"
+                      className="provider-card-action provider-card-action-sm"
+                      data-testid={"agent-install-cancel-" + provider}
+                      onClick={onCancelInstall}
+                    >
+                      {t.account.cancelInstall}
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <span className="provider-card-version-new" data-testid={"agent-update-available-" + provider}>
+                      {t.account.updateAvailable(updateInfo.latest_version)}
+                    </span>
+                    <button
+                      type="button"
+                      className="provider-card-action provider-card-action-sm"
+                      data-testid={"agent-update-" + provider}
+                      onClick={() => void startUpdate()}
+                    >
+                      {t.account.update}
+                    </button>
+                  </>
+                )
+              )}
+            </div>
+          )}
           {/* 账号信息紧贴标题下方。邮箱可能很长，单行省略；data-tip 兜住完整值。 */}
           {desc && (
             <div className="provider-card-desc" data-tip={desc} data-testid={"agent-desc-" + provider}>
@@ -607,7 +675,9 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
         />
       )}
 
-      {installed === false && installState === "error" && (
+      {/* 安装/更新失败就地报错（无 toast 纪律）：未安装时是「安装」失败，已安装时是「更新」失败，
+          同一呈现。更新入口在版本行里，失败后按钮回落可重试，错误原因必须有处可看。 */}
+      {installState === "error" && (
         <div className="provider-card-body agent-install-error" data-testid={"agent-install-error-" + provider}>
           {/* 有后端诊断（被 CF 拦、取不到脚本）就显示它；否则脚本跑失败了，给通用文案 + 日志路径。 */}
           {installMsg ?? t.account.installFailed}
@@ -1091,12 +1161,27 @@ export function AccountSection() {
   // 账号数据（getAccounts）首读失败标记：失败曾静默，已登录会显示成「未登录」。
   const [accountsError, setAccountsError] = useState(false);
   const installed = agents === null ? null : new Set(agents.filter((a) => a.installed).map((a) => a.id));
+  // provider → 版本/更新探测结果。探测失败静默降级为空：版本与更新入口整块不出现，
+  // 不红字、不显示任何错误——版本探测是锦上添花，不该打扰账号页主流程。
+  const [updateMap, setUpdateMap] = useState<Record<string, AgentUpdateInfo>>({});
+  const refreshAgentUpdates = () => {
+    checkAgentUpdates()
+      .then((list) => {
+        const next: Record<string, AgentUpdateInfo> = {};
+        list.forEach((info) => { next[info.provider] = info; });
+        setUpdateMap(next);
+      })
+      .catch(() => {});
+  };
   // 重查 agent 名单（安装态会变）。挂载、窗口聚焦、后台安装成功各处复用。
+  // 名单到手后一并刷新版本/更新探测（后端有 10 分钟缓存，聚焦高频不会扇出；
+  // 后端在安装成功后失效版本缓存，install-done 走到这里正好拿到新值）。
   const refreshInstalled = () => {
     listAgents()
       .then((list) => {
         setAgents(list);
         setAgentsError(false);
+        refreshAgentUpdates();
       })
       .catch(() => setAgentsError(true));
   };
@@ -1293,6 +1378,7 @@ export function AccountSection() {
         patchSettings={patchSettings}
         onToggleQuota={() => toggleQuotaProvider(cur.id)}
         usageRefreshedAt={usageRefreshedAt[cur.id] ?? null}
+        updateInfo={updateMap[cur.id] ?? null}
       />
       {patchError && (
         <div className="sec-hint proxy-err" role="alert">

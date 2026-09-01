@@ -992,6 +992,25 @@ export function installAgent(provider: AgentId): Promise<void> {
   return invoke("install_agent", { provider });
 }
 
+/**
+ * 单个 agent 的版本与更新探测结果（check_agent_updates 的单元）。
+ * 两个版本字段各自独立降级：探测失败为 null，前端据此隐去对应 UI（latest 为 null → 无更新入口），
+ * 而不是红字报错——版本探测是锦上添花，不该打扰账号页的主流程。
+ */
+export type AgentUpdateInfo = {
+  provider: string;
+  /** 本机版本，探测失败为 null。 */
+  installed_version: string | null;
+  /** 远端最新版，探测失败为 null。 */
+  latest_version: string | null;
+  update_available: boolean;
+};
+
+/** 各 agent 的本机版本与远端最新版探测（后端带 10 分钟缓存，窗口聚焦/install-done 重查不会扇出）。 */
+export function checkAgentUpdates(): Promise<AgentUpdateInfo[]> {
+  return invoke("check_agent_updates");
+}
+
 /** 取消进行中的安装：后端强杀脚本进程树（直下路径丢弃结果），并补发 cancelled 的 install-done。 */
 export function cancelInstall(provider: AgentId): Promise<void> {
   return invoke("cancel_install", { provider });

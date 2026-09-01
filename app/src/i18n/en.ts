@@ -822,6 +822,17 @@ export const en: Dict = {
     installFailed: "Installation failed",
     installLogOpen: "Open install log",
     installLogOpenFailed: (e: string) => `Couldn't open the log: ${e}`,
+    // Version & update: the UI degrades wholesale when a probe field is null (see the version row
+    // in AccountSection) — these strings only appear when there's a value to show.
+    versionCurrent: (v) => `Current v${v}`,
+    updateAvailable: (v) => `v${v} available`,
+    update: "Update",
+    // Mirrors updater.restartConfirm: updating re-runs the idempotent installer (which installs
+    // latest) and re-pulls the agent itself — running sessions of this agent may die, so say so.
+    updateConfirm: (n) =>
+      n === 1
+        ? "Updating will interrupt 1 running session of this agent. Continue?"
+        : `Updating will interrupt ${n} running sessions of this agent. Continue?`,
     pathGap: "Not found in your terminal?",
     pathGapDetail: (dir: string) => `${dir} is not on your PATH — the command won't be found in a terminal`,
     addToPath: "Add to PATH",
