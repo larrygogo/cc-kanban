@@ -859,6 +859,58 @@ mod tests {
         );
     }
 
+    /// 空闲输入框是**正向** idle 证据（0.29 源码取证：custom-editor.ts 的
+    /// injectPromptSymbol + wrapWithSideBorders，行呈 `│ > `，bash 模式 `│ ! `）。
+    /// 此前 kimi 没有 idle 规则，空闲屏恒落 fallback——卡片挂「认不出来」灰点。
+    #[test]
+    fn kimi_idle_composer_prompt_is_confident_idle() {
+        let s = snap(&[
+            "  earlier output",
+            "\u{256D}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256E}",
+            "\u{2502} >      \u{2502}",
+            "\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256F}",
+            "kimi-for-coding  ~/repo",
+            "        context: 12% (24k/200k)",
+        ]);
+        assert_eq!(
+            state_of(evaluate("kimi", &s)),
+            Some((ScreenState::Idle, "composer_prompt_idle"))
+        );
+        // bash 模式的 `!` 提示符同样认。
+        let bash = snap(&["\u{2502} !      \u{2502}", "context: 1%"]);
+        assert_eq!(
+            state_of(evaluate("kimi", &bash)),
+            Some((ScreenState::Idle, "composer_prompt_idle"))
+        );
+    }
+
+    /// 优先级钉子：工作状态行与输入框同屏（工作中输入框照画）时，working 规则
+    /// 必须压过 composer_prompt_idle——否则转着的会话会被谎报成等你输入。
+    #[test]
+    fn kimi_working_status_outranks_composer_prompt() {
+        let s = snap(&[
+            "  output",
+            " \u{1F318} \u{00B7} Tip: ! to run a shell command",
+            "\u{2502} >      \u{2502}",
+            "context: 12%",
+        ]);
+        assert_eq!(
+            state_of(evaluate("kimi", &s)),
+            Some((ScreenState::Working, "moon_tip_status_working"))
+        );
+    }
+
+    /// 反向钉子：转录里用户消息是 bullet 开头的 `> ...`（user-message.ts），没有
+    /// `│` 边框——不能认成空闲输入框，只能落 fallback。
+    #[test]
+    fn kimi_bare_gt_transcript_line_is_not_composer() {
+        let s = snap(&["> 刚才发的那条消息", "  nothing pending"]);
+        assert_eq!(
+            state_of(evaluate("kimi", &s)),
+            Some((ScreenState::Idle, FALLBACK_RULE_ID))
+        );
+    }
+
     // -- gemini --
 
     #[test]
