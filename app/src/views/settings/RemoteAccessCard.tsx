@@ -91,7 +91,10 @@ export function RemoteAccessCard() {
 
   const url =
     enabled && selectedIp && info?.token
-      ? `http://${selectedIp}:${info.port}/#token=${info.token}`
+      ? // 二维码按本实例**实际监听**端口生成（boundPort）：多实例共享 settings.json 时
+        // info.port 是被另一实例改过的配置值，照它生成会指向别的实例的 server（实拍：
+        // dev 改 18622 后，安装版 QR 指向 18622 而它自己还听在 18621）。
+        `http://${selectedIp}:${info.boundPort ?? info.port}/#token=${info.token}`
       : null;
   const svg = url ? renderSVG(url, { border: 2 }) : null;
 
@@ -152,6 +155,16 @@ export function RemoteAccessCard() {
         <div className="row">
           <div className="row-text">
             <div className="proxy-err">{t.remote.startError(info.lastError)}</div>
+          </div>
+        </div>
+      )}
+
+      {/* 配置与实际监听分叉（多实例共享 settings.json，另一实例改端口写盘而本实例
+          listener 未跟随）：不是错误——本实例服务本身健康，但配置值已不可信，说明白。 */}
+      {enabled && info?.boundPort != null && info.boundPort !== port && (
+        <div className="row">
+          <div className="row-text">
+            <div className="row-desc">{t.remote.boundMismatch(port, info.boundPort)}</div>
           </div>
         </div>
       )}

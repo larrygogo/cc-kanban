@@ -850,6 +850,10 @@ export type RemoteAccessInfo = {
   ips: RemoteIpCandidate[];
   /** 最近一次启动失败原因（端口被占等），无错为 null。 */
   lastError: string | null;
+  /** 本实例实际监听的端口（server 运行中），未运行为 null。与 port（配置值）可能
+   *  分叉：多实例共享 settings.json，另一实例改端口后本实例 listener 不跟随——
+   *  二维码必须按它生成。 */
+  boundPort: number | null;
 };
 
 export function remoteAccessInfo(): Promise<RemoteAccessInfo> {

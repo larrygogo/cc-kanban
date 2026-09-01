@@ -267,6 +267,10 @@ pub(crate) struct RemoteAccessInfo {
     ips: Vec<IpCandidate>,
     /// 最近一次启动失败原因（端口被占等），供设置页红字提示。
     last_error: Option<String>,
+    /// 本实例**实际监听**的端口（server 在跑时）；未运行为 None。与 `port`（settings
+    /// 配置值）可能分叉：多实例共享 settings.json，另一实例改端口写盘后本实例的
+    /// listener 不会跟随——QR/提示必须按真实监听生成，否则指向别的实例的 server。
+    bound_port: Option<u16>,
 }
 
 /// 设置页调用：惰性生成 token 落盘，返回开关/端口/可达 IP/最近启动错误。
@@ -284,10 +288,10 @@ pub(crate) async fn remote_access_info(
     })
     .await
     .map_err(|e| e.to_string())??;
-    let last_error = {
+    let (last_error, bound_port) = {
         let runtime = app.state::<RemoteRuntime>();
         let inner = runtime.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.last_error.clone()
+        (inner.last_error.clone(), inner.running.as_ref().map(|r| r.port))
     };
     Ok(RemoteAccessInfo {
         enabled: settings.remote_access_enabled,
@@ -295,6 +299,7 @@ pub(crate) async fn remote_access_info(
         token: settings.remote_access_token,
         ips,
         last_error,
+        bound_port,
     })
 }
 
@@ -1468,11 +1473,13 @@ mod tests {
             token: "tok".into(),
             ips: vec![IpCandidate { ip: "192.168.1.5".into(), kind: "lan" }],
             last_error: Some("端口占用".into()),
+            bound_port: Some(18621),
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains(r#""lastError":"端口占用""#), "{json}");
         assert!(json.contains(r#""ips":[{"ip":"192.168.1.5","kind":"lan"}]"#), "{json}");
         assert!(json.contains(r#""port":18620"#), "{json}");
+        assert!(json.contains(r#""boundPort":18621"#), "{json}");
     }
 
     /// 归类是配对地址的守门员：Tailscale CGNAT 与 RFC1918 之外（TUN 假地址、

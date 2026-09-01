@@ -734,6 +734,8 @@ export const en: Dict = {
     noIp: "No LAN address found; enter this machine's IP manually in the phone browser",
     offHint: "Phones can't connect while off",
     startError: (e) => `Failed to start: ${e}`,
+    boundMismatch: (configured, actual) =>
+      `Configured port ${configured} didn't take effect in this instance; actually listening on ${actual} (possibly changed by another instance). The QR code uses the actual port`,
   },
   relay: {
     title: "API relay",

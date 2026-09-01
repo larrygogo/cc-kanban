@@ -774,6 +774,9 @@ export const zh = {
     noIp: "取不到局域网地址，请在手机浏览器手动输入本机 IP",
     offHint: "关闭时手机无法连接",
     startError: (e: string) => `启动失败：${e}`,
+    // 配置端口与实际监听分叉（多实例共享 settings.json，另一实例改端口本实例不跟随）。
+    boundMismatch: (configured: number, actual: number) =>
+      `配置端口 ${configured} 未在本实例生效，实际监听 ${actual}（可能被另一实例改动），二维码按实际监听生成`,
   },
   relay: {
     title: "API 中转",
