@@ -6,6 +6,11 @@
 //! set_ignore_cursor_events(true) 不吃鼠标、skip_taskbar 不占任务栏、focused(false)
 //! 不抢焦点。创建失败即熔断（BROKEN），Moved 处理据 update 返回值让前端回退 .snap-ghost。
 //!
+//! 启动预热（prewarm）：懒建意味着每次启动后的第一次拖拽要白等「建窗 + WebView2
+//! 首帧」几十~几百 ms。setup 完成后的空闲点在子线程预建窗口（保持 hidden、READY
+//! 握手照走、不 show），首次拖拽的 place() 直接命中已存在窗口。预热与拖拽懒建同走
+//! CREATING 门互斥，只会有一个生效；预热失败同样落 BROKEN 熔断，语义不变。
+//!
 //! 两个 Tauri 命令需全平台注册（generate_handler 不做 cfg 分流）：非 Windows 为空操作
 //! 桩——前端本就不会在非 Windows 调用（吸边整体仅 Windows，W-18）。
 
@@ -51,6 +56,25 @@ mod imp {
             extent.clamp(1.0, crate::snap::SIZE_MAX_LOGICAL).to_bits(),
             Ordering::Relaxed,
         );
+    }
+
+    /// 启动预热：setup 完成后的空闲点调用——子线程里先延迟几百 ms（让出启动关键
+    /// 路径：主窗首帧、托盘、位置恢复都在这窗口期内落地），再预建预览窗并保持
+    /// hidden（READY 握手照走、WANT_VISIBLE=false 不 show），首次拖拽即热窗。
+    ///
+    /// 与拖拽触发的懒建互斥：**睡眠结束后**才取 CREATING 门，先到先得——若睡眠
+    /// 期间用户已开始拖拽，懒建已持门，预热直接退出（建窗本就在进行，不需要第
+    /// 二个）；反之预热持门后，拖拽帧见 CREATING=true 不再重复建，建好那一刻
+    /// create_window 会应用 LATEST_RECT。预热失败走 create_window 内既有 BROKEN
+    /// 熔断（此刻无拖拽，补偿重发的是 edge=None，前端本就不在拖拽态，无副作用）。
+    pub fn prewarm(app: tauri::AppHandle) {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            if BROKEN.load(Ordering::Relaxed) || CREATING.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            create_window(app);
+        });
     }
 
     /// 预览页挂载握手：标记 READY，若此刻候选边仍在（WANT_VISIBLE）则补 show——
@@ -186,7 +210,11 @@ mod imp {
             let app = app.clone();
             std::thread::spawn(move || create_window(app));
         }
-        true
+        // 熔断后必须返回 false：前端据它保持 .snap-ghost 回退（文件头契约）。此前
+        // 无条件 true 只在「懒建失败→补偿重发」后、下一次边变化时露出——native=true
+        // 让前端收起 ghost 却没有任何预览；预热把建窗失败提前到启动期后这条路径会
+        // 在首次拖拽即命中，故在此对齐 None 分支的 !BROKEN 语义。
+        !BROKEN.load(Ordering::Relaxed)
     }
 
     /// 隐藏预览条（幂等）。调用点：候选边消失（update 的 None 分支）、
@@ -201,7 +229,7 @@ mod imp {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) use imp::{hide, on_ready, set_extent, update};
+pub(crate) use imp::{hide, on_ready, prewarm, set_extent, update};
 
 #[tauri::command]
 #[cfg(target_os = "windows")]

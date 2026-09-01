@@ -1588,6 +1588,11 @@ pub fn run() {
                     window::open_onboarding_window(&handle);
                 });
             }
+            // W-2 吸附预览窗预热：子线程延迟到启动空闲点预建（保持 hidden，READY 握手
+            // 照走、不 show），消掉首次拖拽「建窗 + WebView2 首帧」的无预览窗口期。
+            // 与拖拽懒建同走 CREATING 门互斥；失败走既有 BROKEN 熔断，不拖慢启动。
+            #[cfg(target_os = "windows")]
+            snap_preview::prewarm(app.handle().clone());
             Ok(())
         })
         .build({
