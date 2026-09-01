@@ -114,6 +114,7 @@ export function installMocks(): void {
           runtime_commands_pending: false,
           attachment_mention: true,
           clipboard_image_paste: "\\[Image #\\d",
+          clipboard_paste_input: "",
           version: "2.1.215 (Claude Code)",
         };
       }

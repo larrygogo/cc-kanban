@@ -206,6 +206,9 @@ export function chatUi(provider: string, custom: SlashCommand[] = []): ChatUi | 
     attachment_mention: provider === "claude" || provider === "gemini" || provider === "kimi",
     // 与后端同源:claude/kimi 的 TUI 文档明确 Ctrl-V 读剪贴板原生附加图片,占位符各家不同。
     clipboard_image_paste: provider === "claude" ? "\\[Image #\\d" : provider === "kimi" ? "\\[image[:# ]" : null,
+    // 与后端同源:粘贴键 kimi 在 Windows 上是 Alt+V(二进制里 win32 ? "alt+v" : ctrl("v")),
+    // 其余声明该能力的(claude)是 Ctrl-V。
+    clipboard_paste_input: provider === "kimi" ? "\u001bv" : provider === "claude" ? "\u0016" : null,
     // 与后端同源:仅 claude 取证过「TUI 权限框与 PermissionRequest hook 并行竞速」。
     permission_prompt_races_hook: provider === "claude",
     version: null,

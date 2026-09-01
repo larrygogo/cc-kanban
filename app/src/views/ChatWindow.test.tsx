@@ -959,7 +959,7 @@ describe("ChatWindow", () => {
         slash_commands: [], model_presets: [], version: "0.26.0",
         model_menu_command: null, menu_slash_commands: [],
         startup_attention_markers: [], selector_anchors: [], interrupt_input: null, runtime_commands_pending: false,
-        attachment_mention: false, clipboard_image_paste: null,
+        attachment_mention: false, clipboard_image_paste: null, clipboard_paste_input: null,
         mode_controls: [
           {
             dimension: "work", cycle_input: "\u001b[Z", options: [
@@ -2958,12 +2958,12 @@ describe("ChatWindow", () => {
         return Promise.resolve(`C:\\Temp\\meowo-paste\\3-0\\image${saved}.png`);
       }
       if (command === "clipboard_set_image") return Promise.resolve();
-      if (command === "write_managed_terminal" && args?.data === "\x16") {
+      if (command === "write_managed_terminal" && args?.data === "\x1bv") {
         pasted += 1;
         return Promise.resolve();
       }
       if (command === "managed_terminal_snapshot") {
-        // kimi 的原生占位符带尺寸;第 N 次 ^V 后屏幕上累计 N 个。
+        // kimi 的原生占位符带尺寸;第 N 次 Alt+V 后屏幕上累计 N 个。
         const line = pasted >= 2 ? "> [image #1 (10×10)] [image #2 (20×20)]" : pasted === 1 ? "> [image #1 (10×10)]" : "";
         return Promise.resolve({ sessionId: 23, active: true, managed: true, data: line ? btoa(line) : "", startOffset: 0, endOffset: line.length, exited: false, exitCode: null });
       }
@@ -2981,13 +2981,14 @@ describe("ChatWindow", () => {
     fireEvent.keyDown(box(), { key: "Enter" });
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 23, data: "做成类似这样的" }), { timeout: 3000 });
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 23, data: "\r" }), { timeout: 3000 });
-    // 两张各写一次剪贴板、顺序与附件一致;各发一次 Ctrl-V。
+    // 两张各写一次剪贴板、顺序与附件一致;各发一次粘贴键——kimi 在 Windows 上是 Alt+V
+    // (\x1bv),不是 Ctrl-V(发 \x16 会被 composer 无视,用户实拍故障)。
     const sets = invoke.mock.calls.filter((call) => call[0] === "clipboard_set_image");
     expect(sets.map((call) => (call[1] as { path: string }).path)).toEqual([
       "C:\\Temp\\meowo-paste\\3-0\\image1.png",
       "C:\\Temp\\meowo-paste\\3-0\\image2.png",
     ]);
-    expect(invoke.mock.calls.filter((call) => call[0] === "write_managed_terminal" && (call[1] as { data: string }).data === "\x16")).toHaveLength(2);
+    expect(invoke.mock.calls.filter((call) => call[0] === "write_managed_terminal" && (call[1] as { data: string }).data === "\x1bv")).toHaveLength(2);
     // 全程没有指令文本注入;结束后还原剪贴板快照。
     const writes = invoke.mock.calls.filter((call) => call[0] === "write_managed_terminal");
     expect(writes.every((call) => !String((call[1] as { data: string }).data).includes("请读取并结合"))).toBe(true);

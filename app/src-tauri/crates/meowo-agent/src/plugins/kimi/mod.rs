@@ -382,8 +382,9 @@ impl AgentPlugin for Kimi {
     fn attachment_mention(&self, version: Option<&str>) -> bool {
         version.is_some()
     }
-    /// kimi TUI 的 Ctrl-V 读系统剪贴板并把图片缓存为 blob 原生附加(官方文档:composer
-    /// 显示 `[image:…]` 占位;wire.jsonl 实测入 prompt 为 image_url blobref)。
+    /// kimi TUI 的原生图片附加：触发键读系统剪贴板并把图片缓存为 blob 原生附加（composer
+    /// 显示 `[image #N (W×H)]` 占位；旧版是 `[image:…]`，marker 正则两种形态都覆盖；
+    /// wire.jsonl 实测入 prompt 为 image_url blobref）。触发键见 `clipboard_paste_input`。
     /// 版本探测不到时**仍声明**:能力已在真机实测,探测失败只是拿不到版本号,不代表
     /// 能力缺失(同 attachment_mention 的取值理由,但方向相反——那里探测不到时宁可
     /// 不用 `@`,因为文本通道恒可用;这里探测不到就**没有**声明的话,前端会静默退回
@@ -391,6 +392,15 @@ impl AgentPlugin for Kimi {
     /// 的 sendWithClipboardImages → sendText 回退仍在,风险有底。
     fn clipboard_image_paste(&self, _version: Option<&str>) -> Option<&'static str> {
         Some(r"\[image[:# ]")
+    }
+    /// kimi 在 Windows 上的贴图键是 **Alt+V**，不是 Ctrl+V：0.29 与上一版（.bak）二进制
+    /// 里都是 `matchesKey(..., win32 ? "alt+v" : ctrl("v"))`；真机探针
+    /// （app/src-tauri/tests/probe_clipboard_image.rs）实测 `\x16` 注入 composer 零反应，
+    /// `\x1bv`（传统 Meta 编码）~40ms 落出 `[image #1 (120×48)]`。kitty CSI-u 编码的
+    /// Alt+V（`ESC[118;3u`）反而不被认——kimi 虽推 kitty 协议，这个键的匹配走的是
+    /// 传统 ESC 前缀形态。版本门不设：两版二进制行为一致，探测不到版本时按现状声明。
+    fn clipboard_paste_input(&self, _version: Option<&str>) -> Option<&'static str> {
+        Some("\x1bv")
     }
     /// kimi 的 `/model` 同样是交互式菜单（二进制里的命令描述就是 `/model: switch model`，
     /// 且失败提示是「Run /model to select one first」），不接受内联参数，故不声明模型预设。
@@ -564,6 +574,15 @@ mod tests {
         let plugin = Kimi;
         assert_eq!(plugin.clipboard_image_paste(None), Some(r"\[image[:# ]"));
         assert_eq!(plugin.clipboard_image_paste(Some("1.0")), Some(r"\[image[:# ]"));
+    }
+
+    #[test]
+    fn clipboard_paste_input_is_alt_v_on_windows() {
+        // 回归钉:kimi(win32)的贴图键是 Alt+V(`\x1bv`),不是通用的 Ctrl-V。发错键
+        // composer 零反应,占位符超时后前端静默回退指令文本(用户实拍故障)。
+        let plugin = Kimi;
+        assert_eq!(plugin.clipboard_paste_input(None), Some("\x1bv"));
+        assert_eq!(plugin.clipboard_paste_input(Some("0.29.0")), Some("\x1bv"));
     }
 
     #[test]

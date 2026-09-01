@@ -249,9 +249,12 @@ pub struct ChatUi {
     pub attachment_mention: bool,
     /// 该 CLI 的 TUI 支持 Ctrl-V 原生粘贴剪贴板图片时,composer 里出现的占位符正则
     /// (claude `\[Image #\d`、kimi `\[image[:# ]`)。前端在「剪贴板里仍是刚粘贴的那张图」
-    /// 时向 PTY 发 Ctrl-V 触发原生图片附加,并用它从屏幕上验证成功;None = 不支持,
-    /// 图片一律走指令文本兜底。
+    /// 时向 PTY 发粘贴键（见 `clipboard_paste_input`）触发原生图片附加,并用它从屏幕上
+    /// 验证成功;None = 不支持,图片一律走指令文本兜底。
     pub clipboard_image_paste: Option<&'static str>,
+    /// 触发原生图片粘贴的按键序列（claude 的 Ctrl-V = `\x16`；kimi 在 Windows 上是
+    /// Alt+V = `\x1bv`，发 Ctrl-V 会被 composer 无视）。由插件声明，前端不自行猜键。
+    pub clipboard_paste_input: Option<&'static str>,
     /// 探测到的 CLI 版本，原样回传（展示/排障）。
     pub version: Option<String>,
 }

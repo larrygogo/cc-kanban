@@ -218,6 +218,7 @@ pub trait AgentPlugin: Sync {
             runtime_commands_pending,
             attachment_mention: self.attachment_mention(ctx.version),
             clipboard_image_paste: self.clipboard_image_paste(ctx.version),
+            clipboard_paste_input: self.clipboard_paste_input(ctx.version),
             version: ctx.version.map(str::to_string),
         }
     }
@@ -229,6 +230,15 @@ pub trait AgentPlugin: Sync {
     /// 兜底——发一个对方不认的 Ctrl-V 只会往 composer 里塞脏字节。
     fn clipboard_image_paste(&self, _version: Option<&str>) -> Option<&'static str> {
         None
+    }
+
+    /// 触发原生图片粘贴的按键序列。只在 `clipboard_image_paste` 已声明时有意义。
+    /// 默认 Ctrl-V（`\x16`，claude 及多数 TUI 的约定）；不按此约定的 agent 必须覆盖——
+    /// kimi 在 Windows 上的贴图键实测是 **Alt+V**（`\x1bv`，kimi 0.29 二进制里
+    /// `matchesKey(..., win32 ? "alt+v" : ctrl("v"))`，当前版与上一版 .bak 同），
+    /// 发 Ctrl-V 会被 composer 整个无视（真机探针 tests/probe_clipboard_image.rs）。
+    fn clipboard_paste_input(&self, _version: Option<&str>) -> Option<&'static str> {
+        Some("\x16")
     }
 
     /// 附件是否可用该 CLI 的 `@路径` 提及注入。

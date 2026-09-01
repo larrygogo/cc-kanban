@@ -2177,15 +2177,13 @@ export function ChatWindow() {
     await submitToTerminal(sessionId, content, attentionAbort, verify);
     return true;
   });
-  /// 剪贴板原生图片附加:向 PTY 发 Ctrl-V,让 TUI 自己读剪贴板走它的官方图片粘贴通道
-  /// (claude 的 `[Image #N]`、kimi 的 `[image:…]`),从屏幕上确认占位符出现后再写正文提交。
-  /// 调用方已确认「剪贴板指纹 == 待发附件」,全程只读剪贴板、不写。
-  /// 返回 false = 未送达,调用方退回指令文本。
-  /// 原生图片附加：逐张把附件写进系统剪贴板 → 发 Ctrl-V 让 TUI 自己读（claude 的
-  /// `[Image #N]`、kimi 的 `[image #N (W×H)]`）→ 等第 N 个占位符出现再贴下一张，
-  /// 全部落地后提交正文。剪贴板是发送通道的耗材：首次写入前后端自动快照，这里 finally
-  /// 还原。任一张落地失败（剪贴板写不进、占位符超时）返回 false，调用方回退指令文本。
-  const sendWithClipboardImages = (content: string, marker: string, images: Attachment[]): Promise<boolean> => withSendGuard(async () => {
+  /// 原生图片附加：逐张把附件写进系统剪贴板 → 发插件声明的粘贴键（claude 的 Ctrl-V、
+  /// kimi 在 Windows 上的 Alt+V——发 Ctrl-V 会被它的 composer 无视，真机实拍）让 TUI
+  /// 自己读（claude 的 `[Image #N]`、kimi 的 `[image #N (W×H)]`）→ 等第 N 个占位符出现
+  /// 再贴下一张，全部落地后提交正文。剪贴板是发送通道的耗材：首次写入前后端自动快照，
+  /// 这里 finally 还原。任一张落地失败（剪贴板写不进、占位符超时）返回 false，
+  /// 调用方回退指令文本。
+  const sendWithClipboardImages = (content: string, marker: string, pasteInput: string, images: Attachment[]): Promise<boolean> => withSendGuard(async () => {
     const before = await managedTerminalSnapshot(sessionId);
     const markerPattern = new RegExp(marker, "gi");
     const decoder = new TextDecoder();
@@ -2196,11 +2194,11 @@ export function ChatWindow() {
         try {
           await clipboardSetImage(images[index].path);
         } catch {
-          // 剪贴板写不进去（被占用/附件文件已删）：绝不能照常 Ctrl-V——那会把剪贴板里
+          // 剪贴板写不进去（被占用/附件文件已删）：绝不能照常发粘贴键——那会把剪贴板里
           // 别人的内容附给 agent。回退指令文本由调用方接。
           return false;
         }
-        await writeManagedTerminal(sessionId, "\x16");
+        await writeManagedTerminal(sessionId, pasteInput);
         // TUI 读剪贴板+缓存图片是异步的:轮询增量输出等占位符计数达标,1.5s 没出现放弃原生化。
         let landed = false;
         for (let attempt = 0; attempt < 6 && !landed; attempt += 1) {
@@ -2219,7 +2217,7 @@ export function ChatWindow() {
           landed = (visibleTerminalText(tail).match(markerPattern) ?? []).length >= index + 1;
         }
         if (!landed) {
-          // 占位符没出现。Ctrl-V 的副作用不可撤销——慢机/大图上图片可能在超时之后才落进
+          // 占位符没出现。粘贴键的副作用不可撤销——慢机/大图上图片可能在超时之后才落进
           // composer,若直接回退指令文本,迟到的原生图会和它一起提交成重复附件。先 Ctrl-U
           // 清行做尽力撤销(两家 TUI 都支持 emacs 行编辑),把残余竞态压缩到「清行后才落地」
           // 的极小窗口。
@@ -2485,14 +2483,15 @@ export function ChatWindow() {
         }]);
       }
     };
-    // 原生图片附加:仅当「附件全部是图片 + 插件声明 TUI 支持 Ctrl-V 图片粘贴」。逐张写
+    // 原生图片附加:仅当「附件全部是图片 + 插件声明 TUI 支持剪贴板图片粘贴」。逐张写
     // 剪贴板让 TUI 自己读(kimi/claude 的 composer 都支持多张图连续粘贴)。含非图片附件、
     // 或任一张落地失败(剪贴板写不进、占位符超时)都静默退回指令文本——那条路径对所有
     // agent 恒可用。
     // 远程跳过:clipboard_set_image 是 /rpc 拒绝项,必 404 再回退——省掉每张图两发白请求。
     const clipMarker = !remoteUi() && chatUi?.clipboard_image_paste;
     if (clipMarker && attachments.length > 0 && attachments.every((file) => file.image)) {
-      if (await sendWithClipboardImages(prompt.trim(), clipMarker, attachments)) {
+      // 粘贴键由插件声明（kimi 在 Windows 上是 Alt+V 而非 Ctrl-V）；缺声明按 Ctrl-V 兜底。
+      if (await sendWithClipboardImages(prompt.trim(), clipMarker, chatUi?.clipboard_paste_input ?? "\x16", attachments)) {
         setPrompt("");
         setAttachments([]);
         setAttachmentNotice("");
