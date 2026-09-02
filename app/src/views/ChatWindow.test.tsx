@@ -914,7 +914,7 @@ describe("ChatWindow", () => {
     expect(await screen.findByText("改后标题")).toBeTruthy();
 
     current = { ...base, currentActivity: "Bash: 第二步", contextPct: 42, title: "改后标题", agentModes: [{ dimension: "permission", value: "plan" }] };
-    expect(await screen.findByText("计划")).toBeTruthy();
+    expect(await screen.findByText("计划模式")).toBeTruthy();
 
     // 兜底时间线读 lastUserText/lastAiText（transcript 空窗期渲染 hook 落库的最近往来），
     // 它们也在比较清单里——漏掉的话空窗期内容永远停在第一轮。
@@ -1029,7 +1029,7 @@ describe("ChatWindow", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: /计划/ }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 51, data: "\u001b[Z" }));
     // transcript 静默，但屏幕是 CLI 自己画的权威状态——标签应据它回显为「计划」。
-    expect(await screen.findByText("计划")).toBeTruthy();
+    expect(await screen.findByText("计划模式")).toBeTruthy();
   });
 
   it("休眠会话的权限胶囊改卖「下一次恢复的权限」：选择只落启动参数，不碰终端", async () => {
@@ -1686,8 +1686,9 @@ describe("ChatWindow", () => {
     fireEvent.change(input, { target: { value: "继续" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     expect(await screen.findByText(/正在等待 Agent 终端就绪，已等 \d+ 秒/, {}, { timeout: 6_000 })).toBeTruthy();
-    // 顶部视图切换也有个「终端」钮,这里认等待条里的那个(chat-send-takeover)。
-    expect(screen.getAllByRole("button", { name: "终端" }).some((b) => b.className.includes("chat-send-takeover"))).toBe(true);
+    // 等待条里的那个钮(chat-send-takeover)。7G-9 后标签统一成「去终端页」,
+    // 与顶部视图切换的「终端」页签不再同名。
+    expect(screen.getAllByRole("button", { name: "去终端页" }).some((b) => b.className.includes("chat-send-takeover"))).toBe(true);
     // 放行就绪:等待条收起、消息送达。把在途链路走完再收工,别留轮询污染后面的用例
     // (与上一个用例的「等回车落地」同一纪律)。
     ready = true;
@@ -2023,7 +2024,7 @@ describe("ChatWindow", () => {
     // 正例锚:外部会话 composer 让位给接管门卡——门卡在场说明首轮渲染已完成。
     expect(await screen.findByText(/会话在外部终端运行/)).toBeTruthy();
     expect(screen.queryByText("Agent 正在等待你的回答")).toBeNull();
-    expect(screen.queryByRole("button", { name: "打开终端" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "去终端页" })).toBeNull();
   });
 
   /** 对照:托管会话在屏幕未识别出卡片时,降级卡仍是去终端页处理的入口,不得连带消失。 */
@@ -2045,7 +2046,7 @@ describe("ChatWindow", () => {
     });
     render(<ChatWindow />);
     expect(await screen.findByText("Agent 正在等待你的回答")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "打开终端" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "去终端页" })).toBeTruthy();
   });
 
   it("renders and resolves a managed permission request", async () => {
@@ -2309,7 +2310,7 @@ describe("ChatWindow", () => {
     expect(await screen.findByText(/新仓库叫什么名字/)).toBeTruthy();
     expect(screen.getByText("autopilot-v2")).toBeTruthy();
     expect(screen.getByText("沿用产品名")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "去终端作答" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "去终端页" })).toBeTruthy();
     // 不是审批卡：没有允许/拒绝，也没有原始 JSON 参数。
     expect(screen.queryByRole("button", { name: "允许一次" })).toBeNull();
     expect(screen.queryByRole("button", { name: "拒绝" })).toBeNull();
@@ -2424,7 +2425,7 @@ describe("ChatWindow", () => {
       } });
     });
     expect(await screen.findByText(/继续吗/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "去终端作答" }));
+    fireEvent.click(screen.getByRole("button", { name: "去终端页" }));
     await waitFor(() => {
       const resolved = invoke.mock.calls.find((call) => call[0] === "resolve_pending_approval");
       expect(resolved).toBeTruthy();
@@ -2839,7 +2840,7 @@ describe("ChatWindow", () => {
     expect(await screen.findByText(/晚饭吃什么/)).toBeTruthy();
     expect(screen.getByText("火锅")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /火锅/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: "去终端作答" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "去终端页" })).toBeNull();
     expect(screen.getByText(/请回到运行它的终端作答/)).toBeTruthy();
   });
 

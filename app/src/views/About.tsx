@@ -14,7 +14,7 @@ import { appConfirm } from "../confirm";
 import logoUrl from "../../src-tauri/icons/128x128.png";
 import type { Dict } from "../i18n/zh";
 import { SETTINGS_DEFAULTS, useSettingsState } from "./settings/state";
-import { Switch, Segmented, SwatchPicker, FontSizeSlider } from "./settings/widgets";
+import { Switch, Segmented, SwatchPicker, FontSizeSlider, SettingsError } from "./settings/widgets";
 import { Dropdown } from "./menu";
 import { AccountSection } from "./settings/AccountSection";
 import { NetworkSection } from "./settings/NetworkSection";
@@ -111,28 +111,6 @@ function IconGlobe() {
 }
 
 
-
-/** 设置保存失败的统一错误行：patch 失败时开关会被回读「弹回去」，没有这一行用户
- *  只能看到界面自己变回去、零解释（S-3——曾只有网络分区把错误显示了出来）。
- *  常驻错误加关闭 ×：错误不会自己消失（下一次成功才清），用户看完得有办法关掉。
- *  渲染点兜底过一遍 formatBackendError（产出端 state.ts 已格式化，这里是幂等双保险）。 */
-function SettingsError({ error, onDismiss }: { error: string | null; onDismiss: () => void }) {
-  const t = useT();
-  if (!error) return null;
-  return (
-    <div className="sec-hint proxy-err" role="alert">
-      {formatBackendError(error, t.locale)}
-      <button
-        type="button"
-        aria-label={t.settings.close}
-        style={{ appearance: "none", background: "none", border: "none", padding: 0, marginLeft: 6, font: "inherit", color: "inherit", cursor: "pointer" }}
-        onClick={onDismiss}
-      >
-        ×
-      </button>
-    </div>
-  );
-}
 
 // 通用：应用级设置（语言、自启、更新、通知）。会话与卡片的行为在 SessionsSection。
 function GeneralSection() {
@@ -709,16 +687,20 @@ function AboutSection({
     void appConfirm(formatBackendError(e, t.locale), { title: t.about.checkUpdate });
   });
   const hasUpdate = status === "available" || status === "downloading" || status === "ready";
+  // 7S-3：三个态此前都压成一句「发现新版本」+ 一颗「更新到 vX」——正在下载和已经下完
+  // 是用户要做的事完全不同的两件事（等 vs 点）。
   const updateBtn =
-    hasUpdate
-      ? { label: t.about.updateTo(newVersion ?? ""), primary: true }
+    status === "ready" ? { label: t.about.installUpdate, primary: true }
+      : hasUpdate ? { label: t.about.updateTo(newVersion ?? ""), primary: true }
       : { label: t.about.checkUpdate, primary: false };
 
   const verText = `v${version || "—"}`;
   // checking/error 也要有话说：曾经两态都落空串——打开「关于」十秒空窗、检查失败一片安静。
   // unknown（关了自动更新、从未检查）只显示版本号，不谎报「已是最新」。
   const verStatus =
-    hasUpdate ? t.about.foundNew(newVersion ?? "")
+    status === "downloading" ? t.about.downloadingUpdate
+      : status === "ready" ? t.about.updateReady
+      : hasUpdate ? t.about.foundNew(newVersion ?? "")
       : status === "latest" ? t.about.upToDate
       : status === "checking" ? t.about.checking
       : status === "error" ? t.about.checkFailed
@@ -743,7 +725,9 @@ function AboutSection({
             <div className="row-label">{t.about.website}</div>
             <div className="row-desc">{SITE}</div>
           </div>
-          <button className="sbtn primary" onClick={() => openExt(SITE_URL)}>
+          {/* 7S-9：官网原是本页唯一的 primary——有更新时页面上就有两颗主按钮抢视线，
+              而「装更新」才是那一刻真正要做的事。官网降回普通按钮。 */}
+          <button className="sbtn" onClick={() => openExt(SITE_URL)}>
             {t.about.open}
           </button>
         </div>
@@ -759,7 +743,9 @@ function AboutSection({
         <div className="row">
           <div className="row-text">
             <div className="row-label">{t.about.guide}</div>
-            <div className="row-desc">{t.onboarding.welcome.title}</div>
+            {/* 7S-9：副标此前直接借用引导页大标题「欢迎使用 Meowo」——在「关于」页里
+                读起来像在欢迎一个已经用了很久的人。说清这颗按钮会干什么。 */}
+            <div className="row-desc">{t.about.guideDesc}</div>
           </div>
           <button className="sbtn" onClick={() => void invoke("open_onboarding").catch((e) => console.error("[about] 打开引导窗口失败：", e))}>
             {t.about.open}
@@ -823,6 +809,18 @@ export function About() {
   // MutationObserver 兜底异步内容（agent 名单/配额加载完成后新出现的行也要被过滤）。
   const [query, setQuery] = useState("");
   const searching = query.trim() !== "";
+  // 7B-7：设置窗此前没有 Ctrl+F（贴纸窗有），搜索框只能用鼠标点到。
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.code !== "KeyF") return;
+      e.preventDefault();
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   const [noHits, setNoHits] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -859,6 +857,7 @@ export function About() {
             <line x1="21" y1="21" x2="16.5" y2="16.5" />
           </svg>
           <input
+            ref={searchInputRef}
             value={query}
             placeholder={t.settings.searchPlaceholder}
             aria-label={t.settings.searchPlaceholder}
@@ -878,6 +877,16 @@ export function About() {
               }
             }}
           />
+          {/* 7B-7：清词此前只有 Esc 一条路（且要焦点在框里）。补一颗 ×，与贴纸搜索同款。 */}
+          {query && (
+            <button
+              type="button"
+              className="side-search-x"
+              aria-label={t.settings.searchClear}
+              data-tip={t.settings.searchClear}
+              onClick={() => { setQuery(""); searchInputRef.current?.focus(); }}
+            >×</button>
+          )}
         </div>
         <nav className="side-nav">
           {/* 搜索态点分区 = 清词并跳转（搜索结果已把各分区平铺，点导航即退出搜索）。 */}

@@ -175,6 +175,22 @@ const components: Components = {
     const html = cachedHighlight(text.replace(/\n$/, ""), lang);
     return <code className={className} dangerouslySetInnerHTML={{ __html: html }} />;
   },
+  // 7C-10：markdown 里的图片此前完全没管。远端大图按原始像素铺开，把 720px 的消息列
+  // 撑出横向滚动条；本地路径/相对路径在 webview 里根本加载不到，只剩一个碎图标，
+  // 用户不知道那是什么。远端图限宽自适应，非 http 源降级成与附件同款的文件名 chip。
+  img: ({ src, alt }) => {
+    const url = typeof src === "string" ? src : "";
+    if (!/^https?:\/\//i.test(url)) {
+      const name = alt || url.split(/[\\/]/).pop() || url;
+      return (
+        <span className="chat-image-chip" data-tip={url || name}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="9" cy="10" r="1.6" /><path d="m5 17 4.5-4.5L13 16l3-3 3 4" /></svg>
+          <span>{name}</span>
+        </span>
+      );
+    }
+    return <img src={url} alt={alt ?? ""} loading="lazy" referrerPolicy="no-referrer" />;
+  },
   // 链接绝不能让 webview 自己导航（这个窗口没有地址栏，跳走就回不来了）；
   // 交给后端在默认浏览器打开，scheme 校验也在后端。
   a: ({ href, children }) => {

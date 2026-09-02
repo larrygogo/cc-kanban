@@ -44,6 +44,7 @@ import { RelayAccess } from "./RelayAccess";
 import { useTauriEvent } from "../../hooks/useTauriEvent";
 import { useLoginOperations, type LoginOperationState } from "../../hooks/useLoginOperations";
 import { useInstallOperations, type InstallOperationState } from "../../hooks/useInstallOperations";
+import { isWindows } from "../../platform";
 
 function RefreshIcon({ spinning }: { spinning?: boolean }) {
   return (
@@ -247,7 +248,15 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
     wt: "Windows Terminal", wezterm: "WezTerm", powershell: "PowerShell",
     cmd: t.settings.cmdPrompt,
   };
-  const loginTerm = settings?.resume_terminal ? loginTermLabels[settings.resume_terminal] ?? null : null;
+  // 7S-1：resume_terminal 的默认值是 "terminal"（macOS 的 Terminal.app），Windows 上
+  // 后端另有一套回退（wt 装了走 Windows Terminal，否则 PowerShell，见 terminal.rs），
+  // 前端却照着存值念「已在 Terminal 打开」——弹出来的根本不是那个东西。前端探不到
+  // wt 装没装，那就不猜终端名，退回不带名字的等待文案。
+  const macOnlyTerminals = new Set(["terminal", "iterm", "ghostty"]);
+  const termKey = settings?.resume_terminal;
+  const loginTerm = termKey && !(isWindows() && macOnlyTerminals.has(termKey))
+    ? loginTermLabels[termKey] ?? null
+    : null;
   const loginMsg = loginState?.phase === "pending"
     ? loginTerm
       ? t.account.loginWaiting(loginTerm)

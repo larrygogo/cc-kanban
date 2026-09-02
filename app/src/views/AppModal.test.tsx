@@ -113,10 +113,24 @@ describe("AppModal（页内 modal 统一壳，G-3）", () => {
   it("点遮罩关闭，点弹层内部不关", () => {
     const onClose = vi.fn();
     const { dlg } = setup(onClose);
+    const overlay = dlg.parentElement as HTMLElement;
+    fireEvent.mouseDown(dlg);
     fireEvent.click(dlg);
     expect(onClose).not.toHaveBeenCalled();
-    fireEvent.click(dlg.parentElement as HTMLElement);
+    fireEvent.mouseDown(overlay);
+    fireEvent.click(overlay);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  /** 7S-5：在弹层里拖选文字、手滑到遮罩上松手——按下不在遮罩上，就不算「点了遮罩」，
+   *  否则一次拖选就把弹层连同没提交的草稿一起关掉。 */
+  it("从弹层内按下、在遮罩上松手不关", () => {
+    const onClose = vi.fn();
+    const { dlg } = setup(onClose);
+    const overlay = dlg.parentElement as HTMLElement;
+    fireEvent.mouseDown(dlg);
+    fireEvent.click(overlay);
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it("自定义 onKeyDown 先跑，preventDefault 后壳不再处理", () => {

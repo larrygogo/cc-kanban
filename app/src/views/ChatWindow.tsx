@@ -641,6 +641,10 @@ export function ChatWindow() {
   const [needsTakeover, setNeedsTakeover] = useState(false);
   const retryRef = useRef<(() => void | Promise<void>) | null>(null);
   const [terminalAttention, setTerminalAttention] = useState<TerminalAttention | null>(null);
+  // 7C-2：「仅收起」此前是单向门——收完屏幕签名没变，ManagedTerminal 的去重不会再报同一张卡，
+  // 用户想回看只剩终端页。收起的卡先留在这里，overlay 底部换成一条可再展开的折叠条；
+  // 收起本身仍照旧把 terminalAttention 置空（composer 解锁、发送不再被拦），语义没变。
+  const [dismissedAttention, setDismissedAttention] = useState<TerminalAttention | null>(null);
   const [questionCustomText, setQuestionCustomText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   // 附件超上限被截断时给用户的可见提示（此前 .slice(0, 12) 静默丢弃）。
@@ -673,6 +677,8 @@ export function ChatWindow() {
   const learnModelLabelsRef = useRef<(options: TerminalAttentionOption[]) => void>(() => {});
   const finishSilentProbeRef = useRef<() => void>(() => {});
   const revealTerminalAttention = useCallback((attention: TerminalAttention | null) => {
+    // 屏幕不再匹配（提示已在终端里被处理掉）或换了一张新卡时，收起条一并作废。
+    setDismissedAttention(null);
     if (!attention) { setTerminalAttention(null); return; }
     terminalEverShownRef.current = true;
     // CLI 弹出的模型菜单被识别成选项了：把清单学下来，之后直接渲染 GUI 下拉。
@@ -1671,6 +1677,47 @@ export function ChatWindow() {
     return () => observer.disconnect();
   }, []);
 
+  // 7C-2：overlay 的卡片从锚点向上溢出，盖住 transcript 末尾约 500px——零位移的代价
+  // 本来「可接受」，但计划审批时刚写完的计划正文正好落在这一段，滚到底也露不出来。
+  // 把卡片实高回写成 .chat-scroll 的额外 padding-bottom：文档流不动（overlay 仍 height:0），
+  // 滚动区却多出一段可滚空白，被盖住的内容能滚出卡片上缘。卡片高度随正文/按钮变，
+  // 所以观察每张卡（ResizeObserver）+ 卡片增删（MutationObserver）。
+  const overlayRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = overlayRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const apply = () => {
+      const scroll = scrollRef.current;
+      // 变量写在 overlay 的父容器（chat-window 根）上而不是滚动区自己：滚动区的
+      // padding、sticky 的「回到最新」浮钮、以及流里紧贴 composer 的排队回执/运行条
+      // 都要读它，它们互为兄弟，只有共同祖先能同时喂到（7C-2 / 7C-3）。
+      const host = el.parentElement;
+      if (!scroll || !host) return;
+      // 锚点 = overlay 在流中的位置（零高，等于 composer 上沿）；卡片向上溢出到 top。
+      const anchor = el.getBoundingClientRect().bottom;
+      let top = anchor;
+      for (const child of Array.from(el.children)) {
+        const rect = child.getBoundingClientRect();
+        if (rect.height > 0) top = Math.min(top, rect.top);
+      }
+      const height = Math.max(0, Math.round(anchor - top));
+      host.style.setProperty("--chat-overlay-h", `${height}px`);
+      // padding 变化不改变滚动容器自身的 border-box 尺寸，上面那个 ResizeObserver 不会
+      // 触发——已吸底的用户在这里自己钉回去。
+      if (!scroll.hidden && followRef.current) scroll.scrollTop = scroll.scrollHeight;
+    };
+    const sizes = new ResizeObserver(apply);
+    const rewatch = () => {
+      sizes.disconnect();
+      for (const child of Array.from(el.children)) sizes.observe(child);
+      apply();
+    };
+    const children = new MutationObserver(rewatch);
+    children.observe(el, { childList: true });
+    rewatch();
+    return () => { sizes.disconnect(); children.disconnect(); };
+  }, []);
+
   const resetTo = useCallback((id: number) => {
     if (!Number.isSafeInteger(id) || id === 0) return;
     if (id === activeSessionRef.current) return;
@@ -1748,6 +1795,8 @@ export function ChatWindow() {
     awayCountRef.current = null; // 未读徽章按会话归零（旧会话的快照对新会话无意义）
     positionedRef.current = false;
     followRef.current = true;
+    // 换会话后旧会话的阅读位置对新 transcript 无意义（7C-7 的恢复只跨视图，不跨会话）。
+    savedScrollRef.current = null;
     // 切会话一律保持当前视图：用户在终端就显示终端，在对话就显示对话。负 id（尚未
     // 认领的新会话）也不再强制进终端——对话页有「启动中」占位，claim 成真 id 时
     // 同样走这里，视图原地不动。
@@ -1953,7 +2002,7 @@ export function ChatWindow() {
       setStructuredQuestion(null);
       // 过期不能只是凭空消失（用户离开一会儿回来，分不清是自己漏点还是超时）——
       // 说清卡去哪了、该去哪继续。
-      setSendError(t.chat.questionExpired);
+      setSendError(remoteUi() ? t.chat.questionExpiredRemote : t.chat.questionExpired);
     }, 180_000);
     return () => window.clearTimeout(timer);
   }, [structuredQuestion, sessionId, t]);
@@ -2029,17 +2078,34 @@ export function ChatWindow() {
     el.scrollTop = el.scrollHeight;
     el.style.scrollBehavior = behavior;
   };
+  // 7C-7：切去终端再切回来，阅读位置此前一律丢失——上面那段的旧注释写「终端页会卸载
+  // chat-scroll」，但两个视图早就都留在树上、用 hidden 切换了（见 .chat-scroll 的渲染），
+  // 真正的原因是 hidden 的 display:none 让浏览器把 scrollTop 清零。既然容器还是同一个，
+  // 离开前把位置和 follow 态记下来，回来原样放回去；本来就吸着底的照旧吸底。
+  const savedScrollRef = useRef<{ top: number; follow: boolean } | null>(null);
   useLayoutEffect(() => {
+    const el = scrollRef.current;
     if (view !== "chat") {
-      // 终端页会卸载 chat-scroll；切回来得到的是全新的滚动容器，必须重新做一次首帧定位。
-      positionedRef.current = false;
-      followRef.current = true;
-      setAtBottom(true);
+      if (el && el.scrollHeight > 0) savedScrollRef.current = { top: el.scrollTop, follow: followRef.current };
       return;
     }
+    if (!el) return;
+    const saved = savedScrollRef.current;
+    if (saved) {
+      savedScrollRef.current = null;
+      followRef.current = saved.follow;
+      setAtBottom(saved.follow);
+      if (!saved.follow) {
+        const behavior = el.style.scrollBehavior;
+        el.style.scrollBehavior = "auto";
+        el.scrollTop = saved.top;
+        el.style.scrollBehavior = behavior;
+        positionedRef.current = true;
+        return;
+      }
+    }
     if (!followRef.current) return;
-    const el = scrollRef.current;
-    if (!el || timelineItems.length === 0) return;
+    if (timelineItems.length === 0) return;
     stickToBottom(el);
     positionedRef.current = true;
   }, [timelineItems, view]);
@@ -3027,6 +3093,11 @@ export function ChatWindow() {
     else el.removeAttribute("inert");
   }, [composerLocked, view]);
 
+  // 「仅收起」：零副作用地把卡收走（不向 PTY 写任何字节），同时留一条可再展开的折叠条。
+  const collapseAttention = () => {
+    setDismissedAttention(terminalAttention);
+    setTerminalAttention(null);
+  };
   // 审批卡门控：插件声明了详情文法风格（details）的提示才走命令审批卡——不再枚举 pattern id。
   const commandAttention = terminalAttention && (terminalAttention.details === "proceed_box" || terminalAttention.details === "arrow_panel") ? terminalAttention : null;
   const interactiveAttention = terminalAttention?.id === "interactive:numbered-selector" ? terminalAttention : null;
@@ -3491,7 +3562,13 @@ export function ChatWindow() {
                       {/* 远程没有终端视图(setView 被无害化),不给死按钮。 */}
                       {startingSlow && !remoteUi() && (
                         /* 目的性跳转，不写视图偏好。 */
-                        <button type="button" className="chat-empty-cta" onClick={() => setView("terminal")}>{t.chat.openTerminal}</button>
+                        <button type="button" className="chat-empty-cta" onClick={() => setView("terminal")}>{t.chat.goTerminal}</button>
+                      )}
+                      {/* 7M-8：远程连这个出口都被门掉，于是「正在启动…」永远转，一个字
+                          解释都没有。启动阻塞（信任目录询问/登录）只在桌面终端画面上，
+                          手机这头唯一能做的就是去桌面确认——那就把它说出来。 */}
+                      {startingSlow && remoteUi() && (
+                        <div className="chat-remote-hint">{t.chat.startingOnDesktop}</div>
                       )}
                     </div>
                   : tone === "running" ? t.chat.emptyWorking : t.chat.empty}</div>
@@ -3584,13 +3661,13 @@ export function ChatWindow() {
           与旧文档流方案同序,最新的最靠近 composer)。
           「仅收起」不向 PTY 写任何字节:识别是启发式的,误报/过期的卡必须有不产生
           副作用的出口(同屏有签名去重不会复弹;真提示仍在终端页等)。 ── */}
-      <div className={"chat-approval-overlay" + (hasOverlayCard ? " is-active" : "")}>
+      <div ref={overlayRef} className={"chat-approval-overlay" + (hasOverlayCard ? " is-active" : "")}>
       {view === "chat" && interactiveAttention && <ApprovalCard
         returnFocusTo={promptInputRef}
         className="chat-screen-approval"
         title={history?.pendingReview === "plan" ? t.chat.planTitle : t.chat.questionTitle}
         badge={history?.pendingReview === "plan" ? t.chat.approvalPending : t.chat.questionPending}
-        sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setTerminalAttention(null)}>{t.chat.attentionDismiss}</button>}
+        sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={collapseAttention}>{t.chat.attentionDismiss}</button>}
         actions={<>
           {interactiveAttention.options?.filter((option) => option.kind === "chat").map((option) => (
             <button type="button" disabled={!option.input} key={`${option.position}:${option.label}`} onClick={() => chooseInteractiveOption(option)}>{t.chat.chatAboutThis}</button>
@@ -3623,7 +3700,7 @@ export function ChatWindow() {
         title={t.chat.approvalTitle}
         badge={t.chat.approvalPending}
         sideActions={<>
-          <button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setTerminalAttention(null)}>{t.chat.attentionDismiss}</button>
+          <button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={collapseAttention}>{t.chat.attentionDismiss}</button>
           {commandRemember && <button type="button" className="is-persistent" onClick={() => chooseTerminalOption(commandRemember)}>
             {/* arrow_panel 的「Approve for this session」只记本会话，proceed_box 的记住是持久规则——文案不能混。 */}
             {commandAttention.details === "arrow_panel"
@@ -3633,7 +3710,7 @@ export function ChatWindow() {
         </>}
         actions={<>
           {commandDeny && <button type="button" className={"is-deny" + (escArmed ? " is-esc-armed" : "")} onClick={() => chooseTerminalOption(commandDeny)}>
-            {escArmed ? t.chat.denyConfirmEsc : t.chat.deny}<kbd aria-hidden="true">Esc</kbd>
+            {escArmed ? t.chat.denyConfirmEsc : t.chat.deny}{!remoteUi() && <kbd aria-hidden="true">Esc</kbd>}
           </button>}
           {/* 危险命令的「允许一次」降级为红色警示主按钮(is-danger):rm -rf 与 ls 不该
               同一个视觉权重(判定见 isRiskyCommand,宁漏勿冤)。 */}
@@ -3665,7 +3742,7 @@ export function ChatWindow() {
             ? t.chat.trustPromptTitle
             : t.chat.terminalPromptTitle}
         badge={t.chat.approvalPending}
-        sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setTerminalAttention(null)}>{t.chat.attentionDismiss}</button>}
+        sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={collapseAttention}>{t.chat.attentionDismiss}</button>}
         actions={!terminalAttention.options?.length && <>
           {/* 取消发 Esc——在 Claude 里会打断正在跑的回合,与零副作用的「仅收起」是两回事。
               这个后果必须在 tip 里对用户说出来,不能只写在注释里给维护者看。 */}
@@ -3709,7 +3786,9 @@ export function ChatWindow() {
         title={t.chat.questionTitle}
         badge={questionTimedOut ? t.chat.approvalTimedOut : questionCountdown ? `${t.chat.questionPending} · ${questionCountdown}` : t.chat.questionPending}
         actions={<>
-          <button type="button" disabled={resolvingApproval} onClick={() => void sendQuestionToTerminal()}>{t.chat.answerInTerminal}</button>
+          {remoteUi()
+            ? <span className="chat-remote-hint">{t.chat.answerOnDesktop}</span>
+            : <button type="button" disabled={resolvingApproval} onClick={() => void sendQuestionToTerminal()}>{t.chat.goTerminal}</button>}
           <button type="button" className="is-allow" disabled={resolvingApproval || !answerBody} onClick={() => void submitQuestionAnswers()}>{t.chat.submitAnswer}</button>
         </>}
       >
@@ -3719,6 +3798,7 @@ export function ChatWindow() {
           answers={questionAnswers}
           onSelect={selectQuestionOption}
           onCustom={setQuestionCustom}
+          onSubmit={() => { if (!resolvingApproval && answerBody) void submitQuestionAnswers(); }}
         />
         <span>{answerBody ? t.chat.questionAnswerReady : t.chat.questionAnswerIncomplete(unansweredCount)}</span>
       </ApprovalCard>}
@@ -3732,7 +3812,7 @@ export function ChatWindow() {
         title={t.chat.questionTitle}
         badge={t.chat.questionPending}
         sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setStructuredQuestion(null)}>{t.chat.attentionDismiss}</button>}
-        actions={!remoteUi() && history?.ptyManaged && <button type="button" className="is-allow" onClick={() => setView("terminal")}>{t.chat.answerInTerminal}</button>}
+        actions={!remoteUi() && history?.ptyManaged && <button type="button" className="is-allow" onClick={() => setView("terminal")}>{t.chat.goTerminal}</button>}
       >
         {/* 可点选排队的条件：托管会话（GUI 持有 PTY 才写得进按键）+ 至少一题带选项。
             排队按问题 keyed：落键前先认屏幕上停的是第几题（题面原文反查，
@@ -3790,12 +3870,12 @@ export function ChatWindow() {
           {/* 右端两颗是「就这一次」的决定：拒绝（中性，也是 Esc 的落点）、允许一次（主按钮）。
               危险命令时允许钮降级为红色警示主按钮(is-danger,判定见 isRiskyCommand)。 */}
           <button type="button" className={"is-deny" + (escArmed ? " is-esc-armed" : "")} disabled={resolvingApproval} onClick={() => void decideApproval("deny")}>
-            {escArmed ? t.chat.denyConfirmEsc : t.chat.deny}<kbd aria-hidden="true">Esc</kbd>
+            {escArmed ? t.chat.denyConfirmEsc : t.chat.deny}{!remoteUi() && <kbd aria-hidden="true">Esc</kbd>}
           </button>
           <button type="button" className={"is-allow" + (isRiskyCommand(approval.input) ? " is-danger" : "")} disabled={resolvingApproval} onClick={() => void decideApproval("allow_once")}>{t.chat.allowOnce}</button>
         </> : remoteUi()
           ? <span className="chat-remote-hint">{t.chat.answerOnDesktop}</span>
-          : <button type="button" onClick={() => setView("terminal")}>{t.chat.openTerminal}</button>}
+          : <button type="button" onClick={() => setView("terminal")}>{t.chat.goTerminal}</button>}
       >
         {approval ? <>
           <div className="chat-approval-tool"><span>{t.chat.approvalTool}</span><code>{approval.toolName}</code></div>
@@ -3816,6 +3896,15 @@ export function ChatWindow() {
         {/* 降级分支仅托管会话可达(渲染条件已含 ptyManaged),文案恒为「正在读取终端」。 */}
         </> : <span>{t.chat.approvalReadingTerminal}</span>}
       </ApprovalCard>}
+      {/* 收起后的折叠条(7C-2):卡走了但提示还在终端里等着,留一个能原样展开的入口。
+          屏幕不再匹配时 revealTerminalAttention(null) 会把它一并撤掉。 */}
+      {view === "chat" && dismissedAttention && !terminalAttention && (
+        <button
+          type="button"
+          className="chat-attention-collapsed"
+          onClick={() => { setTerminalAttention(dismissedAttention); setDismissedAttention(null); }}
+        >{t.chat.attentionCollapsedRestore}</button>
+      )}
       </div>
       {terminalMounted && (
         <div className={`chat-terminal-pane${view !== "terminal" ? " is-background" : ""}`} aria-hidden={view !== "terminal"}>
@@ -3987,7 +4076,7 @@ export function ChatWindow() {
           // 原因，占位符再跟着换成同一句话只会误导（此前任何错误都变「尚未接管」）。
           placeholder={
             composerLocked
-              ? t.chat.inputLocked
+              ? (remoteUi() ? t.chat.inputLockedRemote : t.chat.inputLocked)
               : needsTakeover && !history?.background
                 ? t.chat.inputUnavailable
                 // 手机上 Enter/Shift+Enter 是不存在的键盘语义,占位只留一句短的。
@@ -4425,7 +4514,9 @@ export function ChatWindow() {
             aria-label={stopMode ? (interrupting ? t.chat.interrupting : t.chat.interruptNow) : sending ? t.chat.sending : t.chat.send}
             // 回合跑着且已有草稿时,圆钮虽是「发送」,Ctrl+Enter 仍是「打断并发送」——
             // 这句提示就挂在这里(此前的挂点随「Enter ↵」文字一起删掉后成了孤儿文案)。
-            data-tip={stopMode ? t.chat.interruptNowTip : canInterrupt ? t.chat.interruptAndSendTip : undefined}
+            // 7M-12：触屏上长按会弹这条 tip（G-15 给的长按提示），可它说的是 Ctrl+Enter——
+            // 手机上根本没有这组键。远程不给 tip。
+            data-tip={remoteUi() ? undefined : stopMode ? t.chat.interruptNowTip : canInterrupt ? t.chat.interruptAndSendTip : undefined}
             onClick={() => { if (stopMode) sendInterrupt(); else void sendPrompt(); }}
             disabled={composerDisabled || (stopMode ? interrupting : (!prompt.trim() && attachments.length === 0) || sending)}
           >
@@ -4465,20 +4556,20 @@ export function ChatWindow() {
             的出口——启动交互（目录信任等）与报错都画在那边。 */}
         {terminalWaitSeconds != null && !sendError && <div className="chat-send-error" role="status">
           <span>{t.chat.terminalWaitingReady(terminalWaitSeconds)}</span>
-          {!remoteUi() && <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>}
+          {!remoteUi() && <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.goTerminal}</button>}
         </div>}
         {/* 静默探测（问模型清单）期间不出这条等待条：那次交互对用户是不可见的，
             忙态只体现在模型按钮上。用户主动发的斜杠菜单命令照旧显示。 */}
         {menuWatching && !modelProbing && !terminalAttention && <div className="chat-send-error" role="status">
           <span>{t.chat.slashMenuOpened}</span>
-          {!remoteUi() && <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>}
+          {!remoteUi() && <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.goTerminal}</button>}
           <button type="button" className="chat-send-takeover" onClick={cancelTerminalMenu}>{t.chat.slashMenuDismiss}</button>
         </div>}
         {/* 软拦非阻断横幅:消息已发出,提示终端可能有未识别的交互等待,给跳终端/收起两个出口。
             terminalAttention 出现说明识别成功变成了卡片,此横幅即让位。 */}
         {softPromptNotice && !terminalAttention && <div className="chat-send-error" role="status">
           <span>{remoteUi() ? t.chat.unrecognizedPromptNoticeRemote : t.chat.unrecognizedPromptNotice}</span>
-          {!remoteUi() && <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.terminal}</button>}
+          {!remoteUi() && <button type="button" className="chat-send-takeover" onClick={() => setView("terminal")}>{t.chat.goTerminal}</button>}
           <button type="button" className="chat-send-takeover" onClick={() => setSoftPromptNotice(false)}>{t.chat.slashMenuDismiss}</button>
         </div>}
         </>

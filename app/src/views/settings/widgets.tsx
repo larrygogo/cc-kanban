@@ -2,6 +2,32 @@
 // 纯展示、无业务耦合，供各 section 复用。
 // 弹层菜单（Dropdown / ActionMenu / useMenuPopup）已收敛到 ../menu——全项目只有那一份实现。
 import { STICKER_COLORS, STICKER_COLOR_KEYS } from "../../appearance";
+import { useT } from "../../i18n";
+import { formatBackendError } from "../../i18n/errors";
+
+/** 设置保存失败的统一错误行：patch 失败时开关会被回读「弹回去」，没有这一行用户
+ *  只能看到界面自己变回去、零解释（S-3——曾只有网络分区把错误显示了出来）。
+ *  常驻错误加关闭 ×：错误不会自己消失（下一次成功才清），用户看完得有办法关掉。
+ *  渲染点兜底过一遍 formatBackendError（产出端 state.ts 已格式化，这里是幂等双保险）。
+ *  7S-7：本来长在 About.tsx 里、只有三处在用；网络与远程两处各写各的裸 div（无 ×、
+ *  无 role=alert）。抽到这里供全部分区共用。 */
+export function SettingsError({ error, onDismiss }: { error: string | null; onDismiss: () => void }) {
+  const t = useT();
+  if (!error) return null;
+  return (
+    <div className="sec-hint proxy-err" role="alert">
+      {formatBackendError(error, t.locale)}
+      <button
+        type="button"
+        aria-label={t.settings.close}
+        style={{ appearance: "none", background: "none", border: "none", padding: 0, marginLeft: 6, font: "inherit", color: "inherit", cursor: "pointer" }}
+        onClick={onDismiss}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
 
 export function Switch({ checked, onChange, disabled, label }: { checked: boolean; onChange: () => void; disabled?: boolean; label: string }) {
   return (

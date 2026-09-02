@@ -36,8 +36,11 @@ export const zh = {
     openChatWindow: "打开对话窗口",
     openSettings: "打开设置",
     updateAvailable: "有新版本",
+    // 下载中/已就绪各自成句（7S-3）：等和点是两件事。
+    updateDownloading: "正在下载新版本",
+    updateReady: "新版本已就绪，可安装",
     search: "搜索会话",
-    searchPlaceholder: "搜索标题 / 仓库…",
+    searchPlaceholder: "搜索标题 / 仓库 / 便签…",
     searchClose: "关闭搜索",
     pinOn: "取消窗口置顶",
     pinOff: "窗口置顶",
@@ -45,7 +48,7 @@ export const zh = {
     keepOpenOn: "取消保持打开",
     keepOpenOff: "保持打开（失焦不自动收起）",
     waitingFirstInput: "等待首次输入",
-    stopped: "已断开/已停止",
+    stopped: "已断开",
     sessionError: "会话出错",
     online: "在线",
     // 无屏幕检测的外部会话，状态点回落 DB status 时的弱化 tip（T-15：与实时判定区分）。
@@ -59,7 +62,7 @@ export const zh = {
     cardResumeTip: "点击恢复会话，将重新拉起进程",
     renameTitle: "重命名",
     renamePlaceholder: "输入名称，回车保存",
-    renameHint: "运行中：改名后需在该终端 /resume 才生效",
+    renameHint: "改名后需在该终端 /resume 生效",
     archive: "归档",
     unarchive: "取消归档",
     openProjectDir: "打开项目目录",
@@ -81,6 +84,11 @@ export const zh = {
     loading: "加载中…",
     loadFailed: "会话加载失败",
     retry: "重试",
+    // 刷新失败但列表非空时的细横幅（7B-2）：卡片还在，只是不新鲜了。
+    staleNotice: "刷新失败，显示的是缓存",
+    usageStale: (time: string) => `用量刷新失败，上次更新 ${time}`,
+    // 「全部」tab 里在线与历史会话的分界（7B-3）。
+    historyDivider: (n: number) => `历史会话 · ${n}`,
     renameFailed: "重命名失败，请稍后再试。",
     noteFailed: "便签保存失败，请稍后再试。",
     archiveFailed: "归档失败，请稍后再试。",
@@ -101,9 +109,9 @@ export const zh = {
     focusEnded: "会话已经断开。",
     focusFailed: "无法打开会话终端，请稍后再试。",
     // Agent 自己派生的后台会话（Claude Code 的 FleetView）：没有终端窗口可切，接管也无效。
-    focusBackground: "后台会话没有终端窗口。到对话页查看和发消息。",
+    focusBackground: "后台会话无终端窗口，去对话页发消息",
     // 外库(安装版)会话:dev 构建只读聚合生产库,本实例只有观察权。
-    focusForeign: "这个会话由安装版 Meowo 托管，本窗口只读展示。请到安装版里操作它。",
+    focusForeign: "安装版 Meowo 托管，请去安装版操作",
     foreignBadge: "安装版",
     foreignTip: "由安装版 Meowo 托管（只读展示）",
     reopenSupported: "使用支持的终端重新打开",
@@ -116,10 +124,10 @@ export const zh = {
     // 「正在启动」占位卡（pending PTY，负 id）：PTY 已起、CLI 还没写库的新会话——
     // codex 要到首个 turn 才认领出真卡，没有占位卡就是「点了启动，什么反应都没有」。
     startingCard: "会话正在启动…",
-    startingTip: "终端已启动，Agent 首次上报后转为正式卡片",
+    startingTip: "终端已启动，等 Agent 首次上报",
     // 首启历史导入的一次性提示（S-12）：导入曾全程零说明。由后端 first_import_notice
     // 保证只弹一次；只读导入，不改动原 CLI 的任何数据。
-    importNotice: (n: number) => `已导入最近 7 天的 ${n} 个历史会话（只读，不影响原数据）`,
+    importNotice: (n: number) => `已导入最近 7 天的 ${n} 个会话（只读）`,
     dismiss: "关闭提示",
     // 折叠缩略条的展开动作（悬停/聚焦/Enter 均可触发）。
     expandBoard: "展开看板",
@@ -135,6 +143,8 @@ export const zh = {
     extraDirsAdd: "附加目录",
     extraDirsTip: "同一会话访问多个仓库",
     extraDirsHint: "Ctrl+点击加为附加目录",
+    // macOS 上处理器收的是 metaKey，提示得跟着改口（7T-7）。
+    extraDirsHintMac: "⌘+点击加为附加目录",
     extraDirRemove: "移除附加目录",
     browse: "浏览…",
     up: "上一级",
@@ -149,6 +159,9 @@ export const zh = {
     hooksMissing: "该 Agent 尚未接入，新会话可能不会出现在看板",
     hooksUnknown: "无法确认该 Agent 的接入状态",
     noAgents: "未检测到已安装的 AI CLI，请先安装",
+    goInstall: "去安装",
+    // 预填的 agent 没装、被换成别家时的说明（7T-9）。
+    agentSwapped: (want: string, used: string) => `${want} 未安装，已改用 ${used}`,
     detectingAgents: "正在检测已安装的 Agent…",
     notLoggedIn: "该 agent 尚未登录",
     // 非默认账号活跃时，启动按钮旁的提示：新会话将写进那个隔离账号。
@@ -156,14 +169,14 @@ export const zh = {
     login: "登录",
     loggingIn: "等待登录…",
     cancelLogin: "取消等待",
-    loginCancelled: "已取消等待。若已在终端登录完成，切回本窗口会自动检测",
-    loginTimeout: "未检测到登录完成。若已在终端登录，切回本窗口会自动检测",
+    loginCancelled: "已取消等待。在终端登录后切回会自动检测",
+    loginTimeout: "未检测到登录。在终端登录后切回会自动检测",
     repairHooks: "修复连接",
     repairingHooks: "修复中…",
     // 按钮旁的说明（S-8：按钮凭空出现零解释）：它做什么 + 何时需要点。
-    repairHooksTip: "把 Meowo 的接入写回该 Agent 的配置；新会话没出现在看板时点它",
+    repairHooksTip: "重写接入配置，新会话没上看板时点它",
     // 修复在后端进程内完成，没有「终端里的修复日志」可看——指向真实可行的下一步。
-    repairFailed: "修复未生效，请重试；仍失败可重新安装该 Agent。",
+    repairFailed: "修复未生效，请重试或重装该 Agent",
     repairNeedLogin: "请先在终端登录该 Agent，再点修复连接。",
     repairNoReporter: "缺少组件 meowo-reporter，请重新安装 Meowo。",
     repairNotDetected: "未检测到该 Agent 的数据目录，请确认已安装。",
@@ -204,8 +217,8 @@ export const zh = {
     status: {
       running: "运行中",
       pending: "待处理",
-      waiting: "等你输入",
-      offline: "未连接",
+      waiting: "等待输入",
+      offline: "已断开",
       ended: "已结束",
       error: "出错了",
     } as Record<string, string>,
@@ -223,7 +236,7 @@ export const zh = {
     loadError: "读取对话失败，正在重试",
     // 同步中断（C-18）：轮询 IPC 连续失败才单列——它只说「窗口与后端的通道断了」，
     // 与状态徽标里的「已断开」（agent 进程没了）是两种事实，措辞故意分开。
-    syncInterrupted: "与后端的同步中断，正在重连；页面显示的是缓存内容",
+    syncInterrupted: "同步中断，正在重连，显示的是缓存",
     jumpLatest: "回到最新",
     switcherTitle: "命令面板",
     switcherPlaceholder: "搜索会话或命令（↑↓ 选择，Enter 打开 / 执行）",
@@ -242,7 +255,7 @@ export const zh = {
     shortcutSearch: "搜索会话",
     shortcutSend: "发送消息",
     shortcutNewline: "换行",
-    shortcutInterruptSend: "打断当前回合并发送",
+    shortcutInterruptSend: "中断当前回合并发送",
     shortcutDeny: "拒绝待审批请求（输入框为空时，按两次确认）",
     shortcutSlashComplete: "选中斜杠命令补全",
     shortcutHistory: "取回上一条消息（输入框为空时）",
@@ -260,7 +273,9 @@ export const zh = {
     codeCopy: "复制",
     codeCopied: "已复制",
     questionExpired: "提问卡已超时收起，可到终端页继续作答",
-    terminalApprovalBanner: "有 1 条待批准的请求，Agent 在等你",
+    // 远程没有终端页（setView 被无害化），这三条的去处只能是桌面端（7C-4）。
+    questionExpiredRemote: "提问卡已超时收起，请在桌面端作答",
+    terminalApprovalBanner: "有 1 条待批准的请求",
     terminalApprovalGo: "去处理",
     toolResult: "工具结果",
     lightboxClose: "关闭大图",
@@ -270,6 +285,11 @@ export const zh = {
     runTerminal: "运行终端",
     readFile: "读取文件",
     editFile: "编辑文件",
+    searchFiles: "搜索文件",
+    fetchWeb: "访问网页",
+    updateTodos: "更新清单",
+    runAgent: "派出子任务",
+    listDir: "列出目录",
     toolActivities: (count: number) => `执行了 ${count} 次工具调用`,
     toolFailures: (count: number) => `${count} 个失败`,
     reasoning: "思考过程",
@@ -285,6 +305,7 @@ export const zh = {
     sendBackgroundQueued: "已发给后台会话。若它未处理，内容还在输入框，可直接重发。",
     sendBackgroundNoAttachments: "后台会话暂不支持附件，请只发文字。",
     inputLocked: "终端正在等待选择，请先用上方卡片或终端页处理",
+    inputLockedRemote: "终端正在等待选择，请先用上方卡片处理",
     send: "发送",
     sending: "发送中…",
     attach: "添加图片或文件",
@@ -305,6 +326,8 @@ export const zh = {
     questionExternalHint: "请回到运行它的终端作答，完成后本卡自动关闭",
     questionMultiHint: "没有可点选的选项，请到终端作答，完成后本卡自动关闭",
     answerOnDesktop: "请在桌面端作答，完成后本卡自动关闭",
+    // 远程启动久等（7M-8）：阻塞多半是桌面终端上的信任目录/登录询问。
+    startingOnDesktop: "启动等待中，请在桌面端确认",
     customAnswerPlaceholder: "输入其他回答",
     addCustomAnswer: "添加回答",
     submitAnswer: "提交选择",
@@ -332,10 +355,13 @@ export const zh = {
     denyConfirmEsc: "再按 Esc 确认拒绝",
     // 审批卡被别处结算/超时收卡时的去向说明——凭空消失像 bug。
     approvalClearedNotice: "该审批已在别处处理或已超时，如需继续请查看终端",
+    approvalClearedNoticeRemote: "该审批已在别处处理或已超时，请到桌面端查看",
     // 倒计时归零到后端结算事件到达之间的一拍空窗：徽章切这句，不留定格的 0:00。
     // 审批卡与题面卡共用（回落语义相同）。
     approvalTimedOut: "已超时，回落终端处理中",
     openTerminal: "打开终端",
+    // 切到终端页的按钮一律用这个标签（7G-9：此前四处四种说法）。
+    goTerminal: "去终端页",
     close: "关闭",
     renameSave: "保存",
     minimize: "最小化",
@@ -359,7 +385,7 @@ export const zh = {
     // 正常退出（码 0）不标退出码：那是常态不是异常，退出卡片描边同规（ManagedTerminal is-clean）。
     terminalExited: (code: number | null) => `Agent 进程已退出${code == null || code === 0 ? "" : `（退出码 ${code}）`}，上方保留了终端输出`,
     // 强制收尾（kill 对卡死进程静默无效后的末档）：会话已摘除，但进程可能仍在系统里。
-    terminalExitedForced: (code: number | null) => `已强制结束${code == null ? "" : `（退出码 ${code}）`}——进程未能正常退出，可能仍在后台残留，上方保留了终端输出`,
+    terminalExitedForced: (code: number | null) => `已强制结束${code == null ? "" : `（退出码 ${code}）`}。进程可能仍在后台，上方保留了终端输出`,
     // 写进终端画面的退出提示行（宿主注解，灰色素描样式在 ManagedTerminal 的 applyExit）。
     terminalExitedInline: (code: number | null) => `[Meowo：进程已退出${code == null ? "" : `（${code}）`}]`,
     terminalStopping: "正在结束…",
@@ -371,6 +397,11 @@ export const zh = {
     // 悬停在终端里的链接/文件路径上时,右下角的操作提示(T-4:此前 Ctrl+点击无任何界面表达)。
     terminalLinkHint: "Ctrl+点击打开链接",
     terminalPathHint: "Ctrl+点击在文件管理器中显示",
+    terminalLinkHintMac: "⌘+点击打开链接",
+    terminalPathHintMac: "⌘+点击在文件管理器中显示",
+    // 鼠标归 TUI 时的选区逃生口（7T-1）。Windows/Linux 是 Shift，macOS 惯例是 ⌥。
+    terminalSelectHint: "按住 Shift 拖动可选择文字",
+    terminalSelectHintMac: "按住 ⌥ 拖动可选择文字",
     // 终端右键菜单（U0-11：生产构建的 WebView 默认菜单被 devtools-guard 封死后的替代）。
     terminalMenuCopy: "复制",
     terminalMenuPaste: "粘贴",
@@ -397,7 +428,7 @@ export const zh = {
     diffTruncated: "diff 过大，已截断显示",
     diffBinary: "二进制文件，无法显示 diff",
     diffResize: "拖拽调整宽度",
-    diffCollapse: "折叠面板",
+    diffCollapse: "收起面板",
     diffMaximize: "最大化面板",
     diffRestore: "还原对话区",
     filesTab: "文件",
@@ -461,6 +492,7 @@ export const zh = {
     interrupting: "正在中断…",
     attentionDismiss: "仅收起",
     attentionDismissTip: "仅收起卡片，不发送按键",
+    attentionCollapsedRestore: "已收起提示，点击展开",
     unrecognizedPromptNotice: "终端似乎在等待选择，消息已发出。若无响应请到终端页确认。",
     unrecognizedPromptNoticeRemote: "终端似乎在等待选择，消息已发出。若无响应请在桌面端确认。",
     terminalPromptTitle: "Agent 需要你完成一个启动步骤",
@@ -513,7 +545,7 @@ export const zh = {
     sidebarHideIdle: "收起未运行会话",
     // G-16：视觉隐藏的侧栏状态汇总播报（全侧栏唯一的 live region）。
     sidebarLiveSummary: (approval: number, waiting: number, error: number) =>
-      `会话状态汇总：${approval} 个待批准，${waiting} 个等你输入，${error} 个出错`,
+      `会话状态汇总：${approval} 个待批准，${waiting} 个等待输入，${error} 个出错`,
     // 标题菜单「目录」小节:主仓 + 附加目录的完整清单,尾接附加动作。
     dirsSection: "目录",
     // 中途附加目录(标题菜单):/add-dir 即时生效 + 落库供恢复回放。
@@ -578,10 +610,10 @@ export const zh = {
       default: "默认",
       manual: "手动确认",
       acceptEdits: "自动接受编辑",
-      plan: "计划",
+      plan: "计划模式",
       auto: "自动",
       yolo: "YOLO",
-      bypassPermissions: "跳过权限检查",
+      bypassPermissions: "跳过权限确认",
       dontAsk: "不询问",
       untrusted: "仅信任命令免审",
       "on-request": "按需审批",
@@ -637,6 +669,7 @@ export const zh = {
     nav: { general: "通用", sessions: "会话", appearance: "外观", network: "网络", account: "账号与用量", about: "关于" },
     searchPlaceholder: "搜索设置…",
     searchNoResults: "没有匹配的设置项",
+    searchClear: "清除搜索",
     archivedSessions: "已归档会话",
     archivedEmpty: "暂无已归档会话",
     archivedLoadMore: "加载更多",
@@ -654,9 +687,9 @@ export const zh = {
     notifySystemDenied: "已在系统设置中关闭",
     openSystemSettings: "打开系统设置",
     attentionFlash: "任务栏提醒",
-    attentionFlashDesc: "有会话需要关注时高亮任务栏图标；独立于「桌面通知」，关闭通知后仍会生效",
+    attentionFlashDesc: "有会话需要关注时高亮任务栏图标。关闭「桌面通知」后仍生效。",
     clickThrough: "点击穿透",
-    clickThroughDesc: "鼠标穿过贴纸直达下层窗口；按住 Alt 临时恢复交互",
+    clickThroughDesc: "鼠标穿过贴纸直达下层窗口。按住 Alt 临时恢复交互。",
     autoUpdate: "自动更新",
     autoUpdateDesc: "自动检查并下载新版本，准备好后由你确认重启",
     resumeTerm: "默认终端",
@@ -744,11 +777,11 @@ export const zh = {
     coverageFull: "全部会话（含你自己在终端里敲的）",
     coverageFullWhy: "代理已写进它的配置文件，谁启动都生效",
     coveragePartial: "仅从 Meowo 打开的会话",
-    coveragePartialWhy: "它只认进程环境变量，由 Meowo 拉起时注入。别处开的终端不生效。",
+    coveragePartialWhy: "只对 Meowo 拉起的终端生效",
     skipped: (keys: string) => `${keys} 是你手动设置的，Meowo 未覆盖`,
     unsupported: (why: string) => `未应用：${why}`,
     applyError: (e: string) => `写入配置失败：${e}`,
-    socksWarn: "Claude Code 和 Codex 不支持 SOCKS 代理，请改用 HTTP 端口（常见 7890）。",
+    socksWarn: "不支持 SOCKS 代理，请改用 HTTP 端口",
     updaterSocksHint: "自更新仅支持 HTTP 代理，SOCKS 无效。",
   },
   remote: {
@@ -756,12 +789,13 @@ export const zh = {
     enableDesc: "同一局域网或 Tailscale 下用手机看和发消息",
     port: "端口",
     portDesc: "手机连接用的端口，默认 18620",
+    portInvalid: "端口须为 1 到 65535",
     bind: "绑定网卡",
     bindDesc: "全程明文 HTTP，绑得越窄暴露面越小",
     bindAll: "所有网卡（局域网 + Tailscale）",
     bindLoopback: "仅本机（调试用）",
     bindTailscale: "仅 Tailscale（推荐）",
-    bindWarnAll: "明文 HTTP 监听所有网卡：同网设备可截获令牌与聊天内容，不可信网络请改用 Tailscale",
+    bindWarnAll: "明文可被同网截获，不可信网络请用 Tailscale",
     scan: "扫码连接",
     scanHint: "用手机扫码，或复制地址到浏览器打开",
     netTailscale: "Tailscale",
@@ -775,9 +809,19 @@ export const zh = {
     noIp: "取不到局域网地址，请在手机浏览器手动输入本机 IP",
     offHint: "关闭时手机无法连接",
     startError: (e: string) => `启动失败：${e}`,
+    // ── 手机端配对闸门（7M-7：此前整页文案硬编码在 TokenGate 里，且用的是半角标点）──
+    gateTitle: "Meowo 远程",
+    gateHint: "扫码后自动配对。手动配对请粘贴桌面「远程访问」里的令牌。",
+    gateTokenLabel: "访问令牌",
+    gateConnect: "连接",
+    gateConnecting: "正在连接…",
+    gateLoading: "正在加载…",
+    gateErrExpired: "桌面端令牌已更换或失效，请重新扫码或粘贴新令牌",
+    gateErrInvalid: "令牌不对，请核对后重试",
+    gateErrUnreachable: "连不上桌面端，请检查网络或确认桌面端仍在运行",
     // 配置端口与实际监听分叉（多实例共享 settings.json，另一实例改端口本实例不跟随）。
     boundMismatch: (configured: number, actual: number) =>
-      `配置端口 ${configured} 未在本实例生效，实际监听 ${actual}（可能被另一实例改动），二维码按实际监听生成`,
+      `端口 ${configured} 未生效，实际监听 ${actual}，二维码按实际生成`,
   },
   relay: {
     title: "API 中转",
@@ -839,13 +883,13 @@ export const zh = {
     login: "登录",
     loggingIn: "等待登录…",
     // pending 指引：窗口开在哪个终端（后端按 settings.resume_terminal 选）、最多等多久，一次说清。
-    loginWaiting: (terminal: string) => `已在 ${terminal} 打开登录窗口，完成授权后自动检测（最长等待 5 分钟）`,
+    loginWaiting: (terminal: string) => `已在 ${terminal} 打开登录窗口，完成后自动检测`,
     cancelLogin: "取消等待",
     // 不能写「点刷新」：刷新按钮只在已登录态渲染，未登录用户照着找会发现根本没有那个按钮。
     // 窗口聚焦会自动重查账号态，文案照实说。
-    loginCancelled: "已取消等待登录。若已在终端登录完成，切回本窗口会自动检测",
+    loginCancelled: "已取消等待。在终端登录后切回会自动检测",
     loginFailed: "拉起登录失败",
-    loginTimeout: "未检测到登录完成。若已在终端登录，切回本窗口会自动检测",
+    loginTimeout: "未检测到登录。在终端登录后切回会自动检测",
     // API Key 登录（gemini：官方已停掉个人账号的 OAuth，key 是唯一活路）
     apiKeyLogin: "API Key 登录",
     apiKeyPlaceholder: "粘贴 API Key",
@@ -860,7 +904,7 @@ export const zh = {
     accountsLoadFailed: "账号信息加载失败",
     install: "安装",
     // 预下载体量说明（S-8）：装之前说清要联网下载、大致耗时，不再点了才知道要下东西。
-    installHint: "安装后即可查看账号与配额；需联网下载组件，通常一两分钟",
+    installHint: "安装后可查看账号与配额，约一两分钟",
     installing: "安装中…",
     installingFor: (s: number) => `安装中…（已 ${s} 秒）`,
     // 安装中的取消出口（S-8：安装曾是不可中断的黑盒）。
@@ -887,7 +931,7 @@ export const zh = {
     pathAddFailed: "写入 PATH 失败，请手动添加",
     quota: "配额",
     relayBadge: "中转",
-    relayActive: "正在使用 API 中转；官方账号配额不适用",
+    relayActive: "正在使用 API 中转，官方配额不适用",
     refresh: "刷新",
     usageUpdatedAt: (time: string) => `更新于 ${time}`,
     extraUsage: "已开启超额用量",
@@ -925,6 +969,9 @@ export const zh = {
     // 更新不会丢，退出应用即完成。
     readyHint: "现在不装也行，退出应用时会自动安装",
     restart: "重启并更新",
+    // 7S-2：按下到安装器起来有好几秒，那段时间必须有进行态，否则像点空了。
+    installing: "正在安装…",
+    installingHint: "应用即将重启，请勿关闭",
     // 重启会终止全部 Meowo 托管的 PTY 会话（退出收尾 shutdown，见 lib.rs RunEvent::Exit）——
     // 有托管会话在跑时必须先确认，不能静默杀掉。
     restartConfirm: (n: number) => `重启将中断 ${n} 个运行中的会话，继续？`,
@@ -952,6 +999,9 @@ export const zh = {
     checkFailed: "检查更新失败",
     foundNew: (v: string) => `发现新版本 v${v}`,
     upToDate: "已是最新版本",
+    downloadingUpdate: "正在下载新版本",
+    updateReady: "更新已下载，可安装",
+    installUpdate: "安装更新",
     versionInfo: "版本信息",
     website: "官方网站",
     source: "源码仓库",
@@ -960,6 +1010,7 @@ export const zh = {
     feedback: "意见反馈",
     changelog: "更新日志",
     guide: "使用引导",
+    guideDesc: "重看首次引导",
   },
   onboarding: {
     skip: "跳过",
@@ -970,7 +1021,7 @@ export const zh = {
     stepOf: (i: number, n: number) => `第 ${i} 步，共 ${n} 步`,
     welcome: {
       title: "欢迎使用 Meowo",
-      desc: "常驻桌面贴纸，汇总 Claude Code、Codex 等会话进度。谁在跑、谁在等你，一眼可见。",
+      desc: "常驻桌面贴纸，汇总 Claude Code、Codex 等会话进度。谁在跑、谁在等待输入，一眼可见。",
     },
     // 看板不会自己变出会话：得先装 agent 并登录。缺了这一步，用户走完引导面对的还是空看板。
     connect: {
@@ -986,9 +1037,9 @@ export const zh = {
     progress: {
       title: "Meowo 如何读到进度",
       points: [
-        "Meowo 会向各 CLI 的配置文件（如 ~/.claude/settings.json）写入 hooks，用来上报会话状态，其余配置原样保留。",
+        "Meowo 会在各 CLI 的配置文件（如 ~/.claude/settings.json）里写入接入项，用来上报会话状态，其余配置原样保留。",
         "首次写入前自动备份原文件（同目录的 .cckb-bak 文件）。",
-        "不再使用时，删除配置里的 hooks 字段或用 .cckb-bak 备份还原即可移除。",
+        "不再使用时，删掉配置里的接入项，或用 .cckb-bak 备份还原。",
         "首次启动会把最近 7 天的历史会话只读导入看板，不改动原数据。",
       ],
     },

@@ -9,40 +9,50 @@ import { regenerateRemoteToken, remoteAccessInfo, type RemoteAccessInfo, type Re
 import { appConfirm } from "../../confirm";
 import { useT } from "../../i18n";
 import { useSettingsState } from "./state";
-import { Switch } from "./widgets";
+import { Switch, SettingsError } from "./widgets";
 import { Dropdown } from "../menu";
 
 /// 端口输入：本地草稿 + 失焦/回车提交（同 NetworkSection 的 UrlInput，避免每键一存打后端）。
 function PortInput({ value, onCommit }: { value: number; onCommit: (port: number) => void }) {
+  const t = useT();
   const [text, setText] = useState(String(value));
-  useEffect(() => setText(String(value)), [value]);
+  // 7S-6：非法输入此前**静默**回退成磁盘值（默认 18620），用户看着自己敲的 70000
+  // 变回 18620、没有一个字解释。改成留住输入 + 行内说明，直到改对或清空。
+  const [invalid, setInvalid] = useState(false);
+  useEffect(() => { setText(String(value)); setInvalid(false); }, [value]);
   const commit = () => {
-    const n = Number.parseInt(text.trim(), 10);
-    // 合法端口才提交；非法（空/越界）回退磁盘值，不落盘。
-    if (Number.isInteger(n) && n >= 1 && n <= 65535 && n !== value) onCommit(n);
-    else setText(String(value));
+    const raw = text.trim();
+    if (raw === "") { setText(String(value)); setInvalid(false); return; }
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isInteger(n) || n < 1 || n > 65535 || String(n) !== raw) { setInvalid(true); return; }
+    setInvalid(false);
+    if (n !== value) onCommit(n);
   };
   return (
-    <input
-      className="ns-input remote-port-input"
-      type="text"
-      inputMode="numeric"
-      autoComplete="off"
-      spellCheck={false}
-      value={text}
-      onChange={(e) => setText(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") e.currentTarget.blur();
-      }}
-    />
+    <>
+      <input
+        className={"ns-input remote-port-input" + (invalid ? " is-invalid" : "")}
+        type="text"
+        inputMode="numeric"
+        autoComplete="off"
+        spellCheck={false}
+        aria-invalid={invalid || undefined}
+        value={text}
+        onChange={(e) => { setText(e.target.value); setInvalid(false); }}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+        }}
+      />
+      {invalid && <div className="proxy-err remote-port-err" role="alert">{t.remote.portInvalid}</div>}
+    </>
   );
 }
 
 export function RemoteAccessCard() {
   const t = useT();
   // patchError 与兄弟分区同款：开关/端口落盘被拒时不能静默回滚（开关自己弹回去零解释）。
-  const [settings, patch, patchError] = useSettingsState();
+  const [settings, patch, patchError, clearPatchError] = useSettingsState();
   const [info, setInfo] = useState<RemoteAccessInfo | null>(null);
   const [selectedIp, setSelectedIp] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -143,20 +153,11 @@ export function RemoteAccessCard() {
         <Dropdown value={bind} options={bindOptions} onChange={changeBind} />
       </div>
 
-      {patchError && (
-        <div className="row">
-          <div className="row-text">
-            <div className="proxy-err" role="alert">{patchError}</div>
-          </div>
-        </div>
-      )}
-
+      {/* 7S-7：两条错误行此前是裸 div——没有 ×（错误不会自己消失）、启动失败那条连
+          role=alert 都没有，读屏完全静默。与其余四个分区统一走 SettingsError。 */}
+      <SettingsError error={patchError} onDismiss={clearPatchError} />
       {info?.lastError && (
-        <div className="row">
-          <div className="row-text">
-            <div className="proxy-err">{t.remote.startError(info.lastError)}</div>
-          </div>
-        </div>
+        <SettingsError error={t.remote.startError(info.lastError)} onDismiss={() => setInfo((cur) => (cur ? { ...cur, lastError: null } : cur))} />
       )}
 
       {/* 配置与实际监听分叉（多实例共享 settings.json，另一实例改端口写盘而本实例

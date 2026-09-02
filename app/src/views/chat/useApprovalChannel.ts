@@ -220,7 +220,7 @@ export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setVi
         // （那条路先行 setApproval(null)，这里读到的已是 null）。凭空消失分不清是自己漏点
         // 还是超时（与题面卡 questionExpired 同一课），说清卡去哪了。
         if (approvalLiveRef.current?.requestId === event.payload.requestId) {
-          setSendError(tRef.current.chat.approvalClearedNotice);
+          setSendError(remoteUi() ? tRef.current.chat.approvalClearedNoticeRemote : tRef.current.chat.approvalClearedNotice);
         }
         setApproval((current) => current?.requestId === event.payload.requestId ? null : current);
       }

@@ -2,11 +2,20 @@ import { memo } from "react";
 import { useT } from "../../i18n";
 import { type ToolResultItem, type ToolUseItem } from "./shared";
 
+/// 工具名的展示词。命中不了的原样回落成工具 id——比编一个错译好，但**常见工具**
+/// 必须都译到：此前只译了 Bash/Read/Write 三家，一组活动摘要读起来是
+/// 「运行终端 ×2 · Grep · WebFetch」这样的中英混排（7C-9）。
+/// 判定顺序有讲究：web_search 含 "search"，网络类必须排在搜索类之前。
 export function friendlyToolName(name: string, t: ReturnType<typeof useT>): string {
   const normalized = name.toLowerCase();
   if (normalized === "bash" || normalized === "exec" || normalized.includes("shell") || normalized.includes("terminal")) return t.chat.runTerminal;
+  if (normalized.includes("web") || normalized.includes("fetch") || normalized.includes("http")) return t.chat.fetchWeb;
+  if (normalized.includes("grep") || normalized.includes("glob") || normalized.includes("search")) return t.chat.searchFiles;
   if (normalized === "read" || normalized.includes("view_image")) return t.chat.readFile;
-  if (normalized === "write" || normalized === "edit" || normalized.includes("patch")) return t.chat.editFile;
+  if (normalized === "write" || normalized === "edit" || normalized.includes("patch") || normalized.includes("notebook")) return t.chat.editFile;
+  if (normalized.includes("todo")) return t.chat.updateTodos;
+  if (normalized === "task" || normalized.includes("agent")) return t.chat.runAgent;
+  if (normalized === "ls" || normalized.includes("list_dir") || normalized.includes("listdir")) return t.chat.listDir;
   return name;
 }
 
@@ -41,7 +50,9 @@ export const ToolActivity = memo(function ToolActivity({ item, result }: { item:
         <span className="chat-tool-summary">{item.summary}</span>
         {/* 结果未到 = 工具还在跑：给行尾一个跳动指示，否则组头明明说「运行中」，
             展开后却看不出是哪条没跑完。 */}
-        {!result && <span className="chat-tool-pending" role="status" aria-label={t.chat.running}><i /><i /><i /></span>}
+        {/* 纯装饰:组头已经用一处 aria-label 播报「还有几条在跑」,每行再挂一个
+            role=status,并行工具一多读屏就被轮番打断,什么也听不清(7C-9)。 */}
+        {!result && <span className="chat-tool-pending" aria-hidden="true"><i /><i /><i /></span>}
         <span className="chat-tool-chevron">›</span>
       </summary>
       {/* summary 已经在标题行展示过，pre 里不再重复念一遍；展开只看结果本身。 */}

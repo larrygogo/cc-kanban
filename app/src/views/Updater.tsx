@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
@@ -30,11 +30,16 @@ export function Updater() {
     getVersion().then(setCurrent).catch(() => {});
   }, []);
   const close = () => getCurrentWindow().close().catch(() => {});
-  useEscClose(close); // Esc = 「稍后」：关窗不打断下载（下载是后端进程级任务）
+  // Esc = 「稍后」：关窗不打断下载（下载是后端进程级任务）。安装已经发起后 Esc 让位
+  // （7S-2）：那几秒里关窗只会让用户以为自己取消掉了，实际安装器照常起来。
+  useEscClose(() => { if (!installingRef.current) close(); });
 
   // 重启安装前先看有没有托管会话在跑：应用退出会 shutdown 全部托管 PTY（lib.rs RunEvent::Exit），
   // 正在跑的 agent 会被当场杀掉——必须过一次危险确认，不能静默。查询失败不阻断更新（按无会话处理）。
   const [installing, setInstalling] = useState(false);
+  // useEscClose 拿到的是挂载时的闭包，要读最新值只能过 ref。
+  const installingRef = useRef(false);
+  installingRef.current = installing;
   const restartAndInstall = async () => {
     if (installing) return;
     setInstalling(true);
@@ -177,13 +182,18 @@ export function Updater() {
               </div>
             ) : (
               <>
-                <div className="up-status" role="status">{t.updater.ready}</div>
-                <div className="up-hint">{t.updater.readyHint}</div>
+                {/* 7S-2：按下「重启并更新」后到安装器真正起来有好几秒，此前这段时间界面
+                    一动不动（按钮只是 disabled），像点空了。状态行与主按钮一起换成
+                    进行态，「稍后」同时让位——那几秒里退出更新已经来不及了。 */}
+                <div className="up-status" role="status">{installing ? t.updater.installing : t.updater.ready}</div>
+                <div className="up-hint">{installing ? t.updater.installingHint : t.updater.readyHint}</div>
                 {/* 「稍后」语义化关窗：此前关窗是唯一的推迟方式，但右上角 ✕ 读不出
                     「更新还在、随时可装」——并排给出两条路，主次分明。 */}
                 <div className="up-actions">
-                  <button className="sbtn" onClick={close}>{t.updater.later}</button>
-                  <button className="sbtn primary" disabled={installing} onClick={() => void restartAndInstall()}>{t.updater.restart}</button>
+                  {!installing && <button className="sbtn" onClick={close}>{t.updater.later}</button>}
+                  <button className="sbtn primary" disabled={installing} onClick={() => void restartAndInstall()}>
+                    {installing ? t.updater.installing : t.updater.restart}
+                  </button>
                 </div>
               </>
             )}

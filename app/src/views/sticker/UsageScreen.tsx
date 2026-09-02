@@ -42,9 +42,13 @@ function LaneRow({ lane, label }: { lane: UsageLane; label: string }) {
 export function UsageScreen({
   quotaProviders,
   usageMap,
+  usageMeta = {},
 }: {
   quotaProviders: string[];
   usageMap: Record<string, ProviderUsage>;
+  /// 每个 provider 上次成功刷新的时刻与「最近一次刷新是否失败」（7B-8）。
+  /// 缺省为空表：拿不到元信息时按新鲜渲染，与旧行为一致。
+  usageMeta?: Record<string, { at: number; stale: boolean }>;
 }) {
   const t = useT();
   // provider 图标标签的可访问名/悬停提示（P2-7）：按钮内容只有品牌 SVG，
@@ -83,8 +87,18 @@ export function UsageScreen({
     ? t.account.laneOpus
     : modelLane?.label ? t.account.laneModelWeekly(modelLane.label) : t.account.laneWeekly;
 
+  // 7B-8：刷新失败时读数原样留在屏上，看着和新鲜值一模一样。降饱和 + tip 说明上次
+  // 更新时刻——数字仍可用（多半只差几分钟），但「它可能过时了」必须看得出来。
+  const meta = usageMeta[selected];
+  const stale = meta?.stale === true;
+
   return (
-    <div className="stk-uscreen" role="group" aria-label={t.account.quota}>
+    <div
+      className={"stk-uscreen" + (stale ? " is-stale" : "")}
+      role="group"
+      aria-label={t.account.quota}
+      data-tip={stale && meta ? t.sticker.usageStale(new Date(meta.at).toLocaleTimeString()) : undefined}
+    >
       {/* 品牌图标标签行（每个 provider 一个，点选切换） */}
       <div className="stk-utabs">
         {activeProviders.map((p) => {

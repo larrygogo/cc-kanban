@@ -31,7 +31,7 @@ import { useT } from "../../i18n";
 import { useTauriEvent } from "../../hooks/useTauriEvent";
 import { useAgentListRefresh } from "../../useAgents";
 import { SETTINGS_DEFAULTS, useSettingsState } from "./state";
-import { Segmented, Switch } from "./widgets";
+import { Segmented, Switch, SettingsError } from "./widgets";
 import { Dropdown } from "../menu";
 import { RemoteAccessCard } from "./RemoteAccessCard";
 
@@ -322,7 +322,8 @@ export function NetworkSection() {
         </div>
       )}
 
-      {err && <div className="sec-hint proxy-err">{t.proxy.saveFailed(err)}</div>}
+      {/* 7S-7：与其余分区统一——此前是裸 div，无 × 也无 role=alert。 */}
+      <SettingsError error={err ? t.proxy.saveFailed(err) : null} onDismiss={() => setErr(null)} />
       <div className="sec-hint">{t.proxy.desc}</div>
     </>
   );

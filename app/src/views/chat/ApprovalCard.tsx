@@ -1,5 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
+/// 焦点是否落在用户正在打字的控件里（见 7C-1 的移焦让位）。
+function isTypingTarget(el: Element | null): boolean {
+  return el instanceof HTMLElement
+    && (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.isContentEditable);
+}
+
 /// 审批/交互卡的统一外壳。对话页上四类卡——broker 审批(claude hook 劫走的请求)、
 /// 终端命令审批(claude/kimi 屏幕识别)、交互选择器(question/plan)、其他屏幕提示
 /// (信任页/启动步骤/菜单)——此前各写一段 section、三套视觉(白卡/琥珀内联/琥珀浮层),
@@ -24,9 +30,14 @@ export function ApprovalCard({ title, badge, className, children, sideActions, a
   const ref = useRef<HTMLElement>(null);
   // G-16：role=alert 只打断朗读、焦点却进不来，用户听不到也摸不着按钮。改 alertdialog
   // 并在出现时把焦点交给第一个动作按钮（alertdialog 的惯例）；非模态， aria-modal=false。
+  //
+  // 7C-1：但用户正在 composer 里打插话时卡片弹出，抢焦点会把下一个空格/回车喂给
+  // 「拒绝」钮——一次误拒。U1-21 定的「不锁 composer」与这里的挂载移焦叠加出的输入
+  // 竞态，让位给正在进行的输入：焦点在可编辑控件里就不抢，读屏用户仍可用 Tab 进卡。
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    if (isTypingTarget(document.activeElement)) return;
     // 优先右组（本次决定）的第一个按钮；左组是「不作决定」的次要动作，不该先落焦。
     (el.querySelector<HTMLElement>(".chat-approval-actions > button")
       ?? el.querySelector<HTMLElement>(".chat-approval-actions button")

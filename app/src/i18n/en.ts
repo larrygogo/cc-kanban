@@ -33,8 +33,10 @@ export const en: Dict = {
     openChatWindow: "Open chat window",
     openSettings: "Settings",
     updateAvailable: "Update available",
+    updateDownloading: "Downloading update…",
+    updateReady: "Update ready to install",
     search: "Search sessions",
-    searchPlaceholder: "Search title / repo…",
+    searchPlaceholder: "Search title / repo / note…",
     searchClose: "Close search",
     pinOn: "Unpin window",
     pinOff: "Pin window",
@@ -42,7 +44,7 @@ export const en: Dict = {
     keepOpenOn: "Stop keeping open",
     keepOpenOff: "Keep open (don't auto-hide on focus loss)",
     waitingFirstInput: "Waiting for first input",
-    stopped: "Disconnected / stopped",
+    stopped: "Disconnected",
     sessionError: "Session error",
     online: "Online",
     // Weakened-badge tip for external sessions without screen detection (T-15).
@@ -77,6 +79,9 @@ export const en: Dict = {
     loading: "Loading…",
     loadFailed: "Couldn't load sessions",
     retry: "Retry",
+    staleNotice: "Refresh failed · showing cached data",
+    usageStale: (time) => `Usage refresh failed · last updated ${time}`,
+    historyDivider: (n) => `Past sessions · ${n}`,
     renameFailed: "Couldn't rename the session. Try again shortly.",
     noteFailed: "Couldn't save the note. Try again shortly.",
     archiveFailed: "Couldn't archive the session. Try again shortly.",
@@ -112,7 +117,7 @@ export const en: Dict = {
     // hasn't written its session row yet — codex isn't claimed until its first turn, and
     // without a placeholder, clicking Launch feels like a no-op.
     startingCard: "Launching session…",
-    startingTip: "Terminal is up — this becomes a real card once the agent first reports in",
+    startingTip: "Terminal is up — this becomes a real card once the Agent first reports in",
     // One-time notice after the first-launch history import (S-12): the import used to be
     // completely silent. The backend first_import_notice guarantees it shows only once.
     importNotice: (n: number) => `Imported ${n} session${n > 1 ? "s" : ""} from the last 7 days (read-only — your data is untouched)`,
@@ -129,6 +134,7 @@ export const en: Dict = {
     extraDirsAdd: "Add directory",
     extraDirsTip: "One session across multiple repos",
     extraDirsHint: "Ctrl+click to add as extra directory",
+    extraDirsHintMac: "⌘+click to add as extra directory",
     extraDirRemove: "Remove extra directory",
     browse: "Browse…",
     up: "Up",
@@ -140,26 +146,28 @@ export const en: Dict = {
     cancel: "Cancel",
     launch: "Launch",
     launching: "Launching…",
-    hooksMissing: "This agent isn't connected yet; the session may not appear on the board",
-    hooksUnknown: "Can't confirm this agent's connection status",
+    hooksMissing: "This Agent isn't connected yet. New sessions may not appear on the board.",
+    hooksUnknown: "Can't confirm this Agent's connection status",
+    goInstall: "Install",
+    agentSwapped: (want, used) => `${want} is not installed. Using ${used} instead.`,
     noAgents: "No installed AI CLI detected. Please install one first.",
-    detectingAgents: "Detecting installed agents…",
-    notLoggedIn: "This agent is not signed in",
+    detectingAgents: "Detecting installed Agents…",
+    notLoggedIn: "This Agent is not signed in",
     // Shown next to the launch button while a non-default account is active:
     // the new session will be written into that isolated account.
     activeProfile: (name: string) => `Will use account: ${name}`,
     login: "Sign in",
     loggingIn: "Waiting for sign-in…",
     cancelLogin: "Stop waiting",
-    loginCancelled: "Stopped waiting. If you signed in, focus this window to re-check.",
+    loginCancelled: "Stopped waiting. If you signed in, focus this window to re-check",
     loginTimeout: "Sign-in not detected. If you signed in, focus this window to re-check",
     repairHooks: "Repair connection",
     repairingHooks: "Repairing…",
-    repairHooksTip: "Re-writes Meowo's hooks into this agent's config. Use it when new sessions don't appear on the board.",
-    repairFailed: "Repair had no effect. Try again, or reinstall the agent.",
-    repairNeedLogin: "Sign in to this agent in a terminal first, then repair the connection.",
+    repairHooksTip: "Re-writes Meowo's hooks into this Agent's config. Use it when new sessions don't appear on the board.",
+    repairFailed: "Repair had no effect. Try again, or reinstall the Agent.",
+    repairNeedLogin: "Sign in to this Agent in a terminal first, then repair the connection.",
     repairNoReporter: "Missing component meowo-reporter. Please reinstall Meowo.",
-    repairNotDetected: "This agent's data directory wasn't detected. Make sure it's installed.",
+    repairNotDetected: "This Agent's data directory wasn't detected. Make sure it's installed.",
     newButton: "New session",
     emptyCta: "New session",
     launchOption: {
@@ -185,7 +193,7 @@ export const en: Dict = {
       "work.plan": "Plan mode",
     } as Record<string, string>,
     // Subtitle for risky tiers (contract LaunchChoice.risk=true): one line spelling out the cost.
-    riskyChoiceSub: "Skips human confirmation — the agent can run high-risk actions on its own",
+    riskyChoiceSub: "Skips human confirmation — the Agent can run high-risk actions on its own",
     // With relay enabled the model is pinned by the relay (backend --model wins): grey out and say so.
     relayPinnedModel: (model: string) => `Pinned to ${model} by the API relay`,
   },
@@ -195,14 +203,14 @@ export const en: Dict = {
     status: {
       running: "Running",
       pending: "Needs action",
-      waiting: "Waiting for you",
+      waiting: "Waiting for input",
       offline: "Disconnected",
       ended: "Ended",
       error: "Errored",
     } as Record<string, string>,
-    unsupported: "This agent does not provide structured conversation history yet",
+    unsupported: "This Agent does not provide structured conversation history yet",
     empty: "No conversation entries to display yet",
-    emptyWorking: "The agent is already working — the conversation will appear shortly",
+    emptyWorking: "The Agent is already working — the conversation will appear shortly",
     emptyStarting: "Starting session…",
     pickSession: "Pick a session from the sidebar",
     loadEarlier: "Load earlier messages",
@@ -213,7 +221,7 @@ export const en: Dict = {
     // Sync interrupted (C-18): only after consecutive IPC poll failures — it means the
     // window lost its channel to the backend, NOT that the agent process died (that is
     // the "Disconnected" status badge). Keep the two phrasings distinct.
-    syncInterrupted: "Sync with the backend interrupted — reconnecting; showing cached content",
+    syncInterrupted: "Sync interrupted. Reconnecting, showing cached content.",
     jumpLatest: "Jump to latest",
     switcherTitle: "Command palette",
     switcherPlaceholder: "Search sessions or commands (↑↓ to select, Enter to open / run)",
@@ -248,7 +256,8 @@ export const en: Dict = {
     codeCopy: "Copy",
     codeCopied: "Copied",
     questionExpired: "The question card timed out and closed; keep answering on the Terminal tab",
-    terminalApprovalBanner: "1 request pending approval — the agent is waiting for you",
+    questionExpiredRemote: "The question card timed out and closed; answer it on the desktop",
+    terminalApprovalBanner: "1 request pending approval",
     terminalApprovalGo: "Review",
     toolResult: "Tool result",
     lightboxClose: "Close image",
@@ -258,6 +267,11 @@ export const en: Dict = {
     runTerminal: "Run terminal",
     readFile: "Read file",
     editFile: "Edit file",
+    searchFiles: "Search files",
+    fetchWeb: "Fetch web page",
+    updateTodos: "Update to-dos",
+    runAgent: "Run subagent",
+    listDir: "List directory",
     toolActivities: (count: number) => `${count} tool ${count === 1 ? "call" : "calls"}`,
     toolFailures: (count: number) => `${count} failed`,
     reasoning: "Reasoning",
@@ -273,6 +287,7 @@ export const en: Dict = {
     sendBackgroundQueued: "Sent to the background session. If it doesn't process it, your text stays in the box — just resend.",
     sendBackgroundNoAttachments: "Background sessions don't take attachments yet — send text only.",
     inputLocked: "The terminal is waiting for a choice; respond via the card above or the Terminal tab first",
+    inputLockedRemote: "The terminal is waiting for a choice; respond via the card above first",
     send: "Send",
     sending: "Sending…",
     attach: "Add images or files",
@@ -292,6 +307,7 @@ export const en: Dict = {
     questionExternalHint: "Answer in the terminal running this session; the card closes automatically",
     questionMultiHint: "No clickable options here — answer in the terminal; the card closes automatically",
     answerOnDesktop: "Answer on the desktop; the card closes automatically",
+    startingOnDesktop: "Still starting — confirm the prompt on the desktop",
     customAnswerPlaceholder: "Type another answer",
     addCustomAnswer: "Add answer",
     submitAnswer: "Submit choices",
@@ -317,10 +333,12 @@ export const en: Dict = {
     deny: "Deny",
     denyConfirmEsc: "Press Esc again to deny",
     approvalClearedNotice: "This approval was handled elsewhere or timed out. Check the terminal to continue.",
+    approvalClearedNoticeRemote: "This approval was handled elsewhere or timed out. Check the desktop app to continue.",
     // Between countdown zero and the backend's settlement event: show this instead of a frozen 0:00.
     // Shared by the approval card and the question card (same fall-back-to-terminal semantics).
     approvalTimedOut: "Timed out — falling back to the terminal",
     openTerminal: "Open terminal",
+    goTerminal: "Go to terminal",
     close: "Close",
     renameSave: "Save",
     minimize: "Minimize",
@@ -342,7 +360,7 @@ export const en: Dict = {
     terminalInitializing: "Initializing Agent…",
     terminalExited: (code: number | null) => `The Agent exited${code == null || code === 0 ? "" : ` with code ${code}`}; its terminal output is preserved above`,
     // Forced finalize (last resort when kill silently failed): session detached, but the process may still linger.
-    terminalExitedForced: (code: number | null) => `Force-ended${code == null ? "" : ` (exit code ${code})`} — the process did not exit cleanly and may still be lingering; its terminal output is preserved above`,
+    terminalExitedForced: (code: number | null) => `Force-ended${code == null ? "" : ` (exit code ${code})`}. The process may still be running in the background; its terminal output is preserved above.`,
     // Exit note written into the terminal screen (host annotation; gray ANSI styling lives in ManagedTerminal's applyExit).
     terminalExitedInline: (code: number | null) => `[Meowo: process exited${code == null ? "" : ` (${code})`}]`,
     terminalStopping: "Stopping…",
@@ -354,6 +372,10 @@ export const en: Dict = {
     // (T-4: Ctrl+click previously had no on-screen affordance).
     terminalLinkHint: "Ctrl+click to open link",
     terminalPathHint: "Ctrl+click to reveal in file manager",
+    terminalLinkHintMac: "⌘+click to open link",
+    terminalPathHintMac: "⌘+click to reveal in file manager",
+    terminalSelectHint: "Hold Shift and drag to select text",
+    terminalSelectHintMac: "Hold ⌥ and drag to select text",
     // Terminal context menu (U0-11: replaces the WebView default menu blocked by devtools-guard in prod).
     terminalMenuCopy: "Copy",
     terminalMenuPaste: "Paste",
@@ -404,7 +426,7 @@ export const en: Dict = {
     todoSubagentSection: "Subtasks",
     subagent: "Subtask",
     subagentBatch: (n: number) => `${n} subtasks`,
-    subagentSteps: (n: number) => `${n} entries`,
+    subagentSteps: (n: number) => `${n} ${n === 1 ? "entry" : "entries"}`,
     subagentRunning: "Running",
     subagentCompleted: "Done",
     subagentFailed: "Failed",
@@ -440,6 +462,7 @@ export const en: Dict = {
     interrupting: "Interrupting…",
     attentionDismiss: "Hide",
     attentionDismissTip: "Hide the card without sending any keys",
+    attentionCollapsedRestore: "Prompt hidden · click to show",
     unrecognizedPromptNotice: "The terminal seems to be waiting for a choice; your message was sent. If nothing happens, check the Terminal tab.",
     unrecognizedPromptNoticeRemote: "The terminal seems to be waiting for a choice; your message was sent. If nothing happens, check on the desktop.",
     terminalPromptTitle: "The Agent needs a startup choice",
@@ -543,7 +566,7 @@ export const en: Dict = {
       default: "Default",
       manual: "Manual",
       acceptEdits: "Accept edits",
-      plan: "Plan",
+      plan: "Plan mode",
       auto: "Auto",
       yolo: "YOLO",
       bypassPermissions: "Bypass permissions",
@@ -598,6 +621,7 @@ export const en: Dict = {
   settings: {
     nav: { general: "General", sessions: "Sessions", appearance: "Appearance", network: "Network", account: "Accounts & usage", about: "About" },
     searchPlaceholder: "Search settings…",
+    searchClear: "Clear search",
     searchNoResults: "No matching settings",
     archivedSessions: "Archived sessions",
     archivedEmpty: "No archived sessions",
@@ -646,7 +670,8 @@ export const en: Dict = {
     cardMenuContext: "Right-click",
     cardMenuButton: "Card button",
     langAuto: "Follow system",
-    theme: "Appearance",
+    // 7S-10: the section itself is called Appearance; its first row can't be "Appearance" too.
+    theme: "Theme",
     themeDesc: "Dark, light, or follow the system",
     themeDark: "Dark",
     themeLight: "Light",
@@ -683,9 +708,9 @@ export const en: Dict = {
     showQuotaOnSticker: "Show quota on sticker",
   },
   proxy: {
-    desc: "Written into each agent's own config; usage checks and downloads use it too.",
+    desc: "Written into each Agent's own config; usage checks and downloads use it too.",
     mode: "Default proxy",
-    modeDesc: "Used by every agent without its own setting",
+    modeDesc: "Used by every Agent without its own setting",
     off: "Direct",
     system: "Follow system",
     custom: "Custom",
@@ -693,8 +718,8 @@ export const en: Dict = {
     urlPlaceholder: "http://127.0.0.1:7890 or host:port:user:pass",
     systemHint: (p) => `Read from system environment: ${p}`,
     systemNone: "No proxy in the system environment — connecting directly",
-    perAgent: "Per-agent override",
-    perAgentDesc: "Set an independent proxy rule for each agent",
+    perAgent: "Per-Agent override",
+    perAgentDesc: "Set an independent proxy rule for each Agent",
     followGlobal: "Follow default",
     effective: (p) => `Effective: ${p}`,
     effectiveDirect: "Effective: direct",
@@ -714,6 +739,7 @@ export const en: Dict = {
     enable: "Enable remote access",
     enableDesc: "View and send messages from your phone on the same LAN or Tailscale",
     port: "Port",
+    portInvalid: "Port must be between 1 and 65535",
     portDesc: "Port the phone connects to, default 18620",
     bind: "Bind interface",
     bindDesc: "Traffic is plain HTTP — a narrower bind means a smaller exposure",
@@ -735,6 +761,15 @@ export const en: Dict = {
     noIp: "No LAN address found; enter this machine's IP manually in the phone browser",
     offHint: "Phones can't connect while off",
     startError: (e) => `Failed to start: ${e}`,
+    gateTitle: "Meowo Remote",
+    gateHint: "Scanning the code pairs automatically. To pair manually, paste the token from Remote access on the desktop.",
+    gateTokenLabel: "Access token",
+    gateConnect: "Connect",
+    gateConnecting: "Connecting…",
+    gateLoading: "Loading…",
+    gateErrExpired: "The desktop token changed or expired. Scan again, or paste the new token.",
+    gateErrInvalid: "That token is not valid. Check it and try again.",
+    gateErrUnreachable: "Can't reach the desktop app. Check the network, or make sure it is still running.",
     boundMismatch: (configured, actual) =>
       `Configured port ${configured} didn't take effect in this instance; actually listening on ${actual} (possibly changed by another instance). The QR code uses the actual port`,
   },
@@ -771,7 +806,7 @@ export const en: Dict = {
     notLoggedIn: "Not signed in",
     notLoggedInHint: 'Installed but not signed in — click "Sign in" to authorize in a terminal',
     // Be honest about capabilities: say "not supported" plainly instead of leaving a blank.
-    contextUnsupported: "Context usage: not available for this agent",
+    contextUnsupported: "Context usage: not available for this Agent",
     // Multi-account
     profiles: "Accounts",
     defaultProfile: "Default account",
@@ -779,7 +814,7 @@ export const en: Dict = {
     newProfileName: "Account name (e.g. Work)",
     addProfileHint: "Each account keeps its own sign-in and session history",
     switchCoverage: "Applies to new or resumed sessions only; running sessions keep their account",
-    agentsLoadFailed: "Couldn't load the agent list. Please retry",
+    agentsLoadFailed: "Couldn't load the Agent list. Please retry",
     switchProfile: "Switch to this account",
     activeProfile: "In use",
     // Active-account hint shared by the session badge, account card, and new-session panel.
@@ -799,15 +834,15 @@ export const en: Dict = {
     loginWaiting: (terminal) =>
       `Sign-in opened in ${terminal}. We'll detect it when you finish — waiting up to 5 minutes.`,
     cancelLogin: "Stop waiting",
-    loginCancelled: "Stopped waiting. If you finished signing in, focus this window to re-check.",
+    loginCancelled: "Stopped waiting. If you signed in, focus this window to re-check",
     loginFailed: "Failed to start sign-in",
-    loginTimeout: "Sign-in not detected. If you already signed in, focus this window to re-check",
+    loginTimeout: "Sign-in not detected. If you signed in, focus this window to re-check",
     // API-key sign-in (gemini: Google shut down OAuth for individual accounts; a key is the only way in)
     apiKeyLogin: "Use API Key",
     apiKeyPlaceholder: "Paste API key",
     apiKeySave: "Save",
     apiKeySaving: "Saving…",
-    apiKeyHint: "Written into the agent's config, works in every terminal, removed on sign-out",
+    apiKeyHint: "Written into the Agent's config, works in every terminal, removed on sign-out",
     apiKeyFailed: (e: string) => `API-key sign-in failed: ${e}`,
     logout: "Sign out",
     loggingOut: "Signing out…",
@@ -832,8 +867,8 @@ export const en: Dict = {
     // latest) and re-pulls the agent itself — running sessions of this agent may die, so say so.
     updateConfirm: (n) =>
       n === 1
-        ? "Updating will interrupt 1 running session of this agent. Continue?"
-        : `Updating will interrupt ${n} running sessions of this agent. Continue?`,
+        ? "Updating will interrupt 1 running session of this Agent. Continue?"
+        : `Updating will interrupt ${n} running sessions of this Agent. Continue?`,
     pathGap: "Not found in your terminal?",
     pathGapDetail: (dir: string) => `${dir} is not on your PATH — the command won't be found in a terminal`,
     addToPath: "Add to PATH",
@@ -875,6 +910,8 @@ export const en: Dict = {
     ready: "Update downloaded and ready to install",
     readyHint: "No rush. The update installs automatically when you quit Meowo",
     restart: "Restart and update",
+    installing: "Installing…",
+    installingHint: "The app is about to restart. Don't close it.",
     restartConfirm: (n) =>
       n === 1
         ? "Restarting will interrupt 1 running session. Continue?"
@@ -901,6 +938,9 @@ export const en: Dict = {
     checkFailed: "Update check failed",
     foundNew: (v) => `New version v${v} available`,
     upToDate: "Up to date",
+    downloadingUpdate: "Downloading update…",
+    updateReady: "Update downloaded, ready to install",
+    installUpdate: "Install update",
     versionInfo: "Version",
     website: "Website",
     source: "Source code",
@@ -909,6 +949,7 @@ export const en: Dict = {
     feedback: "Feedback",
     changelog: "Changelog",
     guide: "Getting started",
+    guideDesc: "Replay the first-run guide",
   },
   onboarding: {
     skip: "Skip",
@@ -926,7 +967,7 @@ export const en: Dict = {
     connect: {
       title: "Connect your AI CLIs",
       points: [
-        "Install agents like Claude Code or Codex under Settings → Accounts & usage.",
+        "Install Agents like Claude Code or Codex under Settings → Accounts & usage.",
         "Then click “Sign in” and finish authorization in the terminal that pops up.",
         "Sessions these CLIs start will show up on the board.",
       ],

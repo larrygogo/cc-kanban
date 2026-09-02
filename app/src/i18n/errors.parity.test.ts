@@ -27,7 +27,9 @@ describe("errors.ts sentinel 对账", () => {
     collectRs(join(here, "../../src-tauri/crates"), files);
     const corpus =
       files.map((file) => readFileSync(file, "utf8")).join("\n") +
-      readFileSync(join(here, "zh.ts"), "utf8");
+      readFileSync(join(here, "zh.ts"), "utf8") +
+      // 远程桥的 `remote/<code>` sentinel 由前端传输层自产（7M-7），出处在这里。
+      readFileSync(join(here, "../mobile/transport.ts"), "utf8");
     const missing = ENTRIES.filter((entry) => !corpus.includes(entry.m)).map((entry) => entry.m);
     expect(missing).toEqual([]);
   });

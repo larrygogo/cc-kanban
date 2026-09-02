@@ -25,6 +25,8 @@ export function AppModal({
 }) {
   const overlayRef = useRef<HTMLDivElement>(null);
   const dlgRef = useRef<HTMLDivElement>(null);
+  // 这次点击是不是从遮罩上按下去的（7S-5）。
+  const downOnOverlayRef = useRef(false);
   // 注册 Esc 层（escLayers.ts）：弹层存续期间窗口级「Esc=拒绝审批」让位。
   useEffect(() => pushEscLayer(), []);
   useEffect(() => {
@@ -79,7 +81,15 @@ export function AppModal({
   };
 
   return (
-    <div className="chat-modal-overlay" role="presentation" ref={overlayRef} onClick={onClose}>
+    // 7S-5：只有「按下和抬起都在遮罩上」才算点了遮罩。此前用裸 onClick——在弹层里
+    // 拖选一段文字、手滑到遮罩上松手，click 照样落在遮罩上，弹层连同没提交的草稿一起没了。
+    <div
+      className="chat-modal-overlay"
+      role="presentation"
+      ref={overlayRef}
+      onMouseDown={(e) => { downOnOverlayRef.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (e.target === e.currentTarget && downOnOverlayRef.current) onClose(); }}
+    >
       <div
         className={"chat-modal" + (className ? " " + className : "")}
         role="dialog"

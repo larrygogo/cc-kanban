@@ -37,6 +37,7 @@ import type { PtyExitEvent as ExitEvent } from "../generated/contracts/PtyExitEv
 import type { PtyOutputEvent as OutputEvent } from "../generated/contracts/PtyOutputEvent";
 import { terminalAttention, visibleTerminalText, type AttentionGrammar, type TerminalAttention } from "../terminalAttention";
 import { remoteUi } from "../remoteMode";
+import { isMac } from "../platform";
 
 /** 远程模式补查周期（ms）。手机端收不到 pty-output 事件,靠定时补查增量快照喂满屏幕识别
  *  （AskUserQuestion 表单检测跑在这条通道上）。带 nextOffset 只取增量,不重传 backlog。 */
@@ -141,6 +142,28 @@ export function scanLineForFilePaths(line: string): { text: string; start: numbe
 
 /// 行高预设 → xterm lineHeight。normal 即历史硬编码的 1.22（改它会让老用户画面变样）。
 const LINE_HEIGHTS: Record<string, number> = { compact: 1.1, normal: 1.22, relaxed: 1.45 };
+
+/// 终端字号/行高的首帧缓存（7T-3）。settings 走 IPC、必然晚于挂载：不缓存的话每开一次
+/// 终端都先按默认 12 号画一屏、fit 出一套行列下发 PTY，等 settings 到了再整屏重排、
+/// 再发一次 resize（TUI 那头是重画一遍）。缓存上次**生效**的值当首帧初值，改过字号的
+/// 用户从此不再吃这一次抖动；缓存读写全套 try/catch——它只是优化，坏了退回默认即可。
+const TERM_STYLE_KEY = "meowo-term-style";
+function termStyleCache(): { size: number; line: number } {
+  try {
+    const raw = JSON.parse(localStorage.getItem(TERM_STYLE_KEY) || "null");
+    const size = Number(raw?.size);
+    const line = Number(raw?.line);
+    if (Number.isFinite(size) && size >= 8 && size <= 24 && Number.isFinite(line) && line > 0) {
+      return { size, line };
+    }
+  } catch { /* 无缓存/环境不支持 */ }
+  return { size: 12, line: LINE_HEIGHTS.normal };
+}
+function writeTermStyleCache(size: number, line: number): void {
+  try {
+    localStorage.setItem(TERM_STYLE_KEY, JSON.stringify({ size, line }));
+  } catch { /* 隐私模式等写不进去:下次照旧回落默认 */ }
+}
 
 /// 剔除「终端自动应答」形态的序列：CPR 光标位置（`\x1b[n;mR`，含 DECXCPR 的 `?` 变体）、
 /// DSR 状态（`\x1b[0n`）、DA1/DA2 设备属性（`…c`）、DECRPM（`…$y`）、OSC 应答（颜色查询
@@ -559,18 +582,25 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       // hover/leave 挂操作提示：Ctrl+点击这条终端惯例此前没有任何界面表达（T-4）。
       linkHandler: {
         activate: openTerminalLink,
-        hover: () => setLinkHint(t.chat.terminalLinkHint),
+        hover: () => setLinkHint((isMac() ? t.chat.terminalLinkHintMac : t.chat.terminalLinkHint)),
         leave: () => setLinkHint(null),
       },
       cursorBlink: true,
       convertEol: false,
+      // 7T-1：TUI 开着鼠标上报时，左键拖动全被转发走，选不了字。xterm 的逃生口
+      // Windows/Linux 是 Shift 拖动（内置），macOS 惯例是 ⌥ 拖动——后者要显式打开
+      // 这个选项，不开则 macOS 上**彻底**选不了（xterm 6.0 源码：该分支唯一入口）。
+      // 只影响宿主侧的选区判定，不改发给 PTY 的任何序列。（macOS 未经本机验证。）
+      macOptionClickForcesSelection: true,
       // "JetBrains Mono" 由 styles.css 的 @font-face 打包提供（不依赖本机安装），管拉丁+符号；
       // 它不含 CJK，中文逐字回退到各平台**真实存在**的好看字体：微软雅黑 / 苹方 / Noto。
       // （曾误写 "Microsoft YaHei Mono"——该字体名不存在，导致中文掉到 Courier New 的宋体兜底，
       //  正是「中文看着奇怪」的来源。）xterm 用等宽网格定位，中文按双宽对齐，非等宽也整齐。
       fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif',
-      fontSize: 12,
-      lineHeight: 1.22,
+      // 首帧字号/行高取上次生效值的缓存（7T-3）；没有缓存（首次运行）才回落默认。
+      // 真实值仍由 settings 到达后的 applyTermStyle 校正，只是绝大多数时候它已相等。
+      fontSize: termStyleCache().size,
+      lineHeight: termStyleCache().line,
       // 占位默认值,真实值由设置(terminal_scrollback)经 applyTermStyle 下发——挂载时读一次,
       // settings-changed 热应用。
       scrollback: 5000,
@@ -582,7 +612,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     // 纯文本 URL 的链接化。不装它 xterm 根本不识别正文里的 URL——「Ctrl+点击打不开链接」
     // 的第一层原因就是链接从未存在过。hover/leave 同 linkHandler,挂操作提示。
     terminal.loadAddon(new WebLinksAddon(openTerminalLink, {
-      hover: () => setLinkHint(t.chat.terminalLinkHint),
+      hover: () => setLinkHint((isMac() ? t.chat.terminalLinkHintMac : t.chat.terminalLinkHint)),
       leave: () => setLinkHint(null),
     }));
     // 文件路径 link provider:终端里最高频的可点内容,此前一律不可点(T-4)。识别口径见
@@ -594,19 +624,39 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       terminal.registerLinkProvider({
         provideLinks: (y, callback) => {
           const cwd = cwdRef.current;
-          const lineText = terminal.buffer?.active?.getLine(y - 1)?.translateToString(true) ?? "";
+          const line = terminal.buffer?.active?.getLine(y - 1);
+          const lineText = line?.translateToString(true) ?? "";
           const hits = cwd ? scanLineForFilePaths(lineText) : [];
           if (!cwd || hits.length === 0) { callback(undefined); return; }
+          // 7T-2：字符串下标不是单元格下标——中文/emoji 占两格，一行里每有一个宽字符，
+          // 后面所有路径的高亮就左偏一格，Ctrl+点击落在相邻单元格上，链接根本点不开。
+          // 按 translateToString 的口径重建映射：跳过宽字符的续格（width 0），一个
+          // cell 的 chars 有多少个 JS 字符就占多少个字符串下标。
+          const cellOf: number[] = [];
+          const widthOf: number[] = [];
+          for (let i = 0; i < (line?.length ?? 0); i += 1) {
+            const cell = line?.getCell(i);
+            const width = cell?.getWidth() ?? 1;
+            if (width === 0) continue;
+            const chars = cell?.getChars() ?? "";
+            for (let k = 0; k < Math.max(1, chars.length); k += 1) {
+              cellOf.push(i);
+              widthOf.push(width);
+            }
+          }
           callback(hits.map((hit) => ({
-            // 字符串下标 1:1 当单元格用:前面有宽字符时范围会偏,xterm 官方 addon 也是
-            // 先按字符映射再校正,这里取最简。end 为开区间,与 WebLinksAddon 口径一致。
-            range: { start: { x: hit.start + 1, y }, end: { x: hit.end, y } },
+            // range 的 x 是 1-based 单元格列，end 含最后一格（与 WebLinksAddon 口径一致）：
+            // 末字符若是宽字符，末列要再往右推它多占的那一格。映射缺位时退回旧的 1:1。
+            range: {
+              start: { x: (cellOf[hit.start] ?? hit.start) + 1, y },
+              end: { x: (cellOf[hit.end - 1] ?? hit.end - 1) + (widthOf[hit.end - 1] ?? 1), y },
+            },
             text: hit.text,
             activate: (event: MouseEvent, linkText: string) => {
               if (!event.ctrlKey && !event.metaKey) return;
               void revealPathInFileManager(cwd, linkText).catch((e) => setError(formatBackendError(e, t.locale)));
             },
-            hover: () => setLinkHint(t.chat.terminalPathHint),
+            hover: () => setLinkHint((isMac() ? t.chat.terminalPathHintMac : t.chat.terminalPathHint)),
             leave: () => setLinkHint(null),
           })));
         },
@@ -779,6 +829,18 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     };
     host.addEventListener("mousedown", onMouseDown, { capture: true });
     host.addEventListener("mouseup", onMouseUp, { capture: true });
+    // 7T-1：鼠标归 TUI 时左键拖动选不出字（事件全被转发），逃生口 Shift/⌥ 拖动
+    // 界面上从未说过——用户按下左键那一刻在右下角提示一次，复用 link-hint 那条。
+    // 只观察不拦截：不 preventDefault、不 stopPropagation，TUI 收到的事件一字不差。
+    let selectHintTimer = 0;
+    const onSelectAttempt = (event: MouseEvent) => {
+      if (event.button !== 0 || event.shiftKey || event.altKey) return;
+      if (!mouseOwnedByApp()) return;
+      setLinkHint((isMac() ? t.chat.terminalSelectHintMac : t.chat.terminalSelectHint));
+      window.clearTimeout(selectHintTimer);
+      selectHintTimer = window.setTimeout(() => setLinkHint(null), 2600);
+    };
+    host.addEventListener("mousedown", onSelectAttempt);
     const onContextMenu = (event: MouseEvent) => {
       // 鼠标归 TUI 且无选区:右键已由 xterm 转发给它,粘不粘由它决定(claude 会粘),
       // Meowo 不叠菜单。
@@ -978,6 +1040,9 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     const applyTermStyle = (s: Settings) => {
       const size = Math.min(24, Math.max(8, s.terminal_font_size ?? 12));
       const line = LINE_HEIGHTS[s.terminal_line_height] ?? LINE_HEIGHTS.normal;
+      // 记下来给下次挂载当首帧初值（7T-3）：settings 是异步的，不缓存的话每次开终端
+      // 都先按 12 号画一屏、fit 出一套行列发给 PTY，settings 到了再重排重发。
+      writeTermStyleCache(size, line);
       // 回滚缓冲进设置（此前硬编码 5000，见构造处）。改小会裁掉最老的行——用户主动
       // 调小换内存正是这个语义；xterm 运行时改 options.scrollback 即时生效。
       const back = Math.min(50_000, Math.max(500, s.terminal_scrollback ?? 5000));
@@ -1495,6 +1560,8 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       host.removeEventListener("contextmenu", onContextMenu);
       host.removeEventListener("mousedown", onMouseDown, { capture: true });
       host.removeEventListener("mouseup", onMouseUp, { capture: true });
+      host.removeEventListener("mousedown", onSelectAttempt);
+      window.clearTimeout(selectHintTimer);
       helperTextarea?.removeEventListener("compositionstart", startComposition);
       helperTextarea?.removeEventListener("compositionend", endComposition);
       input.dispose();
@@ -1759,6 +1826,9 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
           }}
           onSearch={() => setSearchOpen(true)}
           onClose={() => setTermMenu(null)}
+          // Esc 关菜单后焦点交还终端（7T-10）：xterm 的键盘入口是它内部的隐藏 textarea，
+          // 拿宿主元素调 focus 会被 xterm 的 focus 处理转进去。
+          focusReturn={() => hostRef.current?.querySelector<HTMLElement>(".xterm-helper-textarea") ?? hostRef.current}
         />
       )}
       {initializing && (
@@ -1876,6 +1946,7 @@ function TerminalContextMenu({
   onSelectAll,
   onSearch,
   onClose,
+  focusReturn,
 }: {
   x: number;
   y: number;
@@ -1888,6 +1959,8 @@ function TerminalContextMenu({
   onSelectAll: () => void;
   onSearch: () => void;
   onClose: () => void;
+  /// Esc 关闭时的焦点归还目标（终端宿主）。见 useDismissable 的 escFocusReturn。
+  focusReturn: () => HTMLElement | null;
 }) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
@@ -1909,6 +1982,9 @@ function TerminalContextMenu({
     closeOnContextMenu: true,
     closeOnBlur: true,
     closeOnScroll: true,
+    // 7T-10：菜单挂载时把焦点搬进了菜单项，Esc 关掉后焦点落在被卸载的节点上（等于
+    // 掉回 body），用户继续打字一个字符都进不去终端。关闭前把焦点交还给终端。
+    escFocusReturn: focusReturn,
   });
   // 键盘可达：挂载即把焦点搬进首个可用项；↑↓/Home/End 搬焦点，Enter/Space 激活
   //（与 CardContextMenu 同款 roving；禁用项不在停靠序列里）。

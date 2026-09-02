@@ -265,7 +265,9 @@ function SidebarFilterMenu({ dirValue, dirOptions, groupMode, groupLabels, sortM
       <button
         ref={btnRef}
         type="button"
-        className="chat-sidebar-filter"
+        // 7C-5：筛选/归档视图一旦生效，列表只是「少了很多会话」，界面上没有任何痕迹。
+        // 钮上挂一个小点标记「当前有筛选」（归档视图另有可关闭的状态条，见列表顶部）。
+        className={"chat-sidebar-filter" + (dirValue || archived ? " is-active" : "")}
         aria-label={t.chat.sidebarFilterTip}
         data-tip={t.chat.sidebarFilterTip}
         aria-haspopup="menu"
@@ -371,10 +373,16 @@ function SidebarFilterMenu({ dirValue, dirOptions, groupMode, groupLabels, sortM
   );
 }
 
+/// 目录组的键是 pathKey(cwd)（Windows 路径带 `C:`，所以不能按「含冒号」判）；
+/// 日期/状态桶的键是固定前缀。只有前者值得落盘（7C-6）。
+function isDirGroupKey(key: string): boolean {
+  return !key.startsWith("date:") && !key.startsWith("state:");
+}
+
 function readFolded(): Set<string> {
   try {
     const raw = JSON.parse(localStorage.getItem(FOLDED_KEY) || "[]");
-    return new Set(Array.isArray(raw) ? raw.filter((k): k is string => typeof k === "string") : []);
+    return new Set(Array.isArray(raw) ? raw.filter((k): k is string => typeof k === "string").filter(isDirGroupKey) : []);
   } catch {
     return new Set();
   }
@@ -812,10 +820,12 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, searc
     setSortMode(mode);
     localStorage.setItem(SORT_MODE_KEY, mode);
   };
+  // 只有**目录**分组的折叠值得记住：目录键是稳定的路径。日期桶（`date:today`）与状态桶
+  // 的键固定、内容天天换，落盘等于「昨天折起来的今天照样折着」，新会话凭空消失（7C-6）。
   const toggleFolded = (key: string) => setFolded((prev) => {
     const next = new Set(prev);
     if (!next.delete(key)) next.add(key);
-    localStorage.setItem(FOLDED_KEY, JSON.stringify([...next]));
+    localStorage.setItem(FOLDED_KEY, JSON.stringify([...next].filter(isDirGroupKey)));
     return next;
   });
 
@@ -881,12 +891,41 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, searc
     setLimit((n) => n + PAGE_LIMIT);
   };
 
+  // 分组的**渲染形态**（哪些组折着、每组实际画出哪几条）。此前这段算在 JSX 里，
+  // roving 锚点只能拿 ordered 猜（7C-6：锚点落在折叠组里没渲染的条目上时，整张列表
+  // 一个 tabIndex=0 都没有，Tab 根本进不来）。抽成 memo，锚点与渲染读同一份。
+  const renderedGroups = useMemo(() => {
+    if (!groups) return null;
+    return groups.map((group) => {
+      // 「未运行」= 已断开，且不是当前打开的这条，也不是置顶的那些——正开着的会话
+      // 无论死活都得留在视野里（否则用户一进来就找不到自己在哪），置顶的更是：
+      // 用户刚亲手把它顶上来，转头被折进「显示 N 个未运行会话」里等于白顶。
+      const live = (item: LiveSession) =>
+        item.connected || item.session.id === activeId || starred.has(item.session.cc_session_id);
+      const idle = group.items.filter((item) => !live(item));
+      // 折叠只在组里真有在跑的会话时才启用：它的使命是保住在跑的那几条不被
+      // 历史挤出视野。仅因当前打开/置顶而有「活」条目的组（典型是「已结束」组，
+      // 用户刚把当前会话切进去）不收——否则选中一条,其余几十条凭空消失。
+      // 有搜索词时一律不折：用户明确在找某条会话,命中了却被藏进「显示 N 个
+      // 未运行」等于告诉他「搜不到」。
+      const canCollapse = !search.trim() && group.items.some((item) => item.connected) && idle.length > 0;
+      // 当前会话所在的组强制展开（7C-6）：日期分桶的键是固定的 `date:today`，折过一次
+      // 之后，第二天的新会话全落进同一个折起来的桶里——用户打开的那条会话自己不见了。
+      const isFolded = folded.has(group.key) && !group.items.some((item) => item.session.id === activeId);
+      const shown = canCollapse && !revealed.has(group.key) ? group.items.filter(live) : group.items;
+      return { group, isFolded, canCollapse, idleCount: idle.length, shown: isFolded ? [] : shown };
+    });
+  }, [groups, folded, revealed, search, activeId, starred]);
+
   // C-17：侧栏列表 roving tabindex——上百条会话只占一个 Tab 停靠点，↑↓/Home/End 在
-  // 条目间搬 DOM 焦点。可停靠条目取当前选中的那条（被筛选掉时退回首条）。
+  // 条目间搬 DOM 焦点。可停靠条目取当前选中的那条（没被渲染出来时退回首条渲染项）。
   const tabbableId = useMemo(() => {
-    if (!ordered || ordered.length === 0) return null;
-    return ordered.some((item) => item.session.id === activeId) ? activeId : ordered[0].session.id;
-  }, [ordered, activeId]);
+    const visible = renderedGroups
+      ? renderedGroups.flatMap((entry) => entry.shown)
+      : (ordered ?? []);
+    if (visible.length === 0) return null;
+    return visible.some((item) => item.session.id === activeId) ? activeId : visible[0].session.id;
+  }, [renderedGroups, ordered, activeId]);
 
   // G-16：状态点已全部降级为 role=img（每条会话一个 role=status 就是 N 个播报源，
   // 状态秒级跳变等于播报风暴）；全侧栏只留这一个视觉隐藏的汇总 live region。
@@ -1135,6 +1174,14 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, searc
           t={t}
         />
       </div>
+      {/* 归档视图的状态条（7C-5）：进了归档视图后列表只是「换了一批会话」，此前没有
+          任何界面表达，用户会以为会话丢了。一行可关闭的状态条，点它就退回普通列表。 */}
+      {archivedView && (
+        <button type="button" className="chat-sidebar-viewbar" onClick={() => setArchivedView(false)}>
+          <span>{t.settings.archivedSessions}</span>
+          <span aria-hidden="true">×</span>
+        </button>
+      )}
       {/* 会话搜索（Ctrl/Cmd+F 聚焦）：标题/仓库名下沉后端 LIKE，与看板同一条通道。 */}
       <div className="chat-sidebar-search">
         <input
@@ -1203,28 +1250,14 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, searc
             {search.trim() ? t.chat.sidebarEmptySearch : dirFilter ? t.chat.sidebarEmptyDir : archivedView ? t.chat.sidebarEmptyArchived : t.chat.sidebarEmpty}
           </div>
         )}
-        {groups
-          ? groups.map((group) => {
-              const isFolded = folded.has(group.key);
+        {renderedGroups
+          ? renderedGroups.map(({ group, isFolded, canCollapse, idleCount, shown }) => {
               // 组头汇总点:折起来时它是这一组唯一的状态出口,取组内最强的召唤。
               const approval = group.items.some((item) => approvalAwaitingIds.has(item.session.id));
               const tone = group.items
                 .map((item) => sessionTone(item.connected, item.session.status, item.pending_review, item.errored, item.busy_subagents, item.screen_state))
                 .reduce<SessionTone | null>((best, cur) => (best && TONE_RANK[best] >= TONE_RANK[cur] ? best : cur), null);
               const showDot = !!tone && TONE_RANK[tone] > 0;
-              // 「未运行」= 已断开，且不是当前打开的这条，也不是置顶的那些——正开着的会话
-              // 无论死活都得留在视野里（否则用户一进来就找不到自己在哪），置顶的更是：
-              // 用户刚亲手把它顶上来，转头被折进「显示 N 个未运行会话」里等于白顶。
-              const live = (item: LiveSession) =>
-                item.connected || item.session.id === activeId || starred.has(item.session.cc_session_id);
-              const idle = group.items.filter((item) => !live(item));
-              // 折叠只在组里真有在跑的会话时才启用：它的使命是保住在跑的那几条不被
-              // 历史挤出视野。仅因当前打开/置顶而有「活」条目的组（典型是「已结束」组，
-              // 用户刚把当前会话切进去）不收——否则选中一条,其余几十条凭空消失。
-              // 有搜索词时一律不折：用户明确在找某条会话,命中了却被藏进「显示 N 个
-              // 未运行」等于告诉他「搜不到」。
-              const canCollapse = !search.trim() && group.items.some((item) => item.connected) && idle.length > 0;
-              const shown = canCollapse && !revealed.has(group.key) ? group.items.filter(live) : group.items;
               return (
                 <div className="chat-sidebar-group" key={group.key}>
                   <button
@@ -1241,7 +1274,7 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, searc
                       : showDot && <i className={`chat-sidebar-dot is-${tone}`} role="img" aria-label={t.chat.status[tone]} data-tip={t.chat.status[tone]} />}
                     <span className="chat-sidebar-group-count">{group.items.length}</span>
                   </button>
-                  {!isFolded && shown.map(renderItem)}
+                  {shown.map(renderItem)}
                   {/* 未运行的会话默认收起：一个跑了一阵的目录里，历史会话能堆到几十条，
                       把当前真正在跑的那一两条挤出视野。折起来但不丢——点一下就回来。 */}
                   {!isFolded && canCollapse && (
@@ -1253,7 +1286,7 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, searc
                     >
                       {revealed.has(group.key)
                         ? t.chat.sidebarHideIdle
-                        : t.chat.sidebarShowIdle(idle.length)}
+                        : t.chat.sidebarShowIdle(idleCount)}
                     </button>
                   )}
                 </div>

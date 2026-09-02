@@ -1,5 +1,6 @@
 import { type ReactElement, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useShowWhenReady } from "../useShowWhenReady";
 import {
@@ -19,7 +20,7 @@ import {
   type DirListing,
 } from "../api";
 import { agentAssets, tintStyle } from "../providers";
-import { normalizePath, pathKey } from "../paths";
+import { normalizePath, pathKey, unquotePath } from "../paths";
 import { Dropdown } from "./menu";
 import { useAgentListRefresh } from "../useAgents";
 import { useTauriEvent } from "../hooks/useTauriEvent";
@@ -28,6 +29,7 @@ import { useT, repairFailMessage } from "../i18n";
 import { formatBackendError } from "../i18n/errors";
 import { useEscClose } from "../hooks/useEscClose";
 import { remoteUi } from "../remoteMode";
+import { isMac } from "../platform";
 
 function FolderIcon() {
   return (
@@ -89,6 +91,16 @@ export function NewSessionPanel({ onClose, prefill, onLaunched }: {
   // 窗口以 visible:false 创建（window.rs），首帧渲染后再显示，消除打开瞬间的白框闪烁。
   useShowWhenReady();
   const [cwd, setCwd] = useState(startCwd);
+  // 7T-5：面板打开时没有任何初始焦点——目录已经预填好了，回车却什么都不发生（键盘用户
+  // 得先 Tab 若干次才摸到控件）。挂载即聚焦目录框；已有预填时连带全选，一次输入就能整段
+  // 改写，回车直接启动（Enter 与按钮共用 canLaunch 守卫，见 launch）。
+  const dirInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const el = dirInputRef.current;
+    if (!el) return;
+    el.focus();
+    if (el.value) el.select();
+  }, []);
   // 首帧种子（settings.default_agent resolve 前）。真实默认值由后端给。
   const [provider, setProvider] = useState<AgentId>(startProvider ?? "claude");
   const [recent, setRecent] = useState<string[]>([]);
@@ -211,9 +223,15 @@ export function NewSessionPanel({ onClose, prefill, onLaunched }: {
   // 装完一个 agent，这里的可选项就该多一个——不必关掉面板重开。
   useAgentListRefresh(reloadAgents);
 
-  // default_agent 若未装，则退到首个已装 agent（avail 加载后校正）
+  // default_agent 若未装，则退到首个已装 agent（avail 加载后校正）。
+  // 7T-9：换过这一手此前完全静默——用户从卡片菜单带着 codex 的预填点进来，面板上
+  // 选中的却是 claude，没有一个字解释。记下「本来要用谁」，在 Agent 区下说一句。
+  const [swappedFrom, setSwappedFrom] = useState<string | null>(null);
   useEffect(() => {
-    if (avail && avail.length > 0 && !avail.includes(provider)) setProvider(avail[0]);
+    if (avail && avail.length > 0 && !avail.includes(provider)) {
+      setSwappedFrom(provider);
+      setProvider(avail[0]);
+    }
   }, [avail, provider]);
   // 附加目录只对声明支持的 agent 开放(claude --add-dir);切到不支持的 agent 时清空,
   // 静默带过去会让后端如实拒绝、启动直接报错。
@@ -267,7 +285,7 @@ export function NewSessionPanel({ onClose, prefill, onLaunched }: {
   async function openRemoteBrowser() {
     // 起点取当前输入的目录;不存在/为空则回退磁盘列表,列不了就保持手输。
     try {
-      setBrowse(await listSubdirectories(cwd.trim() || undefined));
+      setBrowse(await listSubdirectories(unquotePath(cwd) || undefined));
     } catch {
       try {
         setBrowse(await listSubdirectories());
@@ -279,15 +297,23 @@ export function NewSessionPanel({ onClose, prefill, onLaunched }: {
     }
   }
 
+  // 7T-6：Enter 与「启动」钮此前各判各的——按钮 disabled 含「一个 agent 都没装/还在
+  // 检测」，Enter 路径只看目录和 busy，于是在没装 CLI 的机器上回车照样发 newSession，
+  // 拿一条后端错误回来。守卫抽出来，两条路径共用。
+  const canLaunch = Boolean(cwd.trim()) && !busy && (avail?.length ?? 0) > 0;
+
   async function launch() {
-    if (!cwd.trim() || busy || launchPendingRef.current) return;
+    if (!canLaunch || launchPendingRef.current) return;
     launchPendingRef.current = true;
     setBusy(true);
     setError(null);
     try {
+      // 输入框里躺的是用户原样粘的串:资源管理器「复制为路径」带引号,后端按字面
+      // 找不到(7T-4)。只剥引号,不动斜杠方向——发给后端的 cwd 保持用户写法。
+      const dir = unquotePath(cwd);
       // 附加目录剔除与主目录重复的(归一比较):agent 对同一目录拿两份授权无意义。
-      const extras = extraDirs.filter((d) => pathKey(d) !== pathKey(cwd.trim()));
-      const tempId = await newSession(cwd.trim(), provider, opts, extras);
+      const extras = extraDirs.filter((d) => pathKey(d) !== pathKey(dir));
+      const tempId = await newSession(dir, provider, opts, extras);
       saveStoredOpts(provider, opts); // 启动成功才记：失败的组合不该成为下次的默认
       // 「正在启动」的可见反馈由看板的占位卡承担（后端把 pending PTY 合成负 id 占位项
       // 合入看板查询，认领出真卡后对账撤下），面板这里启动成功直接自关即可。
@@ -391,6 +417,7 @@ export function NewSessionPanel({ onClose, prefill, onLaunched }: {
           <div className="ns-picker">
             <div className="ns-dir-row">
               <input
+                ref={dirInputRef}
                 className="ns-input"
                 data-testid="ns-dir"
                 value={cwd}
@@ -490,7 +517,7 @@ export function NewSessionPanel({ onClose, prefill, onLaunched }: {
                       + (cwdNorm === r ? " is-on" : "")
                       + (extraDirs.some((x) => pathKey(x) === pathKey(r)) ? " is-extra" : "")
                     }
-                    data-tip={supportsExtraDirs ? `${r}\n${t.newSession.extraDirsHint}` : r}
+                    data-tip={supportsExtraDirs ? `${r}\n${isMac() ? t.newSession.extraDirsHintMac : t.newSession.extraDirsHint}` : r}
                     onClick={(e) => {
                       // Ctrl/Cmd+点击 = 加为/移出附加目录(与侧栏多选同一手势);普通点击 = 设主目录。
                       if (supportsExtraDirs && (e.ctrlKey || e.metaKey)) {
@@ -518,8 +545,13 @@ export function NewSessionPanel({ onClose, prefill, onLaunched }: {
               {t.newSession.detectingAgents}
             </div>
           ) : avail.length === 0 ? (
+            // 7T-8：此前是死胡同——一句「没检测到」，没有按钮也没有去处。安装入口在
+            // 设置的「账号与用量」，直接把人送过去（引导里早就这么说了，这里漏了）。
             <div className="ns-warn" data-testid="ns-no-agents">
-              {t.newSession.noAgents}
+              <span>{t.newSession.noAgents}</span>
+              <button type="button" className="ns-btn" onClick={() => void invoke("open_settings").catch(() => {})}>
+                {t.newSession.goInstall}
+              </button>
             </div>
           ) : (
             <div className="ns-agents">
@@ -541,6 +573,13 @@ export function NewSessionPanel({ onClose, prefill, onLaunched }: {
                   </button>
                 );
               })}
+            </div>
+          )}
+          {/* 7T-9：预填的 agent 没装、被悄悄换成别家时说一句。用户点开面板前就选好了
+              要用谁，换掉不告诉他，等于让他用错工具跑一整轮。 */}
+          {swappedFrom && avail && avail.length > 0 && (
+            <div className="ns-hint" data-testid="ns-agent-swapped">
+              {t.newSession.agentSwapped(agentName(agents ?? [], swappedFrom), agentName(agents ?? [], provider))}
             </div>
           )}
           {launchOptions.length > 0 && (
@@ -639,7 +678,7 @@ export function NewSessionPanel({ onClose, prefill, onLaunched }: {
           type="button"
           className="ns-btn is-primary"
           data-testid="ns-launch"
-          disabled={!cwd.trim() || busy || (avail?.length ?? 0) === 0}
+          disabled={!canLaunch}
           onClick={launch}
         >
           {busy ? t.newSession.launching : t.newSession.launch}

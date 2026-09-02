@@ -79,10 +79,13 @@ function announceAuthLost(): void {
   window.dispatchEvent(new CustomEvent(AUTH_LOST_EVENT));
 }
 
+/** 令牌试探的三态结果(见 probeToken)。 */
+export type ProbeResult = "ok" | "unauthorized" | "unreachable";
+
 /** 配对前的令牌试探(供 TokenGate 提交时先验后放行):打一发最轻的白名单命令。
  *  与主路径同一判据:200 + 非 JSON 是门户/反代劫持页,不算验证通过——否则闸门
  *  放行错令牌,用户进到一个每发请求都炸的界面。 */
-export async function probeToken(token: string): Promise<boolean> {
+export async function probeToken(token: string): Promise<ProbeResult> {
   try {
     const res = await fetch("/rpc/host_os", {
       method: "POST",
@@ -90,11 +93,15 @@ export async function probeToken(token: string): Promise<boolean> {
       body: "{}",
       signal: rpcSignal(8_000),
     });
-    if (!res.ok) return false;
+    // 7M-6：401 是「令牌不对」,其余不通是「桌面端不可达」——两种情况用户要做的事
+    // 完全不同(重抄令牌 vs 检查网络/唤醒桌面),不能都回一句「令牌不对或不可达」。
+    if (res.status === 401) return "unauthorized";
+    if (!res.ok) return "unreachable";
     JSON.parse(await res.text());
-    return true;
+    return "ok";
   } catch {
-    return false;
+    // 超时/DNS/连接拒绝/被劫持成非 JSON:一律算不可达。
+    return "unreachable";
   }
 }
 
@@ -146,12 +153,25 @@ const SLOW_COMMANDS = new Set([
   "get_chat_history",
 ]);
 
+/// 每条命令等多久算超时。
+/// 7M-4：此前只有 90s（慢命令）与 20s（其余）两档，而**轮询**也吃 20s——桌面端一睡，
+/// 手机上要 20s×3 才判定失联（C-18 的连续三次），整整一分钟界面像在正常刷新。
+/// 轮询的增量拉取（offset>0）压到 8s：它本来就该毫秒级返回，等更久没有意义。
+/// 首读（offset=0）仍走 90s——长会话的 transcript 是真的大。
+function rpcTimeout(cmd: string, args: unknown): number {
+  if (cmd === "get_chat_history") {
+    const offset = (args as { offset?: number } | null)?.offset ?? 0;
+    return offset > 0 ? 8_000 : 90_000;
+  }
+  return SLOW_COMMANDS.has(cmd) ? 90_000 : 20_000;
+}
+
 async function rpc(cmd: string, args: unknown): Promise<unknown> {
   const token = getToken();
   // 只接受普通对象载荷:数组/TypedArray/字符串 stringify 后必被后端结构体拒收(400),
   // 二进制还会静默丢数据——在前端就抛清楚。
   if (args != null && (typeof args !== "object" || Array.isArray(args) || ArrayBuffer.isView(args))) {
-    throw new Error(`远程桥只接受对象参数(${cmd})`);
+    throw new Error(`remote/bad_payload:${cmd}`);
   }
   let res: Response;
   try {
@@ -162,12 +182,12 @@ async function rpc(cmd: string, args: unknown): Promise<unknown> {
         "X-Meowo-Token": token ?? "",
       },
       body: JSON.stringify(args ?? {}),
-      signal: rpcSignal(SLOW_COMMANDS.has(cmd) ? 90_000 : 20_000),
+      signal: rpcSignal(rpcTimeout(cmd, args)),
     });
   } catch (e) {
     const name = (e as { name?: string } | null)?.name;
     if (name === "TimeoutError" || name === "AbortError") {
-      throw new Error("远程请求超时,请检查与桌面端的网络连接");
+      throw new Error("remote/timeout");
     }
     throw e;
   }
@@ -176,7 +196,7 @@ async function rpc(cmd: string, args: unknown): Promise<unknown> {
     // (首帧 bootAppearance 的 get_settings 就会踩到),清态会误杀刚扫码存好的令牌;
     // 请求在途中用户重新配对(token 已换代)同理不清。
     if (token && token === getToken()) announceAuthLost();
-    throw new Error("远程访问令牌已失效,请重新扫码配对");
+    throw new Error("remote/unauthorized");
   }
   const text = await res.text();
   if (!res.ok) {
@@ -190,7 +210,7 @@ async function rpc(cmd: string, args: unknown): Promise<unknown> {
     } catch {
       /* 落回状态码提示 */
     }
-    throw new Error(msg || `远程请求失败(${res.status})`);
+    throw new Error(msg || `remote/http_${res.status}`);
   }
   if (!text) return null;
   try {
@@ -198,7 +218,7 @@ async function rpc(cmd: string, args: unknown): Promise<unknown> {
   } catch {
     // 200 + 非 JSON 只可能是中间层劫持(网关门户页等):当错误抛,别让调用方拿到
     // 字符串后在 .items 上炸出被吞掉的 TypeError,界面静默空白。
-    throw new Error("远程响应异常(非 JSON),网络可能被中间设备劫持");
+    throw new Error("remote/not_json");
   }
 }
 
