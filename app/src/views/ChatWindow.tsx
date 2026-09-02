@@ -9,7 +9,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { pathKey } from "../paths";
 import { COMPACTING_ACTIVITY } from "../activity";
 import { appConfirm } from "../confirm";
-import { pickAndAddExtraDir, removeSessionExtraDir, agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardRestore, clipboardSetImage, confirmStopSession, dismissInteractiveQuestion, getChatHistory, getGitDiffSummary, getLiveSessionsPage, getSessionLineage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, probeSubagentStates, refreshSessionModel, refreshSessionTodos, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, switchSessionProvider, takeoverManagedTerminal, writeManagedTerminal, type AgentId, type ChatHistory, type ChatItem, type ChatUi, type GitDiffSummaryDto, type LiveSession, type ModelPreset, type ModeScreenMarker, type SubagentProbe } from "../api";
+import { pickAndAddExtraDir, removeSessionExtraDir, agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardRestore, clipboardSetImage, confirmStopSession, dismissInteractiveQuestion, getChatHistory, getGitDiffSummary, getLiveSessionsPage, getSessionLineage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, probeSubagentStates, refreshSessionModel, refreshSessionTodos, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, switchSessionProvider, takeoverManagedTerminal, writeManagedTerminal, type AgentId, type ChatHistory, type ChatItem, type ChatUi, type GitDiffSummaryDto, type LiveSession, type ModelPreset, type ModeScreenMarker, type PendingApproval, type SubagentProbe } from "../api";
 import { hasEscLayers, pushEscLayer } from "../escLayers";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useSessionActions } from "../hooks/useSessionActions";
@@ -645,6 +645,8 @@ export function ChatWindow() {
   // 用户想回看只剩终端页。收起的卡先留在这里，overlay 底部换成一条可再展开的折叠条；
   // 收起本身仍照旧把 terminalAttention 置空（composer 解锁、发送不再被拦），语义没变。
   const [dismissedAttention, setDismissedAttention] = useState<TerminalAttention | null>(null);
+  // 收起的题面卡（同上，见 collapseQuestion）。类型与 structuredQuestion 同源。
+  const [dismissedQuestion, setDismissedQuestion] = useState<PendingApproval | null>(null);
   const [questionCustomText, setQuestionCustomText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   // 附件超上限被截断时给用户的可见提示（此前 .slice(0, 12) 静默丢弃）。
@@ -3107,6 +3109,12 @@ export function ChatWindow() {
     setDismissedAttention(terminalAttention);
     setTerminalAttention(null);
   };
+  // 题面展示卡同规（7C-2 尾，复核指出上一版只覆盖了屏幕识别三卡）：收起后同样留折叠条，
+  // 否则这张卡收掉就再也回不来——它的来源是 broker 挂起，不像屏幕识别那样会重新匹配。
+  const collapseQuestion = () => {
+    setDismissedQuestion(structuredQuestion);
+    setStructuredQuestion(null);
+  };
   // 审批卡门控：插件声明了详情文法风格（details）的提示才走命令审批卡——不再枚举 pattern id。
   const commandAttention = terminalAttention && (terminalAttention.details === "proceed_box" || terminalAttention.details === "arrow_panel") ? terminalAttention : null;
   const interactiveAttention = terminalAttention?.id === "interactive:numbered-selector" ? terminalAttention : null;
@@ -3820,7 +3828,7 @@ export function ChatWindow() {
         className="chat-screen-approval"
         title={t.chat.questionTitle}
         badge={t.chat.questionPending}
-        sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={() => setStructuredQuestion(null)}>{t.chat.attentionDismiss}</button>}
+        sideActions={<button type="button" className="chat-attention-dismiss is-inline" data-tip={t.chat.attentionDismissTip} onClick={collapseQuestion}>{t.chat.attentionDismiss}</button>}
         actions={!remoteUi() && history?.ptyManaged && <button type="button" className="is-allow" onClick={() => setView("terminal")}>{t.chat.goTerminal}</button>}
       >
         {/* 可点选排队的条件：托管会话（GUI 持有 PTY 才写得进按键）+ 至少一题带选项。
@@ -3912,6 +3920,13 @@ export function ChatWindow() {
           type="button"
           className="chat-attention-collapsed"
           onClick={() => { setTerminalAttention(dismissedAttention); setDismissedAttention(null); }}
+        >{t.chat.attentionCollapsedRestore}</button>
+      )}
+      {view === "chat" && dismissedQuestion && !structuredQuestion && !terminalAttention && (
+        <button
+          type="button"
+          className="chat-attention-collapsed"
+          onClick={() => { setStructuredQuestion(dismissedQuestion); setDismissedQuestion(null); }}
         >{t.chat.attentionCollapsedRestore}</button>
       )}
       </div>

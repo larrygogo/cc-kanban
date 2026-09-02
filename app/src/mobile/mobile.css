@@ -114,7 +114,11 @@ body.remote-ui .chat-sidebar-overlay-head {
   body.remote-ui .chat-sidebar-item-menu::after,
   body.remote-ui .chat-attention-dismiss::after,
   body.remote-ui .chat-sidebar-search-x::after,
-  body.remote-ui .chat-approval-actions .is-deny::after {
+  body.remote-ui .chat-approval-actions .is-deny::after,
+  /* 复核补：这三个也在 44px 以下——进度面板入口 38px、侧栏开关 40px、
+     搜索清除 41px（前两个是远程端的常用入口，点偏就是另一个动作）。 */
+  body.remote-ui .chat-todo-btn::after,
+  body.remote-ui .chat-sidebar-open::after {
     inset: -12px;
   }
 

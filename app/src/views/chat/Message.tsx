@@ -7,7 +7,7 @@ import { zh } from "../../i18n/zh";
 import { en } from "../../i18n/en";
 import { type ChatItem } from "../../api";
 import { ChatMarkdown } from "../ChatMarkdown";
-import { parseUserText } from "./localCommand";
+import { parseUserText, type CrossMessage } from "./localCommand";
 
 // Claude Code 把粘贴/引用的图片在 transcript 里记成一行「[Image: source: <本地路径>]」。
 // 原样渲染就是在气泡里摊一整行 C:\Users\... 路径——对话里最脏的元素。渲染成缩略图
@@ -202,6 +202,48 @@ function Lightbox({ src, name, onClose }: { src: string; name: string; onClose: 
   );
 }
 
+/** 跨会话消息块：另一个 Claude 会话经 SendMessage 发来的一条消息。
+ *  它是真的对话内容（不是 <task-notification> 那种机器记录），所以正文直接可读；
+ *  但复核回执这类消息动辄几十行，收起态限高 220px，超出才给「展开全部」。
+ *  超没超按实测判（scrollHeight vs clientHeight），不按字数猜——同样行数的中英文、
+ *  带不带长 URL，渲染出来的高度差很多。 */
+function CrossMessageBlock({ message }: { message: CrossMessage }) {
+  const t = useT();
+  const [expanded, setExpanded] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    // +4 容差：亚像素行高会让恰好齐平的块虚报溢出，白挂一个点了没变化的按钮。
+    setOverflowing(el.scrollHeight > el.clientHeight + 4);
+  }, [message.text]);
+  return (
+    <div className="chat-crossmsg">
+      <div className="chat-crossmsg-head">
+        <span className="chat-crossmsg-icon" aria-hidden="true">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 8h10l-3-3M17 16H7l3 3" /></svg>
+        </span>
+        <span className="chat-crossmsg-from">{message.fromName || t.chat.crossMessageUnknown}</span>
+        {/* 权限模式只在**非默认**时显示：default 是常态，写出来只是噪声。 */}
+        {message.mode && message.mode !== "default" && (
+          <span className="chat-crossmsg-mode">{message.mode}</span>
+        )}
+        <span className="chat-crossmsg-label">{t.chat.crossMessage}</span>
+      </div>
+      <div ref={bodyRef} className={"chat-crossmsg-body" + (expanded ? " is-expanded" : "")}>
+        <div className="chat-text">{message.text}</div>
+      </div>
+      {/* 收起态只在真的超高时给按钮；展开后保留「收起」，长消息才收得回去。 */}
+      {(overflowing || expanded) && (
+        <button type="button" className="chat-crossmsg-more" onClick={() => setExpanded((v) => !v)}>
+          {expanded ? t.chat.approvalCollapse : t.chat.approvalExpand}
+        </button>
+      )}
+    </div>
+  );
+}
+
 /** 图片缩略图 + 点开灯箱。导出给 composer 的附件条复用：粘贴的图片与 transcript
  *  里的图片走同一套预览（按路径走 convertFileSrc，asset 读不到时回退文件名 chip）。 */
 export function ImageRef({ path }: { path: string }) {
@@ -313,16 +355,7 @@ export const Message = memo(function Message({ item }: { item: ChatItem }) {
               所以默认展开、正文按原样排（对方写的是自然语言，不是 markdown）；只把
               来源标出来，好和用户自己说的话区分开。 */}
           {parts.crossMessages.map((message, index) => (
-            <div className="chat-crossmsg" key={`cross-${index}`}>
-              <div className="chat-crossmsg-head">
-                <span className="chat-crossmsg-icon" aria-hidden="true">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 8h10l-3-3M17 16H7l3 3" /></svg>
-                </span>
-                <span className="chat-crossmsg-from">{message.fromName || t.chat.crossMessageUnknown}</span>
-                <span className="chat-crossmsg-label">{t.chat.crossMessage}</span>
-              </div>
-              <div className="chat-text">{message.text}</div>
-            </div>
+            <CrossMessageBlock message={message} key={`cross-${index}`} />
           ))}
           {images.length > 0 && <ImageRow images={images} />}
           {body && <div className="chat-text">{body}</div>}

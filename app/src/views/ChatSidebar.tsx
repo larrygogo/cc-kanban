@@ -1265,7 +1265,10 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, searc
                     className="chat-sidebar-group-head"
                     aria-expanded={!isFolded}
                     data-tip={group.cwd ?? undefined}
-                    onClick={() => toggleFolded(group.key)}
+                    // 当前会话所在的组折不动（见 renderedGroups 的 isFolded）——那就连
+                    // 状态也别写：否则点它看着没反应，等切到别的会话后这组突然自己折起来
+                    // （复核指出的小怪异）。
+                    onClick={() => { if (!group.items.some((item) => item.session.id === activeId)) toggleFolded(group.key); }}
                   >
                     <ChevronDownIcon className={"chat-sidebar-caret" + (isFolded ? " is-folded" : "")} size={10} strokeWidth={2.6} />
                     <span className="chat-sidebar-group-name">{group.label || t.chat.sidebarNoDir}</span>

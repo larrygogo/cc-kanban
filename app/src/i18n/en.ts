@@ -34,7 +34,7 @@ export const en: Dict = {
     openSettings: "Settings",
     updateAvailable: "Update available",
     updateDownloading: "Downloading update…",
-    updateReady: "Update ready to install",
+    updateReady: "Update downloaded, ready to install",
     search: "Search sessions",
     searchPlaceholder: "Search title / repo / note…",
     searchClose: "Close search",
@@ -301,7 +301,6 @@ export const en: Dict = {
     approvalPending: "Pending approval",
     questionTitle: "Agent is waiting for your answer",
     questionPending: "Awaiting answer",
-    answerInTerminal: "Answer in terminal",
     questionFormLoading: "Pick an answer; it will be applied once the terminal form is ready",
     queuedAnswerHint: (label: string) => `Picked "${label}" — it will be applied once the form is ready`,
     questionExternalHint: "Answer in the terminal running this session; the card closes automatically",
@@ -337,7 +336,6 @@ export const en: Dict = {
     // Between countdown zero and the backend's settlement event: show this instead of a frozen 0:00.
     // Shared by the approval card and the question card (same fall-back-to-terminal semantics).
     approvalTimedOut: "Timed out — falling back to the terminal",
-    openTerminal: "Open terminal",
     goTerminal: "Go to terminal",
     close: "Close",
     renameSave: "Save",

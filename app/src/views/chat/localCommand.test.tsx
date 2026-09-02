@@ -51,6 +51,14 @@ describe("parseUserText", () => {
     expect(parts.crossMessages[0].text).toBe("注意 <command-name>/clear</command-name> 那条分支");
   });
 
+  /// 流式写入/截断会留下没闭合的半个标签。此时 CROSS 匹配不上（走不到 crossMessages），
+  /// 但 includes 已把 local 置真——降级路径要保证「不炸、不吞正文」（复核建议钉住）。
+  it("未闭合的跨会话包裹不炸，正文不被吞掉", () => {
+    const parts = parseUserText('<cross-session-message from-name="peer">半条消息就断了');
+    expect(parts.crossMessages).toEqual([]);
+    expect(parts.text).toContain("半条消息就断了");
+  });
+
   it("会话名缺失时不炸，正文照常收下", () => {
     const parts = parseUserText("<cross-session-message>只有正文</cross-session-message>");
     expect(parts.crossMessages).toEqual([{ fromName: "", mode: "", text: "只有正文" }]);

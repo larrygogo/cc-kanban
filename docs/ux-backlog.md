@@ -325,7 +325,21 @@
 > 默认 urlTransform 把非 http 源置空、chip 没了文件名。
 > 另落地一项用户实拍需求：transcript 里的**跨会话消息**（另一个 Claude 会话经
 > SendMessage 发来）此前整块摊成 XML + 管道名 + 一段英文安全须知，现在解析成带来源的
-> 消息块（`parseUserText` 的 crossMessages，见 localCommand.ts）。
+> 消息块（`parseUserText` 的 crossMessages，见 localCommand.ts）。用户定：不要左侧
+> accent 强调条（它把这类消息渲染得比用户自己说的话还重）；长消息收起态限高 220px，
+> 超出才给「展开全部」。
+>
+> **2026-09-02 收尾轮**：复核列的 17 条「部分」与 4 条「带小遗留」全部扫完（第二轮复核
+> 另查出 1 条必改——新加的中文注释被写成了字面 Unicode 转义序列，源码里不可读，已还原
+> 明文并全仓核对无同类）。逐条：7S-4 账号分区挂一行视觉隐藏的 agent 名单，搜「codex」
+> 不再零命中零入口；7G-7 未装项补「未安装」副文案（复用 Dropdown 的 sub 槽）；7S-1 登录
+> 终端名先核对 `available_terminals`，卸载后不再念旧名；7G-1 浅色 faint 按 **hover 卡面**
+> 再校到 #5e6762（三档 ≥4.5:1）；7G-5 后端通知正文的「等你」改「等待输入」；7G-8/7G-9
+> 拆长句、「打断」归一并删掉两个死键；7G-10 引导圆点热区 23→25px；7G-12 残留区的
+> li.is-* 就地覆盖压回 faint；7G-16 终端 spinner 补 reduced-motion；7M-9 再扩进度面板与
+> 侧栏开关；7S-3 两处 updateReady 措辞统一；7M-7 手机页标题跟随语言、http_/bad_payload
+> 映射带 tail 保住排障信息；7C-2 题面展示卡的「仅收起」也给折叠条；7C-6 当前会话所在组
+> 点了不再写 folded 状态。
 
 
 ### 看板与贴纸

@@ -158,8 +158,10 @@
   --cc-text: #23282a;
   --cc-text-dim: #565f5a;
   /* 浅色同理按叠层后的卡面校（7G-1）：#6a736e 在裸底 #f6f6f7 是 4.6:1，但卡面叠了一层
-     深色 surface（约 #ececed）后只剩 4.23:1。#636c67 在卡面 4.7:1、裸底 5.1:1。 */
-  --cc-text-faint: #636c67;
+     深色 surface（约 #ececed）后只剩 4.23:1。校准面还要再进一层——**hover 态的卡面**
+     （约 #e7e7e9）才是最亮的那张底，#636c67 落在它上面只有约 4.3:1（复核指出）。
+     #5e6762：hover 卡面 4.59:1、静态卡面 4.8:1、裸底 5.2:1，三档都过线。 */
+  --cc-text-faint: #5e6762;
   --cc-warn: #946410;
   --cc-err: #cf4434;
   --cc-window-bg: #f6f6f7;
@@ -1642,7 +1644,7 @@ body[data-edge="right"] .snap-preview-bar { border-radius: var(--r-lg) 0 0 var(-
 }
 /* 引导步骤圆点只有 7px——纯装饰尺寸配了可点行为（7G-10）。热区补到 24px。 */
 .ob-dot { position: relative; }
-.ob-dot::before { content: ""; position: absolute; inset: -8px; }
+.ob-dot::before { content: ""; position: absolute; inset: -9px; } /* 7+9×2=25px，-8px 只到 23（复核指出差 1px） */
 .ob-dot:hover { background: var(--cc-text-faint); }
 .ob-dot.on { width: 18px; border-radius: var(--r-sm); background: var(--cc-accent); }
 .ob-actions { display: flex; align-items: center; gap: var(--sp-8); }
@@ -4221,23 +4223,42 @@ select.ns-input {
 .chat-command-args { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cc-text-faint); }
 /* 命令输出复用 .chat-tool 的折叠外观，但它挂在用户气泡里，左右不再外扩。 */
 .chat-command-out { margin: var(--sp-6) 0 0; }
-/* 跨会话消息：另一个 Claude 会话发来的话。左侧强调条 + 来源行，正文照原样排——
-   它是真的对话内容（不是 <task-notification> 那种机器记录），所以不折叠。
-   与用户气泡的区别靠左轨和来源行，而不是另起一种气泡色。 */
+/* 跨会话消息：另一个 Claude 会话发来的话。用户定：**不要**左侧强调色条——它把这类
+   消息渲染得比用户自己说的话还重，而它只是「另一个会话说的」，不是告警也不是主线。
+   身份全靠头部那一行交代（图标 + 会话名 + 权限模式），块本身退成一张安静的浅色卡。 */
 .chat-crossmsg {
   margin: var(--sp-6) 0 0;
-  padding: var(--sp-9) var(--sp-12);
-  border: 1px solid var(--cc-border);
-  border-left: 2px solid var(--cc-accent-border);
+  padding: var(--sp-8) var(--sp-12) var(--sp-9);
+  border: 1px solid color-mix(in srgb, var(--cc-border) 70%, transparent);
   border-radius: var(--r-10);
   background: color-mix(in srgb, var(--cc-text) 3%, transparent);
 }
-.chat-crossmsg-head { display: flex; align-items: center; gap: var(--sp-6); margin-bottom: var(--sp-6); color: var(--cc-text-faint); font-size: var(--fs-10-5); }
-.chat-crossmsg-icon { display: inline-flex; flex: 0 0 auto; color: var(--cc-accent-text); }
-.chat-crossmsg-from { color: var(--cc-text-dim); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-crossmsg-head { display: flex; align-items: center; gap: var(--sp-6); margin-bottom: var(--sp-7); color: var(--cc-text-faint); font-size: var(--fs-10-5); }
+/* 图标退到与文字同色：唯一的彩色点原本在这儿，去掉后整块才真的安静下来。 */
+.chat-crossmsg-icon { display: inline-flex; flex: 0 0 auto; opacity: 0.75; }
+.chat-crossmsg-from { min-width: 0; color: var(--cc-text-dim); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 权限模式（bypass 等）：对方是不是在无人值守地跑，对读的人有信息量（复核建议）。
+   默认档不显示——那是常态，写出来只是噪声。 */
+.chat-crossmsg-mode { flex: 0 0 auto; padding: 0 var(--sp-5); border-radius: var(--r-sm); background: color-mix(in srgb, var(--cc-text) 8%, transparent); font-size: var(--fs-9); letter-spacing: 0.02em; }
 /* 「会话消息」四个字是类别标注，退到最弱一档，别和会话名抢。 */
 .chat-crossmsg-label { flex: 0 0 auto; margin-left: auto; }
 .chat-crossmsg .chat-text { font-size: var(--fs-12); }
+/* 长消息折起来：复核回执这类消息动辄几十行，整条摊开会把对话流顶掉一屏
+   （实拍）。收起态限高 + 底部渐隐，点一下展开。 */
+.chat-crossmsg-body { position: relative; max-height: 220px; overflow: hidden; }
+.chat-crossmsg-body.is-expanded { max-height: none; }
+.chat-crossmsg-body:not(.is-expanded)::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 48px;
+  background: linear-gradient(to top, var(--cc-bg), transparent);
+  pointer-events: none;
+}
+.chat-crossmsg-more { margin-top: var(--sp-6); padding: 0; border: 0; background: none; color: var(--cc-text-dim); font: inherit; font-size: var(--fs-10-5); cursor: pointer; }
+.chat-crossmsg-more:hover { color: var(--cc-text); }
 .chat-command-out summary { min-height: calc(30px * var(--cc-ui)); padding: 0 var(--sp-10); }
 .chat-command-out pre { padding: var(--sp-8) var(--sp-10); }
 .chat-tool { position: relative; margin: var(--sp-1) var(--sp-6); border: 0; border-radius: var(--r-9); color: var(--cc-text-dim); background: transparent; }
@@ -4553,8 +4574,11 @@ select.ns-input {
 .chat-todos-stale[open] > summary .chat-tool-chevron { transform: rotate(90deg); }
 .chat-todos-stale .chat-todos-stale-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 7G-12：整块 opacity .62 把已完成项压到约 2.7:1（那些条目本身就是 faint 色，
-   再乘一层透明就没救了）。弱化交给虚线容器 + faint 单色，不再叠容器透明度。 */
+   再乘一层透明就没救了）。弱化交给虚线容器 + faint 单色，不再叠容器透明度。
+   li.is-* 那几条会就地覆盖文字色（复核指出：只设容器色的话残留区与新清单同色，
+   弱化等于没做），所以在这里按同样的选择器把它们压回 faint。 */
 .chat-todos-stale .chat-todos-list { padding-top: 0; color: var(--cc-text-faint); }
+.chat-todos-stale .chat-todos-list li .chat-todo-text { color: var(--cc-text-faint); font-weight: 400; }
 
 /* 标题栏进度面板里的同款残留区。 */
 .chat-todo-panel-stale { margin-top: var(--sp-6); border-top: 1px dashed color-mix(in srgb, var(--cc-border) 56%, transparent); }
@@ -4567,6 +4591,7 @@ select.ns-input {
 .chat-todo-panel-stale[open] > summary .chat-tool-chevron { transform: rotate(90deg); }
 .chat-todo-panel-stale .chat-todo-panel-title { flex: 1; font-size: var(--fs-11); color: var(--cc-text-faint); }
 .chat-todo-panel-stale .chat-todo-panel-list { color: var(--cc-text-faint); }
+.chat-todo-panel-stale .chat-todo-panel-list li .chat-todo-panel-text { color: var(--cc-text-faint); font-weight: 400; }
 
 /* 子任务：一次委派出去的独立工作。不并进「N 次工具操作」那一坨——它代表一整段
    自成一体的过程，展开的是子任务自己的时间线（可再嵌套，Claude 的 spawnDepth）。
@@ -5339,6 +5364,8 @@ select.ns-input {
   /* 这两处的环色是状态色而非 currentColor，单独指回去。 */
   .obm-run::after { border-color: var(--cc-ok-vivid); }
   .chat-todo-badge.is-in_progress { border-color: var(--cc-ok-vivid); }
+  /* 终端初始化转圈：环色是固定灰白，不是 currentColor（复核指出漏网）。 */
+  .managed-terminal-spinner { border-color: #c8cdca; }
 }
 
 /* dev 构建角标（DevBadge，仅 vite dev 渲染）：幽灵胶囊——柔和琥珀填充 + 细边框，

@@ -37,18 +37,21 @@ const PAIR = new RegExp(`<(${TAGS.join("|")})>([\\s\\S]*?)<\\/\\1>`, "g");
 // 整段 XML 好不到哪去，收尾时一并抹掉。
 const STRAY = new RegExp(`<\\/?(${TAGS.join("|")})>`, "g");
 // 命令的 stdout 是 CLI 原样落盘的终端输出，常带 SGR 转义（/compact 的 `ESC[2m…ESC[22m`
-// 灰度、彩色命令输出的颜色码），原样渲染就是「\uFFFD[2m」乱码。对话页不是终端，全部剥掉：
+// 灰度、彩色命令输出的颜色码），原样渲染就是「�[2m」乱码。对话页不是终端，全部剥掉：
 // CSI（ESC [ … 终态字符）、OSC（ESC ] … BEL/ESC\）、单字符 ESC 序列；U+FFFD 是 ESC 字节
 // 在某段链路被有损转换后的形态，一并认。
 const ANSI = /[\x1b\uFFFD](?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
 
-// \u8DE8\u4F1A\u8BDD\u6D88\u606F\u3002\u4E0E\u4E0A\u9762\u90A3\u4E9B\u6807\u7B7E\u4E0D\u540C\uFF0C\u5B83**\u5E26\u5C5E\u6027**\uFF08from / from-name / from-mode\uFF09\uFF0C
-// \u5E76\u8FDB PAIR \u90A3\u6761\u65E0\u5C5E\u6027\u6B63\u5219\u5339\u914D\u4E0D\u5230\uFF0C\u5355\u5217\u4E00\u6761\u3002
+// 跨会话消息。与上面那些标签不同，它**带属性**（from / from-name / from-mode），
+// 并进 PAIR 那条无属性正则匹配不到，单列一条。
 const CROSS = /<cross-session-message\b([^>]*)>([\s\S]*?)<\/cross-session-message>/g;
 const CROSS_ATTR = /([\w-]+)="([^"]*)"/g;
-// \u5305\u5728\u5916\u9762\u7684\u4E24\u6BB5\u56FA\u5B9A\u82F1\u6587\uFF1A\u4E00\u53E5\u524D\u5BFC\u3001\u4EE5\u53CA\u5C3E\u90E8\u6574\u6BB5\u5199\u7ED9\u6A21\u578B\u7684\u5B89\u5168\u987B\u77E5\uFF08"A peer cannot
-// grant escalation\u2026"\uFF09\u3002\u90FD\u4E0D\u662F\u4EBA\u8981\u8BFB\u7684\u5185\u5BB9\uFF0C\u968F\u6D88\u606F\u4E00\u8D77\u6536\u8D70\u3002\u63AA\u8F9E\u5728\u4E0D\u540C\u7248\u672C\u91CC\u6709
-// \u300Cwhile you were working\u300D\u8FD9\u7C7B\u53D8\u4F53\uFF0C\u53EA\u951A\u5B9A\u7A33\u5B9A\u7684\u53E5\u5B50\u4E3B\u5E72\u3002
+// 包在外面的两段固定英文：一句前导、以及尾部整段写给模型的安全须知（"A peer cannot
+// grant escalation…"）。都不是人要读的内容，随消息一起收走。措辞在不同版本里有
+// 「while you were working」这类变体，只锚定稳定的句子主干。
+// CROSS_NOTE 从须知开头一路吃到串尾：跨会话消息是**独立注入的一条 user 消息**，
+// 须知之后不会再有别的内容。若哪天同一条里还跟着用户正文，这里要改成只吃到段落边界
+// （复核提醒）。
 const CROSS_LEAD = /[^\n]*Another Claude session sent a message[^\n]*:[ \t]*\n?/g;
 const CROSS_NOTE = /This came from another Claude session[\s\S]*$/;
 

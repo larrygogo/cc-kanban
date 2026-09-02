@@ -10,9 +10,11 @@ import {
   renameProfile,
   deleteProfile,
   mergeProfileIntoDefault,
+  availableTerminals,
   type AgentId,
   type AgentDescriptor,
   type ProfileView,
+  type ResumeTerminal,
   type Settings,
 } from "../../api";
 import {
@@ -238,6 +240,9 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
   const [addingPath, setAddingPath] = useState(false);
   const [pathMsg, setPathMsg] = useState<string | null>(null);
   const [hooksStatus, setHooksStatus] = useState<HooksStatus | null>(null);
+  // 本机实际可用的终端（后端探测）。只用来判「存值还算不算数」，不参与选择。
+  const [availTerms, setAvailTerms] = useState<ResumeTerminal[] | null>(null);
+  useEffect(() => { availableTerminals().then(setAvailTerms).catch(() => setAvailTerms([])); }, []);
   const [repairingHooks, setRepairingHooks] = useState(false);
   const [repairMsg, setRepairMsg] = useState<string | null>(null);
   const loginBusy = loginState?.phase === "pending";
@@ -254,7 +259,11 @@ function ProviderCard({ provider, name, installed, supportsAccount, supportsApiK
   // wt 装没装，那就不猜终端名，退回不带名字的等待文案。
   const macOnlyTerminals = new Set(["terminal", "iterm", "ghostty"]);
   const termKey = settings?.resume_terminal;
-  const loginTerm = termKey && !(isWindows() && macOnlyTerminals.has(termKey))
+  // 存值还得**当前这台机器上真的装着**才敢念它的名字：选过 wezterm 之后把它卸了，
+  // 后端会回退到 wt/PowerShell，界面却还在说「已在 WezTerm 打开」（复核指出的小遗留）。
+  // availTerms 未加载完（null）时按「不确定」处理，不猜。
+  const termInstalled = availTerms === null ? false : availTerms.some((term) => term === termKey);
+  const loginTerm = termKey && termInstalled && !(isWindows() && macOnlyTerminals.has(termKey))
     ? loginTermLabels[termKey] ?? null
     : null;
   const loginMsg = loginState?.phase === "pending"
@@ -1341,6 +1350,12 @@ export function AccountSection() {
         </div>
       )}
       <div className="account-agent-switch">
+        {/* 7S-4 尾：账号分区一次只渲染**当前** agent 的卡，别家的名字在 DOM 里根本不存在，
+            于是搜「codex」时整个分区被判为零命中、连同切换器一起隐藏——有需求却没结果也
+            没入口（复核指出上一版只解决了「分区已可见时切换器被藏」）。把全部 agent 名
+            作为一行可搜索但视觉隐藏的文本挂进来：命中即保住分区，用户在切换器里切过去。
+            用 .row 是因为设置搜索的行级过滤只认这个类（见 searchFilter 的 FILTER_ROW）。 */}
+        <div className="row chat-sronly" aria-hidden="true">{list.map((a) => a.display_name).join(" ")}</div>
         <Dropdown
           value={eff}
           options={list.map((a) => {
@@ -1356,7 +1371,9 @@ export function AccountSection() {
             // 后台安装中的在标签上注明——安装态在页面级，切去看别的 agent 也不会丢。
             const installing = installOperations.states.get(a.id)?.phase === "installing";
             const label = installing ? `${a.display_name} · ${t.account.installing}` : a.display_name;
-            return { value: a.id, label, icon, muted: !a.installed };
+            // 7G-7 尾：淡化只剩图标之后，「为什么这条是灰的」没有任何文字交代。
+            // 用现成的 sub 槽写明「未安装」——它是安装入口，不是禁用项（复核建议）。
+            return { value: a.id, label, icon, muted: !a.installed, sub: a.installed || installing ? undefined : t.account.notInstalled };
           })}
           onChange={pickAgent}
         />

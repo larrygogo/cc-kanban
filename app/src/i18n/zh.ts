@@ -38,7 +38,7 @@ export const zh = {
     updateAvailable: "有新版本",
     // 下载中/已就绪各自成句（7S-3）：等和点是两件事。
     updateDownloading: "正在下载新版本",
-    updateReady: "新版本已就绪，可安装",
+    updateReady: "更新已下载，可安装",
     search: "搜索会话",
     searchPlaceholder: "搜索标题 / 仓库 / 便签…",
     searchClose: "关闭搜索",
@@ -320,7 +320,6 @@ export const zh = {
     approvalPending: "待批准",
     questionTitle: "Agent 正在等待你的回答",
     questionPending: "待回答",
-    answerInTerminal: "去终端作答",
     questionFormLoading: "点选答案，终端表单就绪后自动作答",
     queuedAnswerHint: (label: string) => `已选「${label}」，表单就绪后自动作答`,
     questionExternalHint: "请回到运行它的终端作答，完成后本卡自动关闭",
@@ -359,7 +358,6 @@ export const zh = {
     // 倒计时归零到后端结算事件到达之间的一拍空窗：徽章切这句，不留定格的 0:00。
     // 审批卡与题面卡共用（回落语义相同）。
     approvalTimedOut: "已超时，回落终端处理中",
-    openTerminal: "打开终端",
     // 切到终端页的按钮一律用这个标签（7G-9：此前四处四种说法）。
     goTerminal: "去终端页",
     close: "关闭",
@@ -503,7 +501,7 @@ export const zh = {
     terminalPromptConfirm: "确认",
     terminalPromptCancel: "取消 / 返回",
     // 「取消」实发 Esc 的后果说明：与零副作用的「仅收起」是两回事，必须对用户说出来。
-    terminalPromptCancelTip: "向终端发送 Esc，可能打断正在执行的回合",
+    terminalPromptCancelTip: "向终端发送 Esc，可能中断正在执行的回合",
     sidebarTitle: "会话",
     sidebarFilterTip: "筛选与分组",
     sidebarFilterDir: "目录",
@@ -1024,7 +1022,7 @@ export const zh = {
     stepOf: (i: number, n: number) => `第 ${i} 步，共 ${n} 步`,
     welcome: {
       title: "欢迎使用 Meowo",
-      desc: "常驻桌面贴纸，汇总 Claude Code、Codex 等会话进度。谁在跑、谁在等待输入，一眼可见。",
+      desc: "常驻桌面贴纸，汇总各 CLI 的会话进度。谁在跑、谁在等待输入，一眼可见。",
     },
     // 看板不会自己变出会话：得先装 agent 并登录。缺了这一步，用户走完引导面对的还是空看板。
     connect: {
@@ -1040,7 +1038,7 @@ export const zh = {
     progress: {
       title: "Meowo 如何读到进度",
       points: [
-        "Meowo 会在各 CLI 的配置文件（如 ~/.claude/settings.json）里写入接入项，用来上报会话状态，其余配置原样保留。",
+        "Meowo 会在各 CLI 的配置文件里写入接入项（如 ~/.claude/settings.json），用来上报会话状态。其余配置原样保留。",
         "首次写入前自动备份原文件（同目录的 .cckb-bak 文件）。",
         "不再使用时，删掉配置里的接入项，或用 .cckb-bak 备份还原。",
         "首次启动会把最近 7 天的历史会话只读导入看板，不改动原数据。",

@@ -4,7 +4,7 @@
 // 顺序要害:markRemoteUi + installRemoteTransport 必须先于任何会 invoke 的组件求值。故:
 //  - 这两个副作用在模块体最早期同步执行(它们的 import 无副作用);
 //  - ChatWindow / NewSessionPanel 用 React.lazy 延迟到渲染期加载,那时桥早已就位。
-import React from "react";
+import React, { useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import { markRemoteUi, REMOTE_SETTINGS_EVENT, SELECT_SESSION_EVENT } from "../remoteMode";
 import { installRemoteTransport, NEW_SESSION_EVENT, getToken } from "./transport";
@@ -112,6 +112,14 @@ function RemoteApp() {
 
 /// 7M-1：ChatWindow 那个 chunk 有 1.2MB,走 Tailscale 中继要好几秒。fallback 是 null 时
 /// 这几秒是纯白屏——在手机上和「点了没反应/连挂了」无法区分。给一行同底色的加载态。
+/// 页面标题跟随界面语言（7M-7 尾：mobile.html 里硬编码「Meowo 远程」，英文界面下
+/// 浏览器标签页仍是中文）。首帧的静态 title 由 mobile.html 给，这里在语言就绪后改写。
+function RemoteTitle() {
+  const t = useT();
+  useEffect(() => { document.title = t.remote.gateTitle; }, [t]);
+  return null;
+}
+
 function RemoteBoot() {
   const t = useT();
   return <div className="remote-boot" role="status">{t.remote.gateLoading}</div>;
@@ -125,6 +133,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           <RemoteApp />
         </TokenGate>
       </React.Suspense>
+      <RemoteTitle />
       <TooltipLayer />
     </I18nProvider>
   </React.StrictMode>,
