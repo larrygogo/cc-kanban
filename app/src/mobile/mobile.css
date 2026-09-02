@@ -13,19 +13,32 @@ body {
 }
 
 body.remote-ui {
-  /* 移动端浏览器地址栏收放会改 vh;用 dvh 让根容器贴合实际可视高度,避免底部输入框被顶栏截。 */
-  height: 100dvh;
+  /* 移动端浏览器地址栏收放会改 vh;用 dvh 让根容器贴合实际可视高度,避免底部输入框被顶栏截。
+     --app-height 由 main.tsx 的 visualViewport 观察者写入(7M-3):键盘弹出时 dvh 不变、
+     iOS 却把页面顶走,只有可视视口高度能救 composer。拿不到 API 时回落 dvh。 */
+  height: var(--app-height, 100dvh);
   overflow: hidden;
   -webkit-tap-highlight-color: transparent;
 }
 
 body.remote-ui .chat-window {
-  height: 100dvh;
+  height: var(--app-height, 100dvh);
 }
 
-/* 顶栏拖拽区在真浏览器里无意义(没有可拖的窗口),但仍占 data-tauri-drag-region 的高度做安全区留白。 */
+/* 顶栏拖拽区在真浏览器里无意义(没有可拖的窗口),但仍占 data-tauri-drag-region 的高度做安全区留白。
+   7M-2:桌面规则是 height:42px 定高,加上 padding-top 后刘海机(safe-area 44~59px)的内容盒
+   被吃成负数,☰ 直接溢出压到下面的标题行。改 min-height 把安全区**加**在 42px 之外。
+   窄窗抽屉头(.chat-sidebar-overlay-head)从窗口最顶展开,同样定高 42px,同病同治。 */
 body.remote-ui .chat-topbar {
-  padding-top: env(safe-area-inset-top, 0);
+  height: auto;
+  min-height: calc(42px + env(safe-area-inset-top, 0px));
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+body.remote-ui .chat-sidebar-overlay-head {
+  height: auto;
+  min-height: calc(42px + env(safe-area-inset-top, 0px));
+  padding-top: env(safe-area-inset-top, 0px);
 }
 
 /* 触屏专属调优。远程页也会被桌面浏览器打开(同一局域网的另一台电脑),鼠标环境必须
@@ -50,15 +63,20 @@ body.remote-ui .chat-topbar {
     user-select: text;
   }
 
-  /* 输入框跟随移动字号标尺(此前恒 16px,搜索框比它筛出的列表标题还大 4px)。
-     iOS 的「聚焦 <16px 输入框自动放大整页」由 viewport meta 的 maximum-scale=1
-     压制(mobile.html),不需要字号侧再防——曾试过 :focus 抬 16px 的方案,但 WebKit
-     的判定时机存疑且聚焦跳字号是确定代价,撤销(自审 M8)。 */
-  body.remote-ui .chat-compose textarea { font-size: 14px; }
-  body.remote-ui .chat-sidebar-search input { font-size: 13px; }
-  body.remote-ui .chat-sidebar-edit { font-size: 13px; }
-  body.remote-ui .ns-input { font-size: 14px; }
-  body.remote-ui .chat-approval-custom input { font-size: 13px; }
+  /* 输入控件一律 16px(7M-11)。此前压到 13/14px 求版式协调,靠 viewport 的
+     maximum-scale=1 压住 iOS 的「聚焦小字号输入框自动放大整页」——但那条 meta 同时
+     禁掉了双指缩放,是无障碍硬伤,已去掉。两害相权:输入框略大于列表标题,换回可缩放
+     的页面 + 聚焦不跳字号。(自审 M8 记的是 :focus 抬 16px 的方案不可行,恒 16px 不在其列。) */
+  body.remote-ui .chat-compose textarea,
+  body.remote-ui .chat-sidebar-search input,
+  body.remote-ui .chat-sidebar-edit,
+  body.remote-ui .ns-input { font-size: 16px; }
+
+  /* 触屏上禁掉双击缩放的 300ms 等待(缩放本身仍由双指手势提供)。 */
+  body.remote-ui button,
+  body.remote-ui [role="button"] { touch-action: manipulation; }
+  /* 问题卡的自定义回答框同样钉 16px：iOS 对 <16px 的输入框聚焦即整页自动放大（7M-11）。 */
+  body.remote-ui .chat-approval-custom input { font-size: 16px; }
 
   /* 消息正文/代码块同样放开:HTTP 非 secure context 下 navigator.clipboard 不存在,
      复制按钮走 execCommand 回退,手动框选是最后一条兜底——全禁了内容一个字拿不走。 */
@@ -88,6 +106,20 @@ body.remote-ui .chat-topbar {
     content: "";
     position: absolute;
     inset: -6px;
+  }
+
+  /* 7M-9：这四类按钮视觉尺寸只有 20~26px，+6px 外扩后仍不到 44px 的触控下限，而
+     误点代价都不小——侧栏 ⋯ 是远程端唯一的星标/重命名/归档入口（点偏一格直接跳去
+     另一个会话）、审批卡的收起 ✕ 紧挨着「拒绝」。单独扩到 -12px。 */
+  body.remote-ui .chat-sidebar-item-menu::after,
+  body.remote-ui .chat-attention-dismiss::after,
+  body.remote-ui .chat-sidebar-search-x::after,
+  body.remote-ui .chat-approval-actions .is-deny::after,
+  /* 复核补：这三个也在 44px 以下——进度面板入口 38px、侧栏开关 40px、
+     搜索清除 41px（前两个是远程端的常用入口，点偏就是另一个动作）。 */
+  body.remote-ui .chat-todo-btn::after,
+  body.remote-ui .chat-sidebar-open::after {
+    inset: -12px;
   }
 
   /* ── 移动端字号标尺(按 2026-08 全量清单逐类抬升) ──
@@ -189,15 +221,30 @@ body.remote-ui .chat-topbar {
   body.remote-ui .ns-profile-hint { font-size: 12px; }
 }
 
-/* 配对闸门(TokenGate)。首屏唯一界面,居中一张卡。 */
+/* 懒加载 ChatWindow 期间的占位(7M-1)。整屏同底色 + 一行说明:1.2MB 的 chunk 走
+   中继要好几秒,白屏在手机上读起来就是「挂了」。 */
+.remote-boot {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--cc-window-bg);
+  color: var(--cc-text-dim);
+  font-size: 14px;
+}
+
+/* 配对闸门(TokenGate)。首屏唯一界面,居中一张卡。
+   7M-10:此前写的是 --bg/--fg/--panel/--border/--accent——全仓没有这套 token,
+   每一处都在吃兜底字面量,于是配对页恒深色、浅色主题下与之后的界面撞色。改吃 --cc-*。 */
 .remote-gate {
   position: fixed;
   inset: 0;
   display: grid;
   place-items: center;
   padding: 24px;
-  background: var(--bg, #16171b);
-  color: var(--fg, #e7e7ea);
+  background: var(--cc-window-bg);
+  color: var(--cc-text);
 }
 
 .remote-gate-card {
@@ -221,7 +268,7 @@ body.remote-ui .chat-topbar {
 
 .remote-gate-card .remote-gate-err {
   opacity: 1;
-  color: #e5484d;
+  color: var(--cc-err);
   font-size: 13px;
 }
 
@@ -229,8 +276,8 @@ body.remote-ui .chat-topbar {
   height: 44px;
   padding: 0 12px;
   border-radius: 8px;
-  border: 1px solid var(--border, #33343a);
-  background: var(--panel, #1e1f24);
+  border: 1px solid var(--cc-border);
+  background: var(--cc-surface);
   color: inherit;
   font-size: 16px;
 }
@@ -239,8 +286,8 @@ body.remote-ui .chat-topbar {
   height: 44px;
   border: none;
   border-radius: 8px;
-  background: var(--accent, #6b8afd);
-  color: #fff;
+  background: var(--cc-accent);
+  color: var(--cc-on-accent);
   font-size: 15px;
   font-weight: 600;
 }

@@ -23,6 +23,10 @@ export type QuestionPanelsProps = { items: StructuredQuestion[] } & (
       answers: ReadonlyMap<number, QuestionAnswerDraft>;
       onSelect: (questionIndex: number, label: string) => void;
       onCustom: (questionIndex: number, text: string) => void;
+      /// 自定义回答框里按 Enter 直接提交（7C-8）。调用方自带「答完了没」的守卫，
+      /// 这里只负责把回车转过去。屏幕识别卡的同款输入框早就是回车即提交，
+      /// 唯独这张作答卡的回车是空操作。
+      onSubmit?: () => void;
     }
 );
 
@@ -116,6 +120,12 @@ export function QuestionPanels(props: QuestionPanelsProps) {
                 value={draft.custom}
                 onChange={(event) => props.onCustom(index, event.target.value)}
                 placeholder={t.chat.customAnswerPlaceholder}
+                // IME 合成中的 Enter 是选词，不是提交（同 composer 与新建面板的守卫）。
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+                  event.preventDefault();
+                  props.onSubmit?.();
+                }}
               />
             </div>
           </>

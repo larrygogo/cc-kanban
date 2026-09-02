@@ -129,14 +129,20 @@ pub(crate) async fn add_session_extra_dir(
             // blocked)时,注入串尾的 \r 会按在模态的高亮项上——等于替用户批准一条
             // 从未过目的命令。此时只落库,恢复回放兜底。
             //
-            // 路径恒加引号(Windows 路径不含引号字符):不加的话含空格路径在 CLI 的
-            // slash 参数解析处断开,进程实际没拿到访问权而库里已记,UI 会说谎。
+            // 路径**不加引号**。曾经恒加,理由写的是「不加的话含空格路径会在 CLI 的
+            // slash 参数解析处断开」——那是个没验证过的假设,实拍反证(用户截图):
+            // claude 的 /add-dir 不做 shell 式引号剥离,把引号当成路径字面量的一部分,
+            // 报错原文形如
+            //   Path C:\...\xbot-admin-front"C:\...\xbot-dashboard" was not found.
+            // 引号还让路径不再以盘符开头、于是被当成相对路径拼到了 cwd 后面。同一条
+            // 报错也说明它取的是「命令后的整行」而不是按空格切分,所以裸路径对含空格的
+            // 目录同样成立(原假设担心的那种断开不存在)。
             // "/add-dir" 是 claude 的运行时命令;将来第二个声明 extra_dir_flag 的
             // agent 落地时,运行时命令串也要纳入插件声明,不得沿用这里的字面量。
             let modal = ptys.approval_session_ids().contains(&session_id)
                 || ptys.screen_states().get(&session_id).is_some_and(|sight| sight.state == "blocked");
             if !modal {
-                let _ = ptys.write(session_id, format!("/add-dir \"{d}\"\r").as_bytes());
+                let _ = ptys.write(session_id, format!("/add-dir {d}\r").as_bytes());
             }
             super::watch::emit_board_changed(&app, "extra_dirs");
         }

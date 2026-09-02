@@ -19,6 +19,19 @@ type ErrorEntry = {
 
 /** 按声明顺序匹配:精确项放前、长前缀放短前缀前。导出仅供对账测试(errors.parity.test.ts)。 */
 export const ENTRIES: ErrorEntry[] = [
+  // ── 远程桥(手机端) ──
+  // 7M-7：远程传输层的错误此前是硬编码中文串、直接上屏，既不进这张表也不双语。
+  // 改成 `remote/<code>` 结构化 reason（与后端「模块/代码」同规），文案落回这里。
+  { m: "remote/timeout", exact: true, zh: "与桌面端失去连接，正在重试", en: "Lost connection to the desktop app; retrying" },
+  { m: "remote/unauthorized", exact: true, zh: "配对已失效，请重新扫码", en: "Pairing expired; scan the code again" },
+  { m: "remote/not_json", exact: true, zh: "响应异常，网络可能被中间设备拦截", en: "Unexpected response; the network may be intercepting requests" },
+  // tail：状态码与命令名是排障的全部线索，译文吞掉它等于比改前更难查（复核指出）。
+  { m: "remote/bad_payload", tail: true, zh: "远程请求参数不合法", en: "Invalid request payload for the remote bridge" },
+  // 桥自身（remote.rs）产生的 reason，与上面前端侧的同一命名空间。
+  { m: "remote/unknown_command", exact: true, zh: "这个操作在手机端不可用", en: "This action isn't available from the phone" },
+  { m: "remote/not_ready", exact: true, zh: "远程服务还没就绪，请稍后重试", en: "The remote service isn't ready yet; try again shortly" },
+  { m: "remote/bad_args", tail: true, zh: "远程请求参数不合法", en: "Invalid arguments for the remote request" },
+  { m: "remote/http_", tail: true, zh: "远程请求失败", en: "Remote request failed" },
   // ── 会话 / 终端 ──
   { m: "无效 session_id", exact: true, zh: "会话已失效，请重新打开", en: "Session is no longer valid; reopen it" },
   { m: "会话不存在", exact: true, zh: "会话不存在", en: "Session not found" },

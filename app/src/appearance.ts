@@ -70,6 +70,11 @@ function apply(a: Appearance): void {
   const root = document.documentElement;
   const theme = resolveTheme(a.theme);
   root.setAttribute("data-theme", theme);
+  // 手机浏览器的状态栏/地址栏底色跟随主题(7M-10)。只有 mobile.html 挂了这个 meta,
+  // 桌面三个入口查不到、直接跳过。色值与 styles.css 的 --cc-window-bg 两档一致
+  // (meta 的 content 吃不了 var())。
+  const themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (themeColor) themeColor.content = theme === "light" ? "#f6f6f7" : "#1c1c1e";
   // 贴纸风格（立体感/扁平）：CSS 用 [data-sticker-style="flat"] 抹平所有立体效果。
   root.setAttribute("data-sticker-style", a.sticker_style);
   // 贴纸底色：内联设 --cc-bg-rgb（天然盖过 :root[data-theme=light] 的默认值），随生效主题取深/浅一套。

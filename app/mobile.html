@@ -1,14 +1,21 @@
 <!doctype html>
-<!-- 手机远程 UI 入口。与桌面 index.html 分家:viewport 禁缩放(触控界面自控尺寸)、
+<!-- 手机远程 UI 入口。与桌面 index.html 分家:viewport 允许双指缩放(输入控件钉 16px 防 iOS 聚焦自动放大,7M-11)、
      首帧按缓存定 lang(同 index.html 的内联判定,读屏发音)。真机在浏览器里跑,无 Tauri runtime。 -->
 <html>
   <head>
     <meta charset="UTF-8" />
+    <!-- 7M-11:去掉 maximum-scale=1。禁双指缩放是无障碍硬伤(视力受限用户没有替代手段),
+         与 mobile.css 里「放大交给系统」的注释也自相矛盾。iOS 聚焦小字号输入框会自动放大
+         整页,靠输入控件钉 16px 压制(mobile.css),不再靠禁缩放。
+         interactive-widget=resizes-content:安卓侧软键盘弹出时缩内容而非顶视口。 -->
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
     />
     <meta name="color-scheme" content="dark light" />
+    <!-- 手机浏览器状态栏/地址栏底色。首帧给深色默认值,主题解析后由 appearance.ts 改写
+         (7M-10:此前完全没有,配对页与状态栏之间一条撞色边)。 -->
+    <meta name="theme-color" content="#1c1c1e" />
     <title>Meowo 远程</title>
     <script>
       // 与 src/i18n/index.tsx 的 readCache/resolveLang 同一判定,改一处要同步另一处。

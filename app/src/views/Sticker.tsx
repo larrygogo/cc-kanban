@@ -9,6 +9,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { folderName } from "../paths";
 import {
   LiveSessionCounts,
   Settings,
@@ -143,6 +144,7 @@ export function Sticker({
   loadMore,
   loadingMore,
   hasUpdate,
+  updateStatus,
   search,
   onSearchChange,
   onArchiveOptimistic,
@@ -165,6 +167,8 @@ export function Sticker({
   loadMore?: () => void;
   loadingMore?: boolean;
   hasUpdate?: boolean;
+  /// 更新阶段（available / downloading / ready）：红点按钮的提示按阶段分（7S-3）。
+  updateStatus?: string;
   search?: string;
   onSearchChange?: (q: string) => void;
   /** 归档请求已发出（未确认）：父层可据此乐观摘掉卡片。 */
@@ -213,6 +217,8 @@ export function Sticker({
   // 会话搜索：激活时底栏整条变成输入框；搜索词经 onSearchChange 交给父组件下沉到后端
   // （当前 tab 内全库搜，覆盖未加载数据），本组件不再持有搜索词、不做客户端过滤。
   const [searchOpen, setSearchOpen] = useState(false);
+  // 搜索框实体（Ctrl+F 在「已开」时也要能把焦点抢回来，见窗口级快捷键）。
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const q = search ?? "";
   const closeSearch = () => {
     setSearchOpen(false);
@@ -429,7 +435,9 @@ export function Sticker({
   const pushArchivedToast = (item: Item) => {
     archiveToastIdRef.current += 1;
     const key = archiveToastIdRef.current;
-    setArchivedToasts((cur) => [...cur, { key, item }]);
+    // 7B-9：连续归档时曾无上限堆叠，四条就盖住半张贴纸。只留最近两条——更早的那次
+    // 撤销窗口本来也快到点了，超时清理由各自的定时器照旧负责（找不到即空转）。
+    setArchivedToasts((cur) => [...cur, { key, item }].slice(-2));
     const timer = window.setTimeout(() => {
       archiveToastTimersRef.current.delete(timer);
       setArchivedToasts((cur) => cur.filter((toast) => toast.key !== key));
@@ -464,6 +472,11 @@ export function Sticker({
       if ((e.ctrlKey || e.metaKey) && !e.altKey && e.code === "KeyF") {
         e.preventDefault();
         setSearchOpen(true);
+        // 7B-7：此前只处理「未开 → 开」（靠 input 的 autoFocus 拿焦点）。搜索框已经开着、
+        // 焦点在卡片上时再按 Ctrl+F 完全没反应——用户的本意是「回到搜索框改词」。
+        // 已开时显式 focus + 全选：再按一次即可整段重输。
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
         return;
       }
       if ((e.ctrlKey || e.metaKey) && !e.altKey && e.code === "KeyN") {
@@ -703,6 +716,17 @@ export function Sticker({
   }, [shownLive, switching]);
   const shown = switching ? frozenShownRef.current : shownLive;
 
+  // 7B-3：「全部」tab 里在线会话与历史会话之间此前没有任何分界，20+ 张卡滚到中段
+  // 分不清「这一片还是活的吗」。connected-first 是全局不变量（App 的分区合并），
+  // 但星标浮顶会把断开的星标卡拎到最前——所以起点取**最后一张 connected 之后**，
+  // 而不是第一张断开的卡。其余 tab（运行中/待交互）本身就是同质列表，不插。
+  const historyStart = useMemo(() => {
+    if (tab !== "all" || q.trim()) return -1;
+    let last = -1;
+    for (let i = 0; i < shown.length; i += 1) if (shown[i].connected) last = i;
+    return last >= 0 && last + 1 < shown.length ? last + 1 : -1;
+  }, [shown, tab, q]);
+
   // 贴纸会话虚拟列表：只挂载可视区 + overscan 内的卡片，避免大量 DOM。
   // estimateSize 分档：普通卡约 76–84px；带便签的卡多一块 3 行 clamp 的便签块（约 +60px），
   // 统一估 82 与实测差近一倍是滚动抽搐的来源之一。实际高度由 measureElement 动态测量。
@@ -851,6 +875,8 @@ export function Sticker({
   // 避免缓存晚到覆盖更新的联网值)，再对有账号且 usage_supported 的 provider 定时刷新（5 min）。
   // usageMap 只存原始 ProviderUsage，label 在渲染时取当前语言，切换即时生效。
   const [usageMap, setUsageMap] = useState<Record<string, ProviderUsage>>({});
+  // 各 provider 上次成功刷新的时刻 + 最近一轮是否失败（7B-8 的陈旧标记）。
+  const [usageMeta, setUsageMeta] = useState<Record<string, { at: number; stale: boolean }>>({});
   useEffect(() => {
     let cancelled = false;
     const timers: number[] = [];
@@ -866,13 +892,33 @@ export function Sticker({
           });
           return next;
         });
+        // 7B-8 补齐（复核指出）：这里预填的是**账号快照里的**用量，它本身就可能是几分钟
+        // 前的。不给它写 meta 的话，首轮刷新失败时 usageMeta 空 → 陈旧标记不生效，
+        // 屏上是一份不知多久以前的读数却显示得像新的。按「拿到的时刻」记，且标为待刷新。
+        setUsageMeta((cur) => {
+          const next = { ...cur };
+          ps.forEach((p) => {
+            if (p.relay_enabled) delete next[p.provider];
+            else if (!next[p.provider] && p.usage) next[p.provider] = { at: Date.now(), stale: false };
+          });
+          return next;
+        });
         // 对有账号且支持用量的 provider：立即刷新 + 定时刷新
         ps.filter((p) => p.account != null && p.usage_supported && !p.relay_enabled).forEach(({ provider }) => {
           const doRefresh = () => {
             if (cancelled) return;
             refreshUsage(provider)
-              .then((u) => { if (!cancelled) setUsageMap((m) => ({ ...m, [provider]: u })); })
-              .catch(() => {}); // USAGE_UNSUPPORTED / 网络错误：保持无用量，不显示该行
+              .then((u) => {
+                if (cancelled) return;
+                setUsageMap((m) => ({ ...m, [provider]: u }));
+                setUsageMeta((m) => ({ ...m, [provider]: { at: Date.now(), stale: false } }));
+              })
+              // USAGE_UNSUPPORTED / 网络错误：保持无用量，不显示该行。但**已经显示过**的
+              // 读数会原样留在屏上（5 分钟一轮，失败即定格），标记 stale 让它降饱和（7B-8）。
+              .catch(() => {
+                if (cancelled) return;
+                setUsageMeta((m) => (m[provider] ? { ...m, [provider]: { ...m[provider], stale: true } } : m));
+              });
           };
           doRefresh();
           timers.push(window.setInterval(doRefresh, 5 * 60_000));
@@ -887,6 +933,10 @@ export function Sticker({
   // usageMap 与 quotaProviders 直接传入 UsageScreen，不再在父层预处理为行数组。
   // 交叉过滤：只显示既在配额设置里、又已装的 provider（availAgents 为空=未加载时不过滤，避免闪空）
   const shownQuota = quotaProviders.filter((p) => availAgents.length === 0 || availAgents.includes(p));
+  // 更新红点的提示按阶段分（7S-3）：available=有新版本、downloading=正在下载、ready=可安装。
+  const updateLabel = updateStatus === "downloading" ? t.sticker.updateDownloading
+    : updateStatus === "ready" ? t.sticker.updateReady
+    : t.sticker.updateAvailable;
 
   const syncSb = () => {
     const el = scrollRef.current;
@@ -1014,6 +1064,15 @@ export function Sticker({
           })}
         </div>
       </div>
+      {/* 7B-2：刷新失败但手里还有缓存列表。此前 loadError 只在**空列表**分支上屏，非空时
+          board-changed 刷新失败零提示——状态环、时间全是旧值，看不出已经不新鲜了。
+          （U1-13 给了对话窗细横幅，看板这半边没跟上。） */}
+      {loadError && shown.length > 0 && (
+        <div className="stk-stale" role="status">
+          <span>{t.sticker.staleNotice}</span>
+          <button type="button" onClick={() => onRetry?.()}>{t.sticker.retry}</button>
+        </div>
+      )}
       <div
         className={"stk-scroll" + (switching ? " is-switching" : "") + (edge.top ? " fade-top" : "") + (edge.bottom ? " fade-bottom" : "")}
         ref={scrollRef}
@@ -1027,6 +1086,11 @@ export function Sticker({
         {shown.length === 0 ? (
           initialLoading ? (
             // 冷启动首次加载：先给加载占位，不闪「还没有会话」假空态。
+            <div className="stk-loading">{t.sticker.loading}</div>
+          ) : switching ? (
+            // 7B-1：切 tab 的首页请求在途。B-4 的冻结只保住**非空**旧列表（frozenShownRef
+            // 为空时这里照样落到 EmptyState）——从空的「运行中」切「全部」，请求还没回来
+            // 就先闪一屏「还没有会话 + 新建」，等真数据到了又整屏换掉。在途一律给加载占位。
             <div className="stk-loading">{t.sticker.loading}</div>
           ) : loadError ? (
             // 首页加载失败：如实告知并可重试，不伪装成空看板。
@@ -1094,7 +1158,7 @@ export function Sticker({
                             </span>
                             {l.cwd && (
                               <span className="stk-repo" data-tip={l.cwd}>
-                                {l.cwd.split(/[\\/]/).filter(Boolean).pop() ?? l.cwd}
+                                {folderName(l.cwd)}
                               </span>
                             )}
                           </div>
@@ -1174,6 +1238,11 @@ export function Sticker({
                     transform: `translateY(${virtualItem.start}px)`,
                   }}
                 >
+                  {/* 历史会话分界（7B-3）：挂在分界后第一张卡的容器里，高度随
+                      measureElement 一并测到，不必给虚拟列表新增一种条目类型。 */}
+                  {virtualItem.index === historyStart && (
+                    <div className="stk-history-sep">{t.sticker.historyDivider(shown.length - historyStart)}</div>
+                  )}
                   <div
                     className={"stk-card" + (isStarred(l) ? " is-star" : "") + (openBusyIds.has(l.session.id) ? " is-opening" : "")}
                     role="button"
@@ -1221,7 +1290,10 @@ export function Sticker({
                         setNotingId(null);
                         return;
                       }
-                      if (buttonMode) return;
+                      // 7B-4：按钮模式此前在这里直接 return——卡片仍是可聚焦的 role=button，
+                      // 键盘用户 Tab 到它、按 Enter 却什么都不发生（B-11 保证了「能到达」，
+                      // 没覆盖「到达之后主键有反应」）。按钮模式防的是鼠标误点，键盘上的
+                      // Enter 是明确动作，照常打开。
                       openTerminal(l);
                     }}
                     onContextMenu={(e) => {
@@ -1236,7 +1308,13 @@ export function Sticker({
                     style={{ cursor: !buttonMode && canOpen(l) ? "pointer" : "default" }}
                     // 断开卡的单击不是「查看」而是拉起 CLI 进程(1~3s):后果与普遍预期不对称,
                     // tip 必须把它说出来,让「误点」发生在点击之前而不是之后。
-                    data-tip={buttonMode ? "" : l.connected ? t.sticker.openSession : l.archived ? "" : t.sticker.cardResumeTip}
+                    // 7B-5：外库/后台卡点下去只会弹一张「本窗口只读」的说明，tip 却写着
+                    // 「打开会话」——承诺与结果对不上。这两类先于 connected 判定。
+                    data-tip={buttonMode ? ""
+                      : l.foreign ? t.sticker.focusForeign
+                      : l.background ? t.sticker.focusBackground
+                      : l.connected ? t.sticker.openSession
+                      : l.archived ? "" : t.sticker.cardResumeTip}
                   >
                     <div className="stk-top">
                       <span className="stk-ind">{indicator}</span>
@@ -1328,7 +1406,7 @@ export function Sticker({
                           </span>
                           {l.cwd && (
                             <span className="stk-repo" data-tip={l.cwd}>
-                              {l.cwd.split(/[\\/]/).filter(Boolean).pop() ?? l.cwd}
+                              {folderName(l.cwd)}
                             </span>
                           )}
                           {/* 附加目录标:一个会话跨 N 仓(--add-dir),tip 列全部目录。
@@ -1364,7 +1442,7 @@ export function Sticker({
                               {l.profile_name}
                             </span>
                           )}
-                          {l.model && <span className="stk-model">{l.model}</span>}
+                          {l.model && <span className="stk-model" data-tip={l.model}>{l.model}</span>}
                         </div>
                       </div>
                     </div>
@@ -1599,6 +1677,7 @@ export function Sticker({
               <SearchIcon />
             </span>
             <input
+              ref={searchInputRef}
               className="stk-search-in"
               autoFocus
               value={q}
@@ -1621,7 +1700,7 @@ export function Sticker({
           </div>
         ) : (
           <>
-            <UsageScreen quotaProviders={shownQuota} usageMap={usageMap} />
+            <UsageScreen quotaProviders={shownQuota} usageMap={usageMap} usageMeta={usageMeta} />
             <div className="stk-bar-actions">
               {/* 对话功能关闭（轻量模式）时不渲染 chat 入口。 */}
               {chatEnabled && (
@@ -1658,8 +1737,8 @@ export function Sticker({
                 <button
                   type="button"
                   className="stk-act stk-update-act"
-                  data-tip={t.sticker.updateAvailable}
-                  aria-label={t.sticker.updateAvailable}
+                  data-tip={updateLabel}
+                  aria-label={updateLabel}
                   onClick={() => invoke("open_update_window").catch(() => {})}
                 >
                   <span className="stk-dot is-standalone" aria-hidden="true" />

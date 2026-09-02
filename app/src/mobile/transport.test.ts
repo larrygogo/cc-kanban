@@ -157,20 +157,21 @@ describe("remote transport", () => {
   it("200 + 非 JSON(网关劫持页)按错误抛,不给调用方一坨字符串", async () => {
     setToken("tok");
     mockFetch({ status: 200, body: "<html>portal</html>" });
-    await expect(invoke("get_settings", {})).rejects.toThrow(/非 JSON/);
+    // 7M-7 后错误串是结构化 reason（展示文案在 i18n/errors.ts）。
+    await expect(invoke("get_settings", {})).rejects.toThrow("remote/not_json");
   });
 
   it("非 2xx 的非 JSON 响应收敛为状态码,不把整页 HTML 抛上 UI", async () => {
     setToken("tok");
     mockFetch({ status: 500, body: "<html><body>Internal Error</body></html>" });
-    await expect(invoke("get_settings", {})).rejects.toThrow("远程请求失败(500)");
+    await expect(invoke("get_settings", {})).rejects.toThrow("remote/http_500");
   });
 
   it("数组/非对象参数在前端就拒,不发 400 去后端", async () => {
     setToken("tok");
     const fetchFn = mockFetch({ status: 200, body: "null" });
     await expect(invoke("get_chat_history", [1] as unknown as Record<string, unknown>)).rejects.toThrow(
-      "只接受对象参数",
+      "remote/bad_payload",
     );
     expect(fetchFn).not.toHaveBeenCalled();
   });

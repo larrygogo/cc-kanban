@@ -151,6 +151,14 @@ function CopyablePre({ children }: { children?: ReactNode }) {
   );
 }
 
+/// react-markdown 默认的 urlTransform 会把非 http(s)/mailto 的 src 置空（防 javascript:）。
+/// 图片降级成文件名 chip 需要**看得到原路径**，被置空就只剩一个没名字的空 chip（复核指出）。
+/// 这里放行相对路径与本地绝对路径，仍挡掉可执行 scheme——渲染层从不把它当链接点开，
+/// 只用来取末段文件名，风险面仅限于「显示一个字符串」。
+function keepUrl(url: string): string {
+  return /^\s*(javascript|data|vbscript):/i.test(url) ? "" : url;
+}
+
 const components: Components = {
   pre: ({ children }) => <CopyablePre>{children}</CopyablePre>,
   // ASCII 框图的对齐前提是「中文恰为两倍拉丁宽」，但代码字体 Consolas 没有中文字形，
@@ -174,6 +182,22 @@ const components: Components = {
     // 围栏文本以 \n 收尾（remark 保留）,高亮前剥掉,免得末尾多渲染一个空行。
     const html = cachedHighlight(text.replace(/\n$/, ""), lang);
     return <code className={className} dangerouslySetInnerHTML={{ __html: html }} />;
+  },
+  // 7C-10：markdown 里的图片此前完全没管。远端大图按原始像素铺开，把 720px 的消息列
+  // 撑出横向滚动条；本地路径/相对路径在 webview 里根本加载不到，只剩一个碎图标，
+  // 用户不知道那是什么。远端图限宽自适应，非 http 源降级成与附件同款的文件名 chip。
+  img: ({ src, alt }) => {
+    const url = typeof src === "string" ? src : "";
+    if (!/^https?:\/\//i.test(url)) {
+      const name = alt || url.split(/[\\/]/).pop() || url;
+      return (
+        <span className="chat-image-chip" data-tip={url || name}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="9" cy="10" r="1.6" /><path d="m5 17 4.5-4.5L13 16l3-3 3 4" /></svg>
+          <span>{name}</span>
+        </span>
+      );
+    }
+    return <img src={url} alt={alt ?? ""} loading="lazy" referrerPolicy="no-referrer" />;
   },
   // 链接绝不能让 webview 自己导航（这个窗口没有地址栏，跳走就回不来了）；
   // 交给后端在默认浏览器打开，scheme 校验也在后端。
@@ -204,7 +228,7 @@ const components: Components = {
  */
 export const ChatMarkdown = memo(function ChatMarkdown({ text }: { text: string }) {
   return (
-    <ReactMarkdown remarkPlugins={PLUGINS} components={components}>
+    <ReactMarkdown remarkPlugins={PLUGINS} components={components} urlTransform={keepUrl}>
       {text}
     </ReactMarkdown>
   );

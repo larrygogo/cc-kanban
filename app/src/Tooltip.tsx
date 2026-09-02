@@ -46,6 +46,12 @@ export function TooltipLayer() {
     // 悬停（mouseover）与键盘聚焦（focusin）走同一套延时显示；focusin 会冒泡，document 上能收到。
     const show = (t: EventTarget | null) => {
       const el = tipEl(t);
+      // 7G-4：悬停的元素被移除时浏览器不派发 mouseout，锚点就永远留在一个 detached
+      // 节点上，提示挂在屏幕上直到 Esc 或下一次点击（运行状态条一卸载就复现）。
+      // 每次收到指针事件都顺手核对一次锚点还在不在文档里。
+      if (anchor.current && !anchor.current.isConnected) hide();
+      // 移到了一个没有 tip 的目标上：先撤掉当前这条，别让它挂着。
+      if (!el && anchor.current) { hide(); return; }
       if (!el || el === anchor.current) return;
       anchor.current = el;
       clear();
@@ -126,6 +132,20 @@ export function TooltipLayer() {
       document.removeEventListener("mousedown", onMouseDown);
     };
   }, []);
+
+  // 7G-4 的另一半：锚点在**没有任何指针事件**的情况下被卸载（运行状态条随回合结束
+  // 消失、审批卡收起），上面那些 handler 一个都不会触发，提示就孤零零挂着。提示在场
+  // 期间轮询一下锚点是否还连在文档里——只在有提示时跑，代价可忽略。
+  useEffect(() => {
+    if (!tip) return;
+    const id = window.setInterval(() => {
+      if (anchor.current && !anchor.current.isConnected) {
+        anchor.current = null;
+        setTip(null);
+      }
+    }, 400);
+    return () => window.clearInterval(id);
+  }, [tip]);
 
   // 量好提示框尺寸后定位（useLayoutEffect 在绘制前执行，首帧即落到正确位置，无左上角闪现）：
   // 默认锚点下方居中，下方放不下且上方够则翻到上方，最后左右上下都夹在窗口内。

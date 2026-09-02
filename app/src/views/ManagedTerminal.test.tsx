@@ -37,6 +37,9 @@ const bufferType = vi.hoisted(() => ({ current: "normal" as "normal" | "alternat
 const pasteSpy = vi.hoisted(() => vi.fn());
 // terminal.scrollToBottom 的间谍（退出提示写入后必须滚底，否则上翻视口里提示在屏外）。
 const scrollToBottomSpy = vi.hoisted(() => vi.fn());
+// terminal.refresh 的间谍：切回可见时必须强制本地重画一遍（尺寸没变时后端 resize
+// 同值短路、TUI 收不到 SIGWINCH，坏画面只能靠这一下自愈）。
+const refreshSpy = vi.hoisted(() => vi.fn());
 // Shift+滚轮旁路：自定义 wheel 处理器与 scrollLines 的间谍。
 const wheelHandler = vi.hoisted(() => ({ current: null as ((event: WheelEvent) => boolean) | null }));
 const scrollLinesSpy = vi.hoisted(() => vi.fn());
@@ -95,6 +98,7 @@ vi.mock("@xterm/xterm", () => ({
     unicode = { activeVersion: "6" };
     paste = (data: string) => pasteSpy(data);
     scrollToBottom = scrollToBottomSpy;
+    refresh = (start: number, end: number) => refreshSpy(start, end);
     resize = (cols: number, rows: number) => { resizeGridSpy(cols, rows); this.cols = cols; this.rows = rows; };
   },
 }));
@@ -222,6 +226,7 @@ describe("ManagedTerminal", () => {
     document.hasFocus = () => focusState.current;
     selectAllSpy.mockReset();
     scrollToBottomSpy.mockReset();
+    refreshSpy.mockReset();
     resizeGridSpy.mockReset();
     wheelHandler.current = null;
     scrollLinesSpy.mockReset();
@@ -1198,6 +1203,25 @@ describe("ManagedTerminal", () => {
     rerender(<ManagedTerminal sessionId={163} status="running" visible={false} />);
     rerender(<ManagedTerminal sessionId={163} status="running" visible />);
     await waitFor(() => expect(invoke.mock.calls.some(([c]) => c === "resize_managed_terminal")).toBe(true));
+  });
+
+  /** 切回终端页必须**本地**重画一遍（实拍：底部输入框边框与状态行缺一截，只剩半个
+   *  字符，拖一下窗口才好）。上面那发 resize 指望的是「TUI 收到 SIGWINCH 整屏重绘」，
+   *  但尺寸没变时后端 last_size 同值短路、根本不发信号——隐藏期间画布与纹理图集失效
+   *  留下的残帧，只能靠 refresh 自愈。 */
+  it("切回可见强制重画：不依赖 TUI 的 SIGWINCH", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ ...noPty, active: true, data: btoa("hi"), endOffset: 2 });
+      if (command === "managed_terminal_grid") return Promise.resolve([80, 24]);
+      return Promise.resolve();
+    });
+    const { rerender } = render(<ManagedTerminal sessionId={163} status="running" visible />);
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    rerender(<ManagedTerminal sessionId={163} status="running" visible={false} />);
+    refreshSpy.mockReset();
+    rerender(<ManagedTerminal sessionId={163} status="running" visible />);
+    // 整屏：起点 0 到末行。
+    await waitFor(() => expect(refreshSpy).toHaveBeenCalledWith(0, 23));
   });
 
   it("isMouseMotionReport 只认无按键的 SGR 移动事件", () => {

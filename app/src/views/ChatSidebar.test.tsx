@@ -358,16 +358,22 @@ describe("ChatSidebar", () => {
     expect(heads[0].querySelector(".chat-sidebar-dot")?.className).toContain("is-waiting");
     expect(heads[1].querySelector(".chat-sidebar-dot")?.className).toContain("is-running");
 
-    fireEvent.click(heads[1]);
-    expect(screen.queryByRole("button", { name: /改侧栏/ })).toBeNull();
-    // 折起来后组头的汇总点还在——否则「折叠即失明」，用户会错过组里在跑的东西。
-    expect(heads[1].querySelector(".chat-sidebar-dot")?.className).toContain("is-running");
+    // 折 scratch 组（当前会话不在里面）：组内条目收走，组头汇总点还在——否则
+    // 「折叠即失明」，用户会错过组里在跑的东西。
+    fireEvent.click(heads[0]);
+    expect(screen.queryByRole("button", { name: /临时活儿/ })).toBeNull();
+    expect(heads[0].querySelector(".chat-sidebar-dot")?.className).toContain("is-waiting");
 
-    // 侧栏收起时本组件整个卸载，折叠状态与开关都得落盘，回来才不是全展开。
+    // 7C-6：当前打开的会话所在的组折不动——日期分桶（键恒为 date:today）折过一次后，
+    // 第二天的新会话会连同用户正开着的那条一起被藏掉。折它只是空操作。
+    fireEvent.click(heads[1]);
+    expect(screen.getByRole("button", { name: /改侧栏/ })).toBeTruthy();
+
+    // 侧栏收起时本组件整个卸载，目录组的折叠状态与开关都得落盘，回来才不是全展开。
     cleanup();
     render(<ChatSidebar activeId={2} approvalAwaitingIds={new Set()} onSelect={() => {}} onCollapse={() => {}} />);
-    expect(await screen.findByRole("button", { name: /临时活儿/ })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /改侧栏/ })).toBeNull();
+    expect(await screen.findByRole("button", { name: /改侧栏/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /临时活儿/ })).toBeNull();
   });
 
   /** 按状态分组：组序按召唤强度（出错 > 运行中 > 已结束），不派生原排序——
@@ -681,7 +687,7 @@ describe("ChatSidebar", () => {
       const liveRegions = container.querySelectorAll('[role="status"]');
       expect(liveRegions.length).toBe(1);
       expect(liveRegions[0].className).toContain("chat-sidebar-sronly");
-      expect(liveRegions[0].textContent).toBe("会话状态汇总：0 个待批准，1 个等你输入，0 个出错");
+      expect(liveRegions[0].textContent).toBe("会话状态汇总：0 个待批准，1 个等待输入，0 个出错");
     });
   });
 });

@@ -315,6 +315,7 @@ mod tests {
                 name: "Bash".into(),
                 summary: "cargo test".into(),
                 subagent: None,
+                detail: None,
             },
             ChatItem::ToolResult {
                 id: "t1r".into(),

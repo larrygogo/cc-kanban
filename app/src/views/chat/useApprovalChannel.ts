@@ -75,6 +75,11 @@ export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setVi
     && approvalNow - approvalSeenRef.current.at >= APPROVAL_TIMEOUT_MS;
   // AskUserQuestion 的结构化题面（broker 自动放行后经 interactive-question 事件直达）。
   const [structuredQuestion, setStructuredQuestion] = useState<PendingApproval | null>(null);
+  // broker 那头**此刻真的还挂着**的题面 requestId（无则 null）。与 structuredQuestion
+  // 不是一回事：那张卡在挂起了结后还可能有意留一会儿（等 transcript 消解），而这个是
+  // 事实本身。收起后的折叠条要靠它判活（7C-2 尾，复核指出：题面被收起后若在终端答掉
+  // 或超时，折叠条会永远挂着，点开是一张已死的卡）。
+  const [liveQuestionId, setLiveQuestionId] = useState<string | null>(null);
   // 非当前会话的待授权请求：侧边栏亮徽标召唤用户自己过去。注意后端 **会** 为 broker 接管的
   // 审批把窗口切到目标会话（见 pty.rs 的 ensure_approval_window，不切的代价是请求 10s 后
   // 回落 TUI），所以这里是兜底：切换竞态期间、以及消费者已注册在别的会话时到达的请求。
@@ -135,6 +140,7 @@ export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setVi
       setApproval(nextApproval);
       // 已有同一 requestId 的题面卡时不重复设置，避免打断点选状态；answerable 翻转
       // （挂起结算/超时 → 作答卡降级为展示卡）必须放行——它正是靠这条轮询传递的。
+      setLiveQuestionId(question ? question.requestId : null);
       if (question) {
         setStructuredQuestion((current) => {
           if (
@@ -220,9 +226,10 @@ export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setVi
         // （那条路先行 setApproval(null)，这里读到的已是 null）。凭空消失分不清是自己漏点
         // 还是超时（与题面卡 questionExpired 同一课），说清卡去哪了。
         if (approvalLiveRef.current?.requestId === event.payload.requestId) {
-          setSendError(tRef.current.chat.approvalClearedNotice);
+          setSendError(remoteUi() ? tRef.current.chat.approvalClearedNoticeRemote : tRef.current.chat.approvalClearedNotice);
         }
         setApproval((current) => current?.requestId === event.payload.requestId ? null : current);
+        setLiveQuestionId((current) => (current === event.payload.requestId ? null : current));
       }
     }).then((fn) => { if (cancelled) fn(); else unCleared = fn; }).catch(() => {});
     return () => { cancelled = true; unApproval?.(); unCleared?.(); };
@@ -247,6 +254,9 @@ export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setVi
         // 题面卡就是处理面：抑制 pendingReview 的「去终端处理」降级卡（与 broker 审批同理）。
         setBrokerOwnsReview(true);
         setStructuredQuestion(event.payload);
+        // push 到卡出现、用户在下一轮 poll 前就点收起时，liveQuestionId 还停在上一题
+        // 的值（或 null），折叠条会被判死秒清——push 这条路径同样要同步（复核指出）。
+        setLiveQuestionId(event.payload.requestId);
         // 与审批一致：用户正在终端视图操作时不抢（表单本来就在那里），否则拉回对话页。
         if (viewRef.current !== "terminal") setView("chat");
       } else {
@@ -276,14 +286,16 @@ export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setVi
     if (last && last.payload.sessionId === sessionId && Date.now() - last.at < 3_000) {
       setBrokerOwnsReview(true);
       setStructuredQuestion(last.payload);
+      setLiveQuestionId(last.payload.requestId);
     } else {
       setStructuredQuestion(null);
+      setLiveQuestionId(null);
     }
   }, [sessionId]);
 
   return {
     approval, setApproval, approvalCountdown, approvalTimedOut,
-    structuredQuestion, setStructuredQuestion,
+    structuredQuestion, setStructuredQuestion, liveQuestionId,
     approvalAwaitingIds, setApprovalAwaitingIds,
     brokerOwnsReview, setBrokerOwnsReview,
     // 交出去给消解逻辑清空:卡了结时必须连领养暂存一起清,否则切走再切回弹幽灵卡。

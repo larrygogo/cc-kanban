@@ -651,13 +651,17 @@ async fn require_token(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !token_matches(&ctx.token, provided) {
-        return err_status(StatusCode::UNAUTHORIZED, "未授权");
+        return err_status(StatusCode::UNAUTHORIZED, "remote/unauthorized");
     }
     next.run(req).await
 }
 
 /// invoke 语义对齐：Ok → 200 + JSON 值；Err(String) → 400 + JSON 字符串（前端
 /// transport 据此 reject，错误串走既有 formatBackendError 链路）。
+///
+/// 7M-7：桥自身产生的错误（鉴权/未知命令/参数不合法/未就绪）改用 `remote/<code>`
+/// 结构化 reason——它们此前是裸中文串，英文界面下直接漏中文，也进不了 errors.ts 的
+/// 映射表。业务命令自己的 Err 原样透传，仍走各自的 sentinel。
 fn reply<T: serde::Serialize>(result: Result<T, String>) -> Response {
     match result {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
@@ -677,7 +681,7 @@ fn err_status(status: StatusCode, message: &str) -> Response {
 /// 错误返回消息串（响应由调用宏构造，避免 Err 侧背整个 Response——clippy result_large_err）。
 fn parse<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, String> {
     let raw: &[u8] = if body.is_empty() { b"{}" } else { body };
-    serde_json::from_slice(raw).map_err(|e| format!("参数无效：{e}"))
+    serde_json::from_slice(raw).map_err(|e| format!("remote/bad_args：{e}"))
 }
 
 async fn rpc_handler(
@@ -691,11 +695,11 @@ async fn rpc_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !token_matches(&ctx.token, provided) {
-        return err_status(StatusCode::UNAUTHORIZED, "未授权");
+        return err_status(StatusCode::UNAUTHORIZED, "remote/unauthorized");
     }
     if !BRIDGED_COMMANDS.contains(&command.as_str()) {
         // 未放行与不存在同响应，不区分——不给探测面。
-        return err_status(StatusCode::NOT_FOUND, "未知命令");
+        return err_status(StatusCode::NOT_FOUND, "remote/unknown_command");
     }
     dispatch(&ctx.app, &command, &body).await
 }
@@ -1146,14 +1150,14 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
             match &inner.running {
                 Some(r) => reply_ok(r.file_token.clone()),
                 // 请求既然进得来,server 必在跑;此臂只是锁竞态下的兜底。
-                None => err_status(StatusCode::SERVICE_UNAVAILABLE, "服务未就绪"),
+                None => err_status(StatusCode::SERVICE_UNAVAILABLE, "remote/not_ready"),
             }
         }
         // reply_ok 前提:get_accounts 返回 Vec 而非 Result(Result 会被 serde 包成
         // {"Ok":…} 且照样 200)——改它签名时这里必须复检。
         "get_accounts" => reply_ok(crate::get_accounts().await),
         // BRIDGED_COMMANDS 有而这里漏写的项落到此处：fail-closed，宁 404 不放行。
-        _ => err_status(StatusCode::NOT_FOUND, "未知命令"),
+        _ => err_status(StatusCode::NOT_FOUND, "remote/unknown_command"),
     }
 }
 
@@ -1181,7 +1185,7 @@ async fn file_handler(State(ctx): State<Ctx>, Query(q): Query<FileQuery>) -> Res
     // 主 token 或 /file 降级凭据(见 Ctx::file_token)均可:降级凭据是 <img src> 的
     // 常规载体,主 token 只在前端尚未领到降级凭据的首屏回退时出现。
     if !token_matches(&ctx.token, &q.token) && !token_matches(&ctx.file_token, &q.token) {
-        return err_status(StatusCode::UNAUTHORIZED, "未授权");
+        return err_status(StatusCode::UNAUTHORIZED, "remote/unauthorized");
     }
     let bytes = tauri::async_runtime::spawn_blocking(move || read_scoped_file(&q.path)).await;
     match bytes {

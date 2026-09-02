@@ -70,6 +70,11 @@ export function applySettingsFilter(body: HTMLElement, q: string, navLabels: Rec
         caption = kid;
       } else if (kid.classList.contains("row-card")) {
         if (kid.style.display !== "none") groupVisible = true;
+      } else if (kid.classList.contains("account-agent-switch")) {
+        // 7S-4：账号分区一次只渲染**当前** agent 的卡，别家的名字（"codex"）搜不到；
+        // 而通往别家的唯一入口正是这个切换器，搜索时把它一并藏掉就成了死路——
+        // 分区还在就留着它。
+        setDisplay(kid, secVisible);
       } else {
         setDisplay(kid, false);
       }

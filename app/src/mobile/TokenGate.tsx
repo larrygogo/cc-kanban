@@ -6,12 +6,14 @@
 // 静默弹回而不解释,用户只会反复点「连接」。
 import { useEffect, useState, type ReactNode } from "react";
 import { getToken, setToken, clearToken, onAuthLost, probeToken, primeFileToken } from "./transport";
+import { useT } from "../i18n";
 
-export function TokenGate({ children }: { children: ReactNode }) {
+export function TokenGate({ children, onReady }: { children: ReactNode; onReady?: () => void }) {
+  const t = useT();
   const [ready, setReady] = useState<boolean>(() => getToken() != null);
   const [manual, setManual] = useState("");
   const [checking, setChecking] = useState(false);
-  const [error, setError] = useState<null | "invalid" | "expired">(null);
+  const [error, setError] = useState<null | "invalid" | "unreachable" | "expired">(null);
 
   // 401 弹回配对页:此时 hash 早清了,刷新也回不去,必须把「需要重新扫码」说出来。
   useEffect(() => onAuthLost(() => {
@@ -22,20 +24,23 @@ export function TokenGate({ children }: { children: ReactNode }) {
   if (ready) return <>{children}</>;
 
   const submit = () => {
-    const t = manual.trim();
-    if (!t || checking) return;
+    const token = manual.trim();
+    if (!token || checking) return;
     setChecking(true);
     setError(null);
     // 先验后放行:直接 setReady 的话,错令牌要等第一发业务请求 401 才弹回,
     // 界面闪一下又回到原地,零解释。
-    void probeToken(t).then((ok) => {
+    void probeToken(token).then((result) => {
       setChecking(false);
-      if (ok) {
-        setToken(t);
+      if (result === "ok") {
+        setToken(token);
         primeFileToken();
         setReady(true);
+        // 令牌刚落地:立刻对齐一次主题/语言,不等 12s 的下一拍(7M-5)。
+        onReady?.();
       } else {
-        setError("invalid");
+        // 7M-6:令牌错 → 重抄令牌;连不上 → 检查网络/看桌面端还在不在。
+        setError(result === "unauthorized" ? "invalid" : "unreachable");
       }
     });
   };
@@ -43,14 +48,11 @@ export function TokenGate({ children }: { children: ReactNode }) {
   return (
     <div className="remote-gate">
       <div className="remote-gate-card">
-        <h1>Meowo 远程</h1>
-        <p>扫码后自动配对。若手动配对,粘贴桌面「远程访问」里的令牌:</p>
-        {error === "expired" && (
-          <p className="remote-gate-err">桌面端令牌已更换或失效,请重新扫码,或粘贴新令牌</p>
-        )}
-        {error === "invalid" && (
-          <p className="remote-gate-err">令牌不对或桌面端不可达,请核对后重试</p>
-        )}
+        <h1>{t.remote.gateTitle}</h1>
+        <p>{t.remote.gateHint}</p>
+        {error === "expired" && <p className="remote-gate-err" role="alert">{t.remote.gateErrExpired}</p>}
+        {error === "invalid" && <p className="remote-gate-err" role="alert">{t.remote.gateErrInvalid}</p>}
+        {error === "unreachable" && <p className="remote-gate-err" role="alert">{t.remote.gateErrUnreachable}</p>}
         <input
           type="password"
           inputMode="text"
@@ -61,11 +63,11 @@ export function TokenGate({ children }: { children: ReactNode }) {
           onKeyDown={(e) => {
             if (e.key === "Enter") submit();
           }}
-          placeholder="访问令牌"
-          aria-label="访问令牌"
+          placeholder={t.remote.gateTokenLabel}
+          aria-label={t.remote.gateTokenLabel}
         />
         <button onClick={submit} disabled={!manual.trim() || checking}>
-          {checking ? "正在连接…" : "连接"}
+          {checking ? t.remote.gateConnecting : t.remote.gateConnect}
         </button>
       </div>
     </div>

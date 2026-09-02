@@ -1787,8 +1787,21 @@ pub(crate) fn spawn_in_terminal(
 }
 
 /// 校验并归一「新建会话」的工作目录：非空、真实存在的目录。返回 trim 后的路径。
+/// 剥掉**成对**的首尾引号。资源管理器的「复制为路径」给的就是 `"C:\repo\app"`,用户
+/// 粘到哪儿都可能带着它进来(新建面板、远程桥、中途附加目录)。前端 paths.ts 的
+/// unquotePath 只挡住了新建面板那一条路,后端这里是所有入口的共同关口(7T-4 根治)。
+/// 只剥成对的:单边引号在 Unix 上是合法文件名字符,剥掉会造出一个不存在的路径。
+fn strip_paired_quotes(dir: &str) -> &str {
+    for quote in ['"', '\''] {
+        if let Some(inner) = dir.strip_prefix(quote).and_then(|rest| rest.strip_suffix(quote)) {
+            return inner.trim();
+        }
+    }
+    dir
+}
+
 pub(crate) fn validate_new_session_cwd(cwd: &str) -> Result<String, String> {
-    let d = cwd.trim();
+    let d = strip_paired_quotes(cwd.trim());
     if d.is_empty() {
         return Err("请选择工作目录".into());
     }

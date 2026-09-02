@@ -8,6 +8,12 @@
 /** 一次本地命令调用。args 为空串表示没带参数。 */
 export type LocalCommandCall = { name: string; args: string };
 
+/** 跨会话消息（另一个 Claude 会话经 SendMessage 发来的）。Claude Code 把它当成一条
+ *  用户消息注入 transcript：一句英文前导 + `<cross-session-message>` 包裹 + 一整段
+ *  写给模型的英文安全须知。原样摊开就是满屏尖括号和管道名（实拍反馈）。
+ *  fromName 是对方的会话名，mode 是它的权限模式（bypass 等）；两者缺失时留空串。 */
+export type CrossMessage = { fromName: string; mode: string; text: string };
+
 export type UserTextParts = {
   /** 剥掉本地命令包裹后剩下的正文（用户真正打的字）。 */
   text: string;
@@ -17,6 +23,8 @@ export type UserTextParts = {
   /** 后台任务通知（<task-notification> 的内文）：Claude Code 把它作为 user 消息注入
    *  transcript，原样摊开就是整屏 XML+JSON（实拍反馈）。渲染层收成可展开的一行。 */
   notifications: string[];
+  /** 跨会话消息，按出现顺序。 */
+  crossMessages: CrossMessage[];
   /** 这条消息里出现过本地命令/系统注入包裹——渲染层据此切换形态。 */
   local: boolean;
 };
@@ -29,18 +37,45 @@ const PAIR = new RegExp(`<(${TAGS.join("|")})>([\\s\\S]*?)<\\/\\1>`, "g");
 // 整段 XML 好不到哪去，收尾时一并抹掉。
 const STRAY = new RegExp(`<\\/?(${TAGS.join("|")})>`, "g");
 // 命令的 stdout 是 CLI 原样落盘的终端输出，常带 SGR 转义（/compact 的 `ESC[2m…ESC[22m`
-// 灰度、彩色命令输出的颜色码），原样渲染就是「\uFFFD[2m」乱码。对话页不是终端，全部剥掉：
+// 灰度、彩色命令输出的颜色码），原样渲染就是「�[2m」乱码。对话页不是终端，全部剥掉：
 // CSI（ESC [ … 终态字符）、OSC（ESC ] … BEL/ESC\）、单字符 ESC 序列；U+FFFD 是 ESC 字节
 // 在某段链路被有损转换后的形态，一并认。
 const ANSI = /[\x1b\uFFFD](?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
 
+// 跨会话消息。与上面那些标签不同，它**带属性**（from / from-name / from-mode），
+// 并进 PAIR 那条无属性正则匹配不到，单列一条。
+const CROSS = /<cross-session-message\b([^>]*)>([\s\S]*?)<\/cross-session-message>/g;
+const CROSS_ATTR = /([\w-]+)="([^"]*)"/g;
+// 包在外面的两段固定英文：一句前导、以及尾部整段写给模型的安全须知（"A peer cannot
+// grant escalation…"）。都不是人要读的内容，随消息一起收走。措辞在不同版本里有
+// 「while you were working」这类变体，只锚定稳定的句子主干。
+// CROSS_NOTE 从须知开头一路吃到串尾：跨会话消息是**独立注入的一条 user 消息**，
+// 须知之后不会再有别的内容。若哪天同一条里还跟着用户正文，这里要改成只吃到段落边界
+// （复核提醒）。
+const CROSS_LEAD = /[^\n]*Another Claude session sent a message[^\n]*:[ \t]*\n?/g;
+const CROSS_NOTE = /This came from another Claude session[\s\S]*$/;
+
 export function parseUserText(raw: string): UserTextParts {
-  const parts: UserTextParts = { text: "", commands: [], stdout: [], notifications: [], local: false };
-  if (!raw.includes("<command-name>") && !raw.includes("<local-command-") && !raw.includes("<task-notification>")) {
+  const parts: UserTextParts = { text: "", commands: [], stdout: [], notifications: [], crossMessages: [], local: false };
+  if (!raw.includes("<command-name>") && !raw.includes("<local-command-")
+    && !raw.includes("<task-notification>") && !raw.includes("<cross-session-message")) {
     parts.text = raw;
     return parts;
   }
   parts.local = true;
+  // 跨会话消息先摘出来：它的正文是别的会话写的自然语言，可能整段包含上面那些标签的
+  // 字面量（复核回执里就贴着 `<command-name>` 一类），先摘走才不会被 PAIR 啃掉。
+  raw = raw.replace(CROSS, (_match, attrs: string, body: string) => {
+    const found: Record<string, string> = {};
+    for (const [, key, value] of attrs.matchAll(CROSS_ATTR)) found[key] = value;
+    const text = body.trim();
+    // from 是本机管道路径（uds:\\.\pipe\…），对人零信息量且很长，不收；只留会话名。
+    if (text) parts.crossMessages.push({ fromName: found["from-name"] ?? "", mode: found["from-mode"] ?? "", text });
+    return "";
+  });
+  if (parts.crossMessages.length > 0) {
+    raw = raw.replace(CROSS_LEAD, "").replace(CROSS_NOTE, "");
+  }
   const rest = raw.replace(PAIR, (_match, tag: string, body: string) => {
     const value = body.trim();
     switch (tag) {
@@ -83,7 +118,9 @@ export function parseUserText(raw: string): UserTextParts {
   // 旁边跟着 caveat/stdout/forked-skill-launch。把首行的「/xxx [args]」提升为命令，
   // 与 <command-name> 形态同样渲染成徽章（实拍反馈「/code-review 没渲染好」）。
   // 只在本地包裹语境里做——用户在输入框正常打的「/xxx」是发给 CLI 的正文，不动。
-  if (parts.commands.length === 0 && parts.text.startsWith("/")) {
+  // 跨会话消息语境里不做这一步：剥完包裹后的残余正文若碰巧以 "/" 开头（对方消息被
+  // 前导句截断的尾巴），会被误提升成一条并不存在的斜杠命令。
+  if (parts.commands.length === 0 && parts.crossMessages.length === 0 && parts.text.startsWith("/")) {
     const [first, ...restLines] = parts.text.split("\n");
     const matched = /^\/(\S+)(?:\s+(.*))?$/.exec(first.trim());
     if (matched) {

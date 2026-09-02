@@ -982,6 +982,7 @@ export function App() {
         loadMore={loadMore}
         loadingMore={loadingMore}
         hasUpdate={hasUpdate}
+        updateStatus={upStatus}
         search={search}
         onSearchChange={changeSearch}
         onArchiveOptimistic={onArchiveOptimistic}

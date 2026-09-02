@@ -81,6 +81,48 @@ afterEach(() => {
 });
 
 describe("ChatWindow", () => {
+  /** 手打 `/add-dir "<path>"`（7T-4 尾，用户实拍）：claude 的 /add-dir 不剥引号，成对引号会
+   *  进路径字面量。这条命令改走 add_session_extra_dir（后端剥引号 + 校验 + 落库 + 自己写
+   *  PTY），前端**不再**往终端写一遍；后端拒绝时回退成剥了引号的原命令照常发送。 */
+  const addDirHistory = {
+    sessionId: 7, title: "附加目录会话", status: "idle", provider: "claude", cwd: "C:/repo",
+    supported: true, offset: 1, reset: false, pendingReview: null,
+    items: [{ type: "user_text", id: "u1", timestamp: null, text: "开始" }],
+  };
+  const typeAddDir = async () => {
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("附加目录会话")).toBeTruthy());
+    const box = screen.getByRole("combobox", { name: "发送消息给 Agent" });
+    fireEvent.change(box, { target: { value: '/add-dir "C:\\work\\x y"' } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    return box as HTMLTextAreaElement;
+  };
+  it("手打 /add-dir 走附加目录命令：引号交后端剥，终端里不再写第二条", async () => {
+    window.history.replaceState({}, "", "/?sessionId=7");
+    respondWithHistory(addDirHistory);
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) =>
+      command === "add_session_extra_dir" ? Promise.resolve(true) : base(command, args));
+    const box = await typeAddDir();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("add_session_extra_dir", { sessionId: 7, dir: "C:\\work\\x y" }));
+    await waitFor(() => expect(box.value).toBe(""));
+    // 等过一个提交间隔，确认没有任何 /add-dir 文本写进 PTY。
+    await new Promise((resolve) => setTimeout(resolve, submitGapMs("/add-dir x") + 50));
+    const written = invoke.mock.calls
+      .filter(([command]) => command === "write_managed_terminal")
+      .map(([, args]) => (args as { data: string }).data);
+    expect(written.some((data) => data.includes("/add-dir"))).toBe(false);
+  });
+  it("手打 /add-dir 被后端拒绝时回退：剥掉引号原样发给 CLI", async () => {
+    window.history.replaceState({}, "", "/?sessionId=7");
+    respondWithHistory(addDirHistory);
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) =>
+      command === "add_session_extra_dir" ? Promise.reject(new Error("该 Agent 不支持附加目录")) : base(command, args));
+    await typeAddDir();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 7, data: "/add-dir C:\\work\\x y" }));
+  });
+
   it("renders structured transcript entries", async () => {
     window.history.replaceState({}, "", "/?sessionId=7");
     respondWithHistory({
@@ -914,7 +956,7 @@ describe("ChatWindow", () => {
     expect(await screen.findByText("改后标题")).toBeTruthy();
 
     current = { ...base, currentActivity: "Bash: 第二步", contextPct: 42, title: "改后标题", agentModes: [{ dimension: "permission", value: "plan" }] };
-    expect(await screen.findByText("计划")).toBeTruthy();
+    expect(await screen.findByText("计划模式")).toBeTruthy();
 
     // 兜底时间线读 lastUserText/lastAiText（transcript 空窗期渲染 hook 落库的最近往来），
     // 它们也在比较清单里——漏掉的话空窗期内容永远停在第一轮。
@@ -1029,7 +1071,7 @@ describe("ChatWindow", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: /计划/ }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 51, data: "\u001b[Z" }));
     // transcript 静默，但屏幕是 CLI 自己画的权威状态——标签应据它回显为「计划」。
-    expect(await screen.findByText("计划")).toBeTruthy();
+    expect(await screen.findByText("计划模式")).toBeTruthy();
   });
 
   it("休眠会话的权限胶囊改卖「下一次恢复的权限」：选择只落启动参数，不碰终端", async () => {
@@ -1686,8 +1728,9 @@ describe("ChatWindow", () => {
     fireEvent.change(input, { target: { value: "继续" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     expect(await screen.findByText(/正在等待 Agent 终端就绪，已等 \d+ 秒/, {}, { timeout: 6_000 })).toBeTruthy();
-    // 顶部视图切换也有个「终端」钮,这里认等待条里的那个(chat-send-takeover)。
-    expect(screen.getAllByRole("button", { name: "终端" }).some((b) => b.className.includes("chat-send-takeover"))).toBe(true);
+    // 等待条里的那个钮(chat-send-takeover)。7G-9 后标签统一成「去终端页」,
+    // 与顶部视图切换的「终端」页签不再同名。
+    expect(screen.getAllByRole("button", { name: "去终端页" }).some((b) => b.className.includes("chat-send-takeover"))).toBe(true);
     // 放行就绪:等待条收起、消息送达。把在途链路走完再收工,别留轮询污染后面的用例
     // (与上一个用例的「等回车落地」同一纪律)。
     ready = true;
@@ -2023,7 +2066,7 @@ describe("ChatWindow", () => {
     // 正例锚:外部会话 composer 让位给接管门卡——门卡在场说明首轮渲染已完成。
     expect(await screen.findByText(/会话在外部终端运行/)).toBeTruthy();
     expect(screen.queryByText("Agent 正在等待你的回答")).toBeNull();
-    expect(screen.queryByRole("button", { name: "打开终端" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "去终端页" })).toBeNull();
   });
 
   /** 对照:托管会话在屏幕未识别出卡片时,降级卡仍是去终端页处理的入口,不得连带消失。 */
@@ -2045,7 +2088,7 @@ describe("ChatWindow", () => {
     });
     render(<ChatWindow />);
     expect(await screen.findByText("Agent 正在等待你的回答")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "打开终端" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "去终端页" })).toBeTruthy();
   });
 
   it("renders and resolves a managed permission request", async () => {
@@ -2309,7 +2352,7 @@ describe("ChatWindow", () => {
     expect(await screen.findByText(/新仓库叫什么名字/)).toBeTruthy();
     expect(screen.getByText("autopilot-v2")).toBeTruthy();
     expect(screen.getByText("沿用产品名")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "去终端作答" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "去终端页" })).toBeTruthy();
     // 不是审批卡：没有允许/拒绝，也没有原始 JSON 参数。
     expect(screen.queryByRole("button", { name: "允许一次" })).toBeNull();
     expect(screen.queryByRole("button", { name: "拒绝" })).toBeNull();
@@ -2329,6 +2372,63 @@ describe("ChatWindow", () => {
     expect(writes()).toBe(before);
     fireEvent.click(screen.getByRole("button", { name: /autopilot-v2/ }));
     expect(screen.queryByText(/已选「/)).toBeNull();
+  });
+
+  /** 题面卡的「仅收起」留一条可再展开的折叠条（7C-2 尾）；但挂起在别处了结后，折叠条
+   *  必须自己撤掉——否则它永远挂着，点开是一张已死的卡，去 resolve 一个不存在的请求
+   *  （复核实测）。存活以轮询 pending_interaction 回的 question 为准。 */
+  it("题面卡收起后留折叠条；挂起在别处了结时折叠条一并撤掉", async () => {
+    window.history.replaceState({}, "", "/?sessionId=33");
+    // 先让轮询确认这条挂起还在，收起后折叠条才该留着。
+    let questionAlive = true;
+    const question = {
+      sessionId: 33, requestId: "request-gone", provider: "claude", toolName: "AskUserQuestion",
+      description: null, answerable: false,
+      input: JSON.stringify({
+        questions: [{ header: "去向", question: "接下来做哪一步？", multiSelect: false, options: [{ label: "继续" }] }],
+      }),
+      permissionSuggestions: [],
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 33, title: "收起会话", status: "running", provider: "claude", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
+        ptyManaged: true,
+      });
+      if (command === "pending_interaction") {
+        return Promise.resolve({ approval: null, question: questionAlive ? question : null });
+      }
+      // 真实链路的耦合：清后端待处理表之后，轮询就再也读不到这条挂起了。上一版 mock
+      // 让它返回空 Promise、questionAlive 不跟着翻，于是「收起即被自己秒清」这条回归
+      // 溜了过去（复核指出）。这里如实建模：dismiss 一调，挂起即消失。
+      if (command === "dismiss_interactive_question") {
+        questionAlive = false;
+        return Promise.resolve();
+      }
+      if (command === "managed_terminal_binding") return Promise.resolve(null);
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 33, active: false, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("收起会话")).toBeTruthy());
+    expect(await screen.findByText(/接下来做哪一步/, {}, { timeout: 5_000 })).toBeTruthy();
+
+    // 「仅收起」：卡走了，折叠条留下（题面用自己的文案，与屏幕识别那条分得开）。
+    const dismissCalls = () => invoke.mock.calls.filter((call) => call[0] === "dismiss_interactive_question").length;
+    fireEvent.click(screen.getByRole("button", { name: "仅收起" }));
+    expect(screen.queryByText(/接下来做哪一步/)).toBeNull();
+    expect(await screen.findByRole("button", { name: "已收起提问，点击展开" })).toBeTruthy();
+    // 收起 ≠ 了结：后端待处理表必须留着。清掉的话轮询立刻读不到这条挂起，折叠条会被
+    // 判活逻辑自己秒清（复核实测 2.5s 内），恢复入口没了——只断言「折叠条出现过」抓不住
+    // 那条回归（最终态同样是消失），得直接钉住「没去清后端表」。
+    expect(dismissCalls()).toBe(0);
+
+    // 在终端答掉/超时：下一轮轮询回 question:null，折叠条必须自己消失。
+    questionAlive = false;
+    await waitFor(
+      () => expect(screen.queryByRole("button", { name: "已收起提问，点击展开" })).toBeNull(),
+      { timeout: 5_000 },
+    );
   });
 
   /** broker 挂起代答（answerable）：卡片是真正的作答面——多问题跨 tab、多选勾选、
@@ -2424,7 +2524,7 @@ describe("ChatWindow", () => {
       } });
     });
     expect(await screen.findByText(/继续吗/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "去终端作答" }));
+    fireEvent.click(screen.getByRole("button", { name: "去终端页" }));
     await waitFor(() => {
       const resolved = invoke.mock.calls.find((call) => call[0] === "resolve_pending_approval");
       expect(resolved).toBeTruthy();
@@ -2839,7 +2939,7 @@ describe("ChatWindow", () => {
     expect(await screen.findByText(/晚饭吃什么/)).toBeTruthy();
     expect(screen.getByText("火锅")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /火锅/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: "去终端作答" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "去终端页" })).toBeNull();
     expect(screen.getByText(/请回到运行它的终端作答/)).toBeTruthy();
   });
 

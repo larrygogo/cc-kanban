@@ -17,7 +17,7 @@ function dayLabel(date: Date, t: Dict): string {
 }
 import { imageOnlyPaths, Message, UserImageGroup } from "./Message";
 import { SubagentBlock } from "./SubagentBlock";
-import { friendlyToolName, ToolActivity } from "./ToolActivity";
+import { ActivityGroup, friendlyToolName, ToolActivity } from "./ToolActivity";
 import { isSubagentDelegation, type ToolResultItem, type ToolUseItem } from "./shared";
 
 type SubagentOutcomeInfo = NonNullable<ToolResultItem["subagent"]>;
@@ -177,11 +177,21 @@ export const Transcript = memo(function Transcript({ sessionId, items }: { sessi
       const kinds = [...kindCounts.entries()];
       const label = kinds.slice(0, 3).map(([name, count]) => (count > 1 ? `${name} ×${count}` : name)).join(" · ")
         + (kinds.length > 3 ? " …" : "");
-      record.nodes.push(<details className={"chat-activity-group" + (failureCount ? " is-error" : "")} key={`tools-${tools[0].id}`}>
+      // 组里还有没回执的调用 = 正在跑：默认展开，用户当场看到在做什么（像终端那样）；
+      // 跑完后保持用户留下的开合。只在挂载时定一次（见 ActivityGroup）。
+      record.nodes.push(<ActivityGroup className={"chat-activity-group" + (failureCount ? " is-error" : "")} defaultOpen={pendingCount > 0} key={`tools-${tools[0].id}`}>
         <summary className="chat-activity-summary">
           <span className="chat-tool-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 17l6-6-6-6M12 19h8" /></svg></span>
           <span className="chat-activity-kinds">{label || t.chat.toolActivities(callCount || tools.length)}</span>
-          {pendingCount > 0 && <span className="chat-tool-pending" aria-label={t.chat.toolRunning}><i /><i /><i /></span>}
+          {/* 7C-9：行级指示已降级为 aria-hidden（并行工具一多就是播报风暴），组头这一处
+              是唯一的出口——但 aria-label 挂在无 role 的 span 上读屏取不到，等于全组静音。
+              role=status 让它成为可播报的活区，文本进 sr-only 的伴随节点（点点本身是装饰）。 */}
+          {pendingCount > 0 && (
+            <span className="chat-tool-pending" role="status">
+              <span className="chat-sronly">{t.chat.toolRunning}</span>
+              <i aria-hidden="true" /><i aria-hidden="true" /><i aria-hidden="true" />
+            </span>
+          )}
           {failureCount > 0 && <span className="chat-activity-errors">{t.chat.toolFailures(failureCount)}</span>}
           <span className="chat-tool-chevron">›</span>
         </summary>
@@ -191,7 +201,7 @@ export const Transcript = memo(function Transcript({ sessionId, items }: { sessi
           }
           return consumed.has(tool.id) ? null : <Message key={tool.id} item={tool} />;
         })}</div>
-      </details>);
+      </ActivityGroup>);
       continue;
     }
     record.nodes.push(<Message key={item.id} item={item} />);

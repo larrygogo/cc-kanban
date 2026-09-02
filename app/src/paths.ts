@@ -3,10 +3,25 @@
  * 侧栏按目录分组后两边必须同口径（同一目录不能因斜杠方向或大小写裂成两组），故收敛到此。
  */
 
+/** 去掉首尾空白与**成对**的引号。资源管理器的「复制为路径」给的就是 `"C:\repo\app"`，
+ *  粘进目录框后后端按字面找不到、报「目录不存在」（7T-4）。只剥成对的：单边引号在
+ *  Unix 上是合法文件名字符，剥掉会造出一个不存在的路径。
+ *  与 normalizePath 分开导出：调用方常常只想清掉引号，不想连带翻转斜杠方向（发给
+ *  后端的 cwd 保持用户原样，斜杠归一只用于比对/分组）。 */
+export function unquotePath(p: string): string {
+  const trimmed = p.trim();
+  if (trimmed.length >= 2
+    && ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'")))) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
 /** 统一路径分隔符：Windows 路径用反斜杠，Unix 路径用正斜杠。
  *  用于消除 URL 参数/前端输入与后端数据库中 cwd 的斜杠方向不一致。 */
 export function normalizePath(p: string): string {
   if (!p) return p;
+  p = unquotePath(p);
   if (/^[A-Za-z]:/.test(p)) {
     return p.replace(/\//g, "\\");
   }
@@ -22,9 +37,22 @@ export function pathKey(p: string): string {
   return /^[A-Za-z]:/.test(norm) ? norm.toLowerCase() : norm;
 }
 
-/** cwd 末段目录名作展示，完整路径进 title。与贴纸 stk-repo 同款。 */
+/** cwd 是不是用户主目录本身。判据不依赖后端下发的 home 值：各平台主目录的形状是固定的
+ *  （`C:/Users/<名>`、`/home/<名>`、`/Users/<名>`），段数加倒数第二段就足以认出来。
+ *  宁漏勿冤——`/home/shared` 这类恰好同形的真实目录会被误认，但代价只是标签写成 `~`
+ *  （完整路径仍在 tip 里），比把「仓库」显示成用户名好（7B-6 实拍：显示成 `35122`）。 */
+export function isHomeDir(cwd: string): boolean {
+  const parts = normalizePath(cwd).split(/[\\/]+/).filter(Boolean);
+  if (parts.length === 3) return /^[A-Za-z]:$/.test(parts[0]) && parts[1].toLowerCase() === "users";
+  if (parts.length === 2) return parts[0].toLowerCase() === "users" || parts[0] === "home";
+  return false;
+}
+
+/** cwd 末段目录名作展示，完整路径进 title。与贴纸 stk-repo 同款。
+ *  主目录不取末段——那是用户名，当「仓库名」读毫无意义（7B-6）。 */
 export function folderName(cwd: string | null): string {
   if (!cwd) return "";
+  if (isHomeDir(cwd)) return "~";
   return cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd;
 }
 

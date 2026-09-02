@@ -100,6 +100,50 @@ pub struct SubagentProbeDto {
     pub branches: Vec<SubagentBranchProbeDto>,
 }
 
+/// 工具调用的结构化详情：对话页「像终端那样」展开看——写了什么、改了什么、跑了什么
+/// （用户实拍：终端里 Write 一行「Wrote 225 lines to …」+ 正文预览 + 「+262 lines」，
+/// 对话页只有一个路径摘要）。只有插件认得的工具才填，认不得的留 None，前端退回
+/// 摘要 + 回执。正文有上限（见各插件），超限置 truncated，前端据此标「已截断」而不是
+/// 默默少一截。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../../src/generated/contracts/"))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolDetail {
+    /// 整文件写入。`lines` 是**完整**行数（content 可能已截断，行数不受影响）。
+    Write {
+        path: String,
+        content: String,
+        lines: u32,
+        truncated: bool,
+    },
+    /// 局部替换：old → new。
+    Edit {
+        path: String,
+        old: String,
+        new: String,
+        replace_all: bool,
+        truncated: bool,
+    },
+    /// 终端命令。
+    Command {
+        command: String,
+        description: Option<String>,
+    },
+    /// 读文件，可带行范围。
+    Read {
+        path: String,
+        offset: Option<u32>,
+        limit: Option<u32>,
+    },
+    /// 搜索（Grep / Glob）。
+    Search {
+        pattern: String,
+        path: Option<String>,
+        glob: Option<String>,
+    },
+}
+
 /// Provider 日志经插件解析后交给聊天归一化层的稳定消息单元。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -150,6 +194,9 @@ pub enum ChatItem {
         /// transcript 之外的侧车流里，前端据此渲染成可展开条目，展开时才按需拉取。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent: Option<SubagentRef>,
+        /// 结构化详情（见 [`ToolDetail`]）；插件认不得的工具为 None。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ToolDetail>,
     },
     ToolResult {
         id: String,
