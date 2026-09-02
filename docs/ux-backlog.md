@@ -357,6 +357,11 @@
 > 「不加引号含空格路径会断开」是未经验证的假设，同一条报错恰好反证它取的是整行。
 > 去掉引号，并把剥引号下沉到 `validate_new_session_cwd`——新建面板、远程桥、中途附加
 > 目录全走这一关（前端 paths.ts 的 unquotePath 只挡住了新建面板那一条路）。
+> 第四条入口——对话框里**手打** `/add-dir "…"`——是直写 PTY，不过后端校验：sendPrompt
+> 对它做窄例外（唯一允许改写用户输入的 slash 命令，引号在这里没有合法含义），改走
+> addSessionExtraDir（剥引号 + 校验 + 落库供 resume 回放 + 后端自己写 PTY，前端不再
+> 写第二条）；后端拒绝（provider 不支持/目录不存在）时回退成剥了引号的原命令照常发；
+> 远程桥不放行该命令，远程只剥引号后原样发。其余 slash 命令一律原样透传。
 >
 > **第四轮复核**：上一轮的 liveQuestionId 修法在真实链路里**站不住**——「仅收起」把
 > structuredQuestion 置空后，既有 effect 会调 dismissInteractiveQuestion 清掉后端待处理

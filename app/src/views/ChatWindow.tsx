@@ -6,10 +6,10 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { pathKey } from "../paths";
+import { pathKey, unquotePath } from "../paths";
 import { COMPACTING_ACTIVITY } from "../activity";
 import { appConfirm } from "../confirm";
-import { pickAndAddExtraDir, removeSessionExtraDir, agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardRestore, clipboardSetImage, confirmStopSession, dismissInteractiveQuestion, getChatHistory, getGitDiffSummary, getLiveSessionsPage, getSessionLineage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, probeSubagentStates, refreshSessionModel, refreshSessionTodos, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, switchSessionProvider, takeoverManagedTerminal, writeManagedTerminal, type AgentId, type ChatHistory, type ChatItem, type ChatUi, type GitDiffSummaryDto, type LiveSession, type ModelPreset, type ModeScreenMarker, type PendingApproval, type SubagentProbe } from "../api";
+import { addSessionExtraDir, pickAndAddExtraDir, removeSessionExtraDir, agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardRestore, clipboardSetImage, confirmStopSession, dismissInteractiveQuestion, getChatHistory, getGitDiffSummary, getLiveSessionsPage, getSessionLineage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, probeSubagentStates, refreshSessionModel, refreshSessionTodos, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, switchSessionProvider, takeoverManagedTerminal, writeManagedTerminal, type AgentId, type ChatHistory, type ChatItem, type ChatUi, type GitDiffSummaryDto, type LiveSession, type ModelPreset, type ModeScreenMarker, type PendingApproval, type SubagentProbe } from "../api";
 import { hasEscLayers, pushEscLayer } from "../escLayers";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useSessionActions } from "../hooks/useSessionActions";
@@ -2572,12 +2572,42 @@ export function ChatWindow() {
       }
       return;
     }
+    // 手打 `/add-dir <path>`（7T-4 尾，用户实拍）：claude 的 /add-dir 取命令后整行原样
+    // resolve，不剥引号——资源管理器「复制为路径」带来的成对引号进了路径字面量，还让它
+    // 不再以盘符开头、被当相对路径拼到 cwd 后面（报 `…front"C:\…" was not found`）。
+    // 这是唯一允许改写用户输入的 slash 命令：引号在这条命令里没有任何合法含义。
+    // 改走 addSessionExtraDir：后端统一剥引号 + 校验 + 落库（resume 回放依据，手打的
+    // 否则不进库、恢复后丢）+ 有托管 PTY 时**自己**写 `/add-dir <dir>` 进终端——这里
+    // 不能再发一遍，否则终端里出现两条。校验失败 / provider 不支持时回退成剥了引号的
+    // 原命令照常发送，让 CLI 自己报它的错。远程桥不放行该命令，远程只剥引号后原样发。
+    let outgoingPrompt = prompt;
+    const addDirArg = attachments.length === 0 ? /^\/add-dir\s+(\S[\s\S]*)$/.exec(bare)?.[1] : undefined;
+    if (addDirArg !== undefined) {
+      const dir = unquotePath(addDirArg);
+      if (!remoteUi()) {
+        setSending(true);
+        setSendError("");
+        try {
+          const added = await addSessionExtraDir(sessionId, dir);
+          setPrompt("");
+          // 重复目录后端不写 PTY、终端里什么都不会出现——得说一声，否则像被吞了。
+          if (!added) setSendError(t.chat.extraDirExists);
+          return;
+        } catch {
+          // 回退原样发送（下方）。
+        } finally {
+          setSending(false);
+        }
+      }
+      outgoingPrompt = `/add-dir ${dir}`;
+    }
+    const outgoingBare = outgoingPrompt.trim();
     retryRef.current = () => sendPrompt();
     // 运行中发出的消息会被 CLI **排队**到回合结束才处理,期间 transcript 里看不到它
     // ——不记下来的话,消息在 GUI 上像消失了一样。发送成功后进排队清单,由轮询侧
     // 在它出现于 transcript / 回合结束时清除。
     const interjecting = tone === "running";
-    const queuedText = bare || t.chat.queuedAttachmentOnly;
+    const queuedText = outgoingBare || t.chat.queuedAttachmentOnly;
     // 纯附件消息的回执文本是占位「（附件）」,它永不落盘——打标让消解侧改认
     // 「水位线后任意新 user_text」而非文本包含(见 queuedInterjections 消解 effect)。
     const attachmentOnly = bare === "" && attachments.length > 0;
@@ -2627,7 +2657,7 @@ export function ChatWindow() {
         return;
       }
     }
-    if (await sendText(promptWithAttachments(prompt, attachments, t.chat.attachmentInstruction, chatUi?.attachment_mention ?? false))) {
+    if (await sendText(promptWithAttachments(outgoingPrompt, attachments, t.chat.attachmentInstruction, chatUi?.attachment_mention ?? false))) {
       setPrompt("");
       setAttachments([]);
       setAttachmentNotice("");

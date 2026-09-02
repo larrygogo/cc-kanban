@@ -303,6 +303,8 @@ export const zh = {
     sendBackgroundSession: "后台会话可发消息和结束。斜杠菜单、审批等操作请回派出它的终端。",
     sendBackgroundKeysMovedYou: "后台会话不接受终端按键，请在这里直接发消息。",
     sendBackgroundQueued: "已发给后台会话。若它未处理，内容还在输入框，可直接重发。",
+    // 手打 /add-dir 命中已记录的目录：后端不再写终端，界面上得有回音。
+    extraDirExists: "该目录已是附加目录",
     sendBackgroundNoAttachments: "后台会话暂不支持附件，请只发文字。",
     inputLocked: "终端正在等待选择，请先用上方卡片或终端页处理",
     inputLockedRemote: "终端正在等待选择，请先用上方卡片处理",

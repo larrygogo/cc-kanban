@@ -285,6 +285,7 @@ export const en: Dict = {
     sendBackgroundSession: "You can message and end this background session here. Slash menus and approvals stay in the terminal that started it.",
     sendBackgroundKeysMovedYou: "Background sessions ignore terminal keystrokes. Send messages from here instead.",
     sendBackgroundQueued: "Sent to the background session. If it doesn't process it, your text stays in the box — just resend.",
+    extraDirExists: "That directory is already attached",
     sendBackgroundNoAttachments: "Background sessions don't take attachments yet — send text only.",
     inputLocked: "The terminal is waiting for a choice; respond via the card above or the Terminal tab first",
     inputLockedRemote: "The terminal is waiting for a choice; respond via the card above first",

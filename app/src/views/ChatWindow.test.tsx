@@ -81,6 +81,48 @@ afterEach(() => {
 });
 
 describe("ChatWindow", () => {
+  /** 手打 `/add-dir "<path>"`（7T-4 尾，用户实拍）：claude 的 /add-dir 不剥引号，成对引号会
+   *  进路径字面量。这条命令改走 add_session_extra_dir（后端剥引号 + 校验 + 落库 + 自己写
+   *  PTY），前端**不再**往终端写一遍；后端拒绝时回退成剥了引号的原命令照常发送。 */
+  const addDirHistory = {
+    sessionId: 7, title: "附加目录会话", status: "idle", provider: "claude", cwd: "C:/repo",
+    supported: true, offset: 1, reset: false, pendingReview: null,
+    items: [{ type: "user_text", id: "u1", timestamp: null, text: "开始" }],
+  };
+  const typeAddDir = async () => {
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("附加目录会话")).toBeTruthy());
+    const box = screen.getByRole("combobox", { name: "发送消息给 Agent" });
+    fireEvent.change(box, { target: { value: '/add-dir "C:\\work\\x y"' } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    return box as HTMLTextAreaElement;
+  };
+  it("手打 /add-dir 走附加目录命令：引号交后端剥，终端里不再写第二条", async () => {
+    window.history.replaceState({}, "", "/?sessionId=7");
+    respondWithHistory(addDirHistory);
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) =>
+      command === "add_session_extra_dir" ? Promise.resolve(true) : base(command, args));
+    const box = await typeAddDir();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("add_session_extra_dir", { sessionId: 7, dir: "C:\\work\\x y" }));
+    await waitFor(() => expect(box.value).toBe(""));
+    // 等过一个提交间隔，确认没有任何 /add-dir 文本写进 PTY。
+    await new Promise((resolve) => setTimeout(resolve, submitGapMs("/add-dir x") + 50));
+    const written = invoke.mock.calls
+      .filter(([command]) => command === "write_managed_terminal")
+      .map(([, args]) => (args as { data: string }).data);
+    expect(written.some((data) => data.includes("/add-dir"))).toBe(false);
+  });
+  it("手打 /add-dir 被后端拒绝时回退：剥掉引号原样发给 CLI", async () => {
+    window.history.replaceState({}, "", "/?sessionId=7");
+    respondWithHistory(addDirHistory);
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) =>
+      command === "add_session_extra_dir" ? Promise.reject(new Error("该 Agent 不支持附加目录")) : base(command, args));
+    await typeAddDir();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("write_managed_terminal", { sessionId: 7, data: "/add-dir C:\\work\\x y" }));
+  });
+
   it("renders structured transcript entries", async () => {
     window.history.replaceState({}, "", "/?sessionId=7");
     respondWithHistory({
