@@ -216,7 +216,14 @@ function CrossMessageBlock({ message }: { message: CrossMessage }) {
     const el = bodyRef.current;
     if (!el) return;
     // +4 容差：亚像素行高会让恰好齐平的块虚报溢出，白挂一个点了没变化的按钮。
-    setOverflowing(el.scrollHeight > el.clientHeight + 4);
+    const measure = () => setOverflowing(el.scrollHeight > el.clientHeight + 4);
+    measure();
+    // 只在文本变化时量一次是不够的（复核指出）：窗口变窄会让原本齐平的消息超高、
+    // 变宽则相反，不复测就出现「短消息挂着展开钮」或「该有钮的没有」。
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
   }, [message.text]);
   return (
     <div className="chat-crossmsg">

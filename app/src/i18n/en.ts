@@ -461,6 +461,7 @@ export const en: Dict = {
     attentionDismiss: "Hide",
     attentionDismissTip: "Hide the card without sending any keys",
     attentionCollapsedRestore: "Prompt hidden · click to show",
+    questionCollapsedRestore: "Question hidden · click to show",
     unrecognizedPromptNotice: "The terminal seems to be waiting for a choice; your message was sent. If nothing happens, check the Terminal tab.",
     unrecognizedPromptNoticeRemote: "The terminal seems to be waiting for a choice; your message was sent. If nothing happens, check on the desktop.",
     terminalPromptTitle: "The Agent needs a startup choice",

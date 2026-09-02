@@ -2332,6 +2332,52 @@ describe("ChatWindow", () => {
     expect(screen.queryByText(/已选「/)).toBeNull();
   });
 
+  /** 题面卡的「仅收起」留一条可再展开的折叠条（7C-2 尾）；但挂起在别处了结后，折叠条
+   *  必须自己撤掉——否则它永远挂着，点开是一张已死的卡，去 resolve 一个不存在的请求
+   *  （复核实测）。存活以轮询 pending_interaction 回的 question 为准。 */
+  it("题面卡收起后留折叠条；挂起在别处了结时折叠条一并撤掉", async () => {
+    window.history.replaceState({}, "", "/?sessionId=33");
+    // 先让轮询确认这条挂起还在，收起后折叠条才该留着。
+    let questionAlive = true;
+    const question = {
+      sessionId: 33, requestId: "request-gone", provider: "claude", toolName: "AskUserQuestion",
+      description: null, answerable: false,
+      input: JSON.stringify({
+        questions: [{ header: "去向", question: "接下来做哪一步？", multiSelect: false, options: [{ label: "继续" }] }],
+      }),
+      permissionSuggestions: [],
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 33, title: "收起会话", status: "running", provider: "claude", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, items: [], connected: true,
+        ptyManaged: true,
+      });
+      if (command === "pending_interaction") {
+        return Promise.resolve({ approval: null, question: questionAlive ? question : null });
+      }
+      if (command === "managed_terminal_binding") return Promise.resolve(null);
+      if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 33, active: false, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    await waitFor(() => expect(screen.getByText("收起会话")).toBeTruthy());
+    expect(await screen.findByText(/接下来做哪一步/, {}, { timeout: 5_000 })).toBeTruthy();
+
+    // 「仅收起」：卡走了，折叠条留下（题面用自己的文案，与屏幕识别那条分得开）。
+    fireEvent.click(screen.getByRole("button", { name: "仅收起" }));
+    expect(screen.queryByText(/接下来做哪一步/)).toBeNull();
+    const bar = await screen.findByRole("button", { name: "已收起提问，点击展开" });
+    expect(bar).toBeTruthy();
+
+    // 在终端答掉/超时：下一轮轮询回 question:null，折叠条必须自己消失。
+    questionAlive = false;
+    await waitFor(
+      () => expect(screen.queryByRole("button", { name: "已收起提问，点击展开" })).toBeNull(),
+      { timeout: 5_000 },
+    );
+  });
+
   /** broker 挂起代答（answerable）：卡片是真正的作答面——多问题跨 tab、多选勾选、
    *  自定义输入，提交把 `answer:<正文>` 发给 resolve 通道，不写一个 PTY 字节。
    *  出口只有提交与「去终端作答」，刻意没有「仅收起」（收起=让 hook 干等 300s）。 */

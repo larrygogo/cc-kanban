@@ -491,6 +491,7 @@ export const zh = {
     attentionDismiss: "仅收起",
     attentionDismissTip: "仅收起卡片，不发送按键",
     attentionCollapsedRestore: "已收起提示，点击展开",
+    questionCollapsedRestore: "已收起提问，点击展开",
     unrecognizedPromptNotice: "终端似乎在等待选择，消息已发出。若无响应请到终端页确认。",
     unrecognizedPromptNoticeRemote: "终端似乎在等待选择，消息已发出。若无响应请在桌面端确认。",
     terminalPromptTitle: "Agent 需要你完成一个启动步骤",

@@ -68,16 +68,27 @@ const fireLogin = (provider: string, outcome: "success" | "cancelled" | "timeout
  * 顶部模型下拉切到某个 agent（按展示名）——列表现在一次只渲染选中的那一张卡（agent 一多，全部
  * 竖排要滚半天）。默认选中首个已安装的（beforeEach 里是 claude），要断言别家就先切过去。
  */
-/// 选项的可访问名可能带副文案（未安装的 agent 是「Kimi Code 未安装」，见 7G-7），
-/// 传字符串时按**前缀**认，别让一句副文案把所有调用点都写死成全名。
-function optionNamed(name: string | RegExp) {
-  return typeof name === "string" ? (content: string) => content.startsWith(name) : name;
+/// 按**主标签**精确找选项。未装的 agent 在标签后跟一个副文案 span（「未安装」，见 7G-7），
+/// 它和标签之间没有空白，可访问名拼出来是「Kimi Code未安装」——纯文本匹配要么落空，
+/// 要么退成前缀匹配、把日后新增的 `Kimi Code Pro` 一起放过（复核指出）。
+/// 直接认 DOM：.dd-label 的首个文本节点就是 label 本身，副文案是它的子 span。
+function findOption(name: string): HTMLElement {
+  const hit = screen.getAllByRole("option").find(
+    (el) => el.querySelector(".dd-label")?.firstChild?.textContent?.trim() === name,
+  );
+  if (!hit) throw new Error(`没有主标签为「${name}」的选项`);
+  return hit;
 }
 
 async function selectAgent(name: string | RegExp) {
   await waitFor(() => expect(document.querySelector(".account-agent-switch .dd-btn")).toBeTruthy());
   fireEvent.click(document.querySelector(".account-agent-switch .dd-btn") as HTMLElement);
-  fireEvent.click(await screen.findByRole("option", { name: optionNamed(name) }));
+  if (typeof name !== "string") {
+    fireEvent.click(await screen.findByRole("option", { name }));
+    return;
+  }
+  await waitFor(() => expect(findOption(name)).toBeTruthy());
+  fireEvent.click(findOption(name));
 }
 
 import { AccountSection } from "./settings/AccountSection";
@@ -201,11 +212,11 @@ describe("AccountSection agent 卡", () => {
     // 下拉里五家都在（含未装的 kimi）。
     fireEvent.click(document.querySelector(".account-agent-switch .dd-btn") as HTMLElement);
     for (const name of ["Claude Code", "Codex", "Kimi Code", "Gemini CLI", "OpenCode"]) {
-      expect(await screen.findByRole("option", { name: optionNamed(name) })).toBeTruthy();
+      await waitFor(() => expect(findOption(name)).toBeTruthy());
     }
 
     // 切到 kimi：它未装 → 卡片带安装按钮；此时 claude 卡已从 DOM 撤下。
-    fireEvent.click(screen.getByRole("option", { name: optionNamed("Kimi Code") }));
+    fireEvent.click(findOption("Kimi Code"));
     expect(await screen.findByTestId("agent-install-kimi")).toBeTruthy();
     expect(screen.queryByTestId("agent-card-claude")).toBeNull();
 

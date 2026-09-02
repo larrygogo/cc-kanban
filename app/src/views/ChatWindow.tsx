@@ -753,7 +753,7 @@ export function ChatWindow() {
   // 先记下,等屏幕识别确认表单在屏后才落键,绝不向未确认就绪的表单盲写）与 decideApproval。
   const {
     approval, setApproval, approvalCountdown, approvalTimedOut,
-    structuredQuestion, setStructuredQuestion,
+    structuredQuestion, setStructuredQuestion, liveQuestionId,
     approvalAwaitingIds, setApprovalAwaitingIds,
     brokerOwnsReview, setBrokerOwnsReview,
     lastInteractiveQuestionRef,
@@ -1800,6 +1800,9 @@ export function ChatWindow() {
     // 换会话后旧会话的阅读位置对新 transcript 无意义（7C-7 的恢复只跨视图，不跨会话）。
     savedScrollRef.current = null;
     lastScrollTopRef.current = 0;
+    // 收起的卡也归零：旧会话的折叠条对新会话无意义。
+    setDismissedAttention(null);
+    setDismissedQuestion(null);
     // 切会话一律保持当前视图：用户在终端就显示终端，在对话就显示对话。负 id（尚未
     // 认领的新会话）也不再强制进终端——对话页有「启动中」占位，claim 成真 id 时
     // 同样走这里，视图原地不动。
@@ -3115,6 +3118,13 @@ export function ChatWindow() {
     setDismissedQuestion(structuredQuestion);
     setStructuredQuestion(null);
   };
+  // 折叠条判活：挂起在别处了结（终端答掉 / 300s 超时 / 换了新一轮）后，折叠条必须一起
+  // 撤掉——否则它永远挂着，点开是一张已死的卡，去 resolve 一个不存在的请求（复核指出）。
+  // 屏幕识别那条靠 revealTerminalAttention(null) 兜底，题面这条此前没有对应物。
+  useEffect(() => {
+    if (!dismissedQuestion) return;
+    if (liveQuestionId !== dismissedQuestion.requestId) setDismissedQuestion(null);
+  }, [liveQuestionId, dismissedQuestion]);
   // 审批卡门控：插件声明了详情文法风格（details）的提示才走命令审批卡——不再枚举 pattern id。
   const commandAttention = terminalAttention && (terminalAttention.details === "proceed_box" || terminalAttention.details === "arrow_panel") ? terminalAttention : null;
   const interactiveAttention = terminalAttention?.id === "interactive:numbered-selector" ? terminalAttention : null;
@@ -3922,12 +3932,14 @@ export function ChatWindow() {
           onClick={() => { setTerminalAttention(dismissedAttention); setDismissedAttention(null); }}
         >{t.chat.attentionCollapsedRestore}</button>
       )}
+      {/* 两条折叠条可以同时在场（提示与题面各收起过一次）：文案必须分得开，否则是两个
+          一模一样的药丸叠着，看不出点哪个（复核指出）。 */}
       {view === "chat" && dismissedQuestion && !structuredQuestion && !terminalAttention && (
         <button
           type="button"
           className="chat-attention-collapsed"
           onClick={() => { setStructuredQuestion(dismissedQuestion); setDismissedQuestion(null); }}
-        >{t.chat.attentionCollapsedRestore}</button>
+        >{t.chat.questionCollapsedRestore}</button>
       )}
       </div>
       {terminalMounted && (
