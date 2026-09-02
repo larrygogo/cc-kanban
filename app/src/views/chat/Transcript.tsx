@@ -181,7 +181,15 @@ export const Transcript = memo(function Transcript({ sessionId, items }: { sessi
         <summary className="chat-activity-summary">
           <span className="chat-tool-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 17l6-6-6-6M12 19h8" /></svg></span>
           <span className="chat-activity-kinds">{label || t.chat.toolActivities(callCount || tools.length)}</span>
-          {pendingCount > 0 && <span className="chat-tool-pending" aria-label={t.chat.toolRunning}><i /><i /><i /></span>}
+          {/* 7C-9：行级指示已降级为 aria-hidden（并行工具一多就是播报风暴），组头这一处
+              是唯一的出口——但 aria-label 挂在无 role 的 span 上读屏取不到，等于全组静音。
+              role=status 让它成为可播报的活区，文本进 sr-only 的伴随节点（点点本身是装饰）。 */}
+          {pendingCount > 0 && (
+            <span className="chat-tool-pending" role="status">
+              <span className="chat-sronly">{t.chat.toolRunning}</span>
+              <i aria-hidden="true" /><i aria-hidden="true" /><i aria-hidden="true" />
+            </span>
+          )}
           {failureCount > 0 && <span className="chat-activity-errors">{t.chat.toolFailures(failureCount)}</span>}
           <span className="chat-tool-chevron">›</span>
         </summary>

@@ -96,6 +96,9 @@ export function NewSessionPanel({ onClose, prefill, onLaunched }: {
   // 改写，回车直接启动（Enter 与按钮共用 canLaunch 守卫，见 launch）。
   const dirInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
+    // 远程（手机）不抢焦点：聚焦输入框会立刻弹出软键盘，占掉半屏、还把面板顶上去，
+    // 而手机上第一步多半是点「最近目录」而不是手打路径（复核指出）。
+    if (remoteUi()) return;
     const el = dirInputRef.current;
     if (!el) return;
     el.focus();
@@ -549,9 +552,15 @@ export function NewSessionPanel({ onClose, prefill, onLaunched }: {
             // 设置的「账号与用量」，直接把人送过去（引导里早就这么说了，这里漏了）。
             <div className="ns-warn" data-testid="ns-no-agents">
               <span>{t.newSession.noAgents}</span>
-              <button type="button" className="ns-btn" onClick={() => void invoke("open_settings").catch(() => {})}>
-                {t.newSession.goInstall}
-              </button>
+              {/* open_settings 是宿主执行类命令，远程桥对它返 null——按钮在手机上是死点击
+                  （复核指出）。与同卡的修复/登录按钮同规：远程换成「请在桌面端处理」。 */}
+              {remoteUi() ? (
+                <span className="ns-warn-remote">{t.newSession.fixOnDesktop}</span>
+              ) : (
+                <button type="button" className="ns-btn" onClick={() => void invoke("open_settings").catch(() => {})}>
+                  {t.newSession.goInstall}
+                </button>
+              )}
             </div>
           ) : (
             <div className="ns-agents">

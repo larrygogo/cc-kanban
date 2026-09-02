@@ -61,8 +61,12 @@
 > 2026-09-02 实拍复轮：C-19（子任务吸顶标题与视口顶之间 24px 缝隙，滚动内容
 > 从缝里透出）、C-20（运行状态条非 Bash 工具只显示工具名）各修各的。
 > 2026-09-02 第七轮：六路并行读码 + 实拍新扫 69 条（高 5 / 中 34 / 低 30），
-> 编号 7B/7C/7T/7S/7G/7M，见「五」节。**同日全部修完**（三处有意的行为变更与
-> 未经本机验证项列在该节导语）；交互 backlog 再次回到无开放项。
+> 编号 7B/7C/7T/7S/7G/7M，见「五」节。同日全部标修（三处有意的行为变更与
+> 未经本机验证项列在该节导语）。
+> 同日复核（3eedf30 六路逐条对照 + tsc/vitest/clippy/cargo test 全绿）：44 条真修、
+> 17 条部分（副本或第二半没跟上，状态列已注明）、4 条已修带小遗留、3 条回归（7G-13
+> 浅色失败胶囊变绿字、7M-3×7M-11 缩放互斥、7S-6 端口行撑爆）已修补；本轮 69 条几乎无配套测试，
+> 建议 7T-2/4/6、7M-6 补纯函数单测。dist-mobile 需重建才在手机端生效。
 
 ## 〇、横切主题（先读这节）
 
@@ -292,7 +296,7 @@
    app 级 emit + sessionId 过滤（前端已在过滤），解除窗口 label 耦合。~~ 已落地
    （pty-output/pty-exit/pty-external-viewers 全部 app.emit + 关窗 reset_viewer 兜底）。
 
-## 五、2026-09-02 第七轮新发现（六路读码 + 实拍，69 条 —— 全部已修）
+## 五、2026-09-02 第七轮新发现（六路读码 + 实拍，69 条，复核后 17 条部分待补）
 
 > 六轮关闭后的一轮新扫描。共同模式仍是「策略级修复的相邻路径漏网」：主面修了副本没跟上
 > （B-4 空列表切换、U1-13 看板刷新失败、S-7 跨平台默认终端、S-3 网络分区错误行、
@@ -309,6 +313,20 @@
 > maximum-scale（7M-11，禁双指缩放是无障碍硬伤，换回可缩放 + 聚焦不跳字号）。
 > 未经本机验证：7T-1 的 macOS ⌥ 拖选、7T-7 的 ⌘ 文案（`cfg(macos)` 路径，按 xterm 6.0
 > 源码与 metaKey 处理器推导）；7M-2/3/9/11 的真机表现（iOS 安全区与软键盘）。
+>
+> **2026-09-02 复核轮（另一会话六路逐条对照）**：查出 3 条回归 + 7 处半成品，全部修完。
+> 回归：7G-13 浅色规则特异性压过 `.is-failed`（失败胶囊变红底绿字）、7S-6 说明行落在
+> 无 wrap 的 `.row` 里把标签挤到 0 宽、7M-11 的自定义回答框漏钉 16px 且与 7M-3 的
+> visualViewport 互斥（双指缩放触发 resize 会压塌布局）。半成品：7C-7 的保存分支在
+> hidden 之后跑、`scrollHeight` 恒 0 是死代码（改由 onScroll 持续记位置）；7C-9 组头
+> `aria-label` 挂在无 role 的 span 上、行级 aria-hidden 后读屏全静音；7T-5 autoFocus
+> 在手机上弹软键盘、7T-8「去安装」在远程是死点击（均补 `!remoteUi()`）；7B-8 账号快照
+> 预填 usageMap 时漏写 usageMeta；7S-7 错误行双 format 出双前缀；7C-10 react-markdown
+> 默认 urlTransform 把非 http 源置空、chip 没了文件名。
+> 另落地一项用户实拍需求：transcript 里的**跨会话消息**（另一个 Claude 会话经
+> SendMessage 发来）此前整块摊成 XML + 管道名 + 一段英文安全须知，现在解析成带来源的
+> 消息块（`parseUserText` 的 crossMessages，见 localCommand.ts）。
+
 
 ### 看板与贴纸
 
@@ -321,7 +339,7 @@
 | 7B-5 | 外库卡悬停提示「打开会话」，点下去却是「本窗口只读展示」toast（横切主题 5 新实例） | `Sticker.tsx:1239` vs `:564-575` | data-tip 先判 foreign / background | 已修 |
 | 7B-6 | 实拍：主目录启动的会话「仓库」栏显示成 `35122`（cwd basename） | `session_query.rs:501` | cwd 等于 home 时显示「主目录」或 `~` | 已修 |
 | 7B-7 | 搜索框已开、焦点在卡片时 Ctrl+F 无反应（B-12 只处理未开→开）；设置窗无 Ctrl+F 也无 × 清除（S-1 只做了搜索本身） | `Sticker.tsx:464-468`、`About.tsx:861-880` | 搜索框挂 ref，Ctrl+F 永远 focus+select；设置窗补同款与 × | 已修 |
-| 7B-8 | 底栏用量刷新失败后陈旧百分比当新鲜值展示（S-6 只给了设置页「更新于」） | `Sticker.tsx:873-875` | usageMap 带 fetchedAt，失败后降饱和 + tip 上次更新时间 | 已修 |
+| 7B-8 | 底栏用量刷新失败后陈旧百分比当新鲜值展示（S-6 只给了设置页「更新于」） | `Sticker.tsx:873-875` | usageMap 带 fetchedAt，失败后降饱和 + tip 上次更新时间 | 部分（复核：getAccounts 预填 usageMap 的路径不写 usageMeta，启动即显示缓存、首次刷新失败仍不标陈旧；ProviderUsage 无 fetched_at） |
 | 7B-9 | 连续归档时撤销 toast 无上限堆叠，4 条盖住贴纸一半（U1-12/P1-2 为撤销互不相吞做独立条，未设上限） | `Sticker.tsx:429-438`、`styles.css:435-439` | ≥2 条合并「已归档 N 个 · 撤销全部」或上限 2 条 | 已修 |
 | 7B-10 | 模型胶囊无 max-width，中转长 model id 先挤没仓库名（G-12 未覆盖卡片元信息行） | `styles.css:815`、`Sticker.tsx:1367` | 复制 `.stk-profile` 的 max-width + ellipsis，全名进 tip | 已修 |
 | 7B-11 | 搜索占位符没说便签可搜（B-7 只改了后端 LIKE） | `zh.ts:40`、`en.ts:37` | 改「搜索标题 / 仓库 / 便签…」 | 已修 |
@@ -336,10 +354,10 @@
 | 7C-4 | 远程作答卡「去终端作答」未门控，点后题面交还桌面终端，手机降级为「请在桌面端作答」；另三处远程文案仍指向终端页（C-11 尾未做远程降级） | `ChatWindow.tsx:3712,3108-3119,1956`、`useApprovalChannel.ts:223`、`zh.ts:287` | 按钮按 `!remoteUi()` 门控；三条文案加 Remote 变体 | 已修 |
 | 7C-5 | 侧栏目录筛选/归档视图生效后无可见标记，列表只是「少了很多会话」 | `ChatSidebar.tsx:265-280,440,445` | 筛选钮 is-active 小点；归档视图在搜索框上方渲染可关闭状态条 | 已修 |
 | 7C-6 | 折叠组吞掉当前会话（日期分桶键固定 `date:today`，折过一次第二天新会话全藏）；activeId 在折叠组内时无条目带 tabIndex=0，Tab 进不了列表（C-17 roving 锚点指向未渲染节点） | `ChatSidebar.tsx:886-889,1244,815-820,184-189` | tabbableId 从实际渲染条目取；activeId 所在组强制展开；日期/状态分组折叠不落盘 | 已修 |
-| 7C-7 | 切终端再切回仍强制回底，阅读位置丢失（C-14 标已修但离开 chat 视图时仍重置 followRef/positionedRef） | `ChatWindow.tsx:2032-2045`、`styles.css:4990` | 离开前记 scrollTop/followRef 切回恢复，或隐藏改 content-visibility | 已修 |
+| 7C-7 | 切终端再切回仍强制回底，阅读位置丢失（C-14 标已修但离开 chat 视图时仍重置 followRef/positionedRef） | `ChatWindow.tsx:2032-2045`、`styles.css:4990` | 离开前记 scrollTop/followRef 切回恢复，或隐藏改 content-visibility | 部分（复核：效果靠删掉旧的 followRef 重置成立；新写的 savedScrollRef 保存分支在 hidden 落 DOM 之后才跑、scrollHeight 恒 0，是死代码，注释「display:none 清零 scrollTop」经 Chromium 实测为假，需重做或删干净） |
 | 7C-8 | 作答卡自定义回答按 Enter 无反应，屏幕识别卡同款输入框回车即提交 | `QuestionPanels.tsx:114-120` vs `ChatWindow.tsx:3614` | answer 形态 input 加 onKeyDown 提交 | 已修 |
-| 7C-9 | 工具组摘要中英混排（只本地化 Bash/Read/Write）；每条运行中工具行都是 role=status，并行时读屏被轮番打断（G-16 漏网副本） | `ToolActivity.tsx:5-11,44`、`Transcript.tsx:174-179` | friendlyToolName 补常见项；行级 aria-hidden，组头一处播报 | 已修 |
-| 7C-10 | markdown 图片无兜底：大图撑破 720px 列出横向滚动条，本地路径是破图标无说明（U1-28 只覆盖代码块） | `ChatMarkdown.tsx:154-198` | `.chat-md img { max-width:100% }`；非 http 源复用 chat-image-chip | 已修 |
+| 7C-9 | 工具组摘要中英混排（只本地化 Bash/Read/Write）；每条运行中工具行都是 role=status，并行时读屏被轮番打断（G-16 漏网副本） | `ToolActivity.tsx:5-11,44`、`Transcript.tsx:174-179` | friendlyToolName 补常见项；行级 aria-hidden，组头一处播报 | 部分（复核：工具名映射与行级 aria-hidden 已做；组头 Transcript.tsx:184 的 aria-label span 无 role 不会被读出，读屏现在完全听不到「运行中」） |
+| 7C-10 | markdown 图片无兜底：大图撑破 720px 列出横向滚动条，本地路径是破图标无说明（U1-28 只覆盖代码块） | `ChatMarkdown.tsx:154-198` | `.chat-md img { max-width:100% }`；非 http 源复用 chat-image-chip | 部分（复核：max-width 已做；C:\… / file:// 源被 react-markdown defaultUrlTransform 置空，chip 只剩图标无文件名，需自定义 urlTransform） |
 
 ### 终端与新建会话
 
@@ -349,10 +367,10 @@
 | 7T-2 | 文件路径链接在含中文的行上错位，每个宽字符左偏 1 格，Ctrl+点击打不开（T-4 未覆盖坐标口径） | `ManagedTerminal.tsx:600-604` | `line.getCell(i).getWidth()` 把字符串下标映射到单元格下标 | 已修 |
 | 7T-3 | 终端字号首帧按 12 起，settings 晚到再重排，PTY 多吃一次 resize（U1-17 第 5 处首帧占位） | `ManagedTerminal.tsx:572-576,997` | 挂载前先拿 settings 再 new Terminal，或由 ChatWindow 传入 | 已修 |
 | 7T-4 | 带引号的目录路径（资源管理器「复制为路径」）被拒为「目录不存在」 | `NewSessionPanel.tsx:290`、`paths.ts:8-14`、`terminal.rs:1791` | normalizePath 剥首尾成对引号 | 已修 |
-| 7T-5 | 新建面板打开无初始焦点，目录已预填却回车无反应（U1-15 预填后暴露） | `NewSessionPanel.tsx:393-402` | 输入框 autoFocus 并全选，或有预填时焦点落启动按钮 | 已修 |
+| 7T-5 | 新建面板打开无初始焦点，目录已预填却回车无反应（U1-15 预填后暴露） | `NewSessionPanel.tsx:393-402` | 输入框 autoFocus 并全选，或有预填时焦点落启动按钮 | 部分（复核：autoFocus 无 remoteUi() 门控，手机端打开新建面板即弹软键盘） |
 | 7T-6 | 输入框 Enter 绕过启动按钮禁用条件，未装 CLI/检测中照发 newSession | `NewSessionPanel.tsx:401` vs `:642,283` | 抽 canLaunch 守卫，Enter 与按钮共用 | 已修 |
 | 7T-7 | macOS 上「Ctrl+点击」提示教错键，处理器实际收 metaKey（未经本机验证） | `zh.ts:372-373,137`、`ManagedTerminal.tsx:554,606`、`NewSessionPanel.tsx:496` | 文案走 `isMac()` 写「⌘+点击」 | 已修 |
-| 7T-8 | 未检测到 CLI 时是死胡同，无按钮无去处（S-11 在引导里说了去哪装） | `NewSessionPanel.tsx:520-523`、`zh.ts:151` | 警示行加「去安装」按钮调 open_settings | 已修 |
+| 7T-8 | 未检测到 CLI 时是死胡同，无按钮无去处（S-11 在引导里说了去哪装） | `NewSessionPanel.tsx:520-523`、`zh.ts:151` | 警示行加「去安装」按钮调 open_settings | 部分（复核：「去安装」钮在远程是死点击，transport 对 open_settings 静默返回 null，需门控） |
 | 7T-9 | 预填 Agent 未安装时静默换成别的 | `NewSessionPanel.tsx:215-217` | Agent 区下留一行「X 未安装，已改用 Y」 | 已修 |
 | 7T-10 | 终端右键菜单 Esc 关闭后焦点落空，继续打字没反应（U0-11 焦点归还漏了） | `ManagedTerminal.tsx:1905-1917`、`useDismissable.ts:79` | onClose 补 `terminalRef.focus()` 或传 escFocusReturn | 已修 |
 
@@ -360,13 +378,13 @@
 
 | # | 问题 | 位置 | 建议 | 状态 |
 |---|---|---|---|---|
-| 7S-1 | Windows 默认档登录提示写「已在 Terminal 打开」，实际弹的是 Windows Terminal/PowerShell（S-7 只接了 resume_terminal 原值） | `AccountSection.tsx:245-254`、`settings.rs:21-23`、`terminal.rs:1638` | 存值不在本平台选项内时按后端同规则回退，或退回不带终端名文案 | 已修 |
+| 7S-1 | Windows 默认档登录提示写「已在 Terminal 打开」，实际弹的是 Windows Terminal/PowerShell（S-7 只接了 resume_terminal 原值） | `AccountSection.tsx:245-254`、`settings.rs:21-23`、`terminal.rs:1638` | 存值不在本平台选项内时按后端同规则回退，或退回不带终端名文案 | 已修（复核遗留：存值 wt/wezterm 已卸载时仍念旧终端名，前端可接 availableTerminals() 对齐后端回退） |
 | 7S-2 | 「重启并更新」按下后无进行态，「稍后」/Esc 仍可用，安装器起来前数秒画面不动（U0-12/S-13 止步于确认与失败） | `Updater.tsx:186`、`useUpdate.ts:78-88` | installing 期间状态行与主按钮换「正在安装…」，later/Esc 让位 | 已修 |
-| 7S-3 | 更新已下载态在关于页与贴纸底部按钮都压成「有新版本」（U0-7/S-13 只修了 unknown/checking/error） | `About.tsx:711,721`、`zh.ts:38`、`App.tsx:958` | available / downloading / ready 分三条文案 | 已修 |
-| 7S-4 | 搜索态账号分区只搜当前 agent，切换器被隐藏，搜「codex」无结果无入口（S-1 未覆盖同分区单卡） | `searchFilter.ts:74`、`AccountSection.tsx:1334` | 搜索态豁免 `.account-agent-switch`，或命中 agent 名自动 pickAgent | 已修 |
+| 7S-3 | 更新已下载态在关于页与贴纸底部按钮都压成「有新版本」（U0-7/S-13 只修了 unknown/checking/error） | `About.tsx:711,721`、`zh.ts:38`、`App.tsx:958` | available / downloading / ready 分三条文案 | 已修（复核遗留：sticker.updateReady 与 about.updateReady 措辞不一，违背状态词唯一） |
+| 7S-4 | 搜索态账号分区只搜当前 agent，切换器被隐藏，搜「codex」无结果无入口（S-1 未覆盖同分区单卡） | `searchFilter.ts:74`、`AccountSection.tsx:1334` | 搜索态豁免 `.account-agent-switch`，或命中 agent 名自动 pickAgent | 部分（复核：只解决分区已可见时切换器被藏；搜「codex」仍无结果无入口，建议的自动 pickAgent 未做） |
 | 7S-5 | 弹层内拖选文字松手在遮罩上会关闭弹层、草稿丢失（G-3 只做了焦点陷阱） | `AppModal.tsx:82` | onMouseDown 记起点，起终点都在遮罩上才 onClose | 已修 |
-| 7S-6 | 远程端口非法输入静默回退 18620，无说明 | `RemoteAccessCard.tsx:19-24` | 行内错误「端口须为 1 到 65535」，保留输入直到修正 | 已修 |
-| 7S-7 | 网络分区与远程卡错误行无 × 无 role=alert，与其他四分区不一致（08-31 尾轮只补了账号分区） | `NetworkSection.tsx:325`、`RemoteAccessCard.tsx:146-152` | 改用 About.tsx 的 SettingsError | 已修 |
+| 7S-6 | 远程端口非法输入静默回退 18620，无说明 | `RemoteAccessCard.tsx:19-24` | 行内错误「端口须为 1 到 65535」，保留输入直到修正 | 已修（复核回归修补：说明行 flex-basis 100% 落在 nowrap 的 .row 里会把「端口」标签挤到 0 宽，加 .remote-port-row flex-wrap） |
+| 7S-7 | 网络分区与远程卡错误行无 × 无 role=alert，与其他四分区不一致（08-31 尾轮只补了账号分区） | `NetworkSection.tsx:325`、`RemoteAccessCard.tsx:146-152` | 改用 About.tsx 的 SettingsError | 已修（复核遗留：远程卡 startError 外再套 formatBackendError，英文界面双前缀） |
 | 7S-8 | 确认窗正文 11px + dim 色，危险后果句是整窗最小最淡的字（S-14 只改了按钮） | `styles.css:3490,3493` | 正文升 `--fs-12-5` + `--cc-text` | 已修 |
 | 7S-9 | 关于页「打开官网」是唯一 primary，有新版本时两个主按钮；「使用引导」副标写「欢迎使用 Meowo」 | `About.tsx:746,762` | 官网降级普通按钮；副标改「重看首次引导」 | 已修 |
 | 7S-10 | 英文 Appearance 分区第一行也叫 Appearance | `en.ts:599,649` | theme 改 Theme / Color scheme | 已修 |
@@ -375,22 +393,22 @@
 
 | # | 问题 | 位置 | 建议 | 状态 |
 |---|---|---|---|---|
-| 7G-1 | **faint 文字档按裸底校准，实际落在叠 surface 的卡面**：活动行/时间/tab 计数/代码块语言角标深色约 4.34:1、hover 3.8:1，浅色 4.0～4.23:1（估算；G-9 修的是 alpha/opacity 叠加） | `styles.css:44-45,157-158`、消费 `:715,825,803,353,4970` | faint 按叠层后的面重校（深约 #9aa09b、浅约 #636c67），或卡内 ≤10.5px 改 dim | 已修 |
+| 7G-1 | **faint 文字档按裸底校准，实际落在叠 surface 的卡面**：活动行/时间/tab 计数/代码块语言角标深色约 4.34:1、hover 3.8:1，浅色 4.0～4.23:1（估算；G-9 修的是 alpha/opacity 叠加） | `styles.css:44-45,157-158`、消费 `:715,825,803,353,4970` | faint 按叠层后的面重校（深约 #9aa09b、浅约 #636c67），或卡内 ≤10.5px 改 dim | 部分（复核实算：浅色 hover 卡面 4.39:1 仍不达标） |
 | 7G-2 | 对话输入框占位符 color-mix 78% 透明，约 3.4:1，却是 Enter/Shift+Enter 约定唯一入口（绕回 G-9 同一坑） | `styles.css:4604` | 直接用 `--cc-text-faint` | 已修 |
 | 7G-3 | 同一张待批准卡两种橙：徽标琥珀黄、pill 橙红，终端横幅第三种（G-17/B-2 统一了徽标，pill 与横幅硬编码漏网） | `styles.css:879-886` vs `:642`、`:4987-4988` | `.pending-pill` 与终端横幅改吃 `--cc-warn-vivid` | 已修 |
 | 7G-4 | 悬停元素被移除后 tooltip 残留（运行状态条卸载不派发 mouseout），直到 Esc/点击 | `Tooltip.tsx:47-57,66-73`、`ChatWindow.tsx:3536` | show() 对无 tip 新目标先 hide；加 `anchor.isConnected` 检查 | 已修 |
-| 7G-5 | 「等你」造词回流：对话窗标题栏「等你输入」、终端横幅「Agent 在等你」、读屏汇总、引导「谁在等你」，与徽标「等待输入」不一致；en「Waiting for you」同病 | `zh.ts:207,263,516,973` vs `:19`、`en.ts:198` vs `:17` | 统一「等待输入」；263 改「有 1 条待批准的请求」 | 已修 |
+| 7G-5 | 「等你」造词回流：对话窗标题栏「等你输入」、终端横幅「Agent 在等你」、读屏汇总、引导「谁在等你」，与徽标「等待输入」不一致；en「Waiting for you」同病 | `zh.ts:207,263,516,973` vs `:19`、`en.ts:198` vs `:17` | 统一「等待输入」；263 改「有 1 条待批准的请求」 | 部分（复核：前端已清零；settings.rs:317 系统通知正文仍「等你」，en waitingTitle 与 zh 不对位） |
 | 7G-6 | 断开状态两套词：对话窗「未连接」vs 看板「已断开」，tip 还写「已断开/已停止」 | `zh.ts:208` vs `:48,101,998` | 208 改「已断开」，48 去「/已停止」 | 已修 |
-| 7G-7 | 可点的「未安装」下拉项 opacity .5 压成约 2.5:1，但它是安装入口不是禁用项 | `styles.css:1988`、`menu.tsx:219`、`AccountSection.tsx:1350` | opacity 只灰化图标，文字 dim + 「未安装」副文案 | 已修 |
-| 7G-8 | 文案规范硬伤集中：分号 `zh.ts:164,166,226,657,659,863,890`；「——」`:362`；超 20 字 `:62,104,106,119,122,747,751,764,779,780,842,846,848,989`；黑话「后端」`:226`、「hooks」`:989,991` | 见左 | 分号拆句；362 改「已强制结束（退出码 X）。进程可能仍在后台，上方保留了终端输出」；hooks→接入 | 已修 |
-| 7G-9 | 同一动作多个动词：打断/中断、折叠/收起、跳过权限确认/检查、计划模式/计划；切终端页按钮四种标签（打开终端/终端/去终端作答/去终端页切换模型） | `zh.ts:245,457,400,185,584,183,581`、`ChatWindow.tsx:3494,3735,4184,4468` | 统一「中断」「收起」「跳过权限确认」「计划模式」「去终端页」，en 同步 | 已修 |
-| 7G-10 | 桌面端五处点击热区不足 24px：toast 关闭叉、卡片 ⋯、用量 provider 标签、引导步骤圆点 7px（G-15 从未审过尺寸） | `styles.css:470-474,948-951,524-526,1566-1579` | B-14 的 `::before` 扩热区手法，视觉不变 | 已修 |
+| 7G-7 | 可点的「未安装」下拉项 opacity .5 压成约 2.5:1，但它是安装入口不是禁用项 | `styles.css:1988`、`menu.tsx:219`、`AccountSection.tsx:1350` | opacity 只灰化图标，文字 dim + 「未安装」副文案 | 部分（复核：对比度已修；建议的「未安装」副文案未做，未装项现在只差半透明图标，信息更弱） |
+| 7G-8 | 文案规范硬伤集中：分号 `zh.ts:164,166,226,657,659,863,890`；「——」`:362`；超 20 字 `:62,104,106,119,122,747,751,764,779,780,842,846,848,989`；黑话「后端」`:226`、「hooks」`:989,991` | 见左 | 分号拆句；362 改「已强制结束（退出码 X）。进程可能仍在后台，上方保留了终端输出」；hooks→接入 | 部分（复核：分号/破折号/黑话清零；zh.ts:1040 只换词没拆句仍 60 字，gateErr 两条 21～22 字擦线） |
+| 7G-9 | 同一动作多个动词：打断/中断、折叠/收起、跳过权限确认/检查、计划模式/计划；切终端页按钮四种标签（打开终端/终端/去终端作答/去终端页切换模型） | `zh.ts:245,457,400,185,584,183,581`、`ChatWindow.tsx:3494,3735,4184,4468` | 统一「中断」「收起」「跳过权限确认」「计划模式」「去终端页」，en 同步 | 部分（复核：zh.ts:506 仍「打断」；answerInTerminal / openTerminal 成死键） |
+| 7G-10 | 桌面端五处点击热区不足 24px：toast 关闭叉、卡片 ⋯、用量 provider 标签、引导步骤圆点 7px（G-15 从未审过尺寸） | `styles.css:470-474,948-951,524-526,1566-1579` | B-14 的 `::before` 扩热区手法，视觉不变 | 部分（复核：引导圆点 7+8×2=23px 差 1px，需 inset -9px） |
 | 7G-11 | 远程卡按钮引用不存在的 token（--radius-md/--cc-surface-2/--cc-surface-3），hover 零反馈 | `styles.css:2023,2044,2046,2050` | 改 `--cc-surface(-hover)` / `--r-md` / `--r-sm` | 已修 |
-| 7G-12 | 「上一任务」残留区整块 opacity .62，已完成项约 2.7:1（G-9 之后新增） | `styles.css:4417,4429` | 去容器 opacity，faint 单色 + 虚线容器 | 已修 |
-| 7G-13 | 浅色主题 color-mix 出的子任务胶囊约 3.96/4.1:1（深色 7.5:1 无事） | `styles.css:4502,4566` | 浅色改 `--cc-accent-text` | 已修 |
+| 7G-12 | 「上一任务」残留区整块 opacity .62，已完成项约 2.7:1（G-9 之后新增） | `styles.css:4417,4429` | 去容器 opacity，faint 单色 + 虚线容器 | 部分（复核：opacity 已去；进行中/待办项被 li.is-* 就地覆盖成与新清单同色，「弱化」只剩虚线边） |
+| 7G-13 | 浅色主题 color-mix 出的子任务胶囊约 3.96/4.1:1（深色 7.5:1 无事） | `styles.css:4502,4566` | 浅色改 `--cc-accent-text` | 已修（复核回归修补：原 :root[data-theme=light] .chat-subagent-status 特异性压过 .is-failed，浅色失败胶囊变红底绿字；现只覆盖图标与类型/已完成两个绿胶囊，胶囊文字压深 15% 到约 5.3:1） |
 | 7G-14 | Windows 中文界面 550/560/590 字重跳成 700，中英混排中文粗英文细 | `styles.css:4390,4399,4492,4753,4795,4799,5012` | 中间字重收到 500 或 600 | 已修 |
 | 7G-15 | en 大小写/标点不成对：agent vs the Agent、成对文案一条带句点一条不带、「1 entries」 | `en.ts:143,147,158-162` vs `:267,285`、`:154/155`、`:407` | Agent 统一大写；成对文案统一标点；单数分支 | 已修 |
-| 7G-16 | reduced-motion 下 4 个转圈定格成缺口环（U1-18 通配副作用，3452 只修了一处） | `styles.css:2194,5082,4188,1372-1380` | 同一 @media 块补 `border-*-color: currentColor` | 已修 |
+| 7G-16 | reduced-motion 下 4 个转圈定格成缺口环（U1-18 通配副作用，3452 只修了一处） | `styles.css:2194,5082,4188,1372-1380` | 同一 @media 块补 `border-*-color: currentColor` | 部分（复核：.managed-terminal-spinner 未补，静止仍是缺口环） |
 
 ### 手机远程页
 
@@ -398,15 +416,15 @@
 |---|---|---|---|---|
 | 7M-1 | **配对后整屏空白数秒**：Suspense fallback 为 null，ChatWindow chunk 1.2MB 走 Tailscale 中继像卡死（C-12 骨架屏只覆盖窗内切会话） | `mobile/main.tsx:48-53,92` | fallback 换同底色「正在加载」行；考虑拆 hljs/xterm 出远程 chunk | 已修 |
 | 7M-2 | 刘海机顶栏：42px 定高 + safe-area padding-top 被吃空，☰ 溢出到标题行；抽屉头未留白 | `mobile.css:27-29` × `styles.css:3538-3545,3596` | `.chat-topbar` 改 `min-height: calc(42px + env(safe-area-inset-top))`，抽屉头同步 | 已修 |
-| 7M-3 | iOS 软键盘弹出时 100dvh 页面被整体顶走，composer 可能藏在键盘后；全仓无 visualViewport 处理（调研标「待真机确认」至今未收口） | `mobile.css:15-24` | visualViewport resize 写 `--app-height`；安卓 `interactive-widget=resizes-content` | 已修 |
-| 7M-4 | 桌面离线最长 60s 才提示（20s 超时 × 3 次），文案「后端」是黑话且含分号 | `transport.ts:165`、`ChatWindow.tsx:1842-1845`、`zh.ts:226` | 轮询类超时压到 5s；远程文案「与桌面端失去连接，正在重试」 | 已修 |
+| 7M-3 | iOS 软键盘弹出时 100dvh 页面被整体顶走，composer 可能藏在键盘后；全仓无 visualViewport 处理（调研标「待真机确认」至今未收口） | `mobile.css:15-24` | visualViewport resize 写 `--app-height`；安卓 `interactive-widget=resizes-content` | 已修（复核回归修补：与 7M-11 互斥，双指放大也触发 visualViewport resize，未判 scale 会把 --app-height 压成缩放后高度并滚回原点；加 scale>1.01 跳过。iOS 真机未验） |
+| 7M-4 | 桌面离线最长 60s 才提示（20s 超时 × 3 次），文案「后端」是黑话且含分号 | `transport.ts:165`、`ChatWindow.tsx:1842-1845`、`zh.ts:226` | 轮询类超时压到 5s；远程文案「与桌面端失去连接，正在重试」 | 已修（复核遗留：remote/timeout 译文「正在重试」也用在不重试的发送路径，措辞待中性化） |
 | 7M-5 | 手动配对后主题/语言最长 12s 才纠正，中途整页闪换（setInterval 无首发） | `mobile/main.tsx:35-46` | 轮询体抽函数，TokenGate 验证通过时立即调一次 | 已修 |
 | 7M-6 | 配对失败不分「令牌错」与「连不上」，401 与网络异常同回 false | `TokenGate.tsx:51-53`、`transport.ts:85-99` | probeToken 回三态 ok / unauthorized / unreachable | 已修 |
-| 7M-7 | 远程错误文案硬编码中文、半角标点，errors.ts 无 remote sentinel（S-9 改造漏网） | `TokenGate.tsx:46-69`、`mobile.html:12`、`transport.ts:154-264`、`remote.rs:654,680,698,1149` | 闸门文案入 `remote.*` 字典；remote.rs 改 `remote/<code>` 结构化 reason 并补映射 | 已修 |
+| 7M-7 | 远程错误文案硬编码中文、半角标点，errors.ts 无 remote sentinel（S-9 改造漏网） | `TokenGate.tsx:46-69`、`mobile.html:12`、`transport.ts:154-264`、`remote.rs:654,680,698,1149` | 闸门文案入 `remote.*` 字典；remote.rs 改 `remote/<code>` 结构化 reason 并补映射 | 部分（复核：四段落地；mobile.html <title> 仍硬编码中文，remote/http_ 映射丢状态码、bad_payload 丢 cmd） |
 | 7M-8 | 远程新建会话遇目录信任/登录询问时「正在启动…」永远转，无出口文案（T-8 的出口按钮被 `!remoteUi()` 门掉） | `ChatWindow.tsx:3488-3497,575-580` | 远程 startingSlow 时渲染「启动等待中，请在桌面端确认」 | 已修 |
-| 7M-9 | 关键小按钮触控热区 32～38px 不足 44px：侧栏 ⋯（远程唯一星标/重命名/归档入口，误点直接打开会话）、审批 ✕ 与「拒绝」相邻 | `styles.css:3765,4999,3641,3419`、`mobile.css:84-91` | 触屏块对这四类改 `inset: -12px` | 已修 |
+| 7M-9 | 关键小按钮触控热区 32～38px 不足 44px：侧栏 ⋯（远程唯一星标/重命名/归档入口，误点直接打开会话）、审批 ✕ 与「拒绝」相邻 | `styles.css:3765,4999,3641,3419`、`mobile.css:84-91` | 触屏块对这四类改 `inset: -12px` | 部分（复核：点名的 .chat-todo-btn 未扩仍 38px，抽屉 ☰ 40px、搜索 × 41px 亦不足 44） |
 | 7M-10 | 配对页不跟主题（--bg/--fg/--panel 未定义恒落深色），无 theme-color | `mobile.css:199-242`、`mobile.html` | 改用 `--cc-*` token，补 meta theme-color | 已修 |
-| 7M-11 | 安卓 `maximum-scale=1` 禁双指缩放，与「放大交给系统」注释矛盾 | `mobile.html:7-10` × `mobile.css:37-40` | 去 maximum-scale，输入控件钉 16px，`touch-action: manipulation` | 已修 |
+| 7M-11 | 安卓 `maximum-scale=1` 禁双指缩放，与「放大交给系统」注释矛盾 | `mobile.html:7-10` × `mobile.css:37-40` | 去 maximum-scale，输入控件钉 16px，`touch-action: manipulation` | 已修（复核补漏：.chat-approval-custom input 仍 13px 已钉 16px，mobile.html 头注释同步） |
 | 7M-12 | 触屏残留桌面键盘语义：审批卡「拒绝 Esc」徽章、长按发送钮弹 Ctrl+Enter 说明（G-15 长按 tooltip 带过来的） | `ChatWindow.tsx:3792-3794,4428`、`zh.ts:457` | 两处加 `!remoteUi()` 门控 | 已修 |
 
 ## 做得好的（保留，勿在重构中弄丢）

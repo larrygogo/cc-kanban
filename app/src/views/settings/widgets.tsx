@@ -11,12 +11,18 @@ import { formatBackendError } from "../../i18n/errors";
  *  渲染点兜底过一遍 formatBackendError（产出端 state.ts 已格式化，这里是幂等双保险）。
  *  7S-7：本来长在 About.tsx 里、只有三处在用；网络与远程两处各写各的裸 div（无 ×、
  *  无 role=alert）。抽到这里供全部分区共用。 */
-export function SettingsError({ error, onDismiss }: { error: string | null; onDismiss: () => void }) {
+export function SettingsError({ error, onDismiss, preformatted }: {
+  error: string | null;
+  onDismiss: () => void;
+  /// 调用方已经自己 format 过（并套了自己的语境句，如「启动失败：…」）：这里不再过一遍，
+  /// 否则命中同一条 sentinel 会译出「启动失败：绑定端口…失败：…」这样的双前缀（7S-7）。
+  preformatted?: boolean;
+}) {
   const t = useT();
   if (!error) return null;
   return (
     <div className="sec-hint proxy-err" role="alert">
-      {formatBackendError(error, t.locale)}
+      {preformatted ? error : formatBackendError(error, t.locale)}
       <button
         type="button"
         aria-label={t.settings.close}

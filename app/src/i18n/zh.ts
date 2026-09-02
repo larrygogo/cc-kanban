@@ -514,6 +514,9 @@ export const zh = {
     // 斜杠命令在 transcript 里是一条 XML 包裹的用户消息，渲染成徽章而非标签原文。
     localCommand: "本地命令",
     commandOutput: "命令输出",
+    // 跨会话消息（另一个 Claude 会话经 SendMessage 发来）的来源标注。
+    crossMessage: "会话消息",
+    crossMessageUnknown: "另一个会话",
     taskNotification: "后台任务通知",
     sidebarApproval: "待批准",
     sidebarExpand: "展开会话列表",

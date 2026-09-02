@@ -892,6 +892,17 @@ export function Sticker({
           });
           return next;
         });
+        // 7B-8 补齐（复核指出）：这里预填的是**账号快照里的**用量，它本身就可能是几分钟
+        // 前的。不给它写 meta 的话，首轮刷新失败时 usageMeta 空 → 陈旧标记不生效，
+        // 屏上是一份不知多久以前的读数却显示得像新的。按「拿到的时刻」记，且标为待刷新。
+        setUsageMeta((cur) => {
+          const next = { ...cur };
+          ps.forEach((p) => {
+            if (p.relay_enabled) delete next[p.provider];
+            else if (!next[p.provider] && p.usage) next[p.provider] = { at: Date.now(), stale: false };
+          });
+          return next;
+        });
         // 对有账号且支持用量的 provider：立即刷新 + 定时刷新
         ps.filter((p) => p.account != null && p.usage_supported && !p.relay_enabled).forEach(({ provider }) => {
           const doRefresh = () => {

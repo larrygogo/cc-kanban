@@ -8,6 +8,7 @@ import { renderSVG } from "uqr";
 import { regenerateRemoteToken, remoteAccessInfo, type RemoteAccessInfo, type RemoteBindMode } from "../../api";
 import { appConfirm } from "../../confirm";
 import { useT } from "../../i18n";
+import { formatBackendError } from "../../i18n/errors";
 import { useSettingsState } from "./state";
 import { Switch, SettingsError } from "./widgets";
 import { Dropdown } from "../menu";
@@ -136,7 +137,7 @@ export function RemoteAccessCard() {
         <Switch checked={enabled} onChange={toggle} label={t.remote.enable} />
       </div>
 
-      <div className="row">
+      <div className="row remote-port-row">
         <div className="row-text">
           <div className="row-label">{t.remote.port}</div>
           <div className="row-desc">{t.remote.portDesc}</div>
@@ -156,8 +157,14 @@ export function RemoteAccessCard() {
       {/* 7S-7：两条错误行此前是裸 div——没有 ×（错误不会自己消失）、启动失败那条连
           role=alert 都没有，读屏完全静默。与其余四个分区统一走 SettingsError。 */}
       <SettingsError error={patchError} onDismiss={clearPatchError} />
+      {/* 自己 format 一次再套语境句，并告诉 SettingsError 别再 format——两边都做的话，
+          「启动失败：绑定端口 18620 失败：…」这种双前缀就出来了（复核指出）。 */}
       {info?.lastError && (
-        <SettingsError error={t.remote.startError(info.lastError)} onDismiss={() => setInfo((cur) => (cur ? { ...cur, lastError: null } : cur))} />
+        <SettingsError
+          preformatted
+          error={t.remote.startError(formatBackendError(info.lastError, t.locale))}
+          onDismiss={() => setInfo((cur) => (cur ? { ...cur, lastError: null } : cur))}
+        />
       )}
 
       {/* 配置与实际监听分叉（多实例共享 settings.json，另一实例改端口写盘而本实例

@@ -296,7 +296,8 @@ export const Message = memo(function Message({ item }: { item: ChatItem }) {
     const { body, images } = splitUserText(parts.text);
     if (parts.local) {
       // 只剩免责声明（写给模型的 caveat）的那条：对人零信息量，整条不渲染。
-      if (!parts.commands.length && !parts.stdout.length && !parts.notifications.length && !parts.text) return null;
+      if (!parts.commands.length && !parts.stdout.length && !parts.notifications.length
+        && !parts.crossMessages.length && !parts.text) return null;
       return (
         <article className="chat-message is-user is-command">
           {parts.commands.map((command, index) => (
@@ -307,6 +308,21 @@ export const Message = memo(function Message({ item }: { item: ChatItem }) {
               <span className="chat-command-name">{command.name || t.chat.localCommand}</span>
               {command.args && <span className="chat-command-args">{command.args}</span>}
             </span>
+          ))}
+          {/* 跨会话消息：另一个 Claude 会话发来的话。它是**真的对话内容**，不是机器记录，
+              所以默认展开、正文按原样排（对方写的是自然语言，不是 markdown）；只把
+              来源标出来，好和用户自己说的话区分开。 */}
+          {parts.crossMessages.map((message, index) => (
+            <div className="chat-crossmsg" key={`cross-${index}`}>
+              <div className="chat-crossmsg-head">
+                <span className="chat-crossmsg-icon" aria-hidden="true">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 8h10l-3-3M17 16H7l3 3" /></svg>
+                </span>
+                <span className="chat-crossmsg-from">{message.fromName || t.chat.crossMessageUnknown}</span>
+                <span className="chat-crossmsg-label">{t.chat.crossMessage}</span>
+              </div>
+              <div className="chat-text">{message.text}</div>
+            </div>
           ))}
           {images.length > 0 && <ImageRow images={images} />}
           {body && <div className="chat-text">{body}</div>}

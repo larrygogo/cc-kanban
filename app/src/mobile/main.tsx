@@ -35,6 +35,10 @@ setHostOsUnknown();
 const viewport = window.visualViewport;
 if (viewport) {
   const syncAppHeight = () => {
+    // 双指放大（7M-11 放开了缩放）时 visualViewport.height 按缩放比缩小、同样触发 resize，
+    // 但那不是键盘：照写进去会把整页压成缩放后的可视高度并强制滚回原点，布局塌陷。
+    // 缩放态一律不动，恢复到 1 时 resize 再来一次自然同步。
+    if (viewport.scale > 1.01) return;
     document.documentElement.style.setProperty("--app-height", `${Math.round(viewport.height)}px`);
     window.scrollTo(0, 0);
   };

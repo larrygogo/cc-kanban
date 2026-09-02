@@ -151,6 +151,14 @@ function CopyablePre({ children }: { children?: ReactNode }) {
   );
 }
 
+/// react-markdown 默认的 urlTransform 会把非 http(s)/mailto 的 src 置空（防 javascript:）。
+/// 图片降级成文件名 chip 需要**看得到原路径**，被置空就只剩一个没名字的空 chip（复核指出）。
+/// 这里放行相对路径与本地绝对路径，仍挡掉可执行 scheme——渲染层从不把它当链接点开，
+/// 只用来取末段文件名，风险面仅限于「显示一个字符串」。
+function keepUrl(url: string): string {
+  return /^\s*(javascript|data|vbscript):/i.test(url) ? "" : url;
+}
+
 const components: Components = {
   pre: ({ children }) => <CopyablePre>{children}</CopyablePre>,
   // ASCII 框图的对齐前提是「中文恰为两倍拉丁宽」，但代码字体 Consolas 没有中文字形，
@@ -220,7 +228,7 @@ const components: Components = {
  */
 export const ChatMarkdown = memo(function ChatMarkdown({ text }: { text: string }) {
   return (
-    <ReactMarkdown remarkPlugins={PLUGINS} components={components}>
+    <ReactMarkdown remarkPlugins={PLUGINS} components={components} urlTransform={keepUrl}>
       {text}
     </ReactMarkdown>
   );

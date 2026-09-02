@@ -1797,6 +1797,7 @@ export function ChatWindow() {
     followRef.current = true;
     // 换会话后旧会话的阅读位置对新 transcript 无意义（7C-7 的恢复只跨视图，不跨会话）。
     savedScrollRef.current = null;
+    lastScrollTopRef.current = 0;
     // 切会话一律保持当前视图：用户在终端就显示终端，在对话就显示对话。负 id（尚未
     // 认领的新会话）也不再强制进终端——对话页有「启动中」占位，claim 成真 id 时
     // 同样走这里，视图原地不动。
@@ -2083,10 +2084,13 @@ export function ChatWindow() {
   // 真正的原因是 hidden 的 display:none 让浏览器把 scrollTop 清零。既然容器还是同一个，
   // 离开前把位置和 follow 态记下来，回来原样放回去；本来就吸着底的照旧吸底。
   const savedScrollRef = useRef<{ top: number; follow: boolean } | null>(null);
+  // 最后一次「可见状态下」的滚动位置，由 onScroll 持续写入（见那里的理由）。
+  const lastScrollTopRef = useRef(0);
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (view !== "chat") {
-      if (el && el.scrollHeight > 0) savedScrollRef.current = { top: el.scrollTop, follow: followRef.current };
+      // 这里已经是 hidden 之后，el.scrollTop 恒 0——取 onScroll 记下的那一份。
+      savedScrollRef.current = { top: lastScrollTopRef.current, follow: followRef.current };
       return;
     }
     if (!el) return;
@@ -2100,6 +2104,7 @@ export function ChatWindow() {
         el.style.scrollBehavior = "auto";
         el.scrollTop = saved.top;
         el.style.scrollBehavior = behavior;
+        lastScrollTopRef.current = saved.top;
         positionedRef.current = true;
         return;
       }
@@ -2188,6 +2193,10 @@ export function ChatWindow() {
     if (!el) return;
     const at = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     followRef.current = at;
+    // 7C-7：切去终端页时 main 变 display:none，scrollTop 被浏览器清零，等 layout effect
+    // 跑到时已经量不到了（复核指出：那里的 scrollHeight>0 守卫恒假，保存分支是死代码）。
+    // 唯一可靠的时机是「还看得见的时候」——每次滚动都记一份，切回时直接用。
+    lastScrollTopRef.current = el.scrollTop;
     // 脱离底部的瞬间记下时间线内容项数快照，贴回底部即清：悬浮钮的未读徽章由差值派生。
     if (at) awayCountRef.current = null;
     else if (awayCountRef.current === null) awayCountRef.current = timelineContentCount;

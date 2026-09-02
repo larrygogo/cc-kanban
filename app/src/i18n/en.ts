@@ -482,6 +482,8 @@ export const en: Dict = {
     sidebarActionFailed: "That didn't go through — try again in a moment.",
     localCommand: "Local command",
     commandOutput: "Command output",
+    crossMessage: "Session message",
+    crossMessageUnknown: "Another session",
     taskNotification: "Background task notification",
     sidebarApproval: "Pending approval",
     sidebarExpand: "Expand session list",

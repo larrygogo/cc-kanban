@@ -2104,7 +2104,10 @@ body[data-edge="right"] .snap-preview-bar { border-radius: var(--r-lg) 0 0 var(-
 
 /* 手机远程配对卡：端口窄输入 + 扫码区。 */
 .remote-port-input { width: 96px; text-align: center; }
-/* 非法端口（7S-6）：输入留在框里，边框转红 + 行内说明，不再静默弹回默认值。 */
+/* 非法端口（7S-6）：输入留在框里，边框转红 + 行内说明，不再静默弹回默认值。
+   说明行占满一整行，得让这一 .row 可换行——.row 通用规则是 nowrap，复核发现
+   flex-basis 100% 又 shrink 0 的说明行会把「端口」标签挤到 0 宽。 */
+.remote-port-row { flex-wrap: wrap; }
 .remote-port-input.is-invalid { border-color: var(--cc-err); }
 .remote-port-err { flex: 0 0 100%; margin-top: var(--sp-4); text-align: right; font-size: var(--fs-10-5); }
 /* 配对行:二维码钉在行右控件位,不随 .row 通用规则漂移(此前该类无定义,布局全靠
@@ -3883,7 +3886,9 @@ select.ns-input {
 .chat-sidebar-error { flex: 0 0 auto; padding: var(--sp-6) var(--sp-10); color: var(--cc-err-vivid); font-size: var(--fs-10); }
 /* G-16：全侧栏唯一的读屏汇总播报源——视觉隐藏但能被 live region 读到。
    状态点已全部降级为 role=img，N 条会话不再各自开播报。 */
-.chat-sidebar-sronly { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.chat-sidebar-sronly,
+/* 通用视觉隐藏（7C-9 的工具组组头播报也用它）。 */
+.chat-sronly { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 /* 多选态(批量归档):右侧勾选圈是主视觉(未选空心/选中实心勾),条目背景只做轻微着色
    ——生硬的左缘亮条与 is-active 打架,已废。 */
 .chat-sidebar-item.is-checked { background: color-mix(in srgb, var(--cc-text) 6%, transparent); }
@@ -4216,6 +4221,23 @@ select.ns-input {
 .chat-command-args { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cc-text-faint); }
 /* 命令输出复用 .chat-tool 的折叠外观，但它挂在用户气泡里，左右不再外扩。 */
 .chat-command-out { margin: var(--sp-6) 0 0; }
+/* 跨会话消息：另一个 Claude 会话发来的话。左侧强调条 + 来源行，正文照原样排——
+   它是真的对话内容（不是 <task-notification> 那种机器记录），所以不折叠。
+   与用户气泡的区别靠左轨和来源行，而不是另起一种气泡色。 */
+.chat-crossmsg {
+  margin: var(--sp-6) 0 0;
+  padding: var(--sp-9) var(--sp-12);
+  border: 1px solid var(--cc-border);
+  border-left: 2px solid var(--cc-accent-border);
+  border-radius: var(--r-10);
+  background: color-mix(in srgb, var(--cc-text) 3%, transparent);
+}
+.chat-crossmsg-head { display: flex; align-items: center; gap: var(--sp-6); margin-bottom: var(--sp-6); color: var(--cc-text-faint); font-size: var(--fs-10-5); }
+.chat-crossmsg-icon { display: inline-flex; flex: 0 0 auto; color: var(--cc-accent-text); }
+.chat-crossmsg-from { color: var(--cc-text-dim); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 「会话消息」四个字是类别标注，退到最弱一档，别和会话名抢。 */
+.chat-crossmsg-label { flex: 0 0 auto; margin-left: auto; }
+.chat-crossmsg .chat-text { font-size: var(--fs-12); }
 .chat-command-out summary { min-height: calc(30px * var(--cc-ui)); padding: 0 var(--sp-10); }
 .chat-command-out pre { padding: var(--sp-8) var(--sp-10); }
 .chat-tool { position: relative; margin: var(--sp-1) var(--sp-6); border: 0; border-radius: var(--r-9); color: var(--cc-text-dim); background: transparent; }
@@ -4683,12 +4705,15 @@ select.ns-input {
   background: color-mix(in srgb, var(--cc-accent) 15%, transparent);
   color: color-mix(in srgb, var(--cc-accent) 75%, var(--cc-text));
 }
-/* 7G-13：三处 accent 混色的文字在**浅色**下只有 3.96～4.1:1（深色下 7.5:1 无事）——
-   --cc-accent 是品牌填充色，浅色档它本就偏亮，再混进深文字也拉不回来。浅色统一改吃
-   --cc-accent-text（那正是「accent 当前景色」的专用档，见 :root 注释）。 */
-:root[data-theme="light"] .chat-subagent-icon,
-:root[data-theme="light"] .chat-subagent-status,
-:root[data-theme="light"] .chat-subagent-status.is-completed { color: var(--cc-accent-text); }
+/* 7G-13：accent 混色的文字在**浅色**下只有 3.8～4.1:1（深色下 7.5:1 无事）——
+   --cc-accent 是品牌填充色，浅色档它本就偏亮，再混进深文字也拉不回来。
+   图标落在窗底，直接吃 --cc-accent-text 即 4.8:1；两个绿底胶囊（类型 / 已完成）底色
+   已带 accent，--cc-accent-text 在上面只有 4.1:1，再压深 15% 到约 5.3:1。
+   只点名这三处：复核发现裸 .chat-subagent-status 也被覆盖过，特异性 (0,3,0) 压过
+   .is-failed 的 (0,2,0)，浅色下失败胶囊变成红底绿字、运行中也变绿——那是回归。 */
+:root[data-theme="light"] .chat-subagent-icon { color: var(--cc-accent-text); }
+:root[data-theme="light"] .chat-subagent-type,
+:root[data-theme="light"] .chat-subagent-status.is-completed { color: color-mix(in srgb, var(--cc-accent-text) 85%, #000); }
 .chat-subagent-status.is-failed {
   background: color-mix(in srgb, var(--cc-err) 16%, transparent);
   color: color-mix(in srgb, var(--cc-err) 70%, var(--cc-text));

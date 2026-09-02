@@ -75,7 +75,8 @@ body.remote-ui .chat-sidebar-overlay-head {
   /* 触屏上禁掉双击缩放的 300ms 等待(缩放本身仍由双指手势提供)。 */
   body.remote-ui button,
   body.remote-ui [role="button"] { touch-action: manipulation; }
-  body.remote-ui .chat-approval-custom input { font-size: 13px; }
+  /* 问题卡的自定义回答框同样钉 16px：iOS 对 <16px 的输入框聚焦即整页自动放大（7M-11）。 */
+  body.remote-ui .chat-approval-custom input { font-size: 16px; }
 
   /* 消息正文/代码块同样放开:HTTP 非 secure context 下 navigator.clipboard 不存在,
      复制按钮走 execCommand 回退,手动框选是最后一条兜底——全禁了内容一个字拿不走。 */
