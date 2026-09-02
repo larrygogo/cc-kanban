@@ -159,6 +159,10 @@ pub(crate) struct LiveItem {
     /// 本 GUI 进程正托管该会话的 PTY。门控卡片菜单「结束会话」的可见性——外部终端里
     /// 跑的会话杀不了（要先走接管），与对话窗 ChatHistoryDto.pty_managed 同口径。
     pty_managed: bool,
+    /// 「结束会话」入口口径：pty_managed 或进程仍存活（孤儿兜底，见 session_endable）。
+    /// 由 live_sessions_blocking 在 enrich 之后按同一份存活快照填充（与 screen_state
+    /// 同手法）；enrich 构造时先置 pty_managed，外库卡恒 false。
+    endable: bool,
     /// 由 agent 自己的后台守护进程托管（claude FleetView 的后台会话）。这类卡片是 agent
     /// 在会话中途自行派生的，用户没开过它，界面必须标注出来，并收起接管/结束——那两条
     /// 路对它注定失败（supervisor 会把被杀的进程按 respawnFlags 拉回来）。
@@ -593,6 +597,8 @@ fn pending_placeholder_item(
         },
         connected: true,
         pty_managed: true,
+        // 占位卡的 PTY 刚由本进程拉起，结束入口恒开放（与 pty_managed 同真）。
+        endable: true,
         background: false,
         errored: false,
         error_label: None,
@@ -614,6 +620,20 @@ pub(crate) fn process_alive(
     pty_live: bool,
 ) -> bool {
     pid.is_some_and(|p| p > 0 && alive.contains(&p)) || pty_live
+}
+
+/// 「结束会话」入口的门控口径：本实例托管 PTY，或会话进程仍活着（ConPTY kill 静默无效、
+/// broker 已收掉 PTY 记录的孤儿会话——进程在却没有 PTY 可 stop，stop_managed_terminal
+/// 会按 pid 杀树兜底）。后台会话（agent 守护进程托管）恒不可结束：杀了也会被 supervisor
+/// 按 respawnFlags 拉回。pty_managed 语义（本实例托管 PTY）不变，这是另起的并集口径，
+/// 对话窗 ChatHistoryDto.endable 与看板 LiveItem.endable 共用。
+pub(crate) fn session_endable(
+    pid: Option<i64>,
+    alive: &std::collections::HashSet<i64>,
+    pty_live: bool,
+    background: bool,
+) -> bool {
+    !background && process_alive(pid, alive, pty_live)
 }
 
 /// transcript 分析的唯一接线:supports_analysis 门控 + 路径解析 + 共享 mtime 缓存。
@@ -840,10 +860,11 @@ pub(crate) fn live_sessions_blocking(
                 id: session.session.id,
             };
             let pty_managed = live.pty_live.contains(&session.session.id);
+            let pid = session.pid;
             let connected = session_connected(
                 &session.session.status,
-                session.pid,
-                process_alive(session.pid, live.alive, pty_managed),
+                pid,
+                process_alive(pid, live.alive, pty_managed),
                 session.session.last_event_at,
                 now,
             );
@@ -874,6 +895,9 @@ pub(crate) fn live_sessions_blocking(
                 );
                 if let Some(mut item) = enrich(tx_cache, session, connected, pty_managed, &runtime)
                 {
+                    // 结束入口放宽到「进程还活着」：托管 PTY 被 broker 收掉但进程成孤儿的
+                    // 会话，stop_managed_terminal 能按 pid 杀树兜底（见 session_endable）。
+                    item.endable = session_endable(pid, live.alive, pty_managed, item.background);
                     item.screen_state = screen_state;
                     item.screen_assumed = screen_sight.is_some_and(|sight| sight.fallback);
                     items.push(item);
@@ -982,6 +1006,9 @@ fn enrich(
         inner: session,
         connected,
         pty_managed,
+        // 先按托管口径置位；「进程活着但 PTY 已不在」的孤儿情形由 live_sessions_blocking
+        // 在拿到 enrich 结果后按同一份存活快照放宽（那里才看得见 live.alive）。
+        endable: pty_managed,
         // 当前隐藏规则下**恒为 false**：上面 `runtime.background` 为真的行已经整条丢掉
         // （后台会话一律不上看板，见 hidden_background）。字段留着不是摆设——放宽隐藏规则
         // 时（比如只藏查不到源的那些）这里立刻有值可发，前端的后台会话分支（贴纸的
@@ -1577,5 +1604,83 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &reused));
         assert_eq!(*refreshed, [9].into_iter().collect());
+    }
+
+    /// 结束入口口径（session_endable）：托管 PTY 或活 pid 开放；死 pid、无 pid、后台会话
+    /// 一律不收——后台的杀了会被 supervisor 拉回，开了等于骗用户。
+    #[test]
+    fn endable_or_managed_or_alive_but_never_background() {
+        let alive: std::collections::HashSet<i64> = [42].into_iter().collect();
+        // 托管 PTY（哪怕 pid 还没被 hook 认领）。
+        assert!(session_endable(None, &alive, true, false));
+        // 孤儿兜底：PTY 已不在 broker，进程还活着。
+        assert!(session_endable(Some(42), &alive, false, false));
+        // 进程死了 / 没 pid 又没 PTY：不收。
+        assert!(!session_endable(Some(43), &alive, false, false));
+        assert!(!session_endable(None, &alive, false, false));
+        // 后台会话恒不收——即使 pid 活着（归 supervisor 管）。
+        assert!(!session_endable(Some(42), &alive, false, true));
+        assert!(!session_endable(None, &alive, true, true));
+    }
+
+    /// 看板卡片的 endable 落点：孤儿会话（pid 活着、PTY 不在）要能结束；死 pid 的不能。
+    /// 走 live_sessions_blocking 全链路（真实 DB + 注入的存活快照），而不是只测纯谓词。
+    #[test]
+    fn live_items_carry_endable_for_orphan_sessions() {
+        let dir = std::env::temp_dir().join(format!("meowo-endable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("endable.db");
+        let _ = std::fs::remove_file(&db);
+        let old = super::super::now_ms() - RESUME_GRACE_MS * 10;
+        let (orphan_sid, dead_sid) = {
+            let store = meowo_store::Store::open(&db).unwrap();
+            let project = store.upsert_project_by_root("/tmp/e", "e", old).unwrap();
+            // 孤儿：有 pid 且 pid 在存活快照里，pty_live 为空。
+            let (orphan, _) = store.start_session(project, "cc-orphan", old).unwrap();
+            store.set_session_title(orphan, "孤儿会话", old).unwrap();
+            store.set_session_pid(orphan, 4242, old).unwrap();
+            // 死进程：有 pid 但不在快照里。
+            let (dead, _) = store.start_session(project, "cc-dead", old + 1).unwrap();
+            store.set_session_title(dead, "死会话", old + 1).unwrap();
+            store.set_session_pid(dead, 4343, old + 1).unwrap();
+            (orphan, dead)
+        };
+
+        let cache = Mutex::new(meowo_agent::TranscriptCache::default());
+        let alive: std::collections::HashSet<i64> = [4242].into_iter().collect();
+        let pty_none = std::collections::HashSet::new();
+        let no_runtimes = SessionRuntimeIndex::new();
+        let no_approvals = std::collections::HashSet::new();
+        let no_screens = std::collections::HashMap::new();
+        let page = live_sessions_blocking(
+            &db,
+            &cache,
+            LiveContext {
+                alive: &alive,
+                pty_live: &pty_none,
+                runtimes: &no_runtimes,
+                approvals: &no_approvals,
+                screen_states: &no_screens,
+            },
+            "all",
+            None,
+            None,
+            PageReq {
+                before_last_event_at: None,
+                before_id: None,
+                limit: 10,
+            },
+        )
+        .unwrap();
+
+        let endable_of = |sid: i64| {
+            page.items
+                .iter()
+                .find(|item| item.inner.session.id == sid)
+                .map(|item| item.endable)
+        };
+        assert_eq!(endable_of(orphan_sid), Some(true), "孤儿会话必须可结束");
+        assert_eq!(endable_of(dead_sid), Some(false), "死进程会话不该亮结束入口");
+        let _ = std::fs::remove_file(&db);
     }
 }

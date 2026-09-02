@@ -1340,10 +1340,11 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, searc
           onOpenDir={!remoteUi() && ctxItem.cwd ? () => void openProjectDir(ctxItem.cwd!).catch(() => {}) : null}
           // 远程(手机网页)没有系统目录选择器,附加目录入口一并收起。
           onAddDir={!remoteUi() && supportsExtraDir(ctxItem.provider) ? () => void addExtraDir(ctxItem) : null}
-          // 结束会话只对本 GUI 托管的 PTY 开放（与看板同一门控）：外部终端里跑的会话
-          // 杀不了，后台会话杀了也会被 supervisor 拉回来。远程再叠一层门控:
+          // 结束会话按 endable 口径（与对话窗/贴纸同源）：本 GUI 托管的 PTY，或进程仍活着
+          // 的孤儿会话（后端按 pid 杀树兜底）；外部终端里跑的会话杀不了，后台会话杀了也会
+          // 被 supervisor 拉回来（endable 已内含排除）。远程再叠一层门控:
           // stop_managed_terminal 是 /rpc 拒绝项,点了必 404。
-          onEndSession={!remoteUi() && ctxItem.pty_managed && !ctxItem.background ? () => endSession(ctxItem) : null}
+          onEndSession={!remoteUi() && ctxItem.endable ? () => endSession(ctxItem) : null}
           onClose={() => setCtxMenu(null)}
         />
       )}

@@ -148,6 +148,14 @@ fn load_chat_history(
     let context = store
         .session_context(&header.cc_session_id)
         .map_err(|e| e.to_string())?;
+    // 提前算 background：history.background 与 endable 都吃它（后台会话的进程杀了会被
+    // supervisor 拉回，结束入口不对它开放，与看板 session_endable 同口径）。
+    let background = !live.pty_live
+        && super::session_query::is_background(
+            &live.runtimes,
+            &header.provider,
+            &header.cc_session_id,
+        );
     let mut history = ChatHistory {
         session_id,
         cc_session_id: header.cc_session_id.clone(),
@@ -202,15 +210,18 @@ fn load_chat_history(
         earliest: 0,
         errored: false,
         pty_managed: live.pty_live,
+        // 结束入口放宽到「进程仍存活」：broker 已收掉 PTY 记录但进程成孤儿（ConPTY kill
+        // 静默无效的实拍事故）时，pty_managed 已翻 false，没有它用户将无任何结束入口。
+        endable: super::session_query::session_endable(
+            header.pid,
+            &live.alive,
+            live.pty_live,
+            background,
+        ),
         // 托管 PTY 在跑的会话绝不算后台：resume 后 claude 的新旧运行时索引会短暂并存
         // （旧 bg worker 还在刷新时间戳），此时误判为后台会让前端吞掉终端按键并把用户
         // 强制切回对话页。本 GUI 自己 spawn 的 PTY 是最强的「交互态」证据。
-        background: !live.pty_live
-            && super::session_query::is_background(
-                &live.runtimes,
-                &header.provider,
-                &header.cc_session_id,
-            ),
+        background,
         archived: header.archived,
         last_user_text: header.last_user_text.clone(),
         last_ai_text: header.last_ai_text.clone(),

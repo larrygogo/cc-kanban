@@ -103,6 +103,12 @@ export type LiveSession = Omit<LiveSessionDto, "session" | "todos" | "column" | 
   /** 本 GUI 进程正托管该会话的 PTY；门控贴纸卡片菜单「结束会话」的可见性。 */
   pty_managed: boolean;
   /**
+   * 「结束会话」入口口径：pty_managed，或会话进程仍活着（broker 已收掉 PTY 记录的孤儿
+   * 会话，stop_managed_terminal 会按 pid 杀树兜底）。后台会话恒 false（supervisor 会
+   * 拉回）；外库卡恒 false（只有观察权）。后端 session_endable 是唯一口径来源。
+   */
+  endable: boolean;
+  /**
    * 托管会话的屏幕检测状态（后端对 PTY 末屏做终端仿真 + 规则匹配，见 pty.rs ScreenProbe）。
    * 比 DB status 实时：blocked = 屏幕上挂着审批/提问 UI。null/缺省 = 非托管会话、
    * 无规则集或启动宽限内——此时卡片回退 DB status 口径。

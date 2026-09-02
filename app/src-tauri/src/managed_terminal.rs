@@ -355,13 +355,52 @@ pub(crate) async fn stop_managed_terminal(
         // 接不上就把**普通会话那条错**还回去。托管 PTY 恰好在这一刻退出是常事（结束按钮
         // 按历史轮询的 pty_managed 亮灭），那时该说「PTY 会话未运行」，而不是拿
         //「已经不在 Agent 的花名册里了」去解释一个用户根本没碰过的功能。
+        //
+        // 但有一种情形不能就这么报错：ConPTY 的 kill 静默无效（Windows 上恒 Ok 不保证
+        // 进程死），升级链走完 broker 已把 PTY 记录收掉，进程却活着成了孤儿——此时
+        // ptys.stop 只会撞「未运行」，而进程明明还能按 pid 杀。先试这条兜底。
         if !bg.is_active(session_id) && attach_background(&db_path, &bg, session_id).is_err() {
+            if let Some(result) =
+                stop_orphan_by_pid(&db_path, session_id, &crate::proc::agent_pids_snapshot())
+            {
+                return result;
+            }
             return ptys.stop(session_id);
         }
         bg.kill(session_id)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// broker 无 PTY 时的结束兜底（孤儿会话）：会话记录有 pid 且进程仍活着，按 pid 杀整棵树
+/// 并落 ended。树杀复用 proc 的 kill_pid + kill_descendants——与升级链 escalate_stop
+/// 同一套（kill_descendants 不含 root，root 由 kill_pid 负责，分工与 escalate_stop 里
+/// child.kill() + kill_descendants 一致）。
+///
+/// 判活走 agent 白名单快照（调用方传入，与看板同一份进程表口径）：Windows 会复用 pid，
+/// 只判「pid 存在」会把已结束的会话误判为活着、进而误杀无关进程。
+/// 返回 None = 兜底不适用（无记录 / 无 pid / 进程已死），调用方回退 broker 的原报错。
+fn stop_orphan_by_pid(
+    db_path: &std::path::Path,
+    session_id: i64,
+    alive: &std::collections::HashSet<i64>,
+) -> Option<Result<(), String>> {
+    let store = super::open_store(db_path).ok()?;
+    let pid = store.session_pid(session_id).ok()??;
+    let pid = u32::try_from(pid).ok().filter(|p| *p > 0)?;
+    if !alive.contains(&(pid as i64)) {
+        return None;
+    }
+    crate::proc::kill_pid(pid);
+    crate::proc::kill_descendants(pid);
+    // 落 ended 用 end_session 而非 reaper 的 end_session_if_pid：这是用户明点的结束，
+    // 不是快照推断，pid 墨迹没有保留价值（清 pid 的理由见 store.end_session 注释）。
+    Some(
+        store
+            .end_session(session_id, super::now_ms())
+            .map_err(|e| e.to_string()),
+    )
 }
 
 /// 该会话待处理的审批 + AskUserQuestion 题面，一次取回（合并自两条独立轮询）。
@@ -466,4 +505,93 @@ pub(crate) async fn open_attached_terminal(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod orphan_stop_tests {
+    use super::*;
+
+    /// 挑一个此刻几乎不可能存在的 pid（4 的倍数、远离真实进程号段）：kill_pid 对它
+    /// OpenProcess 失败、kill_descendants 找不到子孙，都是无害 no-op——测试只断言
+    /// 「是否走兜底 / DB 是否落 ended」，不依赖真杀到进程。
+    const FAKE_PID: i64 = 4_199_996;
+
+    fn temp_db(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("meowo-orphan-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("board.db");
+        let _ = std::fs::remove_file(&db);
+        db
+    }
+
+    fn start_session_with_pid(db: &std::path::Path, pid: Option<i64>) -> i64 {
+        let store = meowo_store::Store::open(db).unwrap();
+        let now = super::super::now_ms();
+        let project = store.upsert_project_by_root("/tmp/orphan", "orphan", now).unwrap();
+        let (sid, _) = store.start_session(project, "cc-orphan", now).unwrap();
+        if let Some(pid) = pid {
+            store.set_session_pid(sid, pid, now).unwrap();
+        }
+        sid
+    }
+
+    /// 真机事故复盘：broker 已收掉 PTY 记录但进程活着（kill 静默无效）。兜底必须按 pid
+    /// 收尾并把会话落 ended——否则进程在、结束入口却全灭（pty_managed 已翻 false）。
+    #[test]
+    fn orphan_with_live_pid_is_ended() {
+        let db = temp_db("live");
+        let sid = start_session_with_pid(&db, Some(FAKE_PID));
+        let alive = std::collections::HashSet::from([FAKE_PID]);
+
+        let result = stop_orphan_by_pid(&db, sid, &alive);
+        assert!(matches!(result, Some(Ok(()))), "活 pid 的孤儿会话兜底必须生效");
+
+        let store = meowo_store::Store::open(&db).unwrap();
+        let header = store.session_header(sid).unwrap();
+        assert_eq!(header.status, "ended");
+        assert_eq!(header.pid, None, "落 ended 必须清 pid（同 end_session 契约）");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 没有 pid 的会话兜底不适用——回退给 broker 的「PTY 会话未运行」。
+    #[test]
+    fn session_without_pid_is_not_applicable() {
+        let db = temp_db("nopid");
+        let sid = start_session_with_pid(&db, None);
+        let alive = std::collections::HashSet::from([FAKE_PID]);
+
+        assert_eq!(stop_orphan_by_pid(&db, sid, &alive), None);
+
+        let store = meowo_store::Store::open(&db).unwrap();
+        assert_eq!(store.session_header(sid).unwrap().status, "running");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// pid 已不在 agent 进程快照里（进程早死了 / pid 被复用成非 agent）：不动它、不落
+    /// ended，交给 reaper / SessionEnd 的正常路径收尾。Windows pid 复用的防误杀全靠
+    /// 这道白名单判活。
+    #[test]
+    fn dead_pid_is_not_applicable() {
+        let db = temp_db("dead");
+        let sid = start_session_with_pid(&db, Some(FAKE_PID));
+        let alive = std::collections::HashSet::new();
+
+        assert_eq!(stop_orphan_by_pid(&db, sid, &alive), None);
+
+        let store = meowo_store::Store::open(&db).unwrap();
+        let header = store.session_header(sid).unwrap();
+        assert_eq!(header.status, "running");
+        assert_eq!(header.pid, Some(FAKE_PID));
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 会话行不存在（比如外库聚合的偏移 id 漏禁了入口）：安静不适用，不报错不爆炸。
+    #[test]
+    fn unknown_session_is_not_applicable() {
+        let db = temp_db("unknown");
+        meowo_store::Store::open(&db).unwrap(); // 建库，不写会话
+        let alive = std::collections::HashSet::from([FAKE_PID]);
+        assert_eq!(stop_orphan_by_pid(&db, 424242, &alive), None);
+        let _ = std::fs::remove_file(&db);
+    }
 }

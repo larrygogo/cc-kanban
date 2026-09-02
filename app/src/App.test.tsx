@@ -221,7 +221,7 @@ describe("App", () => {
       cwd: "C:/work/proj", context_pct: null, context_window: null, model: null, note: null,
       pending_review: null, last_ai_text: null, last_user_text: null, provider: "codex",
       profile: null, predecessor_id: null, extra_dirs: [],
-      connected: true, pty_managed: true, background: false, errored: false,
+      connected: true, pty_managed: true, endable: true, background: false, errored: false,
       error_label: null, error_raw: null, busy_subagents: 0, preview: null,
       profile_name: null, foreign: false,
     };

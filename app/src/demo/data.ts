@@ -45,6 +45,7 @@ export function makeSession(p: {
     connected: p.connected ?? true,
     // demo 会话没有真实 PTY，不亮「结束会话」入口。
     pty_managed: false,
+    endable: false,
     // demo 全是用户自己开的会话，没有 agent 派生的后台会话。
     background: false,
     archived: p.archived ?? false,

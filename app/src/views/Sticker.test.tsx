@@ -109,7 +109,7 @@ function mk(over: Partial<Item> = {}): Item {
     task_title: "做点事",
     current_activity: "正在做点事",
     column: "doing", todo_done: 0, todo_total: 0, todos: [],
-    pid: 1234, connected: true, pty_managed: false, archived: false, cwd: null, errored: false, error_label: null, error_raw: null,
+    pid: 1234, connected: true, pty_managed: false, endable: false, archived: false, cwd: null, errored: false, error_label: null, error_raw: null,
     provider: "claude",
     ...over,
   } as Item;
@@ -511,7 +511,7 @@ describe("Sticker", () => {
   });
 
   it("本 GUI 托管的会话菜单末尾多出「结束会话」,确认后发出 stop_managed_terminal", async () => {
-    const { container } = render(<Sticker filter="all" data={[mk({ pty_managed: true })]} />);
+    const { container } = render(<Sticker filter="all" data={[mk({ pty_managed: true, endable: true })]} />);
     await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     const item = screen.getByText(zh.chat.endSession);
@@ -528,7 +528,7 @@ describe("Sticker", () => {
   });
 
   it("「结束会话」确认框取消时不发停止命令", async () => {
-    const { container } = render(<Sticker filter="all" data={[mk({ pty_managed: true })]} />);
+    const { container } = render(<Sticker filter="all" data={[mk({ pty_managed: true, endable: true })]} />);
     await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     // 默认 invokeMock 对 confirm_dialog 返回 undefined → appConfirm 按取消收场。
@@ -537,12 +537,24 @@ describe("Sticker", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("stop_managed_terminal", expect.anything());
   });
 
-  it("非本 GUI 托管的会话(外部终端)不显示「结束会话」", async () => {
-    const { container } = render(<Sticker filter="all" data={[mk({ pty_managed: false, connected: true })]} />);
+  it("非托管且进程不活的会话(外部终端已退)不显示「结束会话」", async () => {
+    const { container } = render(<Sticker filter="all" data={[mk({ pty_managed: false, endable: false, connected: true })]} />);
     await settingsApplied();
     fireEvent.contextMenu(container.querySelector(".stk-card")!);
     expect(document.querySelector(".ctx-menu")).toBeTruthy();
     expect(screen.queryByText(zh.chat.endSession)).toBeNull();
+  });
+
+  /// 孤儿会话(真机事故复盘):broker 已收掉 PTY 记录(pty_managed=false)但进程活着
+  /// (endable=true,后端按 pid 杀树兜底)——菜单必须还有「结束会话」。
+  it("孤儿会话(pty_managed=false 但 endable)仍显示「结束会话」", async () => {
+    const { container } = render(<Sticker filter="all" data={[mk({ pty_managed: false, endable: true, connected: true })]} />);
+    await settingsApplied();
+    fireEvent.contextMenu(container.querySelector(".stk-card")!);
+    const item = screen.getByText(zh.chat.endSession);
+    invokeMock.mockImplementationOnce(() => Promise.resolve(true) as Promise<unknown> as Promise<void>);
+    fireEvent.click(item);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("stop_managed_terminal", { sessionId: 1 }));
   });
 
   it("已置顶/有便签的会话,菜单项显示反向文案", async () => {

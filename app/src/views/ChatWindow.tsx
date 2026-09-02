@@ -961,8 +961,9 @@ export function ChatWindow() {
     try { void getCurrentWindow().setTitle(`${marker}${name} · Meowo`).catch(() => {}); } catch { /* noop */ }
   }, [tone, history?.title, t]);
   // 「结束会话」:结束正在跑的 Agent 此前只有终端页操作条里的入口,不开终端页的 GUI 用户
-  // 无从结束,会话就一直在后台占着进程。可见性由后端 pty_managed 门控——只有本 GUI 托管
-  // 的 PTY 才能这样结束;外部终端里跑的会话不亮(要先走接管)。确认+停止走与终端页共用的
+  // 无从结束,会话就一直在后台占着进程。可见性由后端 endable 门控——本 GUI 托管的 PTY,
+  // 或进程仍活着的孤儿会话(broker 已收掉 PTY 记录,后端按 pid 杀树兜底);外部终端里跑的
+  // 会话不亮(要先走接管)。确认+停止走与终端页共用的
   // confirmStopSession(api.ts),两个入口的协议与文案不再各自为政。
   const [endingSession, setEndingSession] = useState(false);
   const endSession = async () => {
@@ -3435,8 +3436,9 @@ export function ChatWindow() {
             {gitSummary && gitSummary.isRepo && gitSummary.files.length > 0 && <span className="chat-diff-btn-count">{gitSummary.files.length}</span>}
           </button>
         )}
-        {/* stop_managed_terminal 是 /rpc 明确拒绝项(宿主进程生杀),远程按钮点了必 404——隐藏。 */}
-        {!remoteUi() && history?.ptyManaged && (
+        {/* stop_managed_terminal 是 /rpc 明确拒绝项(宿主进程生杀),远程按钮点了必 404——隐藏。
+            endable 口径:托管 PTY 或进程仍活着的孤儿会话(后端按 pid 杀树兜底),见 ChatHistoryDto。 */}
+        {!remoteUi() && history?.endable && (
           <button type="button" className="chat-end" disabled={endingSession} onClick={() => void endSession()}>
             {endingSession ? t.chat.terminalStopping : t.chat.endSession}
           </button>

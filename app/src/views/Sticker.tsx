@@ -1489,13 +1489,14 @@ export function Sticker({
           // 附加目录入口不上贴纸(用户指定):贴纸是监控视野,操作入口在对话窗。
           onAddDir={null}
           onEndSession={
-            // 仅本 GUI 托管的 PTY 能结束（与对话窗标题栏入口同门控）；确认+停止走共用的
-            // confirmStopSession。成功后不用做别的：轮询里 connected 翻 false、徽标自退。
+            // 结束入口按 endable 口径（与对话窗标题栏同源）：本 GUI 托管的 PTY，或进程
+            // 仍活着的孤儿会话（broker 已收掉 PTY 记录，后端按 pid 杀树兜底）。确认+停止走
+            // 共用的 confirmStopSession。成功后不用做别的：轮询里 connected 翻 false、徽标自退。
             // 失败也由徽标兜底可见——卡片仍显「运行中」即说明没停掉，贴纸窗无独立错误槽位。
-            // 后台会话恒不满足 pty_managed（PTY 在 agent 的 daemon 手上），但它有自己的
+            // 后台会话恒不满足 endable（PTY 在 agent 的 daemon 手上），但它有自己的
             // 结束入口——后端会连上那条旁路 socket 发 kill 控制帧，比对着 pid 下手干净：
             // 杀进程会被 supervisor 按 respawnFlags 原地拉回来。
-            ctxItem.pty_managed || ctxItem.background
+            ctxItem.endable || ctxItem.background
               ? () => {
                   void confirmStopSession(ctxItem.session.id, {
                     title: t.chat.endSession,

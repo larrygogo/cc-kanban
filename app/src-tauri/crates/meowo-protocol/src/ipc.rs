@@ -259,6 +259,11 @@ pub struct ChatHistoryDto {
     /// 本 GUI 进程正托管着该会话的 PTY。决定「结束会话」入口的可见性：只有自己托管的
     /// 进程才能从 GUI 结束；外部终端里跑的会话（connected 但非托管）不该亮这个入口。
     pub pty_managed: bool,
+    /// 「结束会话」入口的口径：托管 PTY，或会话进程仍活着（ConPTY kill 静默无效、broker
+    /// 已收掉 PTY 记录的孤儿会话，stop_managed_terminal 会按 pid 杀树兜底）。后台会话
+    /// （agent 守护进程托管）恒 false——杀了也会被 supervisor 拉回。pty_managed 的语义
+    /// 不变，这里只是把它和「进程存活」并成入口门控。
+    pub endable: bool,
     /// 由 agent 自己的后台守护进程托管（claude FleetView 的后台会话），与看板
     /// `LiveItem.background` 同源。这类会话既不在用户的终端里，也接管不了（杀进程会被
     /// supervisor 拉回来），输入框的引导文案必须换一套——让用户回终端的 FleetView。

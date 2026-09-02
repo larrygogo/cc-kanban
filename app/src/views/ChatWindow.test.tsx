@@ -921,16 +921,17 @@ describe("ChatWindow", () => {
     current = { ...base, currentActivity: "Bash: 第二步", contextPct: 42, title: "改后标题", agentModes: [{ dimension: "permission", value: "plan" }], lastUserText: "hook 落库的提问" };
     expect(await screen.findByText("hook 落库的提问")).toBeTruthy();
 
-    // ptyManaged 也在比较清单里——会话已 connected 时中途拉起托管 PTY,那一轮往往只有
-    // 这个字段变;漏掉的话「结束会话」按钮永远不出现(真实翻车过:发消息拉起 PTY 后按钮不见)。
+    // ptyManaged/endable 也在比较清单里——会话已 connected 时中途拉起托管 PTY,那一轮往往只有
+    // 这两个字段变;漏掉的话「结束会话」按钮永远不出现(真实翻车过:发消息拉起 PTY 后按钮不见)。
+    // 按钮门控看 endable(托管或进程仍活的孤儿),真实后端两者同轮翻真。
     expect(screen.queryByText("结束会话")).toBeNull();
-    current = { ...base, currentActivity: "Bash: 第二步", contextPct: 42, title: "改后标题", agentModes: [{ dimension: "permission", value: "plan" }], lastUserText: "hook 落库的提问", ptyManaged: true };
+    current = { ...base, currentActivity: "Bash: 第二步", contextPct: 42, title: "改后标题", agentModes: [{ dimension: "permission", value: "plan" }], lastUserText: "hook 落库的提问", ptyManaged: true, endable: true };
     expect(await screen.findByText("结束会话")).toBeTruthy();
 
     // 标题栏状态徽标已整体移除(errored 的窗口内表面只剩侧栏状态点,不在本测试射程)。
     // connected 仍在比较清单里——漏掉的话进程死亡(connected 翻 false、status 仍 running)
     // 时窗口标题滞留「▶」运行记号,假运行中复活。只翻 connected,断言标题记号退场。
-    current = { ...base, currentActivity: "Bash: 第二步", contextPct: 42, title: "改后标题", agentModes: [{ dimension: "permission", value: "plan" }], lastUserText: "hook 落库的提问", ptyManaged: true, connected: false };
+    current = { ...base, currentActivity: "Bash: 第二步", contextPct: 42, title: "改后标题", agentModes: [{ dimension: "permission", value: "plan" }], lastUserText: "hook 落库的提问", ptyManaged: true, endable: true, connected: false };
     await waitFor(() => expect(setTitleMock).toHaveBeenCalledWith("改后标题 · Meowo"));
     // 每步都要等一轮 650ms 轮询,8 个步骤加起来超出 5s 默认时限。
   }, 15_000);
@@ -3036,7 +3037,7 @@ describe("ChatWindow", () => {
     expect(document.querySelector(".chat-live")).toBeNull();
     expect(screen.queryByText("出错了")).toBeNull();
     expect(screen.queryByText("运行中")).toBeNull();
-    // 非本 GUI 托管的会话(ptyManaged 缺省/false)不显示「结束会话」入口。
+    // 没有结束入口的会话(endable 缺省/false:非托管且进程不活)不显示「结束会话」。
     expect(screen.queryByText("结束会话")).toBeNull();
   });
 
@@ -3583,10 +3584,10 @@ describe("ChatWindow", () => {
 
   /**
    * GUI 用户的「结束会话」:此前结束入口只藏在终端页操作条里,不开终端页的人无从结束,
-   * 会话在后台一直占着进程。标题栏入口仅在本 GUI 托管该 PTY(ptyManaged)时可见,
-   * confirm 通过才调 stop_managed_terminal,取消则不动。
+   * 会话在后台一直占着进程。标题栏入口按 endable 口径可见(托管 PTY 或进程仍活的孤儿
+   * 会话),confirm 通过才调 stop_managed_terminal,取消则不动。
    */
-  it("ptyManaged 会话可从标题栏结束,confirm 取消则不调用", async () => {
+  it("endable 会话可从标题栏结束,confirm 取消则不调用", async () => {
     window.history.replaceState({}, "", "/?sessionId=92");
     // 确认走应用内原生小窗(invoke confirm_dialog):按队列给答案。
     const confirmAnswers: boolean[] = [false, true];
@@ -3594,7 +3595,7 @@ describe("ChatWindow", () => {
       if (command === "get_chat_history") return Promise.resolve({
         sessionId: 92, title: "托管会话", status: "running", provider: "claude", cwd: "C:/repo",
         supported: true, offset: 0, reset: false, pendingReview: null, items: [],
-        connected: true, ptyManaged: true,
+        connected: true, ptyManaged: true, endable: true,
       });
       if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
       if (command === "agent_chat_ui") return Promise.resolve(chatUi("claude"));
@@ -3612,6 +3613,29 @@ describe("ChatWindow", () => {
     // 确定(队列次个 true)→ 杀进程。
     fireEvent.click(button);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("stop_managed_terminal", { sessionId: 92 }));
+  });
+
+  /**
+   * 孤儿会话(真机事故复盘):ConPTY kill 静默无效,broker 已收掉 PTY 记录(ptyManaged=false)
+   * 但进程还活着(endable=true)——结束入口必须还在,否则用户只能手动 taskkill。
+   */
+  it("ptyManaged=false 但进程仍活(endable)的孤儿会话仍有结束入口", async () => {
+    window.history.replaceState({}, "", "/?sessionId=93");
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_chat_history") return Promise.resolve({
+        sessionId: 93, title: "孤儿会话", status: "running", provider: "kimi", cwd: "C:/repo",
+        supported: true, offset: 0, reset: false, pendingReview: null, items: [],
+        connected: true, ptyManaged: false, endable: true,
+      });
+      if (command === "pending_interaction") return Promise.resolve({ approval: null, question: null });
+      if (command === "agent_chat_ui") return Promise.resolve(chatUi("kimi"));
+      if (command === "confirm_dialog") return Promise.resolve(true);
+      return Promise.resolve();
+    });
+    render(<ChatWindow />);
+    const button = await screen.findByRole("button", { name: "结束会话" });
+    fireEvent.click(button);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("stop_managed_terminal", { sessionId: 93 }));
   });
 
   /**
