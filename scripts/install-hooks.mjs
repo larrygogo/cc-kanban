@@ -50,6 +50,8 @@ const SPECS = [
   ["PermissionRequest", "*"],
   ["PreToolUse", "AskUserQuestion"],
   ["PreToolUse", "ExitPlanMode"],
+  ["PreCompact", "*"],
+  ["PostCompact", "*"],
 ];
 // 写入的 command：双引号包住路径以防空格
 const command = `"${reporter}"`;

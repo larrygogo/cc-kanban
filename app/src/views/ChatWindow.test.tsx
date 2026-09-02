@@ -3637,6 +3637,27 @@ describe("ChatWindow", () => {
     await waitFor(() => expect(setTitleMock).toHaveBeenCalledWith("▶ 跑着的会话 · Meowo"));
   });
 
+  /** 压缩（/compact）进行期间后端把 current_activity 写成哨兵 __meowo_compacting__:
+   *  运行条显示本地化「正在压缩上下文…」,哨兵原值不上屏、不进 tooltip(data-tip)。 */
+  it("压缩哨兵:运行条映射为本地化文案,原值不进 tooltip", async () => {
+    window.history.replaceState({}, "", "/?sessionId=96");
+    respondWithHistory({
+      sessionId: 96, title: "压缩中", status: "running", provider: "claude", cwd: "C:/repo",
+      supported: true, offset: 1, reset: false, pendingReview: null, connected: true,
+      currentActivity: "__meowo_compacting__",
+      items: [{ type: "user_text", id: "u1", timestamp: null, text: "开始" }],
+    });
+    render(<ChatWindow />);
+    const strip = await waitFor(() => {
+      const el = document.querySelector(".chat-running");
+      expect(el).toBeTruthy();
+      return el!;
+    });
+    expect(strip.textContent).toContain("正在压缩上下文…");
+    expect(strip.textContent).not.toContain("__meowo_compacting__");
+    expect(strip.querySelector("[data-tip]")).toBeNull();
+  });
+
   /** 运行指示是盲文贪吃蛇（用户指定形态）：帧字符随时间轮转，不再是原地呼吸的圆点。 */
   it("运行指示:盲文蛇帧随时间轮转", async () => {
     window.history.replaceState({}, "", "/?sessionId=95");

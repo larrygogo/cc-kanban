@@ -83,6 +83,8 @@ pub(crate) fn snake_event(ev: &str) -> &'static str {
         "PostToolUse" => "post_tool_use",
         "Stop" => "stop",
         "PermissionRequest" => "permission_request",
+        "PreCompact" => "pre_compact",
+        "PostCompact" => "post_compact",
         _ => "",
     }
 }
@@ -227,7 +229,8 @@ mod tests {
     fn claimed_entries_extraction() {
         let v = wired("C:/x/meowo-reporter.exe");
         let entries = claimed_codex_entries(&v);
-        assert_eq!(entries.len(), 5);
+        // 7 = 变体表 EVENTS 全量（含 PreCompact/PostCompact 两条压缩指示）。
+        assert_eq!(entries.len(), 7);
         assert!(entries
             .iter()
             .all(|e| e.command.contains("--provider codex")));

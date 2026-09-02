@@ -7,6 +7,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { pathKey } from "../paths";
+import { COMPACTING_ACTIVITY } from "../activity";
 import { appConfirm } from "../confirm";
 import { pickAndAddExtraDir, removeSessionExtraDir, agentChatUi, attachBackgroundSession, sendBackgroundPrompt, clipboardRestore, clipboardSetImage, confirmStopSession, dismissInteractiveQuestion, getChatHistory, getGitDiffSummary, getLiveSessionsPage, getSessionLineage, isExternallyHeld, managedTerminalBinding, managedTerminalSnapshot, openNewSessionWindow, probeSubagentStates, refreshSessionModel, refreshSessionTodos, renameSession as renameSessionCmd, resolvePendingApproval, savePastedAttachment, sessionLaunchSelections, setArchived as setArchivedCmd, setSessionLaunchSelection, sessionTone, startManagedTerminal, switchSessionProvider, takeoverManagedTerminal, writeManagedTerminal, type AgentId, type ChatHistory, type ChatItem, type ChatUi, type GitDiffSummaryDto, type LiveSession, type ModelPreset, type ModeScreenMarker, type SubagentProbe } from "../api";
 import { hasEscLayers, pushEscLayer } from "../escLayers";
@@ -360,6 +361,19 @@ const EMPTY_MARKERS: string[] = [];
 // 状态条截断成单行后，冗长的项目路径会把真正在跑的命令挤出可视区；完整原文在 title 里。
 const trimActivityCdPrefix = (activity: string): string =>
   activity.replace(/^([›>]\s*)?cd\s+("[^"]*"|'[^']*'|[^\s&]+)\s+&&\s*/, "$1");
+
+// current_activity 还可能是压缩进行中的哨兵 COMPACTING_ACTIVITY（见 ../activity）：状态
+// 记号不是活动文本——映射成本地化「正在压缩上下文…」，原值不上屏、不进 tooltip，也不过
+// trimActivityCdPrefix（哨兵不是命令，没有 cd 前缀可剥）。
+function runningActivityView(
+  activity: string | null | undefined,
+  compactingLabel: string,
+  runningLabel: string,
+): { text: string; tip: string | undefined } {
+  if (activity === COMPACTING_ACTIVITY) return { text: compactingLabel, tip: undefined };
+  if (!activity) return { text: runningLabel, tip: undefined };
+  return { text: trimActivityCdPrefix(activity), tip: activity };
+}
 
 // 运行指示的「贪吃蛇」（用户指定形态，kimi TUI 同款）：2×4 盲文格内 3 个亮点沿
 // 顺时针环路爬行（左列往上、右列往下），8 帧一轮。比原地呼吸的圆点更「在前进」。
@@ -755,6 +769,8 @@ export function ChatWindow() {
   // ManagedTerminal 后停更,PTY 退出后悬死 true,把 tone 钉死「运行中」——已整根拆除)。
   // history 未加载时按离线处理,避免首帧闪一下运行态。
   const tone = sessionTone(history?.connected ?? false, history?.status, history?.pendingReview, history?.errored);
+  // 运行条活动展示：哨兵/空值/普通命令三分支统一收口（见 runningActivityView）。
+  const runningActivity = runningActivityView(history?.currentActivity, t.chat.compacting, t.chat.running);
   // claude 新版任务列表(TaskCreate/TaskUpdate)从时间线累积重建:CC 对这类 harness
   // 内部工具**不触发 PostToolUse hook**(实测:reporter 手喂事件能落库,真调用不触发),
   // hook 快照/增量两条路都收不到,transcript 是唯一来源。编号在 TaskCreate 回执文本
@@ -3513,9 +3529,10 @@ export function ChatWindow() {
       {view === "chat" && !loading && tone === "running" && (
         <div className="chat-running" role="status">
           {/* 长命令被 CSS 截断成单行，全文进 data-tip。展示文本剥掉 cd 前缀
-              （见 trimActivityCdPrefix）。 */}
-          <SnakeSpinner /><span data-tip={history?.currentActivity || undefined}>
-            {history?.currentActivity ? trimActivityCdPrefix(history.currentActivity) : t.chat.running}
+              （见 trimActivityCdPrefix）；压缩期间哨兵映射成 t.chat.compacting，
+              原值不上屏也不进 tooltip（见 runningActivityView）。 */}
+          <SnakeSpinner /><span data-tip={runningActivity.tip}>
+            {runningActivity.text}
           </span>
         </div>
       )}

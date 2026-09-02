@@ -23,14 +23,18 @@ use crate::{
 };
 
 /// 接线事件集。PermissionRequest = kimi 交互式等待用户审批前触发（官方源码确认，observation-only），
-/// 用于卡片「待交互」显示。
-static EVENTS: [HookEvent; 6] = [
+/// 用于卡片「待交互」显示。PreCompact/PostCompact 是压缩进行期间的「正在压缩」指示通道
+/// （transcript 在压缩期间零新增字节，只能靠 hook；白名单 EVENT_WHITELIST 已含这两个名字，
+/// kimi 0.29 二进制确认支持）。
+static EVENTS: [HookEvent; 8] = [
     HookEvent::plain("SessionStart"),
     HookEvent::plain("UserPromptSubmit"),
     HookEvent::plain("PostToolUse"),
     HookEvent::plain("Stop"),
     HookEvent::plain("SessionEnd"),
     HookEvent::plain("PermissionRequest"),
+    HookEvent::plain("PreCompact"),
+    HookEvent::plain("PostCompact"),
 ];
 
 /// kimi 0.20 支持的全部 hook 事件（HOOK_EVENT_TYPES）。一条非法 event 会让 kimi **静默禁用全部**

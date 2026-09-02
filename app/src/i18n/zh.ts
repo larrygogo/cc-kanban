@@ -275,6 +275,7 @@ export const zh = {
     reasoning: "思考过程",
     reasoningLines: (n: number) => `${n} 行`,
     compact: "上下文已压缩",
+    compacting: "正在压缩上下文…",
     inputLabel: "发送消息给 Agent",
     inputPlaceholder: "直接与 Agent 对话（Enter 发送，Shift+Enter 换行）",
     inputPlaceholderRemote: "发消息给 Agent",

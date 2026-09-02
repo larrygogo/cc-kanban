@@ -28,13 +28,17 @@ use crate::{
     variant::{DataDirSpec, Variant},
 };
 
-/// 接线事件集：dispatch 消化面 ∩ codex 0.142 支持面。无 SessionEnd（codex 不支持，会话收尾靠
+/// 接线事件集：dispatch 消化面 ∩ codex 支持面。无 SessionEnd（codex 不支持，会话收尾靠
 /// Stop + liveness）；不配 PreToolUse（其 matcher 目标是 claude 专属工具）。
-static EVENTS: [HookEvent; 5] = [
+/// PreCompact/PostCompact 的支持面已在实装二进制上取证（0.152.0 的 HookEventsToml 枚举
+/// 字符串里两个事件名俱在），供 /compact 期间显示「正在压缩」。
+static EVENTS: [HookEvent; 7] = [
     HookEvent::plain("SessionStart"),
     HookEvent::plain("UserPromptSubmit"),
     HookEvent::plain("PostToolUse"),
     HookEvent::plain("Stop"),
+    HookEvent::plain("PreCompact"),
+    HookEvent::plain("PostCompact"),
     HookEvent::plain("PermissionRequest").with_timeout(310),
 ];
 

@@ -1094,3 +1094,123 @@ fn todowrite_without_todos_key_keeps_list_but_explicit_empty_clears() {
     disp(&store, &ev(r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"TodoWrite","tool_input":{"todos":[]}}"#), 400).unwrap();
     assert!(store.list_todos(tid).unwrap().is_empty(), "显式空数组应清表");
 }
+
+/// PreCompact = 压缩确定开始（可能由 /compact 裸命令发起、没带 prompt）：走 lookup_or_create
+/// 自愈，置 running 并把「正在压缩」哨兵写进 current_activity（前端按哨兵映射 i18n 文案，
+/// DB 落原值）。置 running 不吃活动类 touch 的 5s 迟到窗——压缩发起时会话多半已停在
+/// waiting 很久，这里用远超迟到窗的间隔钉住这一语义。
+#[test]
+fn precompact_marks_session_running_with_compacting_sentinel() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"pc1","cwd":"/p"}"#),
+        100,
+    )
+    .unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"Stop","session_id":"pc1"}"#),
+        200,
+    )
+    .unwrap();
+    let sid = store.find_session_id_pub("pc1").unwrap().unwrap();
+    assert_eq!(store.get_session(sid).unwrap().status, "waiting");
+
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"PreCompact","session_id":"pc1","cwd":"/p"}"#),
+        60_000,
+    )
+    .unwrap();
+    assert_eq!(
+        store.get_session(sid).unwrap().status,
+        "running",
+        "PreCompact 应直接置 running，不受 Stop 迟到窗约束"
+    );
+    let tid = store.task_id_of_session_pub(sid).unwrap();
+    assert_eq!(
+        store.get_task(tid).unwrap().current_activity.as_deref(),
+        Some("__meowo_compacting__"),
+        "压缩进行期间的活动名应是哨兵原值"
+    );
+}
+
+/// PostCompact = 压缩正常结束的收尾：清掉哨兵、回到 waiting。未知会话不懒创建
+/// （压缩只能发生在已有会话上，查不到行就降级无操作）。
+#[test]
+fn postcompact_clears_sentinel_and_returns_to_waiting() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"pc2","cwd":"/p"}"#),
+        100,
+    )
+    .unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"PreCompact","session_id":"pc2"}"#),
+        200,
+    )
+    .unwrap();
+    let sid = store.find_session_id_pub("pc2").unwrap().unwrap();
+    let tid = store.task_id_of_session_pub(sid).unwrap();
+
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"PostCompact","session_id":"pc2"}"#),
+        300,
+    )
+    .unwrap();
+    assert_eq!(store.get_task(tid).unwrap().current_activity, None);
+    assert_eq!(store.get_session(sid).unwrap().status, "waiting");
+
+    // 幽灵会话：不报错、不建行。
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"PostCompact","session_id":"ghost"}"#),
+        400,
+    )
+    .unwrap();
+    assert!(store.find_session_id_pub("ghost").unwrap().is_none());
+}
+
+/// SessionStart(source=compact) 是压缩收尾的兜底信号：claude 交互模式手动 /compact 的
+/// 上游 bug（anthropics/claude-code#78760）不发 PostCompact，auto-compact 的
+/// SessionStart(source=compact) 实拍确认会发——收到它要清掉哨兵、回到 waiting，
+/// 否则手动压缩结束后卡片永远卡 running + 「正在压缩」。
+#[test]
+fn compact_session_start_clears_compacting_state() {
+    let store = Store::open_in_memory().unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"pc3","source":"startup","cwd":"/repo"}"#),
+        100,
+    )
+    .unwrap();
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"PreCompact","session_id":"pc3"}"#),
+        200,
+    )
+    .unwrap();
+    let sid = store.find_session_id_pub("pc3").unwrap().unwrap();
+    let tid = store.task_id_of_session_pub(sid).unwrap();
+    assert_eq!(
+        store.get_task(tid).unwrap().current_activity.as_deref(),
+        Some("__meowo_compacting__")
+    );
+
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"SessionStart","session_id":"pc3","source":"compact","cwd":"/repo"}"#),
+        300,
+    )
+    .unwrap();
+    assert_eq!(
+        store.get_task(tid).unwrap().current_activity,
+        None,
+        "SessionStart(compact) 应收尾压缩状态"
+    );
+    assert_eq!(store.get_session(sid).unwrap().status, "waiting");
+}

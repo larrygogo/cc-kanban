@@ -16,6 +16,8 @@
 //! | hook `tool.execute.after` | `PostToolUse` | |
 //! | `event: session.idle` | `Stop` | 每个回合跑完发一次，正是 Stop 语义 |
 //! | `event: session.deleted` | `SessionEnd` | opencode 没有「会话结束」，删除是唯一确定的终结 |
+//! | hook `experimental.session.compacting` | `PreCompact` | /compact 开始（session id 字段名类推未验证） |
+//! | `event: session.compacted` | `PostCompact` | 压缩完成（同上） |
 //!
 //! 因此 opencode 的会话收尾与 codex 一样靠 Stop + 判活，而不是一条可靠的 SessionEnd。
 
@@ -73,15 +75,17 @@ static AUTH: AuthScheme = AuthScheme {
 
 /// 桥接插件转发的事件集，**写的已经是规范名**（负载由我们构造，无需再译）。
 ///
-/// 这张表不驱动生成——模板里那五个 `hook_event_name` 是手写的实在代码。它的作用是让
+/// 这张表不驱动生成——模板里那几个 `hook_event_name` 是手写的实在代码。它的作用是让
 /// `has_reporter`（只看 `SessionStart`）等通用逻辑有据可依，并由下方绊线测试保证「表里声明的」
 /// 与「模板里真发的」永远是同一批。
-static EVENTS: [HookEvent; 5] = [
+static EVENTS: [HookEvent; 7] = [
     HookEvent::plain("SessionStart"),
     HookEvent::plain("UserPromptSubmit"),
     HookEvent::plain("PostToolUse"),
     HookEvent::plain("Stop"),
     HookEvent::plain("SessionEnd"),
+    HookEvent::plain("PreCompact"),
+    HookEvent::plain("PostCompact"),
 ];
 
 /// 落点是数据目录下的 `plugin/` 子目录——该子目录**未必存在**（用户没装过插件就没有它），

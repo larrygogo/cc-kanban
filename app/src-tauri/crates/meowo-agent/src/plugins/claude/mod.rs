@@ -39,9 +39,11 @@ use crate::{
 };
 
 /// 接线事件集。`PreToolUse` 用 matcher 限定只在两种工具触发，与用户自有 `PreToolUse:Bash` 共存。
+/// `PreCompact`/`PostCompact` 是压缩进行期间的「正在压缩」指示通道（transcript 在压缩期间
+/// 零新增字节，只能靠 hook）；不加自定义 timeout——压缩 hook 是纯落库，5s 足够。
 ///
 /// **此表须与 `scripts/install-hooks.mjs` 的 `SPECS` 保持一致**——由 meowo-app 的绊线测试守卫。
-static EVENTS: [HookEvent; 8] = [
+static EVENTS: [HookEvent; 10] = [
     HookEvent::matched("SessionStart", "*"),
     HookEvent::matched("UserPromptSubmit", "*"),
     HookEvent::matched("PostToolUse", "*"),
@@ -52,6 +54,8 @@ static EVENTS: [HookEvent; 8] = [
     // PermissionRequest 同一量纲：310 > reporter 读 305 > broker 等 300。
     HookEvent::matched("PreToolUse", "AskUserQuestion").with_timeout(310),
     HookEvent::matched("PreToolUse", "ExitPlanMode"),
+    HookEvent::matched("PreCompact", "*"),
+    HookEvent::matched("PostCompact", "*"),
 ];
 
 /// `settings.json` 不存在时从空对象建：刚装 Claude Code、没改过设置的用户就没有这个文件。
@@ -766,8 +770,8 @@ mod tests {
     }
 
     #[test]
-    fn events_cover_the_eight_specs_with_matchers() {
-        assert_eq!(EVENTS.len(), 8);
+    fn events_cover_the_ten_specs_with_matchers() {
+        assert_eq!(EVENTS.len(), 10);
         // PreToolUse 恰两条，matcher 分别是两种工具；其余六条 matcher 均为 "*"。
         let pre: Vec<_> = EVENTS
             .iter()

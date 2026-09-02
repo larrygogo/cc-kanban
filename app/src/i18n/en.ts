@@ -263,6 +263,7 @@ export const en: Dict = {
     reasoning: "Reasoning",
     reasoningLines: (n) => `${n} lines`,
     compact: "Context compacted",
+    compacting: "Compacting context…",
     inputLabel: "Send a message to the Agent",
     inputPlaceholder: "Message the Agent directly (Enter to send, Shift+Enter for a new line)",
     inputPlaceholderRemote: "Message the Agent",

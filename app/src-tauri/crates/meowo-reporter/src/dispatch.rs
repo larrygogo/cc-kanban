@@ -35,6 +35,20 @@ pub fn dispatch(
             // resume 一个已结束会话时，SessionStart 也要复活它（置 running、清 ended_at），否则卡片停在
             // 断开态直到用户发首条消息才重连。
             store.revive_if_ended(sid, now_ms)?;
+            if ev.source.as_deref() == Some("compact") {
+                // 压缩收尾。claude 交互模式手动 /compact 的上游 bug
+                // （github.com/anthropics/claude-code/issues/78760）：只发 PreCompact、
+                // 不发 PostCompact，也不一定有这条 SessionStart——但 auto-compact 的
+                // SessionStart(source=compact) 是实拍确认会发的（见上方 overwrite_cwd
+                // 判定的出处注释）。在此补做 PostCompact 的收尾：清掉「正在压缩」哨兵、
+                // 回到 waiting，否则压缩结束后状态永远挂着。
+                // 已知取舍：auto-compact 发生在回合中途，置 Waiting 后到下一个活动事件
+                // （距 last_event 超 5s 迟到窗会自动把 waiting 翻回 running，见
+                // store 的 ACTIVITY_TOUCH_SQL）之间会短暂显示等待——比起手动压缩后
+                // 永远卡 running，是可接受的代价。
+                store.clear_current_activity(sid, now_ms)?;
+                store.set_session_status(sid, SessionStatus::Waiting, now_ms)?;
+            }
             apply_title(store, ev, sid, now_ms, provider)?;
             write_tab_token(store, sid, ev, provider);
         }
@@ -176,6 +190,29 @@ pub fn dispatch(
             if let Some(sid) = lookup_session(store, ev)? {
                 store.clear_pending_review(sid, now_ms)?;
                 store.end_session(sid, now_ms)?;
+            }
+        }
+        "PreCompact" => {
+            // 「正在压缩」指示只能靠 hook：各家 CLI 的 transcript 在压缩进行期间零新增
+            // 字节、结束后才整批补写（实拍），读 transcript 永远只能在事后补分隔条。
+            // 活动名写成哨兵串 `__meowo_compacting__`（与前端约定的契约），DB 落原值，
+            // 前端映射成 i18n 文案。
+            // PreCompact 是「确定要开始干活」的信号、不是 Stop 的迟到尾巴，故直接置
+            // Running，不走活动类 touch 的 5s 迟到窗（那窗只约束 waiting 的自动翻回，
+            // 压缩发起时会话多半正停在 waiting）。自愈语义与其它活动事件一致：压缩发起
+            // 可能没带 prompt（如 /compact 裸命令），lookup_or_create 懒创建需要 cwd，
+            // 没有就降级无操作。
+            if let Some(sid) = lookup_or_create(store, ev, provider, now_ms)? {
+                store.set_session_status(sid, SessionStatus::Running, now_ms)?;
+                store.set_current_activity(sid, "__meowo_compacting__", now_ms)?;
+            }
+        }
+        "PostCompact" => {
+            // 压缩正常结束的收尾：清哨兵、回 waiting。走 lookup_session 不懒创建——
+            // 压缩只能发生在已有会话上，查不到行说明建会话事件全丢，硬建只会造孤儿卡。
+            if let Some(sid) = lookup_session(store, ev)? {
+                store.clear_current_activity(sid, now_ms)?;
+                store.set_session_status(sid, SessionStatus::Waiting, now_ms)?;
             }
         }
         "PermissionRequest" => {

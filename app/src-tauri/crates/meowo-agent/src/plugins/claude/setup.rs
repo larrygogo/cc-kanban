@@ -895,7 +895,7 @@ mod tests {
         let from_js = parse_mjs_specs(&src);
         assert_eq!(
             from_js.len(),
-            8,
+            10,
             "解析出的 SPECS 条数不对，脚本格式可能变了"
         );
 

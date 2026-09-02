@@ -9,6 +9,8 @@
 //! 「最后一条用户输入之后的 AI 文本」。用户消息里的 `image_url` part（粘贴图片，blobref 指向
 //! wire.jsonl 旁的 `blobs/<sha>`，或内嵌 data: URL）由 [`user_message_text`] 落盘后补
 //! `[Image: source: …]` 引用行，与 claude 侧形制一致。
+//! 压缩完成的边界行是 `type="full_compaction.complete"`（映射成分隔条；begin/cancel 不映射，
+//! 「正在压缩」的进行中指示由 PreCompact hook 通道负责）。
 
 use std::path::{Path, PathBuf};
 
@@ -379,7 +381,13 @@ fn parse_events(line: &str, wire_dir: Option<&Path>) -> Vec<TranscriptEvent> {
                 _ => Vec::new(),
             }
         }
-        "context.compact" | "context.compacted" => vec![TranscriptEvent::Metadata {
+        // 压缩完成的边界。真实落盘序列：full_compaction.begin →（压缩进行期间零字节，
+        // 进行中指示由 PreCompact hook 通道负责）→ usage.record → context.apply_compaction
+        // → config.update → full_compaction.complete；手动压缩可 Esc 取消，取消时是
+        // full_compaction.cancel。只映射 complete：apply_compaction 与 complete 同次出现，
+        // 双映射会出两条分隔条。此前写的 "context.compact" / "context.compacted" 是引入时
+        // 的推测名——在 kimi 0.26/0.29 二进制与 300 份真实 wire.jsonl 里均不存在，从未触发。
+        "full_compaction.complete" => vec![TranscriptEvent::Metadata {
             id: chat_id("compact", line),
             timestamp,
             kind: "compact".into(),
@@ -1741,6 +1749,27 @@ mod tests {
         let wire = r#"{"type":"turn.prompt","input":"hi"}
 {"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"think","think":"only thinking"}}}"#;
         assert_eq!(parse_wire(wire).last_ai, None);
+    }
+
+    /// 压缩完成边界只认实档里存在的 `full_compaction.complete`（真实序列：
+    /// begin → usage.record → apply_compaction → config.update → complete；取消是 cancel）。
+    /// begin/cancel/apply_compaction 一律不产出事件——进行中指示走 PreCompact hook，
+    /// apply_compaction 与 complete 同次出现，双映射会出两条分隔条。
+    #[test]
+    fn compaction_complete_maps_to_meta_boundary_only() {
+        let complete = r#"{"type":"full_compaction.complete","time":1786678632036}"#;
+        assert!(matches!(
+            &parse_chat_items(complete)[0],
+            ChatItem::Meta { kind, timestamp: Some(ts), .. }
+                if kind == "compact" && ts == "2026-08-14T03:37:12.036Z"
+        ));
+        for line in [
+            r#"{"type":"full_compaction.begin","time":1786678632000}"#,
+            r#"{"type":"full_compaction.cancel","time":1786678632010}"#,
+            r#"{"type":"context.apply_compaction","time":1786678632020}"#,
+        ] {
+            assert!(parse_chat_items(line).is_empty(), "{line} 不应产出事件");
+        }
     }
 
     #[test]

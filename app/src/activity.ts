@@ -2,6 +2,12 @@
 // sessionTone）与 views/sticker/helpers.ts（看板卡片状态环与 tab 归属）消费，挂在 api.ts
 // 上会让每个 mock 了 ./api 的测试都得手动补一个 export，也把一段纯逻辑绑上了 IPC 层。
 
+/** 会话压缩（/compact）进行期间后端写进 sessions.current_activity 的哨兵值——
+ *  状态记号不是活动文本，前端一律映射成本地化「正在压缩上下文…」（t.chat.compacting），
+ *  原值不上屏、不进 tooltip。后端出处：`app/src-tauri/crates/meowo-reporter/src/dispatch.rs`
+ *  的 PreCompact 臂。 */
+export const COMPACTING_ACTIVITY = "__meowo_compacting__";
+
 /** 连接中会话的**活动态阶梯**——侧栏状态点(sessionTone)、看板卡片状态环与 tab 归属
  *  (views/sticker/helpers.ts 的 cardTone/match)、后端 `session_query.rs` 的 tab_class,
  *  三处共用这一个地基。

@@ -856,7 +856,17 @@ export const MeowoReporter = async ({ directory }) => ({
           cwd: props.info?.directory ?? directory,
         })
         break
+      // 压缩完成 ≈ PostCompact。session id 字段名按 session.idle 的 props.sessionID 类推，
+      // 未经真机压缩验证；取不到时 meowoReport 静默丢弃（模板风格本来就是尽力而为）。
+      case "session.compacted":
+        meowoReport({ hook_event_name: "PostCompact", session_id: props.sessionID, cwd: directory })
+        break
     }
+  },
+  // 压缩开始 ≈ PreCompact。session id 字段名按 chat.message 的 input?.sessionID 类推，
+  // 同样未经真机压缩验证。
+  "experimental.session.compacting": async (input) => {
+    meowoReport({ hook_event_name: "PreCompact", session_id: input?.sessionID, cwd: directory })
   },
   "chat.message": async (input, output) => {
     const text = (output?.parts ?? [])

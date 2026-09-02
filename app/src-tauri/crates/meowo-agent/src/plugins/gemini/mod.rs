@@ -23,6 +23,7 @@
 //! | `AfterTool` | `PostToolUse` | 工具跑完 |
 //! | `AfterAgent` | `Stop` | 回合结束（负载带 `prompt_response`＝AI 正文） |
 //! | `SessionEnd` | `SessionEnd` | 会话收尾 |
+//! | `PreCompress` | `PreCompact` | /compress 开始（无 PostCompress，滞留取舍见 EVENTS 注释） |
 
 pub mod account;
 mod screen;
@@ -64,12 +65,17 @@ static AUTH: AuthScheme = AuthScheme {
 /// `setTimeout(..., hookConfig.timeout ?? 60000)`）。沿用 `plain` 的默认 5 就是 5ms——reporter
 /// 刚 spawn 即被 `taskkill /f /t` 整树击杀，每个 hook 都「超时失败」，会话根本落不了库。
 const GEMINI_HOOK_TIMEOUT_MS: u64 = 5_000;
-static EVENTS: [HookEvent; 5] = [
+static EVENTS: [HookEvent; 6] = [
     HookEvent::plain("SessionStart").with_timeout(GEMINI_HOOK_TIMEOUT_MS),
     HookEvent::plain("BeforeAgent").with_timeout(GEMINI_HOOK_TIMEOUT_MS),
     HookEvent::plain("AfterTool").with_timeout(GEMINI_HOOK_TIMEOUT_MS),
     HookEvent::plain("AfterAgent").with_timeout(GEMINI_HOOK_TIMEOUT_MS),
     HookEvent::plain("SessionEnd").with_timeout(GEMINI_HOOK_TIMEOUT_MS),
+    // gemini 只有 PreCompress、**没有 PostCompress**（bundle 事件枚举取证过）。故 /compress
+    // 完成后没有任何事件把状态翻回 waiting——会滞留在 running+压缩中，直到下一个回合自愈
+    // （BeforeAgent→running、AfterAgent→waiting）；看板/侧栏因 screenState=idle 仍显示正确的
+    // 等待态，滞留只影响 DB status 与无屏幕通道的展示面。半修，但比完全没有指示强。
+    HookEvent::plain("PreCompress").with_timeout(GEMINI_HOOK_TIMEOUT_MS),
 ];
 
 /// Gemini 0.50 支持的全部 hook 事件。写进一条它不认识的 event 会怎样尚未实测，但 kimi 的前车之鉴
@@ -193,6 +199,9 @@ impl AgentPlugin for Gemini {
             "BeforeAgent" => "UserPromptSubmit",
             "AfterAgent" => "Stop",
             "AfterTool" => "PostToolUse",
+            // dispatch 只认规范名 PreCompact；gemini 侧叫 PreCompress（无对应的 Post 事件，
+            // 滞留取舍见 EVENTS 的注释）。
+            "PreCompress" => "PreCompact",
             other => other,
         }
     }
@@ -479,12 +488,14 @@ mod tests {
     #[test]
     fn every_declared_event_maps_to_a_canonical_name_dispatch_handles() {
         // dispatch 的消化面（见 meowo_reporter::dispatch）。
-        const CANONICAL: [&str; 5] = [
+        const CANONICAL: [&str; 7] = [
             "SessionStart",
             "UserPromptSubmit",
             "PostToolUse",
             "Stop",
             "SessionEnd",
+            "PreCompact",
+            "PostCompact",
         ];
         for ev in EVENTS {
             let mapped = Gemini.canonical_event(ev.name);
@@ -499,6 +510,7 @@ mod tests {
         assert_eq!(Gemini.canonical_event("BeforeAgent"), "UserPromptSubmit");
         assert_eq!(Gemini.canonical_event("AfterAgent"), "Stop");
         assert_eq!(Gemini.canonical_event("AfterTool"), "PostToolUse");
+        assert_eq!(Gemini.canonical_event("PreCompress"), "PreCompact");
         // 同名的原样透传。
         assert_eq!(Gemini.canonical_event("SessionStart"), "SessionStart");
         assert_eq!(Gemini.canonical_event("SessionEnd"), "SessionEnd");
