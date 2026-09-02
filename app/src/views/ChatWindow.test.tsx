@@ -2356,6 +2356,13 @@ describe("ChatWindow", () => {
       if (command === "pending_interaction") {
         return Promise.resolve({ approval: null, question: questionAlive ? question : null });
       }
+      // 真实链路的耦合：清后端待处理表之后，轮询就再也读不到这条挂起了。上一版 mock
+      // 让它返回空 Promise、questionAlive 不跟着翻，于是「收起即被自己秒清」这条回归
+      // 溜了过去（复核指出）。这里如实建模：dismiss 一调，挂起即消失。
+      if (command === "dismiss_interactive_question") {
+        questionAlive = false;
+        return Promise.resolve();
+      }
       if (command === "managed_terminal_binding") return Promise.resolve(null);
       if (command === "managed_terminal_snapshot") return Promise.resolve({ sessionId: 33, active: false, managed: true, data: "", startOffset: 0, endOffset: 0, exited: false, exitCode: null });
       return Promise.resolve();
@@ -2365,10 +2372,14 @@ describe("ChatWindow", () => {
     expect(await screen.findByText(/接下来做哪一步/, {}, { timeout: 5_000 })).toBeTruthy();
 
     // 「仅收起」：卡走了，折叠条留下（题面用自己的文案，与屏幕识别那条分得开）。
+    const dismissCalls = () => invoke.mock.calls.filter((call) => call[0] === "dismiss_interactive_question").length;
     fireEvent.click(screen.getByRole("button", { name: "仅收起" }));
     expect(screen.queryByText(/接下来做哪一步/)).toBeNull();
-    const bar = await screen.findByRole("button", { name: "已收起提问，点击展开" });
-    expect(bar).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "已收起提问，点击展开" })).toBeTruthy();
+    // 收起 ≠ 了结：后端待处理表必须留着。清掉的话轮询立刻读不到这条挂起，折叠条会被
+    // 判活逻辑自己秒清（复核实测 2.5s 内），恢复入口没了——只断言「折叠条出现过」抓不住
+    // 那条回归（最终态同样是消失），得直接钉住「没去清后端表」。
+    expect(dismissCalls()).toBe(0);
 
     // 在终端答掉/超时：下一轮轮询回 question:null，折叠条必须自己消失。
     questionAlive = false;

@@ -357,6 +357,16 @@
 > 「不加引号含空格路径会断开」是未经验证的假设，同一条报错恰好反证它取的是整行。
 > 去掉引号，并把剥引号下沉到 `validate_new_session_cwd`——新建面板、远程桥、中途附加
 > 目录全走这一关（前端 paths.ts 的 unquotePath 只挡住了新建面板那一条路）。
+>
+> **第四轮复核**：上一轮的 liveQuestionId 修法在真实链路里**站不住**——「仅收起」把
+> structuredQuestion 置空后，既有 effect 会调 dismissInteractiveQuestion 清掉后端待处理
+> 表，于是轮询立刻回 null、判活逻辑把折叠条自己秒杀（实测 2.5s 内）。修法：收起这一次
+> 跳过 dismiss（收起≠了结，挂起还在）；interactive-question push 路径补同步
+> liveQuestionId（push 到卡出现、下一轮 poll 之前点收起同样会被判死）；折叠条也纳入
+> transcript 消解（在终端答掉时不必空等 150s TTL）。
+> 测试教训：原用例只断言「折叠条出现过、后来消失」，而回归的最终态同样是消失——抓不住。
+> 改成钉住修复的直接语义（收起时 dismiss_interactive_question 调用数为 0），并实测
+> 红→绿验证过：退回修复该用例即失败。同时把 mock 里 dismiss 与轮询的耦合如实建模。
 
 
 ### 看板与贴纸

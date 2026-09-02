@@ -1987,6 +1987,8 @@ export function ChatWindow() {
   // sessionId 无条件 dismiss，会把目标会话里挂着的题面（超出 3s 领养窗口、要靠轮询兜底
   // 才能取到的那种）从后端待处理表里抹掉，题面卡永远不出现，用户只能回终端作答。
   const shownQuestionSessionRef = useRef<number | null>(null);
+  // 这一次的置空是「仅收起」而不是「了结」（见 collapseQuestion）。
+  const collapsingQuestionRef = useRef(false);
   useEffect(() => {
     if (!structuredQuestion) {
       setQueuedAnswers(new Map());
@@ -1995,9 +1997,11 @@ export function ChatWindow() {
       lastInteractiveQuestionRef.current = null;
       const shownSid = shownQuestionSessionRef.current;
       shownQuestionSessionRef.current = null;
-      if (shownSid != null && shownSid === sessionId && sessionId > 0) {
+      // 收起路径例外（见 collapseQuestion）：挂起没了结，后端表留着，折叠条才判得出活。
+      if (shownSid != null && shownSid === sessionId && sessionId > 0 && !collapsingQuestionRef.current) {
         void dismissInteractiveQuestion(shownSid).catch(() => {});
       }
+      collapsingQuestionRef.current = false;
       return;
     }
     shownQuestionSessionRef.current = structuredQuestion.sessionId;
@@ -2049,15 +2053,20 @@ export function ChatWindow() {
   //
   // 静置期 1.5s：提问自身的 tool_use 先于题面事件落盘、至迟一个事件推送/轮询周期进
   // items，1.5s 足够吸收；真人 Esc 快不过它，快过了还有 180s 兜底过期。
+  //
+  // 收起后的折叠条也吃这套消解（复核指出）：题面被收起、用户转头去终端答掉时，展示卡
+  // 这一档在后端只有 150s TTL 兜底，折叠条会空挂最多 150s，点开是一张已经作废的卡。
+  // transcript 一确证回合结束就连折叠条一起撤掉，比等 TTL 准得多。
   const questionTranscriptBaseline = useRef<QuestionDismissTracker | null>(null);
+  const watchedQuestion = structuredQuestion ?? dismissedQuestion;
   useEffect(() => {
-    questionTranscriptBaseline.current = structuredQuestion
+    questionTranscriptBaseline.current = watchedQuestion
       ? { armAt: Date.now() + 1_500, count: null }
       : null;
-  }, [structuredQuestion]);
+  }, [watchedQuestion]);
   useEffect(() => {
     const baseline = questionTranscriptBaseline.current;
-    if (!structuredQuestion || !baseline) return;
+    if (!watchedQuestion || !baseline) return;
     const observation = {
       count: items.length,
       // 提问只可能发生在回合中（UserPromptSubmit 已把状态写成 running，且先于题面事件
@@ -2065,8 +2074,16 @@ export function ChatWindow() {
       // history 未加载时是 **null（未知）** 而非 false——见 observeTranscriptForDismiss。
       running: history ? history.status === "running" : null,
     };
-    if (observeTranscriptForDismiss(baseline, observation, Date.now())) setStructuredQuestion(null);
-  }, [structuredQuestion, history, items]);
+    if (!observeTranscriptForDismiss(baseline, observation, Date.now())) return;
+    // 卡还开着就收卡；已经收起成折叠条了就把折叠条撤掉，并把后端待处理表也清干净
+    // （收起那次刻意跳过了 dismiss，见 collapseQuestion）。
+    if (structuredQuestion) {
+      setStructuredQuestion(null);
+    } else if (dismissedQuestion) {
+      setDismissedQuestion(null);
+      if (sessionId > 0) void dismissInteractiveQuestion(sessionId).catch(() => {});
+    }
+  }, [watchedQuestion, structuredQuestion, dismissedQuestion, sessionId, history, items]);
 
   useEffect(() => {
     // transcript 的 pendingReview 比 broker 的实时状态慢一拍。只有历史状态确实清空后，
@@ -3115,6 +3132,11 @@ export function ChatWindow() {
   // 题面展示卡同规（7C-2 尾，复核指出上一版只覆盖了屏幕识别三卡）：收起后同样留折叠条，
   // 否则这张卡收掉就再也回不来——它的来源是 broker 挂起，不像屏幕识别那样会重新匹配。
   const collapseQuestion = () => {
+    // 「仅收起」不是「了结」：下面那个 effect 一见 structuredQuestion 变 null 就会调
+    // dismissInteractiveQuestion 把后端待处理表清掉，于是轮询立刻回 question:null、
+    // liveQuestionId 变 null、判活逻辑把折叠条**自己秒杀**（复核实测：收起后 2.5s 内
+    // 恢复入口就没了）。收起这一次要让它跳过——挂起还在，只是卡收起来了。
+    collapsingQuestionRef.current = true;
     setDismissedQuestion(structuredQuestion);
     setStructuredQuestion(null);
   };

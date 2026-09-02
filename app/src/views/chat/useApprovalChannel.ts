@@ -254,6 +254,9 @@ export function useApprovalChannel({ sessionId, activeSessionRef, viewRef, setVi
         // 题面卡就是处理面：抑制 pendingReview 的「去终端处理」降级卡（与 broker 审批同理）。
         setBrokerOwnsReview(true);
         setStructuredQuestion(event.payload);
+        // push 到卡出现、用户在下一轮 poll 前就点收起时，liveQuestionId 还停在上一题
+        // 的值（或 null），折叠条会被判死秒清——push 这条路径同样要同步（复核指出）。
+        setLiveQuestionId(event.payload.requestId);
         // 与审批一致：用户正在终端视图操作时不抢（表单本来就在那里），否则拉回对话页。
         if (viewRef.current !== "terminal") setView("chat");
       } else {
