@@ -2894,6 +2894,19 @@ mod new_session_tests {
         let got = validate_new_session_cwd(tmp.to_str().unwrap()).unwrap();
         assert_eq!(got, tmp.to_str().unwrap().trim());
     }
+
+    /// 资源管理器的「复制为路径」带成对引号。它能从新建面板、远程桥、中途附加目录
+    /// 任一入口进来,后端这一关剥掉,免得下游把引号当成路径的一部分(7T-4)。
+    #[test]
+    fn validate_cwd_strips_paired_quotes() {
+        let tmp = std::env::temp_dir();
+        let raw = tmp.to_str().unwrap().trim().to_string();
+        assert_eq!(validate_new_session_cwd(&format!("\"{raw}\"")).unwrap(), raw);
+        assert_eq!(validate_new_session_cwd(&format!("  \"{raw}\"  ")).unwrap(), raw);
+        assert_eq!(validate_new_session_cwd(&format!("'{raw}'")).unwrap(), raw);
+        // 单边引号不剥:Unix 上它是合法文件名字符,剥掉会造出一个不存在的路径。
+        assert!(validate_new_session_cwd(&format!("\"{raw}")).is_err());
+    }
 }
 
 #[cfg(test)]
