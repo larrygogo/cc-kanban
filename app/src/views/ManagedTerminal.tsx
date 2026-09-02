@@ -325,6 +325,9 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  /// WebGL 渲染器实例（装不上时为 null，见挂载处的降级）。切回可见时要清一次纹理图集：
+  /// 隐藏期间容器尺寸为 0，图集与画布状态可能已失效，只重画不清图集会画出空白格。
+  const webglRef = useRef<WebglAddon | null>(null);
   const [active, setActive] = useState(false);
   const [snapshotReady, setSnapshotReady] = useState(false);
   const [initialized, setInitialized] = useState(false);
@@ -682,6 +685,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
     let webgl: WebglAddon | null = null;
     try {
       webgl = new WebglAddon();
+      webglRef.current = webgl;
       webgl.onContextLoss(() => { webgl?.dispose(); webgl = null; });
       terminal.loadAddon(webgl);
     } catch {
@@ -1579,6 +1583,7 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;
+      webglRef.current = null;
       rearmRef.current = null;
       sessionChangedRef.current = null;
       if (externalRearmRef) externalRearmRef.current = null;
@@ -1652,6 +1657,14 @@ export function ManagedTerminal({ sessionId, status, reviewPending = false, back
       // 显式滚底：终端是实时视图，切回就该看最新。以前靠「切回必发 resize→TUI 整屏
       // 重绘」的副作用顺带回底，resize 同值短路后副作用消失，上翻的视口会停在原地。
       terminal.scrollToBottom();
+      // 强制本地重画一遍（实拍反馈：切回终端页后底部的输入框边框与状态行缺一截，
+      // 只剩半个字符，拖一下窗口就好）。上面那发 resize 指望的是「TUI 收到 SIGWINCH
+      // 整屏重绘」，但**尺寸没变时后端 last_size 同值短路、根本不发信号**，注释里
+      // 期望的「切回必然自愈」并没有兑现。这里不惊动 TUI，直接让 xterm 拿自己缓冲区
+      // 里的数据重画：隐藏期间容器尺寸为 0，WebGL 的画布与纹理图集失效，缓冲区是对的
+      // 而屏幕上是残帧——清图集 + refresh 正是对着这一种。
+      try { webglRef.current?.clearTextureAtlas(); } catch { /* 上下文已丢失，下一句照旧 */ }
+      terminal.refresh(0, Math.max(0, terminal.rows - 1));
       terminal.focus();
     });
     return () => cancelAnimationFrame(raf);
