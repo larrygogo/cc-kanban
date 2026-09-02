@@ -8,8 +8,8 @@
 #[cfg(test)]
 use crate::transcript::ChatItem;
 use crate::transcript::{
-    preview_text, SubagentOutcome, SubagentRef, SubagentSpec, SubagentStream, TranscriptEvent,
-    TranscriptInfo, TranscriptParser, TranscriptSpec, TurnError,
+    preview_text, SubagentOutcome, SubagentRef, SubagentSpec, SubagentStream, ToolDetail,
+    TranscriptEvent, TranscriptInfo, TranscriptParser, TranscriptSpec, TurnError,
 };
 use std::path::{Path, PathBuf};
 
@@ -155,6 +155,50 @@ fn tool_summary(name: &str, input: Option<&serde_json::Value>) -> String {
         }
     }
     compact_json(input, 800)
+}
+
+/// 详情正文上限（字符）。Write 一次几百行很常见，整段进 IPC 也就几十 KB；再大的
+/// （生成的数据文件、长日志）截到这里——前端只做预览，靠 truncated 标注「已截断」。
+const DETAIL_TEXT_MAX_CHARS: usize = 16_000;
+
+fn clip_detail(text: &str) -> (String, bool) {
+    if text.chars().count() > DETAIL_TEXT_MAX_CHARS {
+        (text.chars().take(DETAIL_TEXT_MAX_CHARS).collect(), true)
+    } else {
+        (text.to_string(), false)
+    }
+}
+
+/// 工具调用的结构化详情（对话页展开看的那份，见 [`ToolDetail`]）。只认 CC 内置的五类
+/// 文件/终端/搜索工具；MCP 与 harness 内部工具（TaskCreate 等）留 None，前端退回摘要。
+/// 行数按完整 content 数，与 CC 终端里「Wrote N lines」同口径，截断不影响它。
+fn tool_detail(name: &str, input: Option<&serde_json::Value>) -> Option<ToolDetail> {
+    let input = input?;
+    let text = |key: &str| input.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    let num = |key: &str| input.get(key).and_then(|v| v.as_u64()).map(|v| v.min(u32::MAX as u64) as u32);
+    match name {
+        "Write" => {
+            let full = text("content")?;
+            let lines = full.lines().count() as u32;
+            let (content, truncated) = clip_detail(&full);
+            Some(ToolDetail::Write { path: text("file_path")?, content, lines, truncated })
+        }
+        "Edit" => {
+            let (old, old_cut) = clip_detail(&text("old_string")?);
+            let (new, new_cut) = clip_detail(&text("new_string")?);
+            Some(ToolDetail::Edit {
+                path: text("file_path")?,
+                old,
+                new,
+                replace_all: input.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false),
+                truncated: old_cut || new_cut,
+            })
+        }
+        "Bash" => Some(ToolDetail::Command { command: text("command")?, description: text("description") }),
+        "Read" => Some(ToolDetail::Read { path: text("file_path")?, offset: num("offset"), limit: num("limit") }),
+        "Grep" | "Glob" => Some(ToolDetail::Search { pattern: text("pattern")?, path: text("path"), glob: text("glob") }),
+        _ => None,
+    }
 }
 
 /// Skill 调用的展示形态:`/<skill> <args>`(args 为空则只有 `/<skill>`)。
@@ -367,6 +411,7 @@ fn parse_events(line: &str, allow_sidechain: bool) -> Vec<TranscriptEvent> {
                             name: name.to_string(),
                             summary: tool_summary(name, block.get("input")),
                             subagent: CLAUDE_SUBAGENTS.detect_call(name, block.get("input")),
+                            detail: tool_detail(name, block.get("input")),
                         })
                     }
                     _ => None,
@@ -2722,6 +2767,56 @@ mod tests {
 
     /// Skill 调用的摘要 = 用户敲的那行命令。它同时是 forked skill 的外键(见 locate_forked),
     /// 形态必须与侧车 meta 的 description 严格一致。
+    #[test]
+    fn tool_detail_covers_builtin_file_and_shell_tools() {
+        let write = serde_json::json!({"file_path": "src/a.ts", "content": "a
+b
+c"});
+        assert_eq!(
+            tool_detail("Write", Some(&write)),
+            Some(ToolDetail::Write { path: "src/a.ts".into(), content: "a
+b
+c".into(), lines: 3, truncated: false })
+        );
+        let edit = serde_json::json!({"file_path": "x.rs", "old_string": "foo", "new_string": "bar", "replace_all": true});
+        assert_eq!(
+            tool_detail("Edit", Some(&edit)),
+            Some(ToolDetail::Edit { path: "x.rs".into(), old: "foo".into(), new: "bar".into(), replace_all: true, truncated: false })
+        );
+        let bash = serde_json::json!({"command": "cargo test", "description": "跑测试"});
+        assert_eq!(
+            tool_detail("Bash", Some(&bash)),
+            Some(ToolDetail::Command { command: "cargo test".into(), description: Some("跑测试".into()) })
+        );
+        let read = serde_json::json!({"file_path": "a.md", "offset": 10, "limit": 20});
+        assert_eq!(
+            tool_detail("Read", Some(&read)),
+            Some(ToolDetail::Read { path: "a.md".into(), offset: Some(10), limit: Some(20) })
+        );
+        let grep = serde_json::json!({"pattern": "fn main", "path": "src", "glob": "*.rs"});
+        assert_eq!(
+            tool_detail("Grep", Some(&grep)),
+            Some(ToolDetail::Search { pattern: "fn main".into(), path: Some("src".into()), glob: Some("*.rs".into()) })
+        );
+        // MCP / harness 内部工具不认，前端退回摘要。
+        assert_eq!(tool_detail("TaskCreate", Some(&serde_json::json!({"subject": "x"}))), None);
+        assert_eq!(tool_detail("Write", None), None);
+    }
+
+    /// 行数按完整正文数、正文本身截到上限并打标——前端只做预览，但「写了多少行」得是真的。
+    #[test]
+    fn tool_detail_write_keeps_full_line_count_when_content_is_clipped() {
+        let body: String = (0..2_000).map(|i| format!("line {i}
+")).collect();
+        let write = serde_json::json!({"file_path": "big.txt", "content": body});
+        let Some(ToolDetail::Write { lines, content, truncated, .. }) = tool_detail("Write", Some(&write)) else {
+            panic!("应识别为 Write 详情");
+        };
+        assert_eq!(lines, 2_000);
+        assert!(truncated);
+        assert_eq!(content.chars().count(), DETAIL_TEXT_MAX_CHARS);
+    }
+
     #[test]
     fn skill_summary_is_the_slash_command() {
         let input = serde_json::json!({"skill":"code-review","args":"1692 高强度"});

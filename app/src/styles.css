@@ -5395,3 +5395,38 @@ select.ns-input {
 .sticker .dev-badge { top: 4px; right: 10px; }
 /* 对话窗：顶栏水平居中（左有侧栏开关、右有窗口控制组/mac 红绿灯，两端都不空）。 */
 .chat-window .dev-badge { top: 8px; left: 50%; transform: translateX(-50%); }
+
+/* ===== 工具详情（对话页像终端那样看：写了什么 / 改了什么 / 跑了什么）=====
+   用户实拍：终端里 Write 一行「Wrote 225 lines to …」+ 正文预览 + 「+262 lines」，
+   对话页此前只有一个路径摘要。标题行加规模小标（写入 N 行 / -a +b / 于 src），
+   展开是带行号的预览，只露前十几行，余下折成「还有 N 行」。 */
+.chat-tool-meta { flex: 0 0 auto; max-width: 40%; padding: 0 var(--sp-6); border-radius: var(--r-pill); background: color-mix(in srgb, var(--cc-text) 7%, transparent); color: var(--cc-text-dim); font-size: var(--fs-10); line-height: 1.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.chat-tool-body { display: flex; flex-direction: column; gap: var(--sp-6); margin: 0 0 var(--sp-2); padding: var(--sp-8) var(--sp-12) var(--sp-9) calc(var(--sp-14) + 18px + var(--sp-9)); border-radius: 0 0 var(--r-9) var(--r-9); background: color-mix(in srgb, var(--cc-text) 3%, transparent); }
+/* 回执 pre 已经在 body 里：底色/圆角/左缩进都由 body 统一给，自己不再叠一层。 */
+.chat-tool-body > pre { margin: 0; padding: 0; border-radius: 0; background: none; }
+.chat-tool-code { overflow-x: auto; color: var(--cc-text); font: var(--fs-11)/1.55 ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, "Roboto Mono", "PingFang SC", "Microsoft YaHei", monospace; user-select: text; }
+.chat-tool-line { display: flex; gap: var(--sp-8); padding: 0 var(--sp-4); border-radius: var(--r-3); }
+/* 行号槽固定 3ch 右对齐；diff 态放 +/-，命令态放 $。数字不可选，复制正文时不夹带。 */
+.chat-tool-ln { flex: 0 0 3ch; text-align: right; color: var(--cc-text-faint); user-select: none; }
+.chat-tool-src { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* diff 两段：删行淡红底、增行淡绿底，记号用各自的语义色（与 GitDiffView 同一色族）。 */
+.chat-tool-code.is-del .chat-tool-line { background: color-mix(in srgb, var(--cc-err) 10%, transparent); }
+.chat-tool-code.is-del .chat-tool-ln { color: color-mix(in srgb, var(--cc-err) 70%, var(--cc-text)); }
+.chat-tool-code.is-add .chat-tool-line { background: color-mix(in srgb, var(--cc-accent) 12%, transparent); }
+.chat-tool-code.is-add .chat-tool-ln { color: var(--cc-accent-text); }
+.chat-tool-diff { display: flex; flex-direction: column; gap: var(--sp-4); }
+.chat-tool-more { align-self: flex-start; padding: 0; border: 0; background: none; color: var(--cc-text-dim); font: inherit; font-size: var(--fs-10-5); cursor: pointer; }
+.chat-tool-more:hover { color: var(--cc-text); }
+.chat-tool-note { color: var(--cc-text-faint); font-size: var(--fs-10-5); }
+/* hljs token 配色与 diff 面板同一张映射表（--cc-syn-*）；那边的规则限定在
+   .chat-diff-panel 下，这里按同样的 token 列表接一份，缺一个 token 高亮就「稀疏」。 */
+.chat-tool-code .hljs-keyword, .chat-tool-code .hljs-doctag, .chat-tool-code .hljs-template-tag, .chat-tool-code .hljs-variable.language_, .chat-tool-code .hljs-meta, .chat-tool-code .hljs-meta .hljs-keyword { color: var(--cc-syn-keyword); }
+.chat-tool-code .hljs-string, .chat-tool-code .hljs-regexp, .chat-tool-code .hljs-symbol, .chat-tool-code .hljs-code, .chat-tool-code .hljs-meta .hljs-string { color: var(--cc-syn-string); }
+.chat-tool-code .hljs-number, .chat-tool-code .hljs-literal { color: var(--cc-syn-number); }
+.chat-tool-code .hljs-comment, .chat-tool-code .hljs-quote { color: var(--cc-syn-comment); }
+.chat-tool-code .hljs-title, .chat-tool-code .hljs-title.function_, .chat-tool-code .hljs-section { color: var(--cc-syn-func); }
+.chat-tool-code .hljs-title.class_, .chat-tool-code .hljs-type, .chat-tool-code .hljs-selector-pseudo, .chat-tool-code .hljs-selector-attr { color: var(--cc-syn-type); }
+.chat-tool-code .hljs-attr, .chat-tool-code .hljs-attribute, .chat-tool-code .hljs-property, .chat-tool-code .hljs-variable, .chat-tool-code .hljs-template-variable, .chat-tool-code .hljs-name, .chat-tool-code .hljs-selector-tag, .chat-tool-code .hljs-selector-class, .chat-tool-code .hljs-selector-id { color: var(--cc-syn-attr); }
+.chat-tool-code .hljs-built_in, .chat-tool-code .hljs-char.escape_ { color: var(--cc-syn-builtin); }
+.chat-tool-code .hljs-punctuation, .chat-tool-code .hljs-operator, .chat-tool-code .hljs-tag { color: var(--cc-text-dim); }
+.chat-tool-code .hljs-subst { color: var(--cc-text); }

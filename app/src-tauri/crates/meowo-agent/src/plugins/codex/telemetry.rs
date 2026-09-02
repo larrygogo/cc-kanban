@@ -164,6 +164,7 @@ fn completed_item_events(
                     name: "patch".into(),
                     summary,
                     subagent: None,
+                    detail: None,
                 },
                 TranscriptEvent::ToolResult {
                     id: format!("{call_id}-out"),
@@ -267,6 +268,7 @@ fn parse_transcript_events(line: &str) -> Vec<TranscriptEvent> {
                 // codex 当前没有子任务：工具集只有 exec/wait，`task_started` 是回合级事件
                 // （payload 带 turn_id / model_context_window）而非委派。
                 subagent: None,
+                detail: None,
             }]
         }
         ("response_item", "function_call_output")

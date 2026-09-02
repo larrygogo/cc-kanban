@@ -376,6 +376,7 @@ fn parse_events(line: &str, wire_dir: Option<&Path>) -> Vec<TranscriptEvent> {
                             .or_else(|| args.map(value_text))
                             .unwrap_or_default(),
                         subagent,
+                        detail: None,
                     }]
                 }
                 _ => Vec::new(),

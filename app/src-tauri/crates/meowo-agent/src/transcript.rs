@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 /// agent 自己的 transcript，避免把光标移动、spinner 和重绘误当正文。
 pub use meowo_protocol::ipc::{
     ChatItem, SubagentBranchProbeDto, SubagentOutcome, SubagentProbeDto, SubagentRef, SubagentRun,
+    ToolDetail,
 };
 
 /// 一条待读取的子任务侧车流。
@@ -71,6 +72,8 @@ pub enum TranscriptEvent {
         summary: String,
         /// 该调用是一次子任务委派时的展示信息（见 [`SubagentSpec::detect_call`]）。
         subagent: Option<SubagentRef>,
+        /// 结构化详情（写入正文 / 编辑前后 / 命令…），插件认不得的工具为 None。
+        detail: Option<ToolDetail>,
     },
     ToolResult {
         id: String,
@@ -153,12 +156,14 @@ impl From<TranscriptEvent> for ChatItem {
                 name,
                 summary,
                 subagent,
+                detail,
             } => Self::ToolUse {
                 id,
                 timestamp,
                 name,
                 summary,
                 subagent,
+                detail,
             },
             TranscriptEvent::ToolResult {
                 id,
