@@ -126,15 +126,23 @@ pub fn dispatch(
                         }
                     }
                     _ => {
-                        // 非 Bash 工具也写活动名:此前只有 Bash 写 current_activity,Edit/Read
+                        // 非 Bash 工具也写活动:此前只有 Bash 写 current_activity,Edit/Read
                         // 等长跑期间前端一直显示上一条早已完成的 Bash 命令,像卡死在某步。
+                        // 只写工具名又看不出在做什么(实拍:Grep 跑十几秒,状态条只有一个词),
+                        // 故带上 activity_detail 抠出的细节(搜索词/文件路径等)。
                         // set_current_activity 内部自带 touch_session,与原兜底分支等价。
                         match ev
                             .tool_name
                             .as_deref()
                             .filter(|name| !name.trim().is_empty())
                         {
-                            Some(name) => store.set_current_activity(sid, name, now_ms)?,
+                            Some(name) => {
+                                let activity = match ev.activity_detail() {
+                                    Some(detail) => format!("{name}: {detail}"),
+                                    None => name.to_string(),
+                                };
+                                store.set_current_activity(sid, &activity, now_ms)?
+                            }
                             None => store.touch_session(sid, now_ms)?,
                         }
                     }

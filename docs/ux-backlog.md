@@ -58,6 +58,8 @@
 > 定值逐面归阶梯）、W-2 原生吸附预览窗（snap-preview 原生窗，Windows 实拍）、
 > U1-14 尾（Ctrl+K 扩成命令面板，会话+命令双组混合过滤）。至此交互 backlog
 > 无开放项；剩「Windows MSIX 打包专项」与 macOS 实拍验证两个环境依赖项。
+> 2026-09-02 实拍复轮：C-19（子任务吸顶标题与视口顶之间 24px 缝隙，滚动内容
+> 从缝里透出）、C-20（运行状态条非 Bash 工具只显示工具名）各修各的。
 
 ## 〇、横切主题（先读这节）
 
@@ -177,6 +179,8 @@
 | C-16 | 超长粘贴固定 250ms 后回车，TUI 可能没消化完；`sessionLaunchSelections` 无 stale 守卫会把旧会话启动档落到新会话 | `ChatWindow.tsx:405-414,727-730` | 已修（submitGapMs 按长度动态间隔 250ms+50ms/KB 封顶 2s；stale 守卫此前已由 cancelled 标志补齐） |
 | C-17 | 快捷键体系整体缺位：无切会话/收展侧栏/切视图/新建/查找；侧栏平铺 tabindex 上百次 Tab | `ChatWindow.tsx:1948-1962`、`ChatSidebar.tsx:629-647` | 已修（Ctrl+K/B/1/2/N/F + ? 速查表全部落地；侧栏 roving tabindex + ↑↓/Home/End 导航） |
 | C-18 | 断线语言缺失：分不出「agent 进程没了」和「IPC 通道断了」 | `zh.ts:153-160`、`ChatWindow.tsx:565` | 已修（轮询连续失败 ≥3 次升级「同步中断」横幅 role=alert 错误色，瞬时失败仍琥珀通用文案；与 tone 解耦） |
+| C-19 | 子任务展开后滚动，吸顶标题与视口顶之间有一条缝，内容从缝里透出 | `styles.css:3802`（`.chat-scroll` padding-top）+ `styles.css:4460`（sticky summary） | 已修（Chromium 里 sticky top:0 贴滚动容器内容盒上沿，padding-top 变成缝隙，Playwright 实测 24px；顶部留白改文档流内 `.chat-scroll::before` 占位，吸顶贴顶=0；`.chat-sync-warn` 同道受益） |
+| C-20 | 运行状态条（SnakeSpinner + currentActivity）非 Bash 工具只显示工具名，看不出在做什么 | `dispatch.rs:114` 兜底分支 | 已修（hook.rs 新增 `activity_detail()`：pattern→file_path→path→query→url→subject→description 逐键试，兼容 claude/kimi 字段名，截 120 字；有细节写「Grep: 个子任务」，无细节维持裸名；dispatch_test 钉死两种形态） |
 
 ### 托管终端 / 跳转恢复 / 新建会话
 

@@ -3798,9 +3798,13 @@ select.ns-input {
   flex: 1;
   overflow: auto;
   scroll-behavior: smooth;
-  /* compose 在文档流内、不再盖住滚动区，底部留白与顶部对称即可。 */
-  padding: var(--sp-24) max(34px, calc((100% - 720px) / 2));
+  /* compose 在文档流内、不再盖住滚动区，底部留白与顶部对称即可。
+     顶部留白不能用 padding：Chromium 里 sticky top:0 贴着的是内容盒上沿，
+     padding-top 会变成吸顶元素与视口顶之间的一条缝（子任务标题、同步警告同受影响）。
+     改用文档流内的 ::before 占位——它随内容一起滚走，吸顶元素才能贴到顶。 */
+  padding: 0 max(34px, calc((100% - 720px) / 2)) var(--sp-24);
 }
+.chat-scroll::before { content: ""; display: block; height: var(--sp-24); }
 /* 屏外消息跳过 layout/paint（浏览器原生的"虚拟化"）：上千条的长会话里，可视区外的
    条目不再参与每轮渲染。选直接子块 = Transcript 的顶层条目；嵌套的小块不值得再管。
    contain-intrinsic-size 的 auto 关键字会记住真实渲染过的尺寸，滚动条估算随之收敛。

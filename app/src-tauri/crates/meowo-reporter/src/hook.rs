@@ -158,6 +158,30 @@ impl HookEvent {
             .as_str()
             .map(|s| s.to_string())
     }
+
+    /// 取非 Bash 工具的「当前动作」细节：状态条只写工具名时，用户看不出在做什么
+    /// （实拍：Grep 跑十几秒，状态条只有「Grep」一个词）。各 provider 字段名不一
+    /// （claude 的 Read 用 `file_path`，kimi 用 `path`），按候选键逐个试；
+    /// `pattern` 排在 `path` 前——Grep/Glob 两者都带，搜索词才是用户想知道的。
+    /// 都不命中返回 None，调用方退回只显示工具名。
+    pub fn activity_detail(&self) -> Option<String> {
+        let input = self.tool_input.as_ref()?;
+        for key in ["pattern", "file_path", "path", "query", "url", "subject", "description"] {
+            if let Some(s) = input.get(key).and_then(|v| v.as_str()).map(str::trim) {
+                if !s.is_empty() {
+                    // 细节只是状态条一行字：Agent 的 description 等字段没有长度约束，
+                    // 截一刀防止超长文本灌进 DB 与 tooltip。
+                    const LIMIT: usize = 120;
+                    let mut s = s.chars().take(LIMIT).collect::<String>();
+                    if s.chars().count() == LIMIT {
+                        s.push('…');
+                    }
+                    return Some(s);
+                }
+            }
+        }
+        None
+    }
 }
 
 /// 把 tool_response 摊平成文本。hook 的结果字段形状不统一：可能是裸字符串、内容块数组

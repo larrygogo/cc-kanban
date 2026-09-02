@@ -360,6 +360,25 @@ fn non_bash_tool_updates_activity_and_new_prompt_clears_it() {
     .unwrap();
     assert_eq!(activity().as_deref(), Some("Edit"));
 
+    // 非 Bash 工具带 tool_input:写「工具名: 细节」而不是光秃秃一个词(实拍反馈:
+    // Grep 跑十几秒状态条只显示「Grep」)。pattern 排在 path 前——搜索词才是要看的。
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"PostToolUse","session_id":"nb1","tool_name":"Grep","tool_input":{"pattern":"个子任务","path":"app/src"}}"#),
+        350,
+    )
+    .unwrap();
+    assert_eq!(activity().as_deref(), Some("Grep: 个子任务"));
+
+    // claude 形态的路径键(file_path)同样认。
+    disp(
+        &store,
+        &ev(r#"{"hook_event_name":"PostToolUse","session_id":"nb1","tool_name":"Read","tool_input":{"file_path":"src/main.rs"}}"#),
+        360,
+    )
+    .unwrap();
+    assert_eq!(activity().as_deref(), Some("Read: src/main.rs"));
+
     // 工具名缺席:回落 touch,不改活动名。
     disp(
         &store,
@@ -367,7 +386,7 @@ fn non_bash_tool_updates_activity_and_new_prompt_clears_it() {
         400,
     )
     .unwrap();
-    assert_eq!(activity().as_deref(), Some("Edit"));
+    assert_eq!(activity().as_deref(), Some("Read: src/main.rs"));
 
     // 新回合:残留活动名清空(否则新回合首个工具调用前一直显示旧命令)。
     disp(
