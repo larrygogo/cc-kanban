@@ -940,6 +940,19 @@ fn dev_badge_icon(icon: &tauri::image::Image<'_>) -> tauri::image::Image<'static
 #[cfg(not(target_os = "macos"))]
 static TRAY_CLICK_GEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// 单击消抖窗口取**系统双击时间**（Windows 默认 500ms，控制面板可调）。曾写死 300ms：
+/// 正常手速的双击（间隔 300~500ms）在 300ms 定时器到点时第二击还没到，先漏出一次
+/// 单击把贴纸开合了，随后系统仍认出双击、对话窗也开——两窗齐弹（实拍反馈）。
+/// Linux 无统一的系统双击时间，跟随 Windows 默认值。
+#[cfg(not(target_os = "macos"))]
+fn tray_click_debounce() -> std::time::Duration {
+    #[cfg(target_os = "windows")]
+    let ms = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() };
+    #[cfg(not(target_os = "windows"))]
+    let ms: u32 = 500;
+    std::time::Duration::from_millis(u64::from(ms))
+}
+
 /// 构建系统托盘：单击左键开合主界面（贴纸窗，与 macOS 左键开合面板同语义）、双击左键
 /// 打开对话窗口（W-11 前的左键语义，老用户肌肉记忆）；右键菜单提供打开对话窗口 /
 /// 找回贴纸 / 使用引导 / 设置 / 官网 / 退出。
@@ -1002,11 +1015,12 @@ pub(crate) fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 } => {
                     // 单击 = 开合主界面（贴纸窗），与 macOS 左键开合面板同语义；窗口 API
                     // 只投递消息不读文件，主线程直调（同 macOS panel::toggle_panel）。
-                    // 延迟一个双击窗口期：紧随其后是双击则这次开合作废（见 TRAY_CLICK_GEN）。
+                    // 延迟一个系统双击窗口期：紧随其后是双击则这次开合作废
+                    // （见 TRAY_CLICK_GEN；窗口期取值理由见 tray_click_debounce）。
                     let gen = TRAY_CLICK_GEN.fetch_add(1, Ordering::SeqCst) + 1;
                     let app = tray.app_handle().clone();
                     std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        std::thread::sleep(tray_click_debounce());
                         if TRAY_CLICK_GEN.load(Ordering::SeqCst) == gen {
                             toggle_main_window(&app);
                         }
