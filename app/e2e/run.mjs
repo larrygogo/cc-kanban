@@ -5,6 +5,7 @@
 // 故都以构建期开关注入，并在此临时拷入 WDIO capability、跑完即删。
 import { spawnSync } from "node:child_process";
 import { copyFileSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -70,7 +71,14 @@ try {
     { VITE_E2E: "1" },
   );
   // 跑 WDIO（embedded provider：首次会自动匹配/下载 msedgedriver）。
-  run("bun", ["x", "wdio", "run", "e2e/wdio.conf.ts"]);
+  // 必须用 Node（preflight 已保证 ≤22）而不是 bun：bun 的 fetch 与 Node≥26 的 undici 同样
+  // 拒绝 wdio webdriver 手动设置的 Content-Length/Connection 头（实测 bun 下创建会话即
+  // UND_ERR_INVALID_ARG）——预检挡了 Node 版本却没换运行时，等于白挡。process.execPath
+  // 即当前 Node；`bun x` 只是装包/解析便利，不能用来跑 wdio 本体。
+  const require = createRequire(import.meta.url);
+  // @wdio/cli 的 exports 只放 "."，bin 不能直接 resolve——从主入口推包根再进 bin。
+  const wdioBin = join(dirname(require.resolve("@wdio/cli")), "..", "bin", "wdio.js");
+  run(process.execPath, [wdioBin, "run", "e2e/wdio.conf.ts"]);
 } finally {
   cleanup();
 }
