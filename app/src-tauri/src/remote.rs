@@ -49,7 +49,7 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -1262,7 +1262,16 @@ fn path_within_roots(raw: &str, roots: &[PathBuf]) -> Option<PathBuf> {
 /// 手机 SPA 静态托管（手写 ServeDir-lite，不引 tower-http）。产物目录：
 /// release 走 resource_dir()/dist-mobile（PR3 接 bundle.resources），debug 回退
 /// 仓库内 dist-mobile 便于本地调试。目录缺失 → 404 提示先构建。
-async fn static_handler(State(ctx): State<Ctx>, uri: axum::http::Uri) -> Response {
+///
+/// 压缩与缓存：vite.mobile.config.ts 给 assets/ 下的文本产物预生成同名 .br，客户端
+/// Accept-Encoding 含 br 且 .br 在场就回它（首屏 1.1MB → 约 0.45MB）；没有 .br 或客户端
+/// 不收就回原文件，行为不变。assets/ 文件名带内容哈希，标一年 immutable，二次打开零下载；
+/// mobile.html 不带哈希，no-cache 让浏览器每次回源确认（1KB，代价可忽略）。
+async fn static_handler(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
     let Some(root) = static_root(&ctx.app) else {
         return err_status(
             StatusCode::NOT_FOUND,
@@ -1272,14 +1281,70 @@ async fn static_handler(State(ctx): State<Ctx>, uri: axum::http::Uri) -> Respons
     let Some(rel) = sanitize_static_path(uri.path()) else {
         return err_status(StatusCode::NOT_FOUND, "无此资源");
     };
+    let wants_br = headers
+        .get("accept-encoding")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(accepts_brotli);
     let full = root.join(&rel);
-    let read = tauri::async_runtime::spawn_blocking(move || std::fs::read(full)).await;
+    let read = tauri::async_runtime::spawn_blocking(move || {
+        if wants_br {
+            let mut br = full.clone().into_os_string();
+            br.push(".br");
+            if let Ok(bytes) = std::fs::read(br) {
+                return Ok((bytes, true));
+            }
+        }
+        std::fs::read(full).map(|bytes| (bytes, false))
+    })
+    .await;
     match read {
-        Ok(Ok(bytes)) => {
+        Ok(Ok((bytes, brotli))) => {
             let ext = rel.rsplit('.').next().unwrap_or("");
-            ([("content-type", mime_for(ext))], bytes).into_response()
+            let mut resp = (
+                [
+                    ("content-type", mime_for(ext)),
+                    ("cache-control", cache_control_for(&rel)),
+                    // 同一 URL 按 Accept-Encoding 回不同实体，中间缓存必须按它分桶。
+                    ("vary", "accept-encoding"),
+                ],
+                bytes,
+            )
+                .into_response();
+            if brotli {
+                resp.headers_mut()
+                    .insert("content-encoding", HeaderValue::from_static("br"));
+            }
+            resp
         }
         _ => err_status(StatusCode::NOT_FOUND, "无此资源"),
+    }
+}
+
+/// Accept-Encoding 里是否接受 brotli：逐项拆 `br;q=0.8`，`q=0` 视为明确拒绝。
+/// 不处理 `*`——只有显式列出 br 的客户端才给压缩体，保守但不会送出对方解不开的东西。
+fn accepts_brotli(accept_encoding: &str) -> bool {
+    accept_encoding.split(',').any(|item| {
+        let mut parts = item.split(';');
+        let name = parts.next().unwrap_or("").trim();
+        if !name.eq_ignore_ascii_case("br") {
+            return false;
+        }
+        !parts.any(|p| {
+            p.trim()
+                .strip_prefix("q=")
+                .and_then(|q| q.trim().parse::<f32>().ok())
+                .is_some_and(|q| q == 0.0)
+        })
+    })
+}
+
+/// 缓存策略：assets/ 下文件名带 vite 内容哈希，改内容必换名，可放心长缓存；其余
+/// （mobile.html）名字固定，每次回源确认。
+fn cache_control_for(rel: &str) -> &'static str {
+    if rel.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
     }
 }
 
@@ -1578,6 +1643,27 @@ mod tests {
         assert!(sanitize_static_path("/.hidden").is_none());
         assert!(sanitize_static_path("/a//b").is_none());
         assert!(sanitize_static_path("/C:/Windows/win.ini").is_none());
+    }
+
+    #[test]
+    fn brotli_negotiation_reads_q_values() {
+        assert!(accepts_brotli("gzip, deflate, br"));
+        assert!(accepts_brotli("br;q=0.9, gzip"));
+        assert!(accepts_brotli("BR"));
+        assert!(!accepts_brotli("gzip, deflate"));
+        assert!(!accepts_brotli("br;q=0"));
+        assert!(!accepts_brotli("br; q=0.0, gzip"));
+        assert!(!accepts_brotli("*"));
+        assert!(!accepts_brotli(""));
+    }
+
+    #[test]
+    fn hashed_assets_get_immutable_cache() {
+        assert_eq!(
+            cache_control_for("assets/ChatWindow-DafP6on7.js"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(cache_control_for("mobile.html"), "no-cache");
     }
 
     /// camelCase 契约：参数结构体按 camelCase 逐名匹配，未知键必须报错（deny_unknown_fields
