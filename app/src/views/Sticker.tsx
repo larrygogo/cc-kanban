@@ -463,6 +463,15 @@ export function Sticker({
     return () => window.clearTimeout(id);
   }, [importNotice]);
 
+  // 更新提示的两档：available/downloading 阶段用户无事可做（自动更新在后台下载），
+  // 齿轮角标红点足够；ready 是「只差点一下安装」的时刻，才升一条横条直达更新窗。
+  // 关掉只作用于本次 ready——状态离开 ready（装完/重新下载）后复位，下次照常提示。
+  const [updateToastOff, setUpdateToastOff] = useState(false);
+  useEffect(() => {
+    if (updateStatus !== "ready") setUpdateToastOff(false);
+  }, [updateStatus]);
+  const showUpdateToast = updateStatus === "ready" && !updateToastOff;
+
   // 窗口级快捷键：Ctrl/Cmd+F 打开搜索；Esc 按「toast → 搜索」回退（右键菜单的 Esc 由
   // CardContextMenu 自己消费并 preventDefault，先于本监听）。焦点在输入框里时 Esc 让位
   // 给各自的 onKeyDown（搜索框自己会关，编辑框是取消编辑）。此前贴纸没有任何快捷键，
@@ -1589,8 +1598,30 @@ export function Sticker({
       {/* toast 统一纵向堆叠（P1-2）：focusNotice / 归档撤销 / 首启导入提示曾各自锚在
           同一 bottom，同屏互压（focusNotice 被压在撤销栈下不可见）。收敛进同一栈容器：
           导入/撤销叠在上，焦点提示贴底（原位）。栈内 .stk-focus-toast 由 CSS 改静态流。 */}
-      {(importNotice !== null || archivedToasts.length > 0 || (focusNotice && focusNotice.kind !== "focused")) && (
+      {(showUpdateToast || importNotice !== null || archivedToasts.length > 0 || (focusNotice && focusNotice.kind !== "focused")) && (
         <div className="stk-archive-toasts">
+          {/* 更新已下载（见 showUpdateToast）：常驻在栈顶，瞬时 toast 叠在它下面靠近底栏。
+              点「安装」开更新窗——安装本身始终由那扇窗确认，这里只负责一键抵达。 */}
+          {showUpdateToast && (
+            <div className="stk-focus-toast is-update" role="status" data-testid="stk-update-toast">
+              <div className="stk-focus-body">
+                <span className="stk-focus-text">{t.sticker.updateReady}</span>
+                <div className="stk-focus-actions">
+                  <button type="button" className="stk-focus-btn" onClick={() => { invoke("open_update_window").catch(() => {}); }}>
+                    {t.sticker.updateInstall}
+                  </button>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="stk-focus-close"
+                aria-label={t.sticker.dismiss}
+                onClick={() => setUpdateToastOff(true)}
+              >
+                <XIcon />
+              </button>
+            </div>
+          )}
           {/* 首启导入提示 toast（S-12，见 importNotice）：一次性，10s 自动消失或手动关。 */}
           {importNotice !== null && (
             <div className="stk-focus-toast is-archive" role="status" data-testid="stk-import-toast">

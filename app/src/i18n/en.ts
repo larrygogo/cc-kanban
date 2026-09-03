@@ -35,6 +35,7 @@ export const en: Dict = {
     updateAvailable: "Update available",
     updateDownloading: "Downloading update…",
     updateReady: "Update downloaded, ready to install",
+    updateInstall: "Install",
     search: "Search sessions",
     searchPlaceholder: "Search title / repo / note…",
     searchClose: "Close search",

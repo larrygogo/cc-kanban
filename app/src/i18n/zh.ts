@@ -39,6 +39,8 @@ export const zh = {
     // 下载中/已就绪各自成句（7S-3）：等和点是两件事。
     updateDownloading: "正在下载新版本",
     updateReady: "更新已下载，可安装",
+    // 横条上的动作钮：点了开更新窗（安装确认在那扇窗里），动词与 updateReady 同一个。
+    updateInstall: "安装",
     search: "搜索会话",
     searchPlaceholder: "搜索标题 / 仓库 / 便签…",
     searchClose: "关闭搜索",

@@ -1319,3 +1319,59 @@ describe("切换期保留旧列表灰化（B-4）", () => {
     expect(screen.getByText("等着的事")).toBeTruthy();
   });
 });
+
+describe("更新提示的两档", () => {
+  afterEach(cleanup);
+
+  /// 实拍回退：红点独立成第 6 颗按钮后底栏放不下，置顶被挤出可视区。红点回到齿轮
+  /// 角标，底栏按钮数不随更新状态变化。
+  it("有更新时不新增按钮，红点是齿轮的角标", () => {
+    const { container, rerender } = render(<Sticker filter="all" data={[]} />);
+    const before = container.querySelectorAll(".stk-bar-actions .stk-act").length;
+    rerender(<Sticker filter="all" data={[]} hasUpdate updateStatus="available" />);
+    expect(container.querySelectorAll(".stk-bar-actions .stk-act").length).toBe(before);
+    // 红点在按钮内部，不是并排的一颗。
+    const dot = container.querySelector(".stk-bar-actions .stk-dot");
+    expect(dot).not.toBeNull();
+    expect(dot?.closest("button")?.querySelector("svg")).not.toBeNull();
+  });
+
+  /// 齿轮点击恒为设置：更新能挂好几天，那几天不该没有进设置的入口（U1-27）。
+  it("有更新时点齿轮仍开设置，不弹更新窗", () => {
+    const { container } = render(<Sticker filter="all" data={[]} hasUpdate updateStatus="ready" />);
+    invokeMock.mockClear();
+    const gear = container.querySelector<HTMLButtonElement>(".stk-bar-actions .stk-dot")?.closest("button");
+    fireEvent.click(gear!);
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === "open_settings")).toBe(true);
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === "open_update_window")).toBe(false);
+  });
+
+  /// 下载阶段用户无事可做（自动更新在后台下），只有 ready 才值得占一条横条。
+  it("available/downloading 不出横条，ready 才出", () => {
+    const { rerender } = render(<Sticker filter="all" data={[]} hasUpdate updateStatus="available" />);
+    expect(screen.queryByTestId("stk-update-toast")).toBeNull();
+    rerender(<Sticker filter="all" data={[]} hasUpdate updateStatus="downloading" />);
+    expect(screen.queryByTestId("stk-update-toast")).toBeNull();
+    rerender(<Sticker filter="all" data={[]} hasUpdate updateStatus="ready" />);
+    expect(screen.getByTestId("stk-update-toast").textContent).toContain(zh.sticker.updateReady);
+  });
+
+  it("横条上的动作钮一键开更新窗", () => {
+    render(<Sticker filter="all" data={[]} hasUpdate updateStatus="ready" />);
+    invokeMock.mockClear();
+    fireEvent.click(within(screen.getByTestId("stk-update-toast")).getByText(zh.sticker.updateInstall));
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === "open_update_window")).toBe(true);
+  });
+
+  /// 关掉只压住本次 ready；状态离开 ready 后复位——否则装到一半取消，下一版就永远不提示了。
+  it("关掉横条后红点仍在，状态离开 ready 再回来会重新提示", () => {
+    const { container, rerender } = render(<Sticker filter="all" data={[]} hasUpdate updateStatus="ready" />);
+    fireEvent.click(within(screen.getByTestId("stk-update-toast")).getByLabelText(zh.sticker.dismiss));
+    expect(screen.queryByTestId("stk-update-toast")).toBeNull();
+    expect(container.querySelector(".stk-bar-actions .stk-dot")).not.toBeNull();
+
+    rerender(<Sticker filter="all" data={[]} hasUpdate updateStatus="downloading" />);
+    rerender(<Sticker filter="all" data={[]} hasUpdate updateStatus="ready" />);
+    expect(screen.queryByTestId("stk-update-toast")).not.toBeNull();
+  });
+});
