@@ -137,10 +137,6 @@ jobs:
   e2e:
     # PR 上不跑：跑也不挡合并，白烧十几分钟配额。
     if: github.event_name != 'pull_request'
-    # 暂不阻断整个 run：这条通道首跑就红（见下方「预置 onboarding_seen」步骤的由来），
-    # 修法尚未在 CI 上验证过。让它先跑绿一次再摘掉这行改为真门禁——在此之前，
-    # 一条永远红的必过 job 只会让 main 长期挂红、把真正的失败淹掉。
-    continue-on-error: true
     runs-on: windows-latest
     # 冷缓存下 debug 全量编译 + 首次下载 msedgedriver 约 20-35 分钟。
     timeout-minutes: 60
