@@ -151,6 +151,9 @@ static VARIANTS: [Variant; 1] = [Variant {
     hooks: &HOOKS,
     auth: Some(&AUTH),
     launch: &LAUNCH,
+    // claude 的目录信任是 `~/.claude.json` 的 `hasTrustDialogAccepted`，机制不同且未观察到卡点，
+    // 暂不预写（见 docs/research/kimi-workspace-trust-2026-09.md 第 7 节）。
+    trust: None,
 }];
 
 pub struct Claude;

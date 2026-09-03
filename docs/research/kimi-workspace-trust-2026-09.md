@@ -45,6 +45,23 @@ async initialize() { this.trusted = await readWorkspaceTrust(this.docs, this.roo
 
 落盘：`<数据目录>/workspace-trust/<key>`，**无扩展名**，内容 `{"root":"<原样路径>","trustedAt":<毫秒>}`。
 
+信任屏文案（0.40.1 探针实拍，默认焦点在「Trust」，回车即确认）：
+
+```
+Trust this folder?
+↑↓ navigate · Enter select · Esc exit
+<cwd>
+Project-level MCP servers are disabled until you explicitly choose Trust. Trust starts the listed project MCP
+targets and remembers this folder.
+ ❯ Trust this folder
+   Enable project MCP servers. Remembered for this folder.
+   Don't trust
+   Exit Kimi Code. Asked again next launch.
+```
+
+注意它的措辞：信任的实际效力是**启用该目录的项目级 MCP 服务器**（`.kimi/mcp.json` 之类）——预写等于
+替用户打开了这一项，第 5 节的权衡以此为准。
+
 ### 三条决定性质
 
 1. **只看文档是否存在**——`readWorkspaceTrust` 不校验 `root` 字段、不校验 `trustedAt`、无签名。
@@ -162,8 +179,10 @@ codex 的 hook `trusted_hash` 预信任是同一性质的既定先例。但边�
 ## 6. 验收
 
 1. 单测（`trust.rs`）：第 3 节向量表全覆盖 + 幂等（已存在不重写）+ 归一等价性。
-2. `#[ignore]` 真机探针（`app/src-tauri/tests/probe_*.rs` 惯例）：临时目录里跑真实 kimi、手动信任一次，
-   读回 `workspace-trust/` 下的文件名与 `trust_key` 的输出逐字符比对——kimi 换算法时靠它发现。
+2. `#[ignore]` 真机探针 `app/src-tauri/tests/probe_kimi_workspace_trust.rs`：临时目录里跑真实 kimi、
+   在信任屏上回车确认一次，读回 `workspace-trust/` 下新出现的文件名与 `trust_key` 的输出逐字符比对
+   ——kimi 换算法时靠它发现。跑法：
+   `cargo test -p meowo-app --test probe_kimi_workspace_trust -- --ignored --nocapture`
 3. 手动验收：取一个从未信任过的目录，对其中的 claude 会话执行「切换到 kimi」，应直达 kimi 主界面，
    看板上出现接续会话卡片（而非停在信任屏、卡片消失）。
 4. 门禁（AGENTS.md）：`cargo clippy --workspace --all-targets` 零警告、`cargo test`。

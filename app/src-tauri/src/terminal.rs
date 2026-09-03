@@ -778,6 +778,31 @@ pub(crate) fn launch_env_for_profile(
     launch_env_for_exact_profile(a, id.as_deref())
 }
 
+/// 起进程前把工作目录预写进该 agent 的工作区信任名册，免掉「是否信任此目录」确认屏——对话页
+/// 看不到也答不了那道 TUI 提示，且信任屏期间 agent 不触发 hook，新会话不落库（跨 agent 切换的
+/// 直接痛点）。能力槽 [`meowo_agent::Installation::pretrust_workspace`]，未声明的 agent no-op。
+///
+/// **按本次实际生效的账号解析数据目录**：profile 的数据目录整个被环境变量搬走，信任名册跟着搬，
+/// 写进默认目录等于没写。`profile = None` 明确表示默认账号（不是「当前活跃」——调用方已经把
+/// 活跃账号解析出来了，与它随后注入的 env 同源，两边不能各推一次）。
+///
+/// 只做文件 IO，须在 blocking 闭包内调用。失败只打日志：最坏退化成用户手动信任一次。
+pub(crate) fn pretrust_workspace(provider: &str, profile: Option<&str>, cwd: &str) {
+    let Some(agent) = meowo_agent::resolve(Some(provider)) else {
+        return;
+    };
+    match profile {
+        Some(id) => {
+            if let Some(inst) = crate::profile::installation_of(agent.id(), id) {
+                inst.pretrust_workspace(cwd);
+            }
+        }
+        None => {
+            agent.pretrust_workspace(cwd);
+        }
+    }
+}
+
 fn launch_env_for_exact_profile(
     agent: &'static dyn meowo_agent::AgentPlugin,
     profile: Option<&str>,
@@ -1903,10 +1928,13 @@ pub(crate) async fn new_session_inner(
     // 这里曾经只注入代理（`proxy::launch_env`），于是多账号完全不生效：设置页明明切到了另一个
     // 账号，新开的会话却仍跑在默认账号上——而且毫无迹象，用户只能靠 `/status` 里的邮箱才发现。
     // 新建会话是**用户切换账号后最先走的一条路**，漏了它等于整个功能没做。
-    let env = launch_env_for_profile(Some(&provider), None);
+    let active_profile = crate::profile::active_id(agent.id().as_str());
+    let env = launch_env_for_profile(Some(&provider), active_profile.as_deref());
     // PTY 冷启动与杀软扫描可能阻塞数秒，放 blocking 池；首次 SessionStart hook 会把临时 PTY
     // 认领为真实数据库 session。
     tauri::async_runtime::spawn_blocking(move || {
+        // 预信任工作目录（与上面的 env 同一个账号），否则 kimi 会停在信任屏、hook 不来、会话不落库。
+        pretrust_workspace(&provider, active_profile.as_deref(), &dir);
         broker.start_pending(
             app,
             &argv,
@@ -2368,6 +2396,11 @@ fn prepare_resume_launch(
     // takeover 在调用前已经结束旧进程；普通 resume 的旧进程本就不在。此刻复制能拿到
     // 完整的最后一帧 transcript，也不会与 Claude 正在追加同一个文件发生竞争。
     let target_profile = prepare_session_for_active_profile(provider, session_id)?;
+    // 预信任工作目录（按**实际**恢复账号，与下面的 env 同源）：resume/接管重启的进程同样会撞上
+    // 信任屏——kimi 升级后旧信任记录像被清空一样重新弹提示（键算法换代，见 trust.rs）。
+    if let Some(dir) = resolved.as_deref() {
+        pretrust_workspace(provider, target_profile.as_deref(), dir);
+    }
     let revived = prepare_resume(app, session_id);
     // 一律按 prepare 算出的**实际**账号取 env，不再按 agent 身份分支重新推导。
     // target_profile 已经涵盖三种情形：跨账号迁移成功 → 活跃账号；声明了迁移但找不到
