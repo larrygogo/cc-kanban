@@ -5010,18 +5010,28 @@ select.ns-input {
 .chat-md .hljs-strong { font-weight: 700; }
 .chat-md > :first-child { margin-top: 0; }
 .chat-md > :last-child { margin-bottom: 0; }
-.chat-md p { margin: 0 0 var(--sp-10); }
-.chat-md h1, .chat-md h2, .chat-md h3, .chat-md h4, .chat-md h5, .chat-md h6 { margin: var(--sp-16) 0 var(--sp-8); font-weight: 650; line-height: 1.4; }
-/* 聊天气泡里的标题只是分节，不是页面标题——收敛到正文附近的尺寸。 */
-.chat-md h1 { font-size: 1.2em; }
-.chat-md h2 { font-size: 1.12em; }
-.chat-md h3 { font-size: 1.05em; }
+/* 段距按行盒给：正文行盒 14×1.72≈24px，此前的 10px 不到半行，段落之间读不出分隔。 */
+.chat-md p { margin: 0 0 var(--sp-12); }
+/* 标题层级（实拍定案：用户对一条长回复的反馈是「看起来好累」）。
+   此前 h2 只有 1.12em、上边距 16px——比段距仅多 6px，于是小节标题与普通换段几乎同形，
+   长消息整篇塌成一堵墙，眼睛找不到落点。这与 .chat-diff-mdview 那段注释写下的是同一条
+   诊断（「标题≈正文、段距贴紧……失去层级、读着累」）：当时只为文件预览恢复了文档比例，
+   对话气泡没跟，而助手的长回复早已是文档长度而非气泡。
+   放大标题只作用于长消息——短气泡几乎不含 h1~h6，日常短回复的观感不变。
+   字重 650→600：Inter 是可变字体、拉丁能渲染真 650，中文回落雅黑没有这一档会跳到 700，
+   中英混排标题里中文偏粗、英文偏细（与 7G-14 同因，那轮收了 560/590 但漏了 650）。 */
+.chat-md h1, .chat-md h2, .chat-md h3, .chat-md h4, .chat-md h5, .chat-md h6 { margin: var(--sp-24) 0 var(--sp-10); font-weight: 600; line-height: 1.4; }
+.chat-md h1 { font-size: 1.32em; }
+.chat-md h2 { font-size: 1.2em; }
+.chat-md h3 { font-size: 1.1em; }
 .chat-md h4, .chat-md h5, .chat-md h6 { font-size: 1em; }
-.chat-md ul, .chat-md ol { margin: 0 0 var(--sp-10); padding-left: var(--sp-22); }
-.chat-md li { margin: var(--sp-3) 0; }
+.chat-md ul, .chat-md ol { margin: 0 0 var(--sp-12); padding-left: var(--sp-22); }
+.chat-md li { margin: var(--sp-5) 0; }
 .chat-md li > ul, .chat-md li > ol { margin-bottom: 0; }
-.chat-md :not(pre) > code { padding: var(--sp-1) var(--sp-5); border-radius: var(--r-5); background: color-mix(in srgb, var(--cc-text) 8%, transparent); font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, "Roboto Mono", "PingFang SC", "Microsoft YaHei", monospace; font-size: .92em; }
-.chat-md pre { margin: 0 0 var(--sp-10); padding: var(--sp-10) var(--sp-12); overflow-x: auto; border: 1px solid var(--cc-border); border-radius: var(--r-9); background: color-mix(in srgb, var(--cc-bg) 94%, var(--cc-text) 6%); }
+/* 行内 code 的底色压到 5%（原 8%）并收窄内边距：一段里十几个标识符时，8% 的填色块
+   会把正文切成碎片，阅读节奏被反复打断。文字色不变，对比度不受影响。 */
+.chat-md :not(pre) > code { padding: var(--sp-1) var(--sp-4); border-radius: var(--r-5); background: color-mix(in srgb, var(--cc-text) 5%, transparent); font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, "Roboto Mono", "PingFang SC", "Microsoft YaHei", monospace; font-size: .92em; }
+.chat-md pre { margin: 0 0 var(--sp-12); padding: var(--sp-10) var(--sp-12); overflow-x: auto; border: 1px solid var(--cc-border); border-radius: var(--r-9); background: color-mix(in srgb, var(--cc-bg) 94%, var(--cc-text) 6%); }
 .chat-md pre code { padding: 0; background: transparent; font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, "Roboto Mono", "PingFang SC", "Microsoft YaHei", monospace; font-size: var(--fs-11-5); line-height: 1.55; }
 /* 含框线字符的代码块（模型画的结构图）由 renderGrid 钉到字符网格：宽字符锁 2ch、
    歧义符号锁 1ch，ch 基准取自本块的等宽字体，对齐不依赖用户装了哪款 CJK 字体。
@@ -5030,10 +5040,10 @@ select.ns-input {
 .chat-md code.chat-md-diagram { line-height: 1.18; }
 .chat-md .chat-md-cell2 { display: inline-block; width: 2ch; text-align: center; }
 .chat-md .chat-md-cell1 { display: inline-block; width: 1ch; text-align: center; }
-.chat-md blockquote { margin: 0 0 var(--sp-10); padding: var(--sp-2) var(--sp-12); border-left: 3px solid var(--cc-border); color: var(--cc-text-dim); }
+.chat-md blockquote { margin: 0 0 var(--sp-12); padding: var(--sp-2) var(--sp-12); border-left: 3px solid var(--cc-border); color: var(--cc-text-dim); }
 .chat-md hr { margin: var(--sp-14) 0; border: 0; border-top: 1px solid var(--cc-border); }
 .chat-md a { color: var(--cc-accent); text-decoration: underline; text-underline-offset: 2px; }
-.chat-md table { margin: 0 0 var(--sp-10); border-collapse: collapse; font-size: .95em; display: block; overflow-x: auto; }
+.chat-md table { margin: 0 0 var(--sp-12); border-collapse: collapse; font-size: .95em; display: block; overflow-x: auto; }
 .chat-md th, .chat-md td { padding: var(--sp-4) var(--sp-10); border: 1px solid var(--cc-border); }
 .chat-md th { background: color-mix(in srgb, var(--cc-text) 5%, transparent); }
 .chat-md input[type="checkbox"] { margin-right: var(--sp-5); }
