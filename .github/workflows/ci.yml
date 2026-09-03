@@ -137,6 +137,11 @@ jobs:
   e2e:
     # PR 上不跑：跑也不挡合并，白烧十几分钟配额。
     if: github.event_name != 'pull_request'
+    # 暂不阻断整个 run。这条通道跑过三次：红（引导窗）→ 绿 → 红，同一份产品代码。
+    # 之前只凭一次绿灯就摘掉本行、当成真门禁，是对 n=1 结论下手太重；GUI 自动化本就
+    # 有落窗竞态，spec 侧的遍历修复（board-refresh.e2e.ts 的 readCount）也还没被验证过。
+    # 判据改成「连续若干次 push main 都绿」再摘，而不是看到一次绿就摘。
+    continue-on-error: true
     runs-on: windows-latest
     # 冷缓存下 debug 全量编译 + 首次下载 msedgedriver 约 20-35 分钟。
     timeout-minutes: 60
