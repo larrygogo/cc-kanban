@@ -3,6 +3,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # e2e job 只在 main 与手动触发上跑（见该 job 的 if）；这里开 dispatch 是为了改完
+  # E2E 相关代码后能立刻验一把，不必先合进 main 再等。
+  workflow_dispatch:
 # CI 只读代码，不需要写权限（deploy-pages/release 各自显式声明了自己的）。
 permissions:
   contents: read
@@ -116,3 +119,61 @@ jobs:
         # npm 生态常有无法立即修的传递性低危告警，先告警不阻断（continue-on-error）。
         continue-on-error: true
         run: bun install --frozen-lockfile && bun audit
+
+  # E2E：拉起真实的 app 二进制，用 WDIO 驱动 WebView2 走一遍看板刷新。
+  #
+  # **为什么不并进上面的 check 矩阵**，三条各自独立：
+  #  1. 它要 Node 22——WDIO 的 webdriver 手动设 Content-Length/Connection 头，Node ≥26 的
+  #     undici v8 按 Fetch 规范拒收（webdriverio#15265），e2e/run.mjs 有预检直接拒跑。
+  #     check job 用的是 runner 自带的 Node，两者要的版本不同，混在一个 job 里互相打架。
+  #  2. 它要一次完整的 debug 版 tauri 构建（--features e2e + 前端 + dist-mobile），
+  #     十几分钟起步，而目前只有一个 spec（board-refresh）——挂在每个 PR 上性价比不成立。
+  #  3. wdio.conf 走 msedgedriver（Windows 的 WebView2 内核），macOS 侧未验证，不进矩阵。
+  #
+  # 所以它的定位是**防烂**而不是防 PR 回归：整套 E2E 基建（run.mjs / wdio.conf /
+  # --features e2e / tauri.e2e.conf.json / wdio capability）此前从未在 CI 跑过一次，
+  # 不接一条定期通道，它迟早在某次重构里悄悄失效，等真要用时才发现起不来。
+  # 因此只在 push main 与手动触发时跑，PR 上不跑、也就永远不会挡合并。
+  e2e:
+    # PR 上不跑：跑也不挡合并，白烧十几分钟配额。
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    # 冷缓存下 debug 全量编译 + 首次下载 msedgedriver 约 20-35 分钟。
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      # Node 22 LTS：理由见上方 1.。钉死大版本而不是 latest——预检拒的正是"太新"。
+      - name: 安装 Node 22 LTS
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: 安装 Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: Bun 包缓存
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('app/bun.lock') }}
+      - name: 安装 Rust(版本见 rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable(仅取 action 实现)
+        with:
+          toolchain: "1.97.1"
+      - name: Rust 构建缓存
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: app/src-tauri
+          # 与 check job 分开的 key：那边是 cargo check/clippy 的产物，这边是
+          # `--features e2e` 的 debug 二进制，profile 与 feature 都不同，混用只会互相顶掉。
+          key: e2e
+          cache-on-failure: true
+      - name: 安装前端依赖
+        working-directory: app
+        run: bun install --frozen-lockfile
+      # 直接调 node（而非 bun run test:e2e）：run.mjs 用 process.execPath 跑 wdio 本体，
+      # 入口进程是谁决定了 wdio 跑在哪个运行时上——bun 的 fetch 与 Node≥26 的 undici
+      # 同样拒收那两个头，用 bun 当入口等于绕过刚装好的 Node 22。
+      # tauri build 的 beforeBuildCommand 已包含 sidecar/ConPTY/前端/dist-mobile 四步，
+      # 不必像 check job 那样手工补跑。
+      - name: E2E(WDIO + 真实 app 二进制)
+        working-directory: app
+        run: node e2e/run.mjs
