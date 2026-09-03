@@ -39,6 +39,11 @@ export const config: WebdriverIO.Config = {
       {
         // 内嵌 provider（tauri-plugin-wdio-webdriver 提供的 WebDriver 服务器），不依赖外置 tauri-driver。
         driverProvider: "embedded",
+        // 等内嵌 WebDriver 绑上端口的上限。默认 60s 在 GitHub Actions 的冷 runner 上不够：
+        // debug 构建 + 首次 WebView2 初始化 + 无任何预热，实测超时（run 33733314763 报
+        // 「did not become ready on port 4445 within 60000ms」）。本机通常几秒就绪，
+        // 放宽只影响真出问题时的等待时长，不拖慢正常路径。
+        startTimeout: 180_000,
         // Windows：按本机 WebView2 版本自动下载匹配的 msedgedriver（驱动 Edge 内核所需）。
         autoDownloadEdgeDriver: true,
         // 把前端 console 与后端日志转发到 wdio 输出，便于排查。

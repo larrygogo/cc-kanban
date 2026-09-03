@@ -13,7 +13,10 @@ describe("贴纸看板：空闲刷新回归", () => {
   it("空闲 6 秒内 board-changed 不再持续累计", async () => {
     // 等前端挂载：监听器 effect 运行时把计数初始化为 0（仅 E2E 构建）。
     try {
-      await browser.waitUntil(async () => (await readCount()) !== null, { timeout: 30_000 });
+      // 90s 而非 30s：CI 冷 runner 上 debug 构建从进程起来到前端挂载可以很慢
+      // （同一条通道另一种失败形态是内嵌 WebDriver 60s 都没绑上端口，见 wdio.conf 的
+      // startTimeout）。本机通常 1~2s 就绪，放宽只影响失败路径的等待时长。
+      await browser.waitUntil(async () => (await readCount()) !== null, { timeout: 90_000 });
     } catch {
       // 失败时连窗口清单一起抛：injected 全 false = 构建没带 VITE_E2E；
       // 某个窗口 injected=true 却没被选中 = 遍历/切窗这层还有洞。
@@ -48,9 +51,12 @@ function probeCount(): Promise<number | null> {
  * 读观测计数，必要时**遍历全部窗口**去找注入了观测点的那个。
  *
  * 起因：app 启动期可能不止一个 webview（首启的引导窗是独立窗口），而 WDIO 的会话落在
- * 哪个句柄上不由我们决定。观测点只由贴纸主窗的 useBoardRefresh 注入，落错窗就永远读到
- * null——CI 上表现为「30s 等不到计数」，且时灵时不灵（同一份代码 run 33722782537 绿、
- * 33726651450 红）。原先只读当前句柄，等于把结果押在驱动的默认落点上。
+ * 哪个句柄上不由我们决定。观测点只由贴纸主窗的 useBoardRefresh 注入，落错窗就永远读到 null。
+ *
+ * **注意：这只是设防，不是已证实的病因。** 后续 run 33733314763 暴露出另一种失败形态
+ * （内嵌 WebDriver 60s 没绑上端口，测试根本没跑），说明 CI 上更可能是冷启动慢，而非落错窗。
+ * 遍历本身无害且让 readCount 不再押在驱动的默认落点上，故保留；真正的判据看下面
+ * describeWindows 打出的清单。
  *
  * 命中后 switchToWindow 把会话留在正确的窗口上，后续读取不再遍历。
  */
