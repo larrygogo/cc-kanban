@@ -373,6 +373,86 @@ unsafe fn grab_bgra(hdc: HDC, bitmap: HBITMAP, width: i32, height: i32) -> Optio
 mod tests {
     use super::*;
 
+    use std::io::Write;
+
+    /// 每个用例一个独立临时目录（沿用 fsutil 测试的写法，不引 dev-dep）。
+    fn tmp_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "meowo-openwith-test-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(bytes).unwrap();
+        path
+    }
+
+    /// ext_key 是清单的缓存键与枚举键：拿错扩展名 = 拿错一整份推荐应用清单。
+    #[test]
+    fn ext_key_lowercases_and_returns_empty_without_extension() {
+        use std::path::PathBuf;
+        assert_eq!(ext_key(&PathBuf::from("a.rs")), ".rs");
+        // 大小写归一：注册表键是小写的，`.RS` 不归一就枚举不到任何关联。
+        assert_eq!(ext_key(&PathBuf::from("A.RS")), ".rs");
+        assert_eq!(ext_key(&PathBuf::from("C:/x/y/main.TSX")), ".tsx");
+        // 多点只取最后一段——`.tar.gz` 在系统眼里就是 `.gz`。
+        assert_eq!(ext_key(&PathBuf::from("a.tar.gz")), ".gz");
+        // 无扩展名与点文件都返回空串：list_for_path 据此直接返回空清单。
+        // `.gitignore` 在 Path 语义里是**无扩展名的文件名**，不是 `.gitignore` 扩展名。
+        assert_eq!(ext_key(&PathBuf::from("Makefile")), "");
+        assert_eq!(ext_key(&PathBuf::from(".gitignore")), "");
+        assert_eq!(ext_key(&PathBuf::from("")), "");
+    }
+
+    /// 文本嗅探是 `.ts` 那条修正的开关（文本 → 换文本编辑器清单，二进制 → 保留系统
+    /// 清单）。判错方向的代价是实拍过的：TypeScript 源码的菜单里全是视频播放器。
+    #[test]
+    fn text_sniff_uses_first_8kb_and_treats_unreadable_as_binary() {
+        assert!(is_text_file(&tmp_file("a.ts", b"const x = 1;\n")));
+        // 空文件没有 NUL，算文本——给编辑器比给播放器合理。
+        assert!(is_text_file(&tmp_file("empty.ts", b"")));
+        // 含 NUL = 二进制（与 fsutil/git 同判据）。
+        assert!(!is_text_file(&tmp_file("v.ts", b"\x00\x00mp4-ish")));
+        // 只嗅前 8KB：更靠后的 NUL 看不见，按文本算。这是刻意取舍（整文件扫大日志
+        // 会拖住菜单弹出），钉住免得有人「顺手」改成全文件扫。
+        let mut late = vec![b'a'; 8 * 1024];
+        late.push(0);
+        assert!(is_text_file(&tmp_file("late.ts", &late)));
+        // 第 8192 个字节是 NUL：仍在窗口内，必须判成二进制（边界不能差一）。
+        let mut edge = vec![b'a'; 8 * 1024 - 1];
+        edge.push(0);
+        assert!(!is_text_file(&tmp_file("edge.ts", &edge)));
+        // 读不了的路径按二进制算：走系统原清单，不做文本修正。
+        assert!(!is_text_file(std::path::Path::new(
+            "C:/meowo-definitely-not-a-real-file-9f8d7c.ts"
+        )));
+    }
+
+    /// 代码编辑器识别只影响清单排序（主键取首项，不该落到播放器/记事本上）。
+    #[test]
+    fn code_editor_match_is_case_insensitive_on_the_exe_tail() {
+        assert!(is_code_editor(
+            r"C:\Program Files\Microsoft VS Code\Code.exe"
+        ));
+        assert!(is_code_editor(
+            r"C:\Users\x\AppData\Local\Programs\cursor\Cursor.exe"
+        ));
+        assert!(is_code_editor(r"D:\tools\Notepad++\notepad++.exe"));
+        assert!(is_code_editor("zed.exe"));
+        // 非编辑器：记事本与播放器都必须落到后半区。
+        assert!(!is_code_editor(r"C:\Windows\system32\notepad.exe"));
+        assert!(!is_code_editor(r"C:\Program Files\VideoLAN\VLC\vlc.exe"));
+        assert!(!is_code_editor(""));
+        // 已知取舍：判据是「路径以某个 exe 名结尾」，所以名字恰好以 code.exe 收尾的
+        // 程序会被误判成编辑器。影响面仅限排序（不改变清单内容、不影响能否打开），
+        // 改成按文件名精确比对又会漏掉带目录的真实路径，故维持现状并在此钉住行为。
+        assert!(is_code_editor(r"C:\x\xcode.exe"));
+    }
+
     /// 取证用（与 detect.rs 的 explain 同哲学：改行为前先看真实系统数据）：
     /// 打印系统清单里各处理器的标识（GetName）与展示名，不断言。
     /// 手动跑：cargo test --lib dump_txt_handlers -- --ignored --nocapture
