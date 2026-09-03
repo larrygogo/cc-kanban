@@ -24,7 +24,6 @@ import { detectAtToken, useAtFileCompletion, useSlashCompletion } from "./chat/c
 import { useApprovalChannel } from "./chat/useApprovalChannel";
 import { useModelPresets } from "./chat/useModelPresets";
 import { ContextMeter } from "./chat/ContextMeter";
-import { GitDiffView } from "./chat/GitDiffView";
 import { ImageRef, splitUserText } from "./chat/Message";
 import { parseUserText } from "./chat/localCommand";
 import { TodoPanel } from "./chat/TodoPanel";
@@ -40,6 +39,11 @@ import { useStarred } from "./sticker/helpers";
 // 终端只为屏幕识别按需挂载（terminalMonitorNeeded），首屏不该为它多等 1.2MB 里的一半。
 // 桌面端在下面的 effect 里预取，切终端页无感；此处不能改回静态 import，否则又并回一个 chunk。
 const ManagedTerminal = lazy(() => import("./ManagedTerminal").then((m) => ({ default: m.ManagedTerminal })));
+// 改动面板同样懒加载：它独占 rehype-raw + rehype-sanitize（整套 HTML 解析器，约 193KB
+// minified / 43KB brotli，见 chat/FileMarkdown.tsx），而远程 UI 把这个面板整个砍掉了
+// （下方 `!remoteUi() && diffOpen` 门控）。静态 import 时这 43KB 白白压在手机首屏
+// chunk 里——那是首屏 brotli 体积的四分之一。桌面端下方 effect 预取，点开无感。
+const GitDiffView = lazy(() => import("./chat/GitDiffView").then((m) => ({ default: m.GitDiffView })));
 import { WindowControls } from "./WindowControls";
 import { DevBadge } from "./DevBadge";
 import { isMac } from "../platform";
@@ -591,7 +595,10 @@ export function ChatWindow() {
   // 桌面端预取终端 chunk（本地文件，几毫秒）：终端页是一等页签，不让首次切换看到空白。
   // 远程不预取：那边切不到终端页，需要时（屏幕识别）Suspense 按需拉。
   useEffect(() => {
-    if (!remoteUi()) void import("./ManagedTerminal");
+    if (remoteUi()) return;
+    void import("./ManagedTerminal");
+    // 改动面板同理:本地文件几毫秒,预取掉首次点开「查看改动」的白屏。
+    void import("./chat/GitDiffView");
   }, []);
   // 软拦非阻断提示:pendingReview 但屏幕没识别出卡片时,发送照常、亮这条横幅(见 withSendGuard)。
   const [softPromptNotice, setSoftPromptNotice] = useState(false);
@@ -4699,6 +4706,9 @@ export function ChatWindow() {
             }}
             onPointerDown={startDiffResize}
           />
+          {/* fallback=null:桌面端已在挂载时预取 chunk,点开即到;真等到的话面板位置
+              短暂空着比塞一个骨架更安静(分栏柄已经先渲染出来占位了)。 */}
+          <Suspense fallback={null}>
           <GitDiffView
             cwd={diffDir ?? cwd}
             dirs={diffDirs}
@@ -4712,6 +4722,7 @@ export function ChatWindow() {
             onCollapse={collapseDiffPanel}
             onToggleMaximize={toggleDiffMaximize}
           />
+          </Suspense>
         </>
       )}
       </div>

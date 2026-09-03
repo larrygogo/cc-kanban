@@ -1,15 +1,14 @@
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import rehypeRaw from "rehype-raw";
-import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import { openLink } from "../api";
 import { useT } from "../i18n";
 // 语法高亮复用文件/diff 面板的同一套 hljs 基建（highlight.ts）：语言表、回退策略、
 // --cc-syn-* 主题变量全部现成，不另引第二套高亮引擎——两处不分叉。
 import { highlightCode, languageForFence } from "./chat/highlight";
 
-const PLUGINS = [remarkGfm];
+/** 文件面板的 FileMarkdown 复用同一份 remark 插件表——渲染规则两处不分叉。 */
+export const PLUGINS = [remarkGfm];
 
 /// 超过这个规模的代码块不高亮：hljs 同步跑在渲染路径上，几百 KB 的日志粘贴会卡住
 /// 整窗；纯文本已有滚动限高，大块不上色是可接受的降级。
@@ -159,7 +158,8 @@ function keepUrl(url: string): string {
   return /^\s*(javascript|data|vbscript):/i.test(url) ? "" : url;
 }
 
-const components: Components = {
+/** 导出供 chat/FileMarkdown.tsx 复用（它只覆写 img，其余规则原样继承）。 */
+export const components: Components = {
   pre: ({ children }) => <CopyablePre>{children}</CopyablePre>,
   // ASCII 框图的对齐前提是「中文恰为两倍拉丁宽」，但代码字体 Consolas 没有中文字形，
   // 中文会回退到比例失配的雅黑；Windows 自带字体里也不存在框线半角 + 中文两倍宽的组合。
@@ -234,78 +234,8 @@ export const ChatMarkdown = memo(function ChatMarkdown({ text }: { text: string 
   );
 });
 
-/* ——以下是「文件」面板 markdown 预览专用形态,对话渲染绝不共用这套(见上方注释)。—— */
-
-/** 文件预览的 sanitize 白名单：defaultSchema（GitHub 风）基础上补 README 生态
- *  常用的展示属性（img 尺寸/对齐、div/p 的 align）。脚本、事件属性、iframe
- *  仍被整体剥除——rehype-raw 先解析、sanitize 再过滤，顺序不可颠倒。 */
-const FILE_SCHEMA = {
-  ...defaultSchema,
-  attributes: {
-    ...defaultSchema.attributes,
-    img: [...(defaultSchema.attributes?.img ?? []), "alt", "width", "height", "align"],
-    div: [...(defaultSchema.attributes?.div ?? []), "align"],
-    p: [...(defaultSchema.attributes?.p ?? []), "align"],
-  },
-};
-// 数组常量提出来：内联字面量每次渲染都是新引用，react-markdown 会重建处理管线。
-const FILE_REHYPE: import("react-markdown").Options["rehypePlugins"] = [
-  rehypeRaw,
-  [rehypeSanitize, FILE_SCHEMA],
-];
-
-/** 预览里的图片：http(s) 直用（CSP img-src 已放行 https:）；相对路径交给调用方
- *  解析成 data URL（仓库文件走后端读盘，webview 里没有文件系统 base 可依赖）。 */
-function PreviewImage({ src, alt, width, height, resolve }: {
-  src?: string;
-  alt?: string;
-  width?: string | number;
-  height?: string | number;
-  resolve: (src: string) => Promise<string | null>;
-}) {
-  const remote = !!src && /^https?:/i.test(src);
-  const [url, setUrl] = useState<string | null>(remote ? src! : null);
-  useEffect(() => {
-    // src 变了先归位:useState 只在首挂时取初值,effect 又只在 resolve 成功时 setUrl,
-    // 二者都不覆盖旧值。react-markdown 按位置复用节点时（切文件 A→B、同位置换图),
-    // remote→remote 会一直显示第一张,relative 换到解析失败的图则残留上一张——都得先清。
-    setUrl(remote ? src! : null);
-    if (remote || !src) return;
-    let alive = true;
-    resolve(src)
-      .then((resolved) => {
-        if (alive && resolved) setUrl(resolved);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [src, remote, resolve]);
-  if (!url) return alt ? <span className="chat-md-img-broken">{alt}</span> : null;
-  return <img src={url} alt={alt ?? ""} width={width} height={height} loading="lazy" />;
-}
-
-/**
- * 「文件」面板的 markdown 预览：与对话版的两点差异——
- * 1) 渲染内嵌 HTML（README 生态大量用 <img>/<div align> 排版），但过 FILE_SCHEMA
- *    白名单，与 GitHub 渲染 README 同策略；
- * 2) 相对路径图片经 resolve 回调转 data URL（GitDiffView 里接 read_image_preview）。
- */
-export const FileMarkdown = memo(function FileMarkdown({ text, resolveImage }: {
-  text: string;
-  resolveImage: (src: string) => Promise<string | null>;
-}) {
-  // 同 FILE_REHYPE 的道理：components 每次渲染换新引用会让 react-markdown 重建管线,
-  // 外层 memo 形同虚设。依赖只有 resolveImage,按它缓存。
-  const fileComponents: Components = useMemo(() => ({
-    ...components,
-    img: ({ src, alt, width, height }) => (
-      <PreviewImage src={src} alt={alt} width={width} height={height} resolve={resolveImage} />
-    ),
-  }), [resolveImage]);
-  return (
-    <ReactMarkdown remarkPlugins={PLUGINS} rehypePlugins={FILE_REHYPE} components={fileComponents}>
-      {text}
-    </ReactMarkdown>
-  );
-});
+/* 「文件」面板的预览形态（FileMarkdown）住在 chat/FileMarkdown.tsx：它要渲染 README
+   的内嵌 HTML，得引 rehype-raw（整套 HTML 解析器，约 193KB min / 43KB br），而对话渲染
+   一个字节都用不上。同住一个模块时 Message.tsx 一引 ChatMarkdown 就把它拖进首屏 chunk，
+   偏偏改动面板在远程 UI 里是砍掉的——手机端纯白付。拆开后由 GitDiffView 懒加载带出。
+   两者共用的 components / PLUGINS 从这里导出，渲染规则不分叉。 */

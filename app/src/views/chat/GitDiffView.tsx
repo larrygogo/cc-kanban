@@ -28,7 +28,7 @@ import {
   type ImagePreviewDto,
   type SearchResultDto,
 } from "../../api";
-import { FileMarkdown } from "../ChatMarkdown";
+import { FileMarkdown } from "./FileMarkdown";
 import { useMenuPopup } from "../menu";
 import { FolderPlusIcon } from "../sticker/icons";
 import { folderName } from "../../paths";
