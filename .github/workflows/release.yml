@@ -1,60 +1,111 @@
 name: Release
 
+# 只从 main 手动触发，不再监听 tag push。原因是 GitHub Actions 缓存只对「同一引用或
+# 默认分支」可见：跑在 refs/tags/vX 上的 run 存下的 Rust 缓存（每平台 ~800MB）之后
+# 没有任何 run 能读到——0.6.4～0.6.6 三次发版的缓存 last-access 全等于创建日，日志
+# 一律 "No cache found."，还把仓库 10GB 配额挤到 9.4GB、连带淘汰 main 上 CI 的缓存。
+# 从 main 触发后缓存落在 main 作用域，下次发版可复用；tag 由 create-release 打。
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  release:
-    strategy:
-      fail-fast: false
-      # latest.json 由 tauri-action 按「读取 release 上已有内容 → 合并本平台 → 上传」生成，
-      # 两个平台 job 并行时该窗口可能重叠，后写覆盖先写 → 只剩单平台的 latest.json，
-      # 另一平台自动更新静默失效。串行化消除竞态（发版频率低，代价可接受）。
-      max-parallel: 1
-      matrix:
-        include:
-          - platform: 'macos-latest'
-            args: '--target universal-apple-darwin'
-          - platform: 'windows-latest'
-            args: ''
-    runs-on: ${{ matrix.platform }}
-    # macOS 公证偶发挂起，默认 360 分钟会烧满账单额度才失败——公证正常十几分钟内完成。
-    timeout-minutes: 90
+  # 先建 tag 与 draft release，两个平台 job 拿同一个 release id 上传。
+  # 不这么做而让 tauri-action 各自建 release，并行时会撞出两个同 tag 的 draft。
+  create-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      release_id: ${{ steps.create.outputs.release_id }}
     steps:
       # 本 workflow 持有签名证书与 minisign 私钥，第三方 action 一律 pin 完整 SHA（同 ci.yml）。
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      # 推错 tag（代码版本与 tag 不符）会静默产出版本号错误的安装包 + latest.json，
-      # 自动更新器随后陷入「下载了却还提示有新版」的循环。Cargo.toml 是版本唯一真源
-      # （tauri.conf.json 无 version 字段），在花钱构建前先拦下。
-      - name: 校验 tag 与 Cargo.toml 版本一致
+      - name: 只允许从 main 触发
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Release 只能从 main 触发（当前 ${GITHUB_REF}）；别的引用上缓存不共享，且 tag 会打在非 main 提交上"
+          exit 1
+
+      # Cargo.toml 是版本唯一真源（tauri.conf.json 无 version 字段），tag 由它推出。
+      # 版本对应的 tag 已存在 = 忘了 bump，花钱构建前先拦下（否则会覆盖已发布版本的产物）。
+      - name: 读取版本并校验 tag 未占用
+        id: meta
         shell: bash
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' app/src-tauri/Cargo.toml | head -n1)"
-          if [ "$tag" != "$version" ]; then
-            echo "::error::tag v$tag 与 app/src-tauri/Cargo.toml 的 version=$version 不一致，先对齐版本再重新打 tag"
+          tag="v$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::tag $tag 已存在，先 bump app/src-tauri/Cargo.toml 的 version 再发"
             exit 1
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       # 发布说明与 tag 同生共死：docs/release-notes/vX.Y.Z.md 必须存在，Release 正文
       # 取自它（v0.6.5 曾靠手工补，此后不再发没有更新日志的版）。缺失时在花钱构建前拦下。
-      - name: 读取发布说明（docs/release-notes/<tag>.md）
-        id: notes
+      - name: 校验发布说明存在（docs/release-notes/<tag>.md）
         shell: bash
         run: |
-          notes="docs/release-notes/${GITHUB_REF_NAME}.md"
+          notes="docs/release-notes/${{ steps.meta.outputs.tag }}.md"
           if [ ! -f "$notes" ]; then
             echo "::error::发布说明不存在: $notes（tag 与文件名同规，先补再发）"
             exit 1
           fi
-          echo 'body<<EOF' >> "$GITHUB_OUTPUT"
-          cat "$notes" >> "$GITHUB_OUTPUT"
-          echo 'EOF' >> "$GITHUB_OUTPUT"
+
+      # GITHUB_TOKEN 推的 tag 不会再触发别的 workflow（GitHub 对 token 事件不级联），
+      # 且本 workflow 已不监听 tag push，不会自触发。
+      - name: 打 tag 并建 draft release
+        id: create
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
+          gh release create "$TAG" --draft --title "Meowo $TAG" \
+            --target "$GITHUB_SHA" --notes-file "docs/release-notes/$TAG.md"
+          # draft 不能按 tag 走 releases/tags/ 接口，gh release view 内部会回退到列表查找。
+          release_id="$(gh release view "$TAG" --json databaseId -q .databaseId)"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      # 两平台并行。tauri-action 各自「读 release 上的 latest.json → 合并 → 上传」有竞态，
+      # 后写覆盖先写；此前靠 max-parallel: 1 串行规避（发版 40 分钟）。现在改由下面的
+      # updater-manifest job 在两边都传完后从 .sig 重新生成完整 latest.json，竞态无害。
+      # macOS 拆成 arm64 / x64 两个独立包，不再出 universal：universal 是两个架构串行各编
+      # 一遍（8.5 + 7.5 分钟）再 lipo，dmg 也是双份体积（17MB）。拆开后两个 job 并行，
+      # 各自 dmg 减半。arm64 job 跑在 arm64 runner 上**不传 --target**：这样主构建与
+      # beforeBuildCommand 里的 sidecar 都落在 target/release 共用依赖树（见 prepare-sidecar.mjs）。
+      # x64 job 是交叉编译，必须传 --target，sidecar 脚本按 TAURI_ENV_TARGET_TRIPLE 跟随。
+      matrix:
+        include:
+          - platform: 'macos-latest'
+            name: macos-aarch64
+            args: ''
+            rust_targets: ''
+          - platform: 'macos-latest'
+            name: macos-x86_64
+            args: '--target x86_64-apple-darwin'
+            rust_targets: 'x86_64-apple-darwin'
+          - platform: 'windows-latest'
+            name: windows-x86_64
+            args: ''
+            rust_targets: ''
+    name: release (${{ matrix.name }})
+    runs-on: ${{ matrix.platform }}
+    # macOS 公证偶发挂起，默认 360 分钟会烧满账单额度才失败——公证正常十几分钟内完成。
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: 安装 Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -66,19 +117,21 @@ jobs:
 
       # toolchain 必须与 rust-toolchain.toml 一致。这个 action 的 toolchain 输入默认是
       # `stable`(不随 pin 的 SHA 变)，不传就把 target 装到 stable 上；而 cargo 在
-      # app/src-tauri 下跑时 rustup 按 rust-toolchain.toml 切到固定版本，那上面没有这两个
+      # app/src-tauri 下跑时 rustup 按 rust-toolchain.toml 切到固定版本，那上面没有交叉
       # target——0.5.10 首次发布即栽在这里:E0463 can't find crate for `core`。
       - name: 安装 Rust(版本见 rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable(仅取 action 实现)
         with:
           toolchain: "1.97.1"
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.rust_targets }}
 
       - name: Rust 构建缓存
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # workspace 根在 app/src-tauri（全部 Rust 都住那里），target/ 也在它下面。
           workspaces: app/src-tauri
+          # 两个 macOS job 同 runner 同 job id，自动 key 会撞车；按矩阵名分开。
+          key: ${{ matrix.name }}
           # 失败的 run 也落盘缓存：发布失败重试时不必从零编译（理由同 ci.yml）。
           cache-on-failure: true
 
@@ -86,13 +139,10 @@ jobs:
         working-directory: app
         run: bun install --frozen-lockfile
 
-      # Windows 由 beforeBuildCommand 里的 prepare-sidecar.mjs 覆盖（宿主 triple）；
-      # macOS 是 universal 构建，需要双架构 lipo 合并的 sidecar，提前显式准备。
-      - name: 准备 meowo-reporter sidecar (macOS universal)
-        if: matrix.platform == 'macos-latest'
-        run: bun scripts/prepare-sidecar.mjs --universal
+      # sidecar 由 beforeBuildCommand 里的 prepare-sidecar.mjs 准备：它按 TAURI_ENV_TARGET_TRIPLE
+      # 选目标，三个矩阵项（宿主 / 交叉 x86_64）都覆盖，不必单独跑。
 
-      - name: 构建并发布(签名公证 + 自动更新产物)
+      - name: 构建并上传(签名公证 + 自动更新产物)
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -110,11 +160,8 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: app
-          tagName: ${{ github.ref_name }}
-          releaseName: Meowo ${{ github.ref_name }}
-          releaseBody: ${{ steps.notes.outputs.body }}
-          releaseDraft: true
-          prerelease: false
+          # 只上传到 create-release 建好的 draft，不再由它建 release。
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
 
       # WebView2 壳安装器（人类下载入口）：wry 现代 UI 包着 NSIS 芯静默跑。
@@ -126,16 +173,76 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+          VER: ${{ needs.create-release.outputs.version }}
         run: |
-          ver="${GITHUB_REF_NAME#v}"
-          inner="app/src-tauri/target/release/bundle/nsis/Meowo_${ver}_x64-setup.exe"
+          inner="app/src-tauri/target/release/bundle/nsis/Meowo_${VER}_x64-setup.exe"
           if [ ! -f "$inner" ]; then
             echo "::error::NSIS 产物不存在: $inner"
             exit 1
           fi
           export MEOWO_INNER_SETUP="$(cygpath -m "$PWD/$inner")"
           (cd app/src-tauri && cargo build --release -p meowo-setup)
-          out="Meowo_${ver}_x64-installer.exe"
+          out="Meowo_${VER}_x64-installer.exe"
           cp app/src-tauri/target/release/meowo-setup.exe "$out"
           # draft release 可按 tag 名寻址；--clobber 让失败重试幂等。
-          gh release upload "$GITHUB_REF_NAME" "$out" --clobber
+          gh release upload "$TAG" "$out" --clobber
+
+  # 三个 job 并行上传 latest.json 会互相覆盖（见 release job 注释），这里在全部完成后
+  # 从 release 上的 .sig 重新生成完整清单并覆盖。键集与 tauri-action 产出保持一致
+  # （darwin 按架构各两键指向自己的 app.tar.gz，windows 两键都指 NSIS 芯），updater
+  # 客户端按 `<os>-<arch>` 或 `<os>-<arch>-<bundle>` 查表。老的 universal 客户端按
+  # 运行时架构报 darwin-aarch64 / darwin-x86_64，能正常升到对应单架构包。
+  # 资产名来自 tauri-action：app.tar.gz 追加 `_<arch>`，arch 为 aarch64 / x64。
+  updater-manifest:
+    needs: [create-release, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: 合并生成 latest.json 并覆盖上传
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+          VER: ${{ needs.create-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p sigs
+          gh release download "$TAG" --pattern '*.sig' --dir sigs --clobber
+          arm_sig="sigs/Meowo_aarch64.app.tar.gz.sig"
+          x64_sig="sigs/Meowo_x64.app.tar.gz.sig"
+          win_sig="sigs/Meowo_${VER}_x64-setup.exe.sig"
+          for f in "$arm_sig" "$x64_sig" "$win_sig"; do
+            if [ ! -s "$f" ]; then
+              echo "::error::签名文件缺失: $f（对应平台的产物没传上来）"
+              exit 1
+            fi
+          done
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          jq -n \
+            --arg version "$VER" \
+            --rawfile notes "docs/release-notes/$TAG.md" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg arm_url "$base/Meowo_aarch64.app.tar.gz" \
+            --rawfile arm_sig "$arm_sig" \
+            --arg x64_url "$base/Meowo_x64.app.tar.gz" \
+            --rawfile x64_sig "$x64_sig" \
+            --arg win_url "$base/Meowo_${VER}_x64-setup.exe" \
+            --rawfile win_sig "$win_sig" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: (
+                (["darwin-aarch64", "darwin-aarch64-app"]
+                  | map({key: ., value: {signature: ($arm_sig | rtrimstr("\n")), url: $arm_url}}) | from_entries)
+                + (["darwin-x86_64", "darwin-x86_64-app"]
+                  | map({key: ., value: {signature: ($x64_sig | rtrimstr("\n")), url: $x64_url}}) | from_entries)
+                + (["windows-x86_64", "windows-x86_64-nsis"]
+                  | map({key: ., value: {signature: ($win_sig | rtrimstr("\n")), url: $win_url}}) | from_entries)
+              )
+            }' > latest.json
+          jq -e '.platforms | length == 6' latest.json >/dev/null
+          cat latest.json | jq '{version, pub_date, platforms: (.platforms | keys)}'
+          gh release upload "$TAG" latest.json --clobber

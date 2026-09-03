@@ -36,7 +36,7 @@ cd app/src-tauri && cargo test       # 或按 crate：cargo test -p meowo-store 
 
 1. 写 `docs/release-notes/vX.Y.Z.md`（tag 同名，release.yml 强制，正文自动取自它）。
 2. bump `app/src-tauri/Cargo.toml`（版本唯一真源）与 `app/package.json`，`cargo check` 刷新 Cargo.lock。
-3. 推 main 等 CI 绿 → `git tag vX.Y.Z && git push origin vX.Y.Z` → release.yml 串行构建 win + macOS(universal)，产 draft release。
+3. 推 main 等 CI 绿 → Actions 里手动运行 Release workflow（`gh workflow run release.yml`，必须从 main 触发）。它自己打 tag、并行构建 win + macOS(arm64 / x64 两个独立 dmg)、最后合并 latest.json，产 draft release。**别手工推 tag**：tag 引用上的 Rust 缓存谁也读不到，从 main 触发才能复用上次发版的缓存。
 4. macOS 真机按 `docs/macos-acceptance-checklist.md` 过一遍。
 
 ## 多实例

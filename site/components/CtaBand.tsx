@@ -23,7 +23,8 @@ export default async function CtaBand({ lang = "zh", title, subtitle }: Props) {
             <DownloadButton
               lang={lang}
               windows={release?.windows ?? null}
-              macos={release?.macos ?? null}
+              macosArm={release?.macosArm ?? null}
+              macosIntel={release?.macosIntel ?? null}
               fallbackHref={withLang(lang, "/download")}
             />
             <a

@@ -8,7 +8,8 @@
 //   默认       —— 构建目标 triple：优先 TAURI_ENV_TARGET_TRIPLE（tauri 的 before 钩子
 //                 会注入），否则取 rustc 宿主 triple（本地 dev / build）。
 //   --universal —— macOS 双架构分别编译后 lipo 合并为 meowo-reporter-universal-apple-darwin
-//                 （CI 的 --target universal-apple-darwin 构建用）。
+//                 （本地 `tauri build --target universal-apple-darwin` 用；release CI 已改为
+//                 arm64 / x64 两个独立包，不再走这条）。
 import { execSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -55,9 +56,14 @@ if (triple === "universal-apple-darwin") {
   chmodSync(out, 0o755); // lipo 按 umask 建文件，不保证可执行位
   console.log(`sidecar 就绪: ${out}`);
 } else {
-  run(`cargo build --release -p meowo-reporter --target ${triple}`);
+  // 宿主 triple 不传 --target:带了 --target 的产物落在 target/<triple>/release,
+  // 而 `tauri build`(不带 --target)的主构建落在 target/release,两棵依赖树互不复用,
+  // meowo-store/agent 及全部传递依赖被完整编两遍(release CI 实测白花 1m39s)。
+  // 交叉编译(triple ≠ 宿主)仍必须带 --target,产物目录也随之带 triple。
+  const cross = triple !== hostTriple();
+  run(`cargo build --release -p meowo-reporter${cross ? ` --target ${triple}` : ""}`);
   const ext = triple.includes("windows") ? ".exe" : "";
-  const src = join(workspace, "target", triple, "release", `meowo-reporter${ext}`);
+  const src = join(workspace, "target", ...(cross ? [triple] : []), "release", `meowo-reporter${ext}`);
   const dst = join(outDir, `meowo-reporter-${triple}${ext}`);
   copyFileSync(src, dst);
   console.log(`sidecar 就绪: ${dst}`);

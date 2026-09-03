@@ -69,7 +69,7 @@ const CONTENT: Record<Lang, Content> = {
       checks: [
         "左键点图标弹出面板，失焦自动收起",
         "菜单栏图标上显示运行中和待交互的会话数",
-        "universal 包，已签名公证，双击打开",
+        "Apple 芯片与 Intel 各自独立包，已签名公证，双击打开",
       ],
     },
   },
@@ -117,7 +117,7 @@ const CONTENT: Record<Lang, Content> = {
       checks: [
         "Left-click the icon for the panel; it hides when it loses focus",
         "The menu-bar icon shows running and needs-you counts",
-        "Universal build, signed & notarized, double-click to open",
+        "Separate Apple silicon and Intel builds, signed & notarized, double-click to open",
       ],
     },
   },
@@ -144,7 +144,8 @@ export default async function HomeContent({ lang }: { lang: Lang }) {
             <DownloadButton
               lang={lang}
               windows={release?.windows ?? null}
-              macos={release?.macos ?? null}
+              macosArm={release?.macosArm ?? null}
+              macosIntel={release?.macosIntel ?? null}
               fallbackHref={withLang(lang, "/download")}
               className="btn btn-primary btn-lg"
             />

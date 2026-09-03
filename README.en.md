@@ -21,7 +21,7 @@ Website: **[meowo.io](https://meowo.io)** — it hands you the installer for you
 | Platform | Installer | Notes |
 |----------|-----------|-------|
 | **Windows** | [Latest x64 installer](https://github.com/larrygogo/meowo/releases/latest) (`Meowo_x.y.z_x64-installer.exe`; older releases: `-setup.exe`) | One-click install; falls back to the classic installer UI without WebView2 |
-| **macOS** | [Latest universal DMG](https://github.com/larrygogo/meowo/releases/latest) (`Meowo_x.y.z_universal.dmg`) | Universal (Intel / Apple Silicon), requires macOS ≥ 14 Sonoma; signed & notarized |
+| **macOS** | [Latest DMG](https://github.com/larrygogo/meowo/releases/latest) (`Meowo_x.y.z_aarch64.dmg` for Apple Silicon, `Meowo_x.y.z_x64.dmg` for Intel) | Requires macOS ≥ 14 Sonoma; signed & notarized. Not sure which chip: Apple menu → About This Mac |
 
 Download the installer for your platform and double-click to install. The app supports in-app update checks.
 
@@ -241,7 +241,7 @@ bunx vitest run
 
 - [x] CI (GitHub Actions: cargo test/clippy + IPC contract generation check + frontend tsc/vitest + cargo/bun audit, windows-latest + macos-latest)
 - [x] Online updates (`tauri-plugin-updater` + tag-triggered GitHub Releases)
-- [x] macOS packaging (universal dmg, signed & notarized + auto-update)
+- [x] macOS packaging (separate arm64 / x64 dmg, signed & notarized + auto-update)
 - [ ] Linux packaging
 
 See [`docs/architecture/`](docs/architecture/) for the current architecture; historical designs and implementation plans are archived under [`docs/archive/superpowers/`](docs/archive/superpowers/).

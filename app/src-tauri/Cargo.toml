@@ -16,13 +16,19 @@ members = [
 resolver = "2"
 
 # 安装包体积:此前没有任何 release 配置,主程序裸奔到 25MB——一半是可 strip 的符号
-# 和未做 LTO 的跨 crate 重复代码。代价只是 release 编译变慢。
+# 和未做 LTO 的跨 crate 重复代码。
+# LTO 选 thin 不选 fat(2026-09 实测,32 核本机,CI 的 4 核约乘 2.5):
+#   fat + codegen-units=1 : 冷编 5m03s,只改一行增量 3m50s,exe 18.2MB
+#   thin + codegen-units=16: 冷编 2m15s,只改一行增量 1m25s,exe 20.7MB
+# fat 的时间几乎全花在最终整体链接优化那一步,缓存救不了增量;多 2.5MB 裸体积压进
+# 安装包约 +0.6MB,换每次发版省约 10 分钟 CI。别改回 codegen-units=1:thin 下它
+# 只拖慢自己 crate 的并行编译,体积收益可忽略。
 # 刻意**不设** panic = "abort":本应用靠线程隔离降级存活——PTY 读取/attach/watch 等
 # 长驻后台线程里的 panic 只该死一个镜像线程,abort 会把所有托管会话一起带走;
 # 全仓 ~20 处锁中毒恢复(unwrap_or_else(into_inner))也只在 unwind 语义下才有意义。
 [profile.release]
-codegen-units = 1
-lto = true
+codegen-units = 16
+lto = "thin"
 opt-level = "s"
 strip = true
 

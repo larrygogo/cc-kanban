@@ -27,4 +27,4 @@
 - [ ] 弹通知时不卡顿、CPU 正常（无 100% 飙升）
 
 ## 自动更新
-- [ ] 发布新版本后，应用内/后台检查到更新并能升级（latest.json 含 darwin-universal）
+- [ ] 发布新版本后，应用内/后台检查到更新并能升级（latest.json 的 darwin-aarch64 / darwin-x86_64 各指向自己架构的 app.tar.gz；Apple 芯片与 Intel 机各验一台）

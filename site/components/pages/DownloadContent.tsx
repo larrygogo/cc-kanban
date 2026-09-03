@@ -10,7 +10,14 @@ type Content = {
   leadVersion: (tag: string) => string;
   leadRest: string;
   win: { meta: string; btn: string; fallback: string };
-  mac: { meta: string; btn: string; fallback: string };
+  mac: {
+    meta: string;
+    btnArm: string;
+    btnIntel: string;
+    fallbackArm: string;
+    fallbackIntel: string;
+    hint: string;
+  };
   allVersions: string;
   stepsEyebrow: string;
   stepsTitle: string;
@@ -29,7 +36,14 @@ const CONTENT: Record<Lang, Content> = {
     leadVersion: (tag) => `最新版本 ${tag}。`,
     leadRest: "开源，MIT 许可。无需提前配置 AI CLI：安装 Meowo 后，可直接在应用内一键安装、登录并自动接入。",
     win: { meta: "x64 安装包 · Windows 10 / 11", btn: "下载 .exe", fallback: "在 GitHub Releases 里选 x64-installer.exe（老版本为 x64-setup.exe）" },
-    mac: { meta: "universal DMG · Intel / Apple Silicon 通用 · ≥ Sonoma", btn: "下载 .dmg", fallback: "在 GitHub Releases 里选 universal.dmg" },
+    mac: {
+      meta: "Apple 芯片与 Intel 各一个 DMG · ≥ Sonoma",
+      btnArm: "下载 .dmg（Apple 芯片）",
+      btnIntel: "下载 .dmg（Intel）",
+      fallbackArm: "在 GitHub Releases 里选 aarch64.dmg",
+      fallbackIntel: "在 GitHub Releases 里选 x64.dmg",
+      hint: "不确定芯片：苹果菜单 → 关于本机，看「芯片」一行",
+    },
     allVersions: "查看全部历史版本",
     stepsEyebrow: "安装",
     stepsTitle: "安装步骤",
@@ -56,7 +70,14 @@ const CONTENT: Record<Lang, Content> = {
     leadVersion: (tag) => `Latest version ${tag}. `,
     leadRest: "Open source, MIT. No need to set up an AI CLI in advance: after installing Meowo, install, sign in, and connect right in the app.",
     win: { meta: "x64 installer · Windows 10 / 11", btn: "Download .exe", fallback: "Pick x64-installer.exe in GitHub Releases (older releases: x64-setup.exe)" },
-    mac: { meta: "Universal DMG · Intel / Apple Silicon · ≥ Sonoma", btn: "Download .dmg", fallback: "Pick universal.dmg in GitHub Releases" },
+    mac: {
+      meta: "Separate DMG for Apple silicon and Intel · ≥ Sonoma",
+      btnArm: "Download .dmg (Apple silicon)",
+      btnIntel: "Download .dmg (Intel)",
+      fallbackArm: "Pick aarch64.dmg in GitHub Releases",
+      fallbackIntel: "Pick x64.dmg in GitHub Releases",
+      hint: "Not sure which chip? Apple menu → About This Mac, see the Chip line",
+    },
     allVersions: "See all past releases",
     stepsEyebrow: "Install",
     stepsTitle: "Install steps",
@@ -124,11 +145,17 @@ export default async function DownloadContent({ lang }: { lang: Lang }) {
                   <h3>macOS</h3>
                 </div>
                 <p className="meta">{c.mac.meta}</p>
-                <a className="btn btn-primary btn-lg" href={release?.macos?.url ?? RELEASE_LATEST}>
+                <a className="btn btn-primary btn-lg" href={release?.macosArm?.url ?? RELEASE_LATEST}>
                   <DownloadIcon />
-                  {c.mac.btn}
+                  {c.mac.btnArm}
                 </a>
-                <p className="sub">{assetSub(release?.macos ?? null, c.mac.fallback)}</p>
+                <p className="sub">{assetSub(release?.macosArm ?? null, c.mac.fallbackArm)}</p>
+                <a className="btn btn-ghost btn-lg" href={release?.macosIntel?.url ?? RELEASE_LATEST}>
+                  <DownloadIcon />
+                  {c.mac.btnIntel}
+                </a>
+                <p className="sub">{assetSub(release?.macosIntel ?? null, c.mac.fallbackIntel)}</p>
+                <p className="sub sub-hint">{c.mac.hint}</p>
               </div>
             </Reveal>
           </div>

@@ -911,6 +911,14 @@ code.inline {
   color: var(--text-faint);
   text-align: center;
 }
+/* macOS 卡片两个按钮竖排：文件名说明行之后再接下一个按钮。 */
+.platform .sub + .btn {
+  margin-top: 16px;
+}
+.platform .sub-hint {
+  font-family: inherit;
+  margin-top: 14px;
+}
 
 /* ---------- 通用信息表 ---------- */
 .rows {

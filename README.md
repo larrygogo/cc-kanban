@@ -21,7 +21,7 @@
 | 平台 | 安装包 | 说明 |
 |------|--------|------|
 | **Windows** | [最新版 x64 安装包](https://github.com/larrygogo/meowo/releases/latest)（`Meowo_x.y.z_x64-installer.exe`，老版本为 `-setup.exe`） | 一键安装；无 WebView2 环境自动回退经典安装界面 |
-| **macOS** | [最新版 universal DMG](https://github.com/larrygogo/meowo/releases/latest)（`Meowo_x.y.z_universal.dmg`） | Intel / Apple Silicon 通用，需 macOS ≥ 14 Sonoma；已签名公证 |
+| **macOS** | [最新版 DMG](https://github.com/larrygogo/meowo/releases/latest)（Apple 芯片选 `Meowo_x.y.z_aarch64.dmg`，Intel 选 `Meowo_x.y.z_x64.dmg`） | 需 macOS ≥ 14 Sonoma；已签名公证。不确定芯片：苹果菜单 → 关于本机 |
 
 下载对应安装包，双击安装即可。应用内支持检查更新。
 
@@ -240,7 +240,7 @@ bunx vitest run
 
 - [x] CI（GitHub Actions：cargo test/clippy + IPC 契约生成校验 + 前端 tsc/vitest + cargo/bun audit，windows-latest + macos-latest）
 - [x] 在线更新（`tauri-plugin-updater` + tag 触发的 GitHub Releases）
-- [x] macOS 打包（universal dmg，签名公证 + 自动更新）
+- [x] macOS 打包（arm64 / x64 各一份 dmg，签名公证 + 自动更新）
 - [ ] Linux 打包
 
 现行架构见 [`docs/architecture/`](docs/architecture/)；历史设计与实现计划存档在 [`docs/archive/superpowers/`](docs/archive/superpowers/)。

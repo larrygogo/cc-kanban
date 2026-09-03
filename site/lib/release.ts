@@ -30,7 +30,10 @@ export type Release = {
   tag: string;
   version: string;
   windows: Asset | null;
-  macos: Asset | null;
+  /** Apple 芯片包（`_aarch64.dmg`）。 */
+  macosArm: Asset | null;
+  /** Intel 包（`_x64.dmg`）。 */
+  macosIntel: Asset | null;
 };
 export type ReleaseNote = {
   tag: string;
@@ -52,6 +55,16 @@ const pick = (assets: Asset[], ext: string) =>
 // 里两个 exe 并存后，命中哪个取决于 GitHub API 返回的资产顺序。
 const pickWindows = (assets: Asset[]) =>
   pick(assets, "-installer.exe") ?? pick(assets, "-setup.exe") ?? pick(assets, ".exe");
+
+// macOS 资产按芯片分两个 dmg（`_aarch64.dmg` / `_x64.dmg`，0.6.7 起）。更早的 release 只有
+// 一个 `_universal.dmg`，两个入口都指向它——老版本页面/回退场景下不能变成空按钮。
+const pickMac = (assets: Asset[]) => {
+  const arm = pick(assets, "_aarch64.dmg");
+  const intel = pick(assets, "_x64.dmg");
+  if (arm || intel) return { arm, intel };
+  const universal = pick(assets, ".dmg");
+  return { arm: universal, intel: universal };
+};
 
 // 站点是静态导出，下面这些请求都发生在构建时。发新版后要重新部署站点内容才会更新——
 // deploy-pages.yml 挂了 release: published 触发，你在 GitHub 上点 Publish 时会自动跑。
@@ -136,7 +149,8 @@ export const getLatestRelease = cache(async (): Promise<Release | null> => {
       tag: `v${APP_VERSION}`,
       version: APP_VERSION,
       windows: null,
-      macos: null,
+      macosArm: null,
+      macosIntel: null,
     };
   }
   const assets: Asset[] = json.assets.map((a) => ({
@@ -144,11 +158,13 @@ export const getLatestRelease = cache(async (): Promise<Release | null> => {
     url: a.browser_download_url,
     size: a.size,
   }));
+  const mac = pickMac(assets);
   return {
     tag: json.tag_name,
     version: json.tag_name.replace(/^v/, ""),
     windows: pickWindows(assets),
-    macos: pick(assets, ".dmg"),
+    macosArm: mac.arm,
+    macosIntel: mac.intel,
   };
 });
 
