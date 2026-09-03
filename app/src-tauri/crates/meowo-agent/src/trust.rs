@@ -32,16 +32,39 @@ impl WorkspaceTrustSpec {
     /// 预写信任记录。已存在则分毫不动（幂等；kimi 自己写的记录带它自己的 `trustedAt`，
     /// 不该被我们盖掉）。返回 `Ok(true)` = 本次写入，`Ok(false)` = 早已存在。
     ///
-    /// 调用方须保证 `data_dir` 已存在（「绝不凭空创建 agent 的数据目录」）；`write_atomic`
-    /// 只会补 `dir_rel` 这一层子目录——kimi 首次信任时也是这样建它的。
+    /// 「只在不存在时创建」交给内核（`create_new`），而不是 `exists()` 再写：后者在两次启动
+    /// 同时预写、或与 kimi 自己落盘撞车时，后到的 rename 会盖掉先写的记录（PR #68 review）。
+    /// 不走 `write_atomic`：它的 tmp+rename 正是会覆盖的那一步；记录只有百余字节、一次
+    /// `write_all` 落盘，读端又只看文件是否存在，半截文件的窗口没有实际后果。
+    ///
+    /// 调用方须保证 `data_dir` 已存在（「绝不凭空创建 agent 的数据目录」）；这里只补
+    /// `dir_rel` 这一层子目录——kimi 首次信任时也是这样建它的。
     pub fn pretrust(&self, data_dir: &Path, cwd: &str) -> std::io::Result<bool> {
+        use std::io::Write as _;
         let path = self.record_path(data_dir, cwd);
-        if path.exists() {
-            return Ok(false);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(e) => return Err(e),
+        };
         // `root` 原样写 cwd（kimi 写的就是 `workspace.cwd`），经 serde 转义，反斜杠不会写坏 JSON。
         let body = serde_json::json!({ "root": cwd, "trustedAt": now_ms() }).to_string();
-        crate::fsutil::write_atomic(&path, &body)?;
+        if let Err(e) = file
+            .write_all(body.as_bytes())
+            .and_then(|()| file.sync_all())
+        {
+            // 写失败别留一个空壳：空文件在读端同样算「已信任」，会把这次失败永久化。
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
         Ok(true)
     }
 }
@@ -270,6 +293,43 @@ mod tests {
             .collect();
         assert_eq!(leftovers.len(), 1, "{leftovers:?}");
 
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// 并发预写同一目录：恰好一方写入，其余全部报「早已存在」，记录不会被后到者盖掉
+    /// （PR #68 review 指出的 exists()+rename 竞态）。
+    #[test]
+    fn concurrent_pretrust_writes_exactly_once() {
+        let data_dir =
+            std::env::temp_dir().join(format!("meowo-trust-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).unwrap();
+        static SPEC: WorkspaceTrustSpec = WorkspaceTrustSpec {
+            dir_rel: "workspace-trust",
+        };
+        let cwd = r"C:\proj\race";
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let data_dir = data_dir.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    SPEC.pretrust(&data_dir, cwd).unwrap()
+                })
+            })
+            .collect();
+        let wrote = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|&wrote| wrote)
+            .count();
+        assert_eq!(wrote, 1, "只能有一方真正写入");
+        let body: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(SPEC.record_path(&data_dir, cwd)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["root"], cwd);
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
