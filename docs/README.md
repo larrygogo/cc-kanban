@@ -9,6 +9,7 @@
 | [architecture/refactor-roadmap.md](architecture/refactor-roadmap.md) | 协议收敛路线（阶段 1–5 完成，遗留项转 backlog） |
 | [architecture/consistency-backlog.md](architecture/consistency-backlog.md) | 已知设计不一致清单（P0–P3，修一条勾一条） |
 | [research/tui-menu-captures-2026-07.md](research/tui-menu-captures-2026-07.md) | TUI 菜单真机取证（活文档，被代码注释引用，**勿移动**） |
+| [research/kimi-workspace-trust-2026-09.md](research/kimi-workspace-trust-2026-09.md) | kimi 工作区信任的机制取证 + 预信任实现计划（活文档，被 `trust.rs` 注释引用） |
 | [macos-release-secrets.md](macos-release-secrets.md) | macOS 发布 secrets 清单（与 release.yml 对齐） |
 | [macos-acceptance-checklist.md](macos-acceptance-checklist.md) | macOS 真机验收清单 |
 | images/ | logo 与演示动图（demo.webp 由 `app/scripts/record-demo.mjs` 按相对路径生成，**勿移动**） |
