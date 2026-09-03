@@ -3601,9 +3601,10 @@ export function ChatWindow() {
             {gitSummary && gitSummary.isRepo && gitSummary.files.length > 0 && <span className="chat-diff-btn-count">{gitSummary.files.length}</span>}
           </button>
         )}
-        {/* stop_managed_terminal 是 /rpc 明确拒绝项(宿主进程生杀),远程按钮点了必 404——隐藏。
-            endable 口径:托管 PTY 或进程仍活着的孤儿会话(后端按 pid 杀树兜底),见 ChatHistoryDto。 */}
-        {!remoteUi() && history?.endable && (
+        {/* endable 口径:托管 PTY 或进程仍活着的孤儿会话(后端按 pid 杀树兜底),见 ChatHistoryDto。
+            远程不再隐藏:stop_managed_terminal 已进 /rpc 白名单(remote.rs 头注释记录了放行理由),
+            确认框在手机上走 window.confirm(transport 的 confirm_dialog 替身)。 */}
+        {history?.endable && (
           <button type="button" className="chat-end" disabled={endingSession} onClick={() => void endSession()}>
             {endingSession ? t.chat.terminalStopping : t.chat.endSession}
           </button>
