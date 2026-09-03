@@ -22,11 +22,15 @@
 //!    - 登录/安装/更新类：`login_agent` / `install_agent` / `check_update` 等
 //!    - 文件浏览类：`read_file_text` / `list_dir_entries` / `search_project_files`
 //!      / `git_*`（任意本地文件读，v1 砍掉）
-//!    - `stop_managed_terminal`（远端不给「杀会话」）
 //!
 //! 注意：白名单内的 `write_managed_terminal` 本身就等于「在宿主机上执行任意命令」
 //! （往 agent CLI 的 PTY 写任意按键）——这是产品功能（远程发消息/打断/答题），
 //! 不是疏漏；它成立的前提正是上面的 token 门 + 网络层假设。
+//!
+//! `stop_managed_terminal`（结束会话）曾列在拒绝面（「远端不给杀会话」）。2026-09-04 改为
+//! 放行：用户实际需要在手机上结束会话；且拒绝它并不构成安全边界——`takeover_managed_terminal`
+//! 本就先杀旧进程，`write_managed_terminal` 更能直接送 Ctrl+C / `exit`。它只作用于本会话的
+//! 进程树（托管 PTY 或按 pid 兜底的孤儿），仍不是宿主级生杀。
 //!
 //! # 与 Tauri command 的耦合约定
 //!
@@ -90,6 +94,8 @@ pub(crate) const BRIDGED_COMMANDS: &[&str] = &[
     "resize_managed_terminal",
     "start_managed_terminal",
     "takeover_managed_terminal",
+    // 结束会话：只杀本会话进程树（模块头注释记录了放行理由）。
+    "stop_managed_terminal",
     "attach_background_session",
     "send_background_prompt",
     "session_launch_selections",
@@ -762,6 +768,10 @@ bridged_args!(SetSessionNoteArgs {
     note: String
 });
 
+bridged_args!(StopManagedTerminalArgs {
+    session_id: i64
+});
+
 bridged_args!(GetChatHistoryArgs {
     session_id: i64,
     offset: u64,
@@ -1026,6 +1036,10 @@ async fn dispatch(app: &tauri::AppHandle, command: &str, body: &[u8]) -> Respons
                 )
                 .await,
             )
+        }
+        "stop_managed_terminal" => {
+            let a = args!(StopManagedTerminalArgs);
+            reply(crate::managed_terminal::stop_managed_terminal(state, a.session_id).await)
         }
         "attach_background_session" => {
             let a = args!(SessionArg);
@@ -1470,7 +1484,6 @@ mod tests {
             "search_project_files",
             "git_diff_summary",
             "git_file_diff",
-            "stop_managed_terminal",
             "snap_expand",
             "snap_collapse",
             "set_autostart",
@@ -1487,6 +1500,7 @@ mod tests {
         for cmd in [
             "get_chat_history",
             "write_managed_terminal",
+            "stop_managed_terminal",
             "pending_interaction",
             "awaiting_interaction_sessions",
             "list_subdirectories",
@@ -1740,6 +1754,10 @@ mod tests {
             // api.ts:456
             "set_archived" => {
                 parse::<SetArchivedArgs>(br#"{"sessionId":7,"archived":true}"#).map(|_| ())
+            }
+            // api.ts:390
+            "stop_managed_terminal" => {
+                parse::<StopManagedTerminalArgs>(br#"{"sessionId":7}"#).map(|_| ())
             }
             // api.ts:461
             "set_session_note" => {

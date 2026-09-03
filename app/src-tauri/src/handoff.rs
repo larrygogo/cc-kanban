@@ -96,7 +96,15 @@ pub(crate) async fn switch_session_provider(
             &selections,
         ));
         let argv = crate::relay::augment_argv(target.id(), argv);
-        let env = crate::terminal::launch_env_for_profile(Some(&target_provider), None);
+        let active_profile = crate::profile::active_id(target.id().as_str());
+        let env = crate::terminal::launch_env_for_profile(
+            Some(&target_provider),
+            active_profile.as_deref(),
+        );
+        // 本次痛点：目标 kimi 停在「是否信任此目录」屏，对话页答不了、hook 不来、新会话不落库，
+        // 而旧会话已收尾——看板上表现为「切换后什么都没了」。起进程前替用户预写信任记录
+        // （用户亲手选定目录与目标 agent，语义上已表达这份信任；codex 的 trusted_hash 是同一先例）。
+        crate::terminal::pretrust_workspace(&target_provider, active_profile.as_deref(), &dir);
         let temp_id = broker
             .start_pending(
                 app.clone(),

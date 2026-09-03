@@ -63,6 +63,9 @@ pub struct Variant {
     /// 无鉴权概念的 agent 为 None。
     pub auth: Option<&'static AuthScheme>,
     pub launch: &'static LaunchSpec,
+    /// 工作区信任名册（起进程前可预写，免掉「是否信任此目录」确认屏，见 [`crate::trust`]）。
+    /// 无此机制的变体为 None。
+    pub trust: Option<&'static crate::trust::WorkspaceTrustSpec>,
 }
 
 impl Variant {
@@ -92,6 +95,7 @@ impl Variant {
             auth: self.auth,
             launch,
             launch_stem: self.launch.stem,
+            trust: self.trust,
             // 默认账号。profile 实况由 `installation_for_profile` 事后填上——可执行的探测与
             // profile 无关（换账号不换二进制），故这里共用同一条 probe 路径。
             profile: None,
@@ -112,6 +116,8 @@ pub struct Installation {
     pub launch: Option<Vec<String>>,
     /// 回退裸名（无扩展名）。
     pub launch_stem: &'static str,
+    /// 该变体的工作区信任名册形态。None = 该 agent 没有这道确认屏。
+    pub trust: Option<&'static crate::trust::WorkspaceTrustSpec>,
     /// 这份实况属于哪个 **profile**（多账号）：`(profile 根目录, 隔离规格)`。
     /// `None` = 默认账号，即 agent 自己的目录。由 [`AgentPlugin::installation_for_profile`] 填。
     pub profile: Option<(PathBuf, &'static crate::profile::ProfileSpec)>,
@@ -196,6 +202,37 @@ impl Installation {
     pub fn is_configured(&self) -> bool {
         self.data_dir.is_dir()
     }
+
+    /// 起进程前把 `cwd` 预写进该实况的工作区信任名册。true = 记录已就位（本次写入或早已存在）。
+    ///
+    /// 全程 best-effort：未声明该机制、数据目录不存在、写失败，一律只打日志返回 false——最坏退化成
+    /// 用户在终端页手动信任一次，与没有此功能时等价，绝不因预信任失败挡住会话。
+    ///
+    /// 门槛是数据目录已存在（与 `wire` 同一条纪律：**绝不凭空创建 agent 的数据目录**）。调用方必须
+    /// 按本次实际生效的账号给实况——kimi 的多账号靠 `KIMI_SHARE_DIR` 搬走整个数据目录，写进默认
+    /// 目录而会话跑在隔离账号上，等于没写。
+    pub fn pretrust_workspace(&self, cwd: &str) -> bool {
+        let Some(spec) = self.trust else {
+            return false;
+        };
+        if !self.is_configured() {
+            eprintln!(
+                "Meowo trust[{}]: 数据目录不存在，跳过预信任 {cwd}",
+                self.id.as_str()
+            );
+            return false;
+        }
+        match spec.pretrust(&self.data_dir, cwd) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!(
+                    "Meowo trust[{}]: 预写工作区信任失败（{cwd}）: {e}",
+                    self.id.as_str()
+                );
+                false
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +276,7 @@ mod tests {
             hooks: &SPEC,
             auth: None,
             launch: &LAUNCH,
+            trust: None,
         }
     }
 
@@ -285,6 +323,7 @@ mod tests {
             hooks: &SPEC,
             auth,
             launch: &LAUNCH,
+            trust: None,
         };
         // 不传 home：launch 候选（DataDir/bin）不会命中，launch_argv 回退裸名 "x"。
         v.installation_at(crate::id::KIMI, PathBuf::from("/nowhere"), None)

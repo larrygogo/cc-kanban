@@ -447,6 +447,15 @@ pub trait AgentPlugin: Sync {
             .find_map(|v| v.probe(self.id(), &home))
     }
 
+    /// 起进程前把 `cwd` 预写进**默认账号**实况的工作区信任名册（见
+    /// [`Installation::pretrust_workspace`]）。未声明该机制的 agent 直接 no-op（false）。
+    /// profile 账号走 [`installation_for_profile`](Self::installation_for_profile) 拿实况再调
+    /// 同名方法——数据目录随账号走，不能按默认目录写。
+    fn pretrust_workspace(&self, cwd: &str) -> bool {
+        self.detect()
+            .is_some_and(|inst| inst.pretrust_workspace(cwd))
+    }
+
     /// 未安装时的默认落点（首选变体的默认目录）。不保证目录存在。
     fn default_installation(&self) -> Option<Installation> {
         let home = crate::home_dir()?;

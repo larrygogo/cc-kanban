@@ -45,6 +45,7 @@ pub mod registry;
 pub mod relay;
 pub mod screen;
 pub mod transcript;
+pub mod trust;
 pub mod variant;
 pub mod wiring;
 
@@ -87,6 +88,7 @@ pub use transcript::{
     ChatDelta, ChatItem, ChatWindow, TranscriptCache, TranscriptEvent, TranscriptInfo,
     TranscriptParser, TranscriptSpec, TurnError,
 };
+pub use trust::{trust_key, WorkspaceTrustSpec};
 pub use variant::{DataDirSpec, Installation, Variant};
 pub use wiring::{backup_once, wire_hooks, WiringCap, WiringContext};
 

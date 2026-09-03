@@ -160,6 +160,7 @@ static VARIANTS: [Variant; 1] = [Variant {
     hooks: &HOOKS,
     auth: Some(&AUTH),
     launch: &LAUNCH,
+    trust: None,
 }];
 
 pub struct Gemini;

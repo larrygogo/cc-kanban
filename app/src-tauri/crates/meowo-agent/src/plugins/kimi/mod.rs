@@ -134,6 +134,12 @@ static LAUNCH_LEGACY: LaunchSpec = LaunchSpec {
     ],
 };
 
+/// 0.40.x 的工作区信任名册：`<数据目录>/workspace-trust/<wd_key>`，读端只看文件是否存在。取证与
+/// key 算法见 `docs/research/kimi-workspace-trust-2026-09.md`。旧 Python 版无此机制。
+static TRUST: crate::trust::WorkspaceTrustSpec = crate::trust::WorkspaceTrustSpec {
+    dir_rel: "workspace-trust",
+};
+
 static VARIANTS: [Variant; 2] = [
     Variant {
         tag: "modern",
@@ -144,6 +150,7 @@ static VARIANTS: [Variant; 2] = [
         hooks: &HOOKS,
         auth: Some(&AUTH_MODERN),
         launch: &LAUNCH_MODERN,
+        trust: Some(&TRUST),
     },
     Variant {
         tag: "legacy",
@@ -154,6 +161,8 @@ static VARIANTS: [Variant; 2] = [
         hooks: &HOOKS,
         auth: Some(&AUTH_LEGACY),
         launch: &LAUNCH_LEGACY,
+        // 旧 Python 版没有工作区信任这道确认屏。
+        trust: None,
     },
 ];
 

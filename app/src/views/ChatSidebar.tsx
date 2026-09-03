@@ -1378,9 +1378,9 @@ function ChatSidebarImpl({ activeId, approvalAwaitingIds, visibleOrderRef, searc
           onAddDir={!remoteUi() && supportsExtraDir(ctxItem.provider) ? () => void addExtraDir(ctxItem) : null}
           // 结束会话按 endable 口径（与对话窗/贴纸同源）：本 GUI 托管的 PTY，或进程仍活着
           // 的孤儿会话（后端按 pid 杀树兜底）；外部终端里跑的会话杀不了，后台会话杀了也会
-          // 被 supervisor 拉回来（endable 已内含排除）。远程再叠一层门控:
-          // stop_managed_terminal 是 /rpc 拒绝项,点了必 404。
-          onEndSession={!remoteUi() && ctxItem.endable ? () => endSession(ctxItem) : null}
+          // 被 supervisor 拉回来（endable 已内含排除）。远程同样放行:stop_managed_terminal
+          // 已进 /rpc 白名单(remote.rs 头注释记录了放行理由)。
+          onEndSession={ctxItem.endable ? () => endSession(ctxItem) : null}
           onClose={() => setCtxMenu(null)}
         />
       )}
