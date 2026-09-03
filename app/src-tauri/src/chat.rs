@@ -672,6 +672,10 @@ pub(crate) fn spawn_paste_cleanup() {
     std::thread::spawn(|| {
         cleanup_expired_under(&paste_root());
         cleanup_expired_under(&meowo_agent::fsutil::handoff_root());
+        // 顺带扫掉数据目录里原子写留下的 tmp 残渣（`*.tmp.<pid>.<序号>`）。挂这条线程
+        // 而不是另起一条:同为「启动期一次性的盘面回收」,跑完即散。只扫 ~/.meowo
+        // ——我们自己的目录;agent 自己的配置目录里也可能有残留,那是用户的地盘,不伸手。
+        meowo_agent::fsutil::sweep_stale_temp_files(&crate::setup::meowo_dir());
     });
 }
 
