@@ -104,6 +104,116 @@ fn escape_like(s: &str) -> String {
     out
 }
 
+/// 构造 [`Store::live_sessions_filtered`] 实际执行的 SQL 与参数。
+///
+/// **抽成纯函数只为一件事:让测试能对真正跑的那条语句做 `EXPLAIN QUERY PLAN`。**
+/// 若测试自己抄一份 SQL,抄本与实现必然漂移——`ix_sessions_board`(store.rs v15)
+/// 哪天因谓词改写而失效时,对着抄本的测试照旧全绿,而看板在大库上悄悄退回全表扫。
+/// 现在两边共用同一份构造,抄本不存在。
+fn build_live_sessions_sql(
+    filter: Option<&str>,
+    search: Option<&str>,
+    cwd: Option<&str>,
+    before_last_event_at: Option<i64>,
+    before_id: Option<i64>,
+    limit: usize,
+) -> (String, Vec<rusqlite::types::Value>) {
+    use rusqlite::types::Value;
+    const SELECT: &str = "SELECT s.id, s.project_id, s.cc_session_id, s.status, s.started_at, s.last_event_at, s.ended_at,
+            p.name, t.id, t.title, t.current_activity, t.column_name, s.pid, s.archived, s.cwd, s.archived_at,
+            sc.used_pct, sc.window_size, sc.model, sn.note,
+            s.pending_review, s.last_ai_text, s.last_user_text, s.provider, s.profile, s.predecessor_id,
+            s.extra_dirs
+     FROM sessions s
+     JOIN projects p ON p.id = s.project_id
+     -- 关联子查询取每会话最新一张 task：ux_tasks_session 建立前的旧库可能一会话
+     -- 多卡，裸 JOIN t.session_id 会扇出重复行（列表重复卡、计数虚高）。与
+     -- task_id_of_session 的「最新卡」口径一致；其余三处 tasks JOIN 同式同义。
+     LEFT JOIN tasks t ON t.id = (SELECT MAX(t2.id) FROM tasks t2 WHERE t2.session_id = s.id)
+     LEFT JOIN session_context sc ON sc.cc_session_id = s.cc_session_id
+     LEFT JOIN session_notes sn ON sn.cc_session_id = s.cc_session_id";
+
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+
+    // superseded_by IS NULL：被跨 provider 切换接替的旧段从所有 tab 折叠隐藏
+    // （链尾代表整条链；回看走 get_chat_history 按 id 直取，不受影响）。
+    // 该谓词与 live_sessions_totals / live_totals_for / live_count_candidates
+    // 四处口径必须同生共死，改任何一处都要同步其余三处。
+    //
+    // running/waiting 共用一个**候选并集**（与 live_count_candidates 逐字同口径）：
+    // 归属哪个 tab 由 app 层的 tab_class 决定——它要看屏幕检测状态（broker 内存里的
+    // 实时事实）与审批存活校正，SQL 都看不见。SQL 若按 status 预分 tab，一条
+    // status=running 而屏幕已 idle 的会话就会被钉死在运行中 tab，与卡片黄环打架
+    //（卡片状态与 tab 归属必须同源，见 session_query.rs 的 tab_class）。
+    match filter {
+        Some("all") => {
+            conditions.push("s.archived = 0 AND s.superseded_by IS NULL".into());
+        }
+        Some("running") | Some("waiting") => conditions.push(
+            "s.status != 'ended' \
+             AND (s.status IN ('running','waiting') OR s.pending_review IS NOT NULL) \
+             AND s.archived = 0 AND s.superseded_by IS NULL"
+                .into(),
+        ),
+        Some("archived") => {
+            conditions.push("s.archived = 1 AND s.superseded_by IS NULL".into());
+        }
+        _ => {} // None 不过滤（仅测试取证用，生产两处调用都传 Some）
+    }
+
+    // 搜索（当前 tab 内 AND 搜索词）：title / cwd / project 名 / 便签 / 最近往来任一命中。
+    // %/_/\ 转义成字面量。便签是用户亲手写的记忆锚点、最近往来是「上次聊到哪」的
+    // 第一线索——这两处搜不到时用户只能凭记忆逐个点开翻。
+    if let Some(q) = search.map(str::trim).filter(|s| !s.is_empty()) {
+        let pat = format!("%{}%", escape_like(q));
+        conditions.push(
+            "(t.title LIKE ? ESCAPE '\\' OR s.cwd LIKE ? ESCAPE '\\' OR p.name LIKE ? ESCAPE '\\' \
+             OR sn.note LIKE ? ESCAPE '\\' OR s.last_user_text LIKE ? ESCAPE '\\' OR s.last_ai_text LIKE ? ESCAPE '\\')".into(),
+        );
+        for _ in 0..6 {
+            params.push(Value::Text(pat.clone()));
+        }
+    }
+
+    // 目录过滤:斜杠归一 + 去尾斜杠后的精确比较(NOCASE 只管 ASCII,盘符/常见路径够用;
+    // CJK 无大小写之分不受影响)。理由见 live_sessions_filtered 文档注释。
+    if let Some(dir) = cwd.map(str::trim).filter(|s| !s.is_empty()) {
+        conditions.push("RTRIM(REPLACE(s.cwd, '\\', '/'), '/') = ? COLLATE NOCASE".into());
+        let normalized = dir.replace('\\', "/");
+        params.push(Value::Text(normalized.trim_end_matches('/').to_string()));
+    }
+
+    // waiting 等最久优先（ASC），游标取「更大」的；其它 DESC，游标取「更小」的。
+    let asc = matches!(filter, Some("waiting"));
+    if let (Some(ts), Some(id)) = (before_last_event_at, before_id) {
+        // 整体括起：AND 优先级高于 OR，不加括号第二个 OR 分支会绕过 filter（4035ec5 回归）。
+        if asc {
+            conditions.push("((s.last_event_at > ?) OR (s.last_event_at = ? AND s.id > ?))".into());
+        } else {
+            conditions.push("((s.last_event_at < ?) OR (s.last_event_at = ? AND s.id < ?))".into());
+        }
+        params.push(Value::Integer(ts));
+        params.push(Value::Integer(ts));
+        params.push(Value::Integer(id));
+    }
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+    let order = if asc {
+        "s.last_event_at ASC, s.id ASC"
+    } else {
+        "s.last_event_at DESC, s.id DESC"
+    };
+    let sql = format!("{} {} ORDER BY {} LIMIT ?", SELECT, where_clause, order);
+    params.push(Value::Integer(limit as i64));
+
+    (sql, params)
+}
+
 impl Store {
     /// 批量取多个 task 的 todos，按 task_id 分组——替代逐 task 调 `list_todos` 的 N+1。
     /// 按固定块大小分批拼 `IN (...)`：单条 `IN` 的占位符数不能超过 SQLite 绑定参数上限
@@ -167,101 +277,8 @@ impl Store {
         before_id: Option<i64>,
         limit: usize,
     ) -> Result<Vec<LiveSession>, StoreError> {
-        use rusqlite::types::Value;
-        const SELECT: &str = "SELECT s.id, s.project_id, s.cc_session_id, s.status, s.started_at, s.last_event_at, s.ended_at,
-                p.name, t.id, t.title, t.current_activity, t.column_name, s.pid, s.archived, s.cwd, s.archived_at,
-                sc.used_pct, sc.window_size, sc.model, sn.note,
-                s.pending_review, s.last_ai_text, s.last_user_text, s.provider, s.profile, s.predecessor_id,
-                s.extra_dirs
-         FROM sessions s
-         JOIN projects p ON p.id = s.project_id
-         -- 关联子查询取每会话最新一张 task：ux_tasks_session 建立前的旧库可能一会话
-         -- 多卡，裸 JOIN t.session_id 会扇出重复行（列表重复卡、计数虚高）。与
-         -- task_id_of_session 的「最新卡」口径一致；其余三处 tasks JOIN 同式同义。
-         LEFT JOIN tasks t ON t.id = (SELECT MAX(t2.id) FROM tasks t2 WHERE t2.session_id = s.id)
-         LEFT JOIN session_context sc ON sc.cc_session_id = s.cc_session_id
-         LEFT JOIN session_notes sn ON sn.cc_session_id = s.cc_session_id";
-
-        let mut conditions: Vec<String> = Vec::new();
-        let mut params: Vec<Value> = Vec::new();
-
-        // superseded_by IS NULL：被跨 provider 切换接替的旧段从所有 tab 折叠隐藏
-        // （链尾代表整条链；回看走 get_chat_history 按 id 直取，不受影响）。
-        // 该谓词与 live_sessions_totals / live_totals_for / live_count_candidates
-        // 四处口径必须同生共死，改任何一处都要同步其余三处。
-        //
-        // running/waiting 共用一个**候选并集**（与 live_count_candidates 逐字同口径）：
-        // 归属哪个 tab 由 app 层的 tab_class 决定——它要看屏幕检测状态（broker 内存里的
-        // 实时事实）与审批存活校正，SQL 都看不见。SQL 若按 status 预分 tab，一条
-        // status=running 而屏幕已 idle 的会话就会被钉死在运行中 tab，与卡片黄环打架
-        //（卡片状态与 tab 归属必须同源，见 session_query.rs 的 tab_class）。
-        match filter {
-            Some("all") => {
-                conditions.push("s.archived = 0 AND s.superseded_by IS NULL".into());
-            }
-            Some("running") | Some("waiting") => conditions.push(
-                "s.status != 'ended' \
-                 AND (s.status IN ('running','waiting') OR s.pending_review IS NOT NULL) \
-                 AND s.archived = 0 AND s.superseded_by IS NULL"
-                    .into(),
-            ),
-            Some("archived") => {
-                conditions.push("s.archived = 1 AND s.superseded_by IS NULL".into());
-            }
-            _ => {} // None 不过滤（仅测试取证用，生产两处调用都传 Some）
-        }
-
-        // 搜索（当前 tab 内 AND 搜索词）：title / cwd / project 名 / 便签 / 最近往来任一命中。
-        // %/_/\ 转义成字面量。便签是用户亲手写的记忆锚点、最近往来是「上次聊到哪」的
-        // 第一线索——这两处搜不到时用户只能凭记忆逐个点开翻。
-        if let Some(q) = search.map(str::trim).filter(|s| !s.is_empty()) {
-            let pat = format!("%{}%", escape_like(q));
-            conditions.push(
-                "(t.title LIKE ? ESCAPE '\\' OR s.cwd LIKE ? ESCAPE '\\' OR p.name LIKE ? ESCAPE '\\' \
-                 OR sn.note LIKE ? ESCAPE '\\' OR s.last_user_text LIKE ? ESCAPE '\\' OR s.last_ai_text LIKE ? ESCAPE '\\')".into(),
-            );
-            for _ in 0..6 {
-                params.push(Value::Text(pat.clone()));
-            }
-        }
-
-        // 目录过滤:斜杠归一 + 去尾斜杠后的精确比较(NOCASE 只管 ASCII,盘符/常见路径够用;
-        // CJK 无大小写之分不受影响)。理由见 live_sessions_filtered 文档注释。
-        if let Some(dir) = cwd.map(str::trim).filter(|s| !s.is_empty()) {
-            conditions.push("RTRIM(REPLACE(s.cwd, '\\', '/'), '/') = ? COLLATE NOCASE".into());
-            let normalized = dir.replace('\\', "/");
-            params.push(Value::Text(normalized.trim_end_matches('/').to_string()));
-        }
-
-        // waiting 等最久优先（ASC），游标取「更大」的；其它 DESC，游标取「更小」的。
-        let asc = matches!(filter, Some("waiting"));
-        if let (Some(ts), Some(id)) = (before_last_event_at, before_id) {
-            // 整体括起：AND 优先级高于 OR，不加括号第二个 OR 分支会绕过 filter（4035ec5 回归）。
-            if asc {
-                conditions
-                    .push("((s.last_event_at > ?) OR (s.last_event_at = ? AND s.id > ?))".into());
-            } else {
-                conditions
-                    .push("((s.last_event_at < ?) OR (s.last_event_at = ? AND s.id < ?))".into());
-            }
-            params.push(Value::Integer(ts));
-            params.push(Value::Integer(ts));
-            params.push(Value::Integer(id));
-        }
-
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", conditions.join(" AND "))
-        };
-        let order = if asc {
-            "s.last_event_at ASC, s.id ASC"
-        } else {
-            "s.last_event_at DESC, s.id DESC"
-        };
-        let sql = format!("{} {} ORDER BY {} LIMIT ?", SELECT, where_clause, order);
-        params.push(Value::Integer(limit as i64));
-
+        let (sql, params) =
+            build_live_sessions_sql(filter, search, cwd, before_last_event_at, before_id, limit);
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(params.iter()), |r| {
@@ -539,5 +556,100 @@ impl Store {
             .conn
             .execute(&sql, rusqlite::params_from_iter(params))?;
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_live_sessions_sql;
+    use crate::Store;
+
+    /// 对**真正执行的那条 SQL**取查询计划。用 `build_live_sessions_sql` 而非抄写的
+    /// 字面量:谓词一旦改写到用不上索引,这里立刻红,而不是等大库上用户报「越滚越卡」。
+    fn plan(store: &Store, filter: &str, search: Option<&str>) -> String {
+        let (sql, params) = build_live_sessions_sql(Some(filter), search, None, None, None, 50);
+        let mut stmt = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let rows: Vec<String> = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+                r.get::<_, String>(3)
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        rows.join(" | ")
+    }
+
+    /// 四个 tab 的列表查询都必须走 `ix_sessions_board`,且都不得出现临时 B 树排序。
+    /// 「不排序」是分页正确性之外的另一半:游标分页的前提是扫描顺序即结果顺序,
+    /// 一旦退化成「全扫完再排序」,LIMIT 就失去提前收工的意义,代价随会话总数线性涨。
+    #[test]
+    fn board_queries_use_the_board_index_without_sorting() {
+        let store = Store::open_in_memory().unwrap();
+        for filter in ["all", "running", "waiting", "archived"] {
+            let p = plan(&store, filter, None);
+            assert!(
+                p.contains("ix_sessions_board"),
+                "{filter} tab 没走 ix_sessions_board: {p}"
+            );
+            assert!(
+                !p.contains("TEMP B-TREE"),
+                "{filter} tab 退回临时 B 树排序: {p}"
+            );
+        }
+    }
+
+    /// 带游标(翻页)时同样成立——`(last_event_at, id)` 的 tie-break 正是索引尾键的用途。
+    #[test]
+    fn paging_cursor_keeps_the_index_order() {
+        let store = Store::open_in_memory().unwrap();
+        let (sql, params) =
+            build_live_sessions_sql(Some("all"), None, None, Some(1_700_000_000), Some(42), 50);
+        let mut stmt = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let rows: Vec<String> = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+                r.get::<_, String>(3)
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let p = rows.join(" | ");
+        assert!(p.contains("ix_sessions_board"), "翻页丢索引: {p}");
+        assert!(!p.contains("TEMP B-TREE"), "翻页退回排序: {p}");
+    }
+
+    /// 搜索态额外 LIKE 六列(含 JOIN 来的便签/项目名),命中行必然要逐行过滤——
+    /// 但**排序**仍应由索引提供。这条钉住的是「搜索不该把分页顺序也一起赔掉」。
+    #[test]
+    fn search_still_orders_by_index() {
+        let store = Store::open_in_memory().unwrap();
+        let p = plan(&store, "all", Some("meowo"));
+        assert!(!p.contains("TEMP B-TREE"), "搜索态退回临时 B 树排序: {p}");
+    }
+
+    /// 反证:把索引删掉,上面三条必须红。
+    ///
+    /// 没有这条,前面的 `assert!(!contains("TEMP B-TREE"))` 有沦为空转的风险——计划
+    /// 文本格式变了、或关键词写错时它会「恒真通过」,而看板已悄悄退回全表扫。
+    /// 这里明确钉住:ix_sessions_board 就是那三条绿灯的唯一来源。
+    #[test]
+    fn dropping_the_board_index_degrades_the_plan() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .conn
+            .execute("DROP INDEX ix_sessions_board", [])
+            .unwrap();
+        for filter in ["all", "running", "waiting", "archived"] {
+            let p = plan(&store, filter, None);
+            assert!(
+                p.contains("SCAN s") && p.contains("TEMP B-TREE"),
+                "{filter} tab 删掉索引后本应退化为全表扫+排序,实际: {p}"
+            );
+        }
     }
 }

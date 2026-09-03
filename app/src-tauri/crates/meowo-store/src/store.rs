@@ -192,7 +192,14 @@ impl Store {
     ///     使用——SQLite 降版本/删列要再做一版迁移,空表零成本;全仓无任何读写端。
     /// v13: sessions 加 extra_dirs 列（附加目录 JSON 数组，claude --add-dir 的回放依据）。
     ///     老库补齐后全是 NULL = 单目录会话，正是我们要的。
-    const USER_VERSION: i64 = 14;
+    /// v14: todos 加 stale 列（「上一任务」残留标记，见 migrations.rs 的列注释）。
+    /// v15: 加 `ix_sessions_board` 部分索引（看板列表查询）。此前四个 tab 一个都吃不到
+    ///     既有索引:`all`/`archived` 根本没有 status 谓词,而 running/waiting 的
+    ///     `(status IN (...) OR pending_review IS NOT NULL)` 里的 OR 会让优化器放弃
+    ///     `ix_sessions_status_lea`——每次刷新都是全表扫 + 临时 B 树排序后才 LIMIT
+    ///     (query.rs 的 `dropping_the_board_index_degrades_the_plan` 把这条反证钉住)。
+    ///     纯加索引,不动表结构与数据。
+    const USER_VERSION: i64 = 15;
 
     /// 一次性建表 + 迁移 + 建索引，用 `PRAGMA user_version` 门控：已是最新版直接返回，
     /// 避免 statusline/hook 每次 open 都重跑 DDL 与注定失败的 ALTER（hot-path 浪费）。
@@ -244,13 +251,22 @@ impl Store {
             }
         }
         // 索引：加速按 project / task / pid 的查询与「驱逐旧会话」（小库无感，大库防全表扫）。
-        const INDEXES: [&str; 5] = [
+        const INDEXES: [&str; 6] = [
             "CREATE INDEX IF NOT EXISTS ix_sessions_project ON sessions(project_id)",
             "CREATE INDEX IF NOT EXISTS ix_sessions_pid ON sessions(pid)",
             "CREATE INDEX IF NOT EXISTS ix_tasks_project_col ON tasks(project_id, column_name)",
             "CREATE INDEX IF NOT EXISTS ix_todos_task ON todos(task_id)",
             // live_sessions 的「已结束仅取最近 100 条」子查询走此索引，避免每次调用全表扫描+排序。
             "CREATE INDEX IF NOT EXISTS ix_sessions_status_lea ON sessions(status, last_event_at DESC)",
+            // 看板列表（build_live_sessions_sql）的主索引，v15。四个 tab 共用:
+            //   all / archived  → archived 等值前缀 + 索引自带顺序,免临时 B 树排序
+            //   running/waiting → 同上取到 archived=0 段,status/pending_review 逐行过滤,
+            //                     但扫描已按游标顺序,LIMIT 可提前收工
+            // 部分索引条件与查询里的 `s.superseded_by IS NULL` 逐字一致——SQLite 只在查询
+            // 谓词蕴含索引谓词时才肯用部分索引,而那条谓词的四处口径本就要求同生共死。
+            // 排序键带 id:游标分页的 tie-break 是 (last_event_at, id),少了 id 仍要排序。
+            // waiting tab 的 ASC 由 SQLite 反向扫同一索引满足,不必另建 ASC 索引。
+            "CREATE INDEX IF NOT EXISTS ix_sessions_board ON sessions(archived, last_event_at DESC, id DESC) WHERE superseded_by IS NULL",
         ];
         for sql in INDEXES {
             if let Err(e) = conn.execute(sql, []) {
