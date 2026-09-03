@@ -1730,28 +1730,19 @@ export function Sticker({
               <button type="button" className="stk-act" data-tip={`${t.sticker.search} · ${isMacPanel() ? "⌘" : "Ctrl+"}F`} aria-label={t.sticker.search} onClick={() => setSearchOpen(true)}>
                 <SearchIcon />
               </button>
-              {/* 齿轮恒开设置：此前有更新时整颗按钮被改成更新入口——更新可以挂好几天，
-                  期间贴纸上就没有打开设置的入口了（图标还是齿轮，点了却弹更新窗）。
-                  有更新时另给一颗独立红点按钮直达更新窗，图标与行为一一对应。 */}
-              {hasUpdate && (
-                <button
-                  type="button"
-                  className="stk-act stk-update-act"
-                  data-tip={updateLabel}
-                  aria-label={updateLabel}
-                  onClick={() => invoke("open_update_window").catch(() => {})}
-                >
-                  <span className="stk-dot is-standalone" aria-hidden="true" />
-                </button>
-              )}
+              {/* 更新提示回到齿轮的右上角红点（实拍：独立成一颗按钮后底栏放不下，
+                  置顶按钮被挤出可视区）。齿轮恒开设置——此前有更新时整颗按钮被改成
+                  更新入口，图标是齿轮点了却弹更新窗，更新挂几天就几天进不去设置；
+                  现在点击行为固定，红点只作提示，安装入口在设置 → 关于。 */}
               <button
                 type="button"
                 className="stk-act"
-                data-tip={t.sticker.openSettings}
-                aria-label={t.sticker.openSettings}
+                data-tip={hasUpdate ? `${t.sticker.openSettings} · ${updateLabel}` : t.sticker.openSettings}
+                aria-label={hasUpdate ? `${t.sticker.openSettings} · ${updateLabel}` : t.sticker.openSettings}
                 onClick={() => invoke("open_settings").catch(() => {})}
               >
                 <GearIcon />
+                {hasUpdate && <span className="stk-dot" aria-hidden="true" />}
               </button>
               {/* pin 在 macOS 面板也渲染（W-12）：那边语义是「保持打开」，见 pinTip。 */}
               <button

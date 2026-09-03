@@ -381,9 +381,6 @@ button.stab {
   border-radius: 50%; background: var(--cc-err-vivid); /* 更新红点：走错误鲜亮色 token（原 #ff4d4f 与深色值 #e0584c 最接近） */
   box-shadow: 0 0 0 1.5px var(--cc-bg), 0 1px 2px rgba(0, 0, 0, 0.45);
 }
-/* 独立更新按钮里的红点：不再是角标，居中放大一档作为按钮本体（齿轮已还给设置）。 */
-.stk-dot.is-standalone { position: static; width: calc(9px * var(--cc-ui)); height: calc(9px * var(--cc-ui)); display: block; }
-.stk-update-act { display: inline-flex; align-items: center; justify-content: center; }
 /* 不加 hover 效果：只在按下(:active)/激活时变化。 */
 /* 统一「按下/激活 = 凹陷」：深内阴影 + 底沿高光 + 中性内描边。
    搜索/设置「按下瞬间」与置顶「激活(latched)」共用同一套样式——置顶不再橙色特殊，三颗按钮完全一致。
