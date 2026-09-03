@@ -4277,10 +4277,16 @@ select.ns-input {
 .chat-tool-name { flex: 0 0 auto; white-space: nowrap; color: var(--cc-text-dim); font-size: var(--fs-11); font-weight: 500; }
 .chat-tool-summary { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cc-text-faint); font-family: inherit; font-size: var(--fs-11); }
 /* max-height 40vh 与 reasoning 同口径：展开一条几千行的 Bash 输出曾把页面撑到几十屏，
-   收起前回不到对话。overscroll-behavior 防内滚到底后把整页带着滚。 */
+   收起前回不到对话。
+   **刻意不设 overscroll-behavior: contain**（此前设过，用户实拍反馈后撤除）：contain 只在
+   内层滚到边界时才起作用——它不挡内滚，挡的是「到顶/到底后把滚动传给外层」。后果是鼠标
+   停在这类块上时整个对话区滚不动，而这些块动辄占 40vh，指针很容易落在里面，表现为「页面
+   卡住了」。默认的 auto 正是想要的：内层先滚，到边界再带动对话区（Chromium 的手势 latching
+   会让当前这一次滚动停在边界，下一次滚动才传出去，不会一冲到底）。
+   下拉菜单/浮层（.dd-menu 等）保留 contain——那里「滚菜单不该带动背后的页面」是对的。 */
 /* 左缩进对齐 summary 的文字起点：sp-14 内边距 + 18px 图标（固定图形不缩放，见 .chat-tool-icon）
    + sp-9 间隔——缩放时内边距/间隔随 --cc-ui 走，图标那段保持字面量。 */
-.chat-tool pre { margin: 0 0 var(--sp-2); padding: var(--sp-9) var(--sp-12) var(--sp-10) calc(var(--sp-14) + 18px + var(--sp-9)); overflow: auto; max-height: 40vh; overscroll-behavior: contain; border: 0; border-radius: 0 0 var(--r-9) var(--r-9); background: color-mix(in srgb, var(--cc-text) 3%, transparent); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--cc-text-dim); font: var(--fs-11)/1.55 ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, "Roboto Mono", "PingFang SC", "Microsoft YaHei", monospace; user-select: text; }
+.chat-tool pre { margin: 0 0 var(--sp-2); padding: var(--sp-9) var(--sp-12) var(--sp-10) calc(var(--sp-14) + 18px + var(--sp-9)); overflow: auto; max-height: 40vh; border: 0; border-radius: 0 0 var(--r-9) var(--r-9); background: color-mix(in srgb, var(--cc-text) 3%, transparent); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--cc-text-dim); font: var(--fs-11)/1.55 ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, "Roboto Mono", "PingFang SC", "Microsoft YaHei", monospace; user-select: text; }
 .chat-reasoning { position: relative; margin: calc(var(--sp-8) * -1) 0 var(--sp-24); padding: var(--sp-4) 0 var(--sp-4) var(--sp-28); border: 0; background: transparent; color: var(--cc-text-dim); font-size: var(--fs-11); line-height: 1.6; }
 /* 负 margin 把 summary 拉回容器左缘（抵消 sp-28 左 padding）：配对值要同步缩放，
    var() 不能取负，按 .chat-title-btn 处 calc(var(--sp-*) * -1) 的既有先例写。 */
@@ -4686,7 +4692,7 @@ select.ns-input {
 .chat-subagent-scroll {
   max-height: 50vh;
   overflow-y: auto;
-  overscroll-behavior: contain;
+  /* 同 .chat-tool pre：不设 overscroll-behavior，让到边界后能带动对话区。 */
 }
 /* 一次派一批（kimi 的 AgentSwarm 可达十几个）：每个分支自己折叠，展开一个不牵连其余。 */
 .chat-subagent-branch {
@@ -5085,7 +5091,8 @@ select.ns-input {
    带 pre-wrap，会盖过单类名的 .chat-md。 */
 .chat-reasoning .chat-md { margin-top: var(--sp-7); white-space: normal; user-select: text; }
 /* 展开后也限高内滚：思考过程可以有上百行，全铺开会把结论顶出屏幕，收起时还得一路往回滚。 */
-.chat-reasoning[open] .chat-md { max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; padding-right: var(--sp-6); }
+/* 同 .chat-tool pre：不设 overscroll-behavior，让到边界后能带动对话区。 */
+.chat-reasoning[open] .chat-md { max-height: 40vh; overflow-y: auto; padding-right: var(--sp-6); }
 /* 长推理的收起态是**预览**而非隐藏：显示开头几行并向下渐隐，一眼能看到 agent 在想什么。
    details 收起时 UA 默认把非 summary 的内容 display:none，这里显式覆盖回来。
    高度与 Message.tsx 的 REASONING_PREVIEW_LINES 对应（行高 1.65，约 6 行）。 */
