@@ -83,15 +83,6 @@ CREATE TABLE IF NOT EXISTS todos (
     stale INTEGER NOT NULL DEFAULT 0
 );
 
--- events: 预留给后续计划的事件审计流，当前管线尚未写入。
-CREATE TABLE IF NOT EXISTS events (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER REFERENCES sessions(id),
-    kind       TEXT NOT NULL,
-    payload    TEXT,
-    created_at INTEGER NOT NULL
-);
-
 CREATE UNIQUE INDEX IF NOT EXISTS ux_tasks_session ON tasks(session_id) WHERE session_id IS NOT NULL;
 
 -- session_context: 来自 Claude Code statusline 的上下文用量（准确窗口与百分比）。

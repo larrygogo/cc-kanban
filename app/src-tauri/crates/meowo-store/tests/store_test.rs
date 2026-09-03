@@ -7,8 +7,9 @@ use meowo_store::{
 fn open_in_memory_creates_tables() {
     let store = Store::open_in_memory().expect("open");
     let count: i64 = store.raw_table_count().expect("count tables");
-    // projects / sessions / tasks / todos / events / session_context / session_notes / work_groups
-    assert_eq!(count, 8);
+    // projects / sessions / tasks / todos / session_context / session_notes / work_groups
+    // （events 于 v16 丢弃：自建库起零读写；work_groups 是刻意保留的空表，见 store.rs）
+    assert_eq!(count, 7);
 }
 
 // == Task 4 ==
@@ -1687,4 +1688,46 @@ fn rebuild_overwrites_when_row_count_differs() {
     let todos = store.list_todos(tid).unwrap();
     assert_eq!(todos.len(), 2);
     assert!(todos.iter().all(|t| !t.stale));
+}
+
+/// v16：老库里那张从未写入过的 events 表要被真的丢掉，且不碰其余表与数据。
+///
+/// 用「建一张带行的 events + 一条真会话」的老库取证：只断言 user_version 变了不够——
+/// DROP 若因某种原因没执行，版本照样会 bump（迁移是先做事后 bump），下次开库就再也不重试。
+#[test]
+fn migrate_drops_the_unused_events_table() {
+    let path = std::env::temp_dir().join(format!("meowo-mig-v15-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
+                kind       TEXT NOT NULL,
+                payload    TEXT,
+                created_at INTEGER NOT NULL);
+             INSERT INTO events (kind, created_at) VALUES ('legacy', 1);
+             PRAGMA user_version = 15;",
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.user_version().unwrap(), Store::CURRENT_USER_VERSION);
+
+    // 表本身消失（不是「还在但空了」）。
+    let left: i64 = store.raw_table_count().expect("count tables");
+    assert_eq!(left, 7, "events 之外的七张表应原样保留");
+
+    // 其余表照常可用——迁移没把别的东西带走。
+    let pid = store.upsert_project_by_root("/p", "p", 1).unwrap();
+    let (sid, _) = store.start_session(pid, "s", 1).unwrap();
+    store.set_session_note("s", "便签还在", 2).unwrap();
+    let live = store
+        .live_sessions(Some("all"), None, None, None, 10)
+        .unwrap();
+    assert!(live.iter().any(|l| l.session.id == sid));
+
+    let _ = std::fs::remove_file(&path);
 }

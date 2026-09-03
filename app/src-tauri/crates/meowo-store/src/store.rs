@@ -199,7 +199,13 @@ impl Store {
     ///     `ix_sessions_status_lea`——每次刷新都是全表扫 + 临时 B 树排序后才 LIMIT
     ///     (query.rs 的 `dropping_the_board_index_degrades_the_plan` 把这条反证钉住)。
     ///     纯加索引,不动表结构与数据。
-    const USER_VERSION: i64 = 15;
+    /// v16: 丢掉 `events` 表。它自建库起就写着「预留给后续计划的事件审计流」,至今全仓
+    ///     零读写(SQL 层 grep `FROM/INTO/UPDATE/DELETE events` 无命中)。留着不是零成本:
+    ///     每次新库都要建它、每个读 schema 的人都要先确认它是不是活的。真要做审计流时
+    ///     再按那时的形状建, 比迁就一张三年没用过的空壳划算。
+    ///     与 v12 的 `work_groups` 不同——那张表是**刻意保留**的(降版本要再做一版迁移、
+    ///     空表零成本), 勿一并删。
+    const USER_VERSION: i64 = 16;
 
     /// 一次性建表 + 迁移 + 建索引，用 `PRAGMA user_version` 门控：已是最新版直接返回，
     /// 避免 statusline/hook 每次 open 都重跑 DDL 与注定失败的 ALTER（hot-path 浪费）。
@@ -273,6 +279,12 @@ impl Store {
                 eprintln!("meowo-store 建索引失败: {sql}: {e}");
                 return Ok(()); // 同上：不 bump，下次重试
             }
+        }
+        // v16：丢掉从未写入过的 events 表。DROP 不可逆,但该表全仓无写端,不存在数据。
+        // 与 ALTER/索引同一纪律：失败不 bump,下次 open 重试。
+        if let Err(e) = conn.execute("DROP TABLE IF EXISTS events", []) {
+            eprintln!("meowo-store 丢弃 events 表失败: {e}");
+            return Ok(());
         }
         // v11 数据修正：stale 态废除后老库可能残留 stale 行,归一成 waiting——它们本就
         // 「久未有事件、进程未必已死」,交给 reaper/end_orphaned_idle 按 waiting 口径收尾。
