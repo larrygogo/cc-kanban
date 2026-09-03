@@ -40,6 +40,11 @@
   /* Claude 品牌赤陶色：仅 provider 徽标(ClaudeMark)专用，独立于全局强调色，换主题色不受影响。 */
   --cc-claude: #d97757;
   --cc-text: #eef1ef;
+  /* 对话正文专用字色。比 --cc-text 暗一档是**深色主题专属**的取舍：#eef1ef 压在卡片底色
+     #1f1f22 上是 14.5:1，接近对比度上限，近白字在近黑底上会晕开（halation），中文的细
+     笔画尤其明显——短标签无所谓，长篇连读就是「看起来好累」的直接来源（实拍反馈）。
+     降到约 12:1 仍远高于 WCAG AAA 的 7:1，只是不再刺眼。浅色主题不改：深字浅底不晕。 */
+  --cc-chat-text: #d8dcd9;
   --cc-text-dim: #a7afab;
   /* 9–10.5px 小字也要 ≥4.5:1。校准面是**叠层后的卡面**而不是裸底（7G-1）：faint 的实际
      消费点几乎全在 .stk-card / 代码块 / tab 计数这类叠了 --cc-surface 的面上（约 #2b2b2d，
@@ -156,6 +161,8 @@
   --cc-on-accent: #ffffff;
   --cc-claude: #b0532f;
   --cc-text: #23282a;
+  /* 浅色主题无 halation 问题，对话正文与全局同色（见深色块里 --cc-chat-text 的说明）。 */
+  --cc-chat-text: #23282a;
   --cc-text-dim: #565f5a;
   /* 浅色同理按叠层后的卡面校（7G-1）：#6a736e 在裸底 #f6f6f7 是 4.6:1，但卡面叠了一层
      深色 surface（约 #ececed）后只剩 4.23:1。校准面还要再进一层——**hover 态的卡面**
@@ -4201,7 +4208,11 @@ select.ns-input {
   border-radius: 18px 18px var(--r-5) 18px;
   background: color-mix(in srgb, var(--cc-text) 7%, var(--cc-bg));
 }
-.chat-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: calc(14px * var(--cc-ui)); line-height: 1.72; letter-spacing: -.006em; user-select: text; }
+/* 字号 14→15px:中文字形比拉丁密,同磅值下 14px 的中文实际比 14px 的英文更难认;
+   助手正文是这个窗口里唯一需要长时间连读的内容,值得比周边控件大一档。
+   letter-spacing 归零:-.006em 是给拉丁字母的光学收紧,套在本就紧密的中文上适得其反。
+   用户消息沿用下一行的 13px/1.58 不随此处放大——那是自己刚打的字,不需要连读。 */
+.chat-text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--cc-chat-text); font-size: calc(15px * var(--cc-ui)); line-height: 1.72; letter-spacing: 0; user-select: text; }
 .chat-message.is-user .chat-text { font-size: var(--fs-13); line-height: 1.58; }
 /* 带图片的用户消息：气泡皮从 article 挪到正文上——缩略图不进气泡（纯图消息则完全没有气泡）。 */
 .chat-message.is-user.has-images { padding: 0; background: transparent; }
@@ -4859,6 +4870,9 @@ select.ns-input {
   --cc-surface-hover: rgba(255, 255, 255, 0.09);
   --cc-border: rgba(255, 255, 255, 0.09);
   --cc-text: #eef1ef;
+  /* 终端视图强制深色，字色同深色主题（见 :root 里 --cc-chat-text 的说明）——
+     少了这条，浅色主题切进终端页时它会继承到浅色的深字，压在这里的深底上不可读。 */
+  --cc-chat-text: #d8dcd9;
   --cc-text-dim: #a7afab;
   --cc-text-faint: #8b918c;
   --cc-accent: #2dd4a7;
