@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction, type PointerEvent as ReactPointerEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 // 文件拖入走 Tauri 的 drag-drop 事件(webview 原生 drop 被拦截,DOM 拿不到 File;
@@ -36,7 +36,10 @@ import { Transcript } from "./chat/Transcript";
 import { ChatSidebar } from "./ChatSidebar";
 import { ChevronDownIcon } from "./sticker/icons";
 import { useStarred } from "./sticker/helpers";
-import { ManagedTerminal } from "./ManagedTerminal";
+// 终端视图独立成 chunk：xterm 及其插件约 500KB，占对话窗 chunk 四成。手机远程页钉在对话页，
+// 终端只为屏幕识别按需挂载（terminalMonitorNeeded），首屏不该为它多等 1.2MB 里的一半。
+// 桌面端在下面的 effect 里预取，切终端页无感；此处不能改回静态 import，否则又并回一个 chunk。
+const ManagedTerminal = lazy(() => import("./ManagedTerminal").then((m) => ({ default: m.ManagedTerminal })));
 import { WindowControls } from "./WindowControls";
 import { DevBadge } from "./DevBadge";
 import { isMac } from "../platform";
@@ -585,6 +588,11 @@ export function ChatWindow() {
   // 终端就绪等待(waitForTerminalReady,最长 45s)的已等秒数:null = 没在等。
   // 只转圈没有下文时用户分不清「还在启动」还是「卡死」——显示秒数并给「去终端页看」。
   const [terminalWaitSeconds, setTerminalWaitSeconds] = useState<number | null>(null);
+  // 桌面端预取终端 chunk（本地文件，几毫秒）：终端页是一等页签，不让首次切换看到空白。
+  // 远程不预取：那边切不到终端页，需要时（屏幕识别）Suspense 按需拉。
+  useEffect(() => {
+    if (!remoteUi()) void import("./ManagedTerminal");
+  }, []);
   // 软拦非阻断提示:pendingReview 但屏幕没识别出卡片时,发送照常、亮这条横幅(见 withSendGuard)。
   const [softPromptNotice, setSoftPromptNotice] = useState(false);
   // 运行中发出的插话:CLI 把它们排队到回合结束,期间 transcript 不显示——这里记账给
@@ -4007,6 +4015,7 @@ export function ChatWindow() {
               <button type="button" onClick={() => setView("chat")}>{t.chat.terminalApprovalGo}</button>
             </div>
           )}
+          <Suspense fallback={null}>
           <ManagedTerminal
             // 不换 key:临时 id→真实 id 的重绑与换会话都由组件内部 sessionChangedRef
             // 处理(同 PTY 平滑续接 / 异会话复位),换 key 会整只重挂 xterm、首屏清空重画。
@@ -4037,6 +4046,7 @@ export function ChatWindow() {
             // T-14：外部视图在线初值（快照回报）；实时增删走 pty-external-viewers 事件。
             onExternalViewers={setExternalViewersOnline}
           />
+          </Suspense>
         </div>
       )}
       {/* sessionId=0(远程未选会话)没有可发送的对象,composer 整体不渲染。 */}
